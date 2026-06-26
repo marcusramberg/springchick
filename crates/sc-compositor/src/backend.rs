@@ -4,6 +4,7 @@ pub const FP5_WIDTH: i32 = 1224;
 pub const FP5_HEIGHT: i32 = 2700;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum BackendKind {
     Winit,
     Drm,
@@ -11,6 +12,7 @@ pub enum BackendKind {
 
 impl BackendKind {
     /// Chosen by `SPRINGCHICK_BACKEND` env var (default: winit on desktop).
+    #[allow(dead_code)]
     pub fn from_env() -> Self {
         Self::from_value(std::env::var("SPRINGCHICK_BACKEND").as_deref().ok())
     }

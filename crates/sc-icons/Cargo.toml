@@ -1,0 +1,13 @@
+[package]
+name = "sc-icons"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+resvg = "0.44"
+png = "0.17"
+
+[dev-dependencies]
+tempfile = "3"
+png = "0.17"

@@ -13,6 +13,8 @@ sc-anim = { path = "../sc-anim" }
 sc-input = { path = "../sc-input" }
 sc-shell-model = { path = "../sc-shell-model" }
 sc-config = { path = "../sc-config" }
+sc-layout = { path = "../sc-layout" }
+sc-icons = { path = "../sc-icons" }
 
 smithay = { version = "0.7", default-features = false, features = [
   "backend_winit",
@@ -20,9 +22,11 @@ smithay = { version = "0.7", default-features = false, features = [
   "renderer_gl",
   "wayland_frontend",
   "desktop",
+  "xwayland",
 ] }
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 skia-safe = { version = "0.99", features = ["gl"] }
+calloop = "0.14"
