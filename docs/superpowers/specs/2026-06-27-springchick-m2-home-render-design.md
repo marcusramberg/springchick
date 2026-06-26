@@ -37,7 +37,8 @@ rebuilt anyway.
 
 ### Module structure
 
-Two new **pure** crates (no GPU/Wayland deps, unit-tested) plus integration in
+Two new crates — one fully pure, one pure-ish (its only impurity is filesystem IO for
+icon files) — both unit-tested with no GPU/Wayland deps, plus integration in
 `sc-compositor`:
 
 - **`sc-layout`** (new, pure): geometry + hit-testing. `(output size, page index,
@@ -106,8 +107,12 @@ Full seat: keyboard + pointer/touch. Routing depends on UI state:
 Reuse the M1 Skia-on-Smithay-GLES path, with the M1 spike's per-frame surface rebuild
 **fixed**: cache the Skia `Surface` + `BackendRenderTarget` keyed on `(fboid, width,
 height)`, recreating only on change. Home UI is Skia; the foreground app is a Smithay-
-composited GLES texture. (Home and app are mutually exclusive in M2, so they don't
-overlap except the always-on-top bar zone drawn by Skia.)
+composited GLES texture. Home and app are mutually exclusive in M2, so they don't overlap
+except the always-on-top bar zone. **Per-frame render order:**
+- **Home:** Skia draws grid + dock + page-indicator dots + bar.
+- **App:** Smithay composites the app texture fullscreen first, then a Skia pass draws the
+  bar zone on top (so the return-home affordance is always visible). The Skia pass is never
+  skipped in App state.
 
 ## Error handling
 
@@ -131,7 +136,8 @@ overlap except the always-on-top bar zone drawn by Skia.)
 
 ## Scope
 
-**In (M2):** real home screen (icons/labels/pages/dock) from installed apps · page-swipe
+**In (M2):** real home screen (icons/labels/pages/dock + page-indicator dots) from
+installed apps · page-swipe
 with spring snap · tap-to-launch real Wayland apps · fullscreen composite (shm + dmabuf) ·
 touch + keyboard input forwarding to the foreground app · placeholder return-home (bar tap
 / Esc) · raise-if-running · auto-return on app close · cached Skia `Surface`.
