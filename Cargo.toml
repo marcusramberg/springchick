@@ -5,6 +5,8 @@ members = [
   "crates/sc-input",
   "crates/sc-shell-model",
   "crates/sc-config",
+  "crates/sc-layout",
+  "crates/sc-icons",
   "crates/sc-compositor",
 ]
 

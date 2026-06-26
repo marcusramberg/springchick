@@ -1,106 +1,59 @@
-//! Skia-on-Smithay-GLES spike (Foundation Task 8) — the architecture go/no-go gate.
+//! Skia-on-Smithay-GLES rendering for springchick.
 //!
-//! This module proves the single-graphics-API claim the whole springchick
-//! architecture rests on: Skia's Ganesh **GL** backend can draw directly into the
-//! *same* GLES/EGL context that Smithay's winit backend already renders with. No
-//! second GL context, no dmabuf import, no cross-API sync — Skia and Smithay share
-//! one context and one framebuffer.
-//!
-//! ## How the context handoff is wired (read this before Milestone 2)
-//!
-//! 1. **GL function loading / `Interface`.** Skia needs a `gpu::gl::Interface`
-//!    (a table of GL entry points). We first try [`Interface::new_native`], which
-//!    asks Skia to assemble the interface from whatever GL is current. On Mesa/EGL
-//!    that frequently returns `None`, so we fall back to
-//!    [`Interface::new_load_with`] driven by Smithay's own EGL proc loader,
-//!    [`smithay::backend::egl::get_proc_address`]. That loader calls
-//!    `eglGetProcAddress` under the hood and is valid *only while an EGL context is
-//!    current* — which is exactly the case during `render_frame` after
-//!    `backend.bind()`. This is why `SkiaGl` is lazily initialized on the first
-//!    `draw_spike` call rather than in `new()`: at `new()` time no context is
-//!    current yet.
-//!
-//! 2. **`DirectContext`.** Built once via
-//!    [`direct_contexts::make_gl`] from that interface and cached for the lifetime
-//!    of the process. It wraps Skia's GPU command stream targeting the shared GL
-//!    context.
-//!
-//! 3. **Retrieving the bound FBO id.** Smithay may render into FBO 0 (the EGL
-//!    window surface) or an internal FBO; rather than assume, we query the live
-//!    `GL_FRAMEBUFFER_BINDING` with a `glGetIntegerv` pointer obtained through the
-//!    *same* EGL proc loader. Whatever is currently bound is what Skia wraps, so
-//!    Skia always draws into the exact framebuffer Smithay is about to present.
-//!
-//! 4. **Wrapping the framebuffer as a Skia `Surface`.** We build a
-//!    [`gl::FramebufferInfo`] (`fboid` = the queried id, `format` = `GL_RGBA8`),
-//!    wrap it in a [`BackendRenderTarget`], then
-//!    [`surfaces::wrap_backend_render_target`] with:
-//!      - origin `SurfaceOrigin::BottomLeft` — GL's framebuffer origin is
-//!        bottom-left, and Smithay presents with `Transform::Flipped180`, so
-//!        bottom-left keeps Skia's content the same way up as Smithay's.
-//!      - color type `ColorType::RGBA8888`.
-//!        No `ColorSpace` / `SurfaceProps` (both `None`) — linear sRGB is fine for the
-//!        spike.
-//!
-//! 5. **GL state hygiene (gotcha).** Smithay's `GlesRenderer` mutates global GL
-//!    state every frame (bound program, blend, VAO, etc.). Skia caches its view of
-//!    that state, so before drawing we call [`DirectContext::reset`] with `None` to
-//!    invalidate *all* cached state and force Skia to re-establish what it needs.
-//!    After drawing we `flush_and_submit()` so the rrect is in the framebuffer
-//!    before Smithay's `submit()` runs `eglSwapBuffers`. Skia leaves GL state
-//!    changed on return; that is fine here because the only thing Smithay does
-//!    after the Skia draw this frame is swap buffers.
-//!
-//! The draw itself is the spike payload: one iOS-style blurred, rounded rectangle
-//! (`MaskFilter::blur(BlurStyle::Normal, sigma)`).
-//!
-//! Because the CI/dev shell has no display, this code cannot be visually verified
-//! here. It is structured to fail *only* on a missing display, not in the
-//! Skia/GL binding logic. The human does the visual go/no-go on a real desktop.
+//! Reuses the M1 spike's Ganesh-GL shared-context approach with the M2 fix:
+//! caches the Skia `Surface` + `BackendRenderTarget` keyed on (fboid, width, height),
+//! recreating only on change.
+
+use sc_config::AppEntry;
+use sc_icons::IconPixels;
+use sc_layout::{self, IconSlot, Layout};
+use sc_shell_model::ShellModel;
 
 use skia_safe::gpu::gl::{Format, FramebufferInfo, Interface};
-use skia_safe::gpu::{
-    backend_render_targets, direct_contexts, surfaces, DirectContext, SurfaceOrigin,
+use skia_safe::gpu::{backend_render_targets, direct_contexts, surfaces, DirectContext, SurfaceOrigin};
+use skia_safe::{
+    Color, ColorType, Font, FontMgr, FontStyle, Image, ImageInfo, Paint, RRect, Rect, Surface,
+    TextBlob, images,
 };
-use skia_safe::{BlurStyle, Color, ColorType, MaskFilter, Paint, RRect, Rect};
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::os::raw::c_int;
 
 use tracing::{debug, warn};
 
-/// `GL_FRAMEBUFFER_BINDING` — query the currently bound draw framebuffer.
 const GL_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
-
-/// `glGetIntegerv` signature (linux GL uses the C/`system` ABI).
 type GlGetIntegerv = unsafe extern "system" fn(pname: u32, params: *mut c_int);
 
 /// Skia Ganesh-GL renderer bound to Smithay's existing GLES/EGL context.
-///
-/// Created once and reused across frames. The expensive GL objects
-/// (`Interface`, `DirectContext`, `glGetIntegerv` pointer) are built lazily on the
-/// first [`draw_spike`](Self::draw_spike), when an EGL context is guaranteed
-/// current.
 pub struct SkiaGl {
     context: Option<DirectContext>,
     gl_get_integerv: Option<GlGetIntegerv>,
-    /// Whether we already logged the one-time setup failure, to avoid spamming.
     setup_failed: bool,
+    cached_surface: Option<CachedSurface>,
+    icon_images: HashMap<String, Image>,
+    font: Option<Font>,
+}
+
+struct CachedSurface {
+    surface: Surface,
+    fboid: u32,
+    width: i32,
+    height: i32,
 }
 
 impl SkiaGl {
-    /// Construct without touching GL. Real initialization is deferred to the first
-    /// [`draw_spike`](Self::draw_spike) call, where an EGL context is current.
     pub fn new() -> Self {
         Self {
             context: None,
             gl_get_integerv: None,
             setup_failed: false,
+            cached_surface: None,
+            icon_images: HashMap::new(),
+            font: None,
         }
     }
 
-    /// Lazily build the GL `Interface` + `DirectContext` from the *current* EGL
-    /// context. Returns `false` if the context could not be established.
     fn ensure_context(&mut self) -> bool {
         if self.context.is_some() {
             return true;
@@ -109,70 +62,168 @@ impl SkiaGl {
             return false;
         }
 
-        // Proc loader backed by Smithay's EGL. Valid only with a current context.
         let loader = |symbol: &str| -> *const c_void {
-            // SAFETY: called from render_frame after backend.bind(), so an EGL
-            // context is current — the documented precondition.
             unsafe { smithay::backend::egl::get_proc_address(symbol) }
         };
 
-        // 1. Build the GL interface: native first, EGL proc loader as fallback.
-        let interface = Interface::new_native()
-            .inspect(|_| {
-                tracing::debug!("Skia GL Interface built via new_native");
-            })
-            .or_else(|| {
-                debug!("Skia GL Interface::new_native() returned None; using EGL proc loader");
-                Interface::new_load_with(loader)
-            });
+        let interface = Interface::new_native().or_else(|| {
+            debug!("Interface::new_native() None; using EGL proc loader");
+            Interface::new_load_with(loader)
+        });
         let Some(interface) = interface else {
-            warn!("failed to build Skia GL Interface from current context");
+            warn!("failed to build Skia GL Interface");
             self.setup_failed = true;
             return false;
         };
 
-        // 2. Create the Ganesh DirectContext on the shared GL context.
         let Some(context) = direct_contexts::make_gl(interface, None) else {
-            warn!("skia_safe::gpu::direct_contexts::make_gl returned None");
+            warn!("make_gl returned None");
             self.setup_failed = true;
             return false;
         };
 
-        // 3. Cache a glGetIntegerv pointer for querying the bound FBO each frame.
         let getter_ptr = loader("glGetIntegerv");
         if getter_ptr.is_null() {
-            warn!("could not load glGetIntegerv via EGL proc loader");
+            warn!("could not load glGetIntegerv");
             self.setup_failed = true;
             return false;
         }
-        // SAFETY: glGetIntegerv has the C ABI we declared in `GlGetIntegerv`.
         let gl_get_integerv: GlGetIntegerv = unsafe { std::mem::transmute(getter_ptr) };
 
         self.context = Some(context);
         self.gl_get_integerv = Some(gl_get_integerv);
-        debug!("Skia Ganesh-GL context initialized on Smithay's GLES/EGL context");
+        debug!("Skia Ganesh-GL context initialized");
         true
     }
 
-    /// Query the currently bound draw framebuffer id.
-    ///
-    /// An EGL context must be current and the GL proc loader initialized;
-    /// returns 0 otherwise.
     fn current_fbo(&self) -> u32 {
         let Some(get) = self.gl_get_integerv else {
             return 0;
         };
         let mut fbo: c_int = 0;
-        // SAFETY: GL_FRAMEBUFFER_BINDING writes exactly one integer.
         unsafe { get(GL_FRAMEBUFFER_BINDING, &mut fbo as *mut c_int) };
         fbo.max(0) as u32
     }
 
-    /// Draw the spike: one blurred, rounded rectangle into the framebuffer Smithay
-    /// is about to present. Must be called while Smithay's target framebuffer is
-    /// bound and the EGL context is current. Errors are logged and swallowed so a
-    /// Skia hiccup never tears down the compositor loop.
-    pub fn draw_spike(&mut self, width: i32, height: i32) {
+    fn ensure_font(&mut self) {
+        if self.font.is_none() {
+            let mgr = FontMgr::default();
+            let typeface = mgr
+                .match_family_style("sans-serif", FontStyle::normal())
+                .unwrap_or_else(|| mgr.legacy_make_typeface(None, FontStyle::normal()).unwrap());
+            self.font = Some(Font::from_typeface(typeface, 28.0));
+        }
+    }
+
+    fn get_or_upload_icon(&mut self, app_id: &str, pixels: &IconPixels) -> Option<Image> {
+        if let Some(img) = self.icon_images.get(app_id) {
+            return Some(img.clone());
+        }
+
+        let info = ImageInfo::new(
+            (pixels.width as i32, pixels.height as i32),
+            ColorType::RGBA8888,
+            skia_safe::AlphaType::Unpremul,
+            None,
+        );
+        let row_bytes = pixels.width as usize * 4;
+        let image = images::raster_from_data(&info, skia_safe::Data::new_copy(&pixels.data), row_bytes)?;
+        self.icon_images.insert(app_id.to_string(), image.clone());
+        Some(image)
+    }
+
+    /// Draw the home screen (grid + dock + dots + bar).
+    pub fn draw_home(
+        &mut self,
+        width: i32,
+        height: i32,
+        page: usize,
+        model: &ShellModel,
+        icon_cache: &HashMap<String, IconPixels>,
+        app_catalog: &HashMap<String, AppEntry>,
+    ) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        if !self.ensure_context() {
+            return;
+        }
+        self.ensure_font();
+
+        // Upload any icons we haven't uploaded yet.
+        for (app_id, pixels) in icon_cache {
+            if !self.icon_images.contains_key(app_id) {
+                self.get_or_upload_icon(app_id, pixels);
+            }
+        }
+
+        let layout = sc_layout::compute(width as f32, height as f32, page, model);
+
+        // Acquire surface.
+        let fboid = self.current_fbo();
+        let context = match self.context.as_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        context.reset(None);
+
+        let needs_recreate = match &self.cached_surface {
+            Some(c) => c.fboid != fboid || c.width != width || c.height != height,
+            None => true,
+        };
+        if needs_recreate {
+            let fb_info = FramebufferInfo {
+                fboid,
+                format: Format::RGBA8.into(),
+                ..Default::default()
+            };
+            let render_target =
+                backend_render_targets::make_gl((width, height), None, 8, fb_info);
+            let Some(surface) = surfaces::wrap_backend_render_target(
+                context,
+                &render_target,
+                SurfaceOrigin::BottomLeft,
+                ColorType::RGBA8888,
+                None,
+                None,
+            ) else {
+                warn!("wrap_backend_render_target returned None");
+                return;
+            };
+            self.cached_surface = Some(CachedSurface {
+                surface,
+                fboid,
+                width,
+                height,
+            });
+        }
+
+        let surface = &mut self.cached_surface.as_mut().unwrap().surface;
+        let canvas = surface.canvas();
+
+        // Draw grid icons.
+        for slot in &layout.grid {
+            draw_icon_slot(canvas, slot, &self.icon_images, &self.font, app_catalog);
+        }
+
+        // Draw dock icons.
+        for slot in &layout.dock {
+            draw_icon_slot(canvas, slot, &self.icon_images, &self.font, app_catalog);
+        }
+
+        // Draw page indicator dots.
+        draw_dots(canvas, &layout, page);
+
+        // Draw bar.
+        draw_bar(canvas, &layout);
+
+        if let Some(ctx) = self.context.as_mut() {
+            ctx.flush_and_submit();
+        }
+    }
+
+    /// Draw bar overlay on top of the app (return-home affordance).
+    pub fn draw_bar_overlay(&mut self, width: i32, height: i32) {
         if width <= 0 || height <= 0 {
             return;
         }
@@ -180,73 +231,56 @@ impl SkiaGl {
             return;
         }
 
-        let fboid = self.current_fbo();
+        let model = ShellModel::default();
+        let layout = sc_layout::compute(width as f32, height as f32, 0, &model);
 
+        // Acquire surface.
+        let fboid = self.current_fbo();
         let context = match self.context.as_mut() {
             Some(c) => c,
             None => return,
         };
-
-        // Smithay just mutated GL state; drop Skia's cached view of it.
         context.reset(None);
 
-        // SPIKE ONLY: the BackendRenderTarget + Surface are rebuilt every frame for
-        // simplicity. M2 must cache these keyed on (fboid, width, height) and only
-        // recreate when the fbo id or dimensions change.
-        let fb_info = FramebufferInfo {
-            fboid,
-            // ASSUMPTION: the EGL surface is RGBA8. This may need to be BGRA8 or
-            // queried on the phone target — revisit during M2/device bring-up.
-            format: Format::RGBA8.into(),
-            ..Default::default()
+        let needs_recreate = match &self.cached_surface {
+            Some(c) => c.fboid != fboid || c.width != width || c.height != height,
+            None => true,
         };
-
-        let render_target = backend_render_targets::make_gl(
-            (width, height),
-            None, // sample count: single-sampled
-            // ASSUMPTION: framebuffer has 8 stencil bits. Not queried here. The blur spike
-            // uses no stencil clips so this is harmless now, but M2 must query GL_STENCIL_BITS
-            // (or guarantee the EGL config requests stencil) before doing stencil clipping.
-            8,
-            fb_info,
-        );
-
-        let Some(mut surface) = surfaces::wrap_backend_render_target(
-            context,
-            &render_target,
-            SurfaceOrigin::BottomLeft,
-            ColorType::RGBA8888,
-            None,
-            None,
-        ) else {
-            warn!("wrap_backend_render_target returned None (fboid={fboid})");
-            return;
-        };
-
-        // --- spike payload: an iOS-style blurred rounded rectangle ---
-        let canvas = surface.canvas();
-
-        let inset = (width.min(height) as f32) * 0.18;
-        let rect = Rect::new(
-            inset,
-            inset,
-            width as f32 - inset,
-            height as f32 - inset,
-        );
-        let rrect = RRect::new_rect_xy(rect, 48.0, 48.0);
-
-        let sigma = (width.min(height) as f32) * 0.02;
-        let mut paint = Paint::default();
-        paint.set_anti_alias(true);
-        paint.set_color(Color::from_argb(0xCC, 0x4F, 0xC3, 0xF7));
-        if let Some(blur) = MaskFilter::blur(BlurStyle::Normal, sigma, false) {
-            paint.set_mask_filter(blur);
+        if needs_recreate {
+            let fb_info = FramebufferInfo {
+                fboid,
+                format: Format::RGBA8.into(),
+                ..Default::default()
+            };
+            let render_target =
+                backend_render_targets::make_gl((width, height), None, 8, fb_info);
+            let Some(surface) = surfaces::wrap_backend_render_target(
+                context,
+                &render_target,
+                SurfaceOrigin::BottomLeft,
+                ColorType::RGBA8888,
+                None,
+                None,
+            ) else {
+                warn!("wrap_backend_render_target returned None");
+                return;
+            };
+            self.cached_surface = Some(CachedSurface {
+                surface,
+                fboid,
+                width,
+                height,
+            });
         }
 
-        canvas.draw_rrect(rrect, &paint);
+        let surface = &mut self.cached_surface.as_mut().unwrap().surface;
+        let canvas = surface.canvas();
 
-        // Make sure the draw lands in the framebuffer before Smithay swaps buffers.
-        context.flush_and_submit();
+        draw_bar(canvas, &layout);
+
+        if let Some(ctx) = self.context.as_mut() {
+            ctx.flush_and_submit();
+        }
     }
 }
 
@@ -254,4 +288,87 @@ impl Default for SkiaGl {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// --- Free functions for drawing (avoids borrow issues with &mut self + canvas) ---
+
+fn draw_icon_slot(
+    canvas: &skia_safe::Canvas,
+    slot: &IconSlot,
+    icon_images: &HashMap<String, Image>,
+    font: &Option<Font>,
+    app_catalog: &HashMap<String, AppEntry>,
+) {
+    // Draw icon image.
+    if let Some(image) = icon_images.get(&slot.app_id) {
+        let dst = Rect::new(
+            slot.icon_rect.x,
+            slot.icon_rect.y,
+            slot.icon_rect.x + slot.icon_rect.w,
+            slot.icon_rect.y + slot.icon_rect.h,
+        );
+        canvas.draw_image_rect(image, None, dst, &Paint::default());
+    } else {
+        // Placeholder rect.
+        let mut paint = Paint::default();
+        paint.set_color(Color::from_argb(255, 80, 80, 100));
+        let rect = Rect::new(
+            slot.icon_rect.x,
+            slot.icon_rect.y,
+            slot.icon_rect.x + slot.icon_rect.w,
+            slot.icon_rect.y + slot.icon_rect.h,
+        );
+        let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
+        canvas.draw_rrect(rrect, &paint);
+    }
+
+    // Draw label.
+    if let Some(entry) = app_catalog.get(&slot.app_id) {
+        if let Some(f) = font {
+            let mut paint = Paint::default();
+            paint.set_color(Color::WHITE);
+            if let Some(blob) = TextBlob::new(&entry.name, f) {
+                let text_width = f.measure_str(&entry.name, None).0;
+                let x = slot.label_rect.x + (slot.label_rect.w - text_width) / 2.0;
+                let y = slot.label_rect.y + slot.label_rect.h * 0.75;
+                canvas.draw_text_blob(&blob, (x, y), &paint);
+            }
+        }
+    }
+}
+
+fn draw_dots(canvas: &skia_safe::Canvas, layout: &Layout, current_page: usize) {
+    let dot_radius = 6.0_f32;
+    let dot_spacing = 20.0_f32;
+    let total_width = layout.page_count as f32 * dot_spacing;
+    let start_x = layout.dots_rect.x + (layout.dots_rect.w - total_width) / 2.0;
+    let cy = layout.dots_rect.y + layout.dots_rect.h / 2.0;
+
+    for i in 0..layout.page_count {
+        let cx = start_x + i as f32 * dot_spacing + dot_spacing / 2.0;
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        if i == current_page {
+            paint.set_color(Color::WHITE);
+        } else {
+            paint.set_color(Color::from_argb(128, 255, 255, 255));
+        }
+        canvas.draw_circle((cx, cy), dot_radius, &paint);
+    }
+}
+
+fn draw_bar(canvas: &skia_safe::Canvas, layout: &Layout) {
+    let bar = &layout.bar_rect;
+    let pill_w = bar.w * 0.35;
+    let pill_h = 8.0_f32;
+    let pill_x = bar.x + (bar.w - pill_w) / 2.0;
+    let pill_y = bar.y + (bar.h - pill_h) / 2.0;
+
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(Color::from_argb(180, 255, 255, 255));
+
+    let rect = Rect::new(pill_x, pill_y, pill_x + pill_w, pill_y + pill_h);
+    let rrect = RRect::new_rect_xy(rect, pill_h / 2.0, pill_h / 2.0);
+    canvas.draw_rrect(rrect, &paint);
 }
