@@ -1,0 +1,28 @@
+[package]
+name = "sc-compositor"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "springchick"
+path = "src/main.rs"
+
+[dependencies]
+sc-anim = { path = "../sc-anim" }
+sc-input = { path = "../sc-input" }
+sc-shell-model = { path = "../sc-shell-model" }
+sc-config = { path = "../sc-config" }
+
+smithay = { version = "0.7", default-features = false, features = [
+  "backend_winit",
+  "backend_egl",
+  "renderer_gl",
+  "wayland_frontend",
+  "desktop",
+] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+skia-safe = { version = "0.99", features = ["gl"] }
