@@ -118,7 +118,12 @@ Create `flake.nix` (dev shell with Rust + the system libs Smithay/Skia need). Ke
             # Skia build deps
             pkgs.fontconfig pkgs.freetype pkgs.clang pkgs.python3
           ];
-          shellHook = ''export RUST_BACKTRACE=1'';
+          # skia-safe's build script runs bindgen — point it at libclang up front
+          # to avoid a debugging loop when Skia is added in Task 8.
+          shellHook = ''
+            export RUST_BACKTRACE=1
+            export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
+          '';
         };
       });
 }
@@ -362,18 +367,19 @@ mod tests {
 
 - [ ] **Step 4: Wire the module tree**
 
-Create `crates/sc-input/src/lib.rs`:
+Create `crates/sc-input/src/lib.rs` with the `nav` lines commented out — `nav.rs`
+doesn't exist until Task 4, so leaving them active would fail to compile now:
 
 ```rust
 #![forbid(unsafe_code)]
 pub mod thresholds;
 pub mod gesture;
-pub mod nav;
+// pub mod nav;                                   // uncomment in Task 4
 pub use gesture::{Pt, Tracker};
-pub use nav::{NavState, NavTarget, classify_release};
+// pub use nav::{NavState, NavTarget, classify_release}; // uncomment in Task 4
 ```
 
-(`nav` is added in Task 4; lib.rs referencing it now means Task 3 compiles only after Task 4's file exists. To keep Task 3 self-contained, temporarily comment the `pub mod nav;` and the `pub use nav::...` line, then uncomment in Task 4.)
+Task 4 uncomments both lines once `nav.rs` exists.
 
 - [ ] **Step 5: Run tests**
 
@@ -1019,7 +1025,7 @@ git commit -m "docs: milestone roadmap"
 
 ## Notes for the executor
 
-- **Pure crates use strict TDD** with the exact code above. The compositor tasks (7, 8) are **integration spikes** — the steps fix the *acceptance behavior* (a window; a blurred rounded rect) because exact Smithay/skia-safe API calls depend on the resolved crate versions. Wire against the current API and record what you did.
+- **Pure-crate TDD note:** each "Write the failing test" step ships the test *and* its reference implementation together. Work test-first: paste the test, run it red (stub the impl with `todo!()` if you want to see the red phase), then paste the reference implementation and run it green. The embedded impls are correct starting points, not a license to skip running the tests. The compositor tasks (7, 8) are **integration spikes** — the steps fix the *acceptance behavior* (a window; a blurred rounded rect) because exact Smithay/skia-safe API calls depend on the resolved crate versions. Wire against the current API and record what you did.
 - **Feel constants are starting values.** `sc-anim` spring defaults and everything in `sc-input/thresholds.rs` get retuned on-harness in M3. The unit tests pin *relative* behavior (ordering of targets), not the final numbers.
 - Run `nix develop` once and work inside the shell, or prefix commands with `nix develop --command` as shown.
 - Frequent commits, one per task minimum.
