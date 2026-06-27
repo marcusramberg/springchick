@@ -44,6 +44,8 @@ pub struct DrawCtx<'a> {
     pub model: &'a ShellModel,
     pub icon_cache: &'a HashMap<String, IconPixels>,
     pub app_catalog: &'a HashMap<String, AppEntry>,
+    /// Toplevels for switcher card rendering.
+    pub toplevels: &'a Vec<Option<crate::AppToplevel>>,
     /// Output transform (winit = Flipped180; DRM = connector transform).
     pub transform: Transform,
     /// Mirror the Skia home/bar vertically — the DRM/GBM scanout buffer has the
@@ -147,6 +149,56 @@ pub fn draw_scene(
                 .map_err(SwapBuffersError::from)?;
             if let Err(e) = draw_render_elements(&mut frame, 1.0, &scaled, &[damage]) {
                 warn!(?e, "failed to draw scaled app elements");
+            }
+            let _sync = frame.finish().map_err(SwapBuffersError::from)?;
+        }
+    }
+
+    // Switcher cards: draw each card back-to-front (already sorted ascending z).
+    if !scene.cards.is_empty() {
+        for card in &scene.cards {
+            let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) else { continue };
+            let card_w = size.w as f32 * card.scale;
+            let card_h = size.h as f32 * card.scale;
+            let card_x = (card.center_x - card_w / 2.0) as i32;
+            let card_y = (card.center_y - card_h / 2.0) as i32;
+
+            let card_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                render_elements_from_surface_tree(
+                    renderer,
+                    tl.surface.wl_surface(),
+                    (0, 0),
+                    1.0,
+                    1.0,
+                    Kind::Unspecified,
+                );
+            if card_elements.is_empty() {
+                continue;
+            }
+
+            let scaled: Vec<
+                RescaleRenderElement<RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
+            > = card_elements
+                .into_iter()
+                .map(|e| {
+                    let relocated = RelocateRenderElement::from_element(
+                        e,
+                        Point::<i32, Physical>::from((card_x, card_y)),
+                        Relocate::Relative,
+                    );
+                    RescaleRenderElement::from_element(
+                        relocated,
+                        Point::<i32, Physical>::from((card_x, card_y)),
+                        smithay::utils::Scale::from(card.scale as f64),
+                    )
+                })
+                .collect();
+
+            let mut frame = renderer
+                .render(&mut *framebuffer, size, ctx.transform)
+                .map_err(SwapBuffersError::from)?;
+            if let Err(e) = draw_render_elements(&mut frame, 1.0, &scaled, &[damage]) {
+                warn!(?e, "failed to draw switcher card");
             }
             let _sync = frame.finish().map_err(SwapBuffersError::from)?;
         }

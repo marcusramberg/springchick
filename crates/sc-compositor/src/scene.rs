@@ -3,6 +3,7 @@
 //! Computes window transforms from UiState for the renderer to apply.
 
 use crate::ui_state::{ToplevelId, UiState};
+use crate::switcher;
 use sc_input::Tracker;
 
 /// Window transform applied to the composited app texture.
@@ -28,11 +29,11 @@ impl WindowTransform {
         }
     }
 
-    /// Interpolate between icon-sized (at icon_center) and fullscreen.
-    /// progress: 0 = icon, 1 = fullscreen.
+    /// Interpolate between start scale (at origin.center) and fullscreen.
+    /// progress: 0 = origin, 1 = fullscreen.
     pub fn from_zoom_progress(
         progress: f32,
-        icon_center: (f32, f32),
+        origin: crate::ui_state::ZoomOrigin,
         width: f32,
         height: f32,
     ) -> Self {
@@ -40,9 +41,9 @@ impl WindowTransform {
         let screen_cy = height / 2.0;
         let p = progress.clamp(0.0, 1.0);
 
-        let scale = 0.1 + p * 0.9;
-        let cx = icon_center.0 + (screen_cx - icon_center.0) * p;
-        let cy = icon_center.1 + (screen_cy - icon_center.1) * p;
+        let scale = origin.scale + p * (1.0 - origin.scale);
+        let cx = origin.center.0 + (screen_cx - origin.center.0) * p;
+        let cy = origin.center.1 + (screen_cy - origin.center.1) * p;
         let corner_radius = 24.0 * (1.0 - p);
 
         Self {
@@ -95,6 +96,8 @@ pub struct Scene {
     pub home_page: usize,
     /// Horizontal pixel offset for page swiping (0 = aligned).
     pub page_offset: f32,
+    /// Switcher deck cards (empty for non-switcher states), sorted ascending z.
+    pub cards: Vec<switcher::CardRect>,
 }
 
 /// Compute the scene from the current UiState.
@@ -111,41 +114,45 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
                 show_home: true,
                 home_page: *page,
                 page_offset,
+                cards: Vec::new(),
             }
         }
         UiState::App { toplevel, .. } => Scene {
             window: Some((*toplevel, WindowTransform::fullscreen(w, h))),
             show_home: false,
             home_page: 0,
-                page_offset: 0.0,
+            page_offset: 0.0,
+            cards: Vec::new(),
         },
         UiState::AppOpening {
             toplevel,
             progress,
-            icon_center,
+            origin,
             ..
         } => Scene {
             window: Some((
                 *toplevel,
-                WindowTransform::from_zoom_progress(progress.value, *icon_center, w, h),
+                WindowTransform::from_zoom_progress(progress.value, *origin, w, h),
             )),
             show_home: true,
             home_page: 0,
-                page_offset: 0.0,
+            page_offset: 0.0,
+            cards: Vec::new(),
         },
         UiState::AppClosing {
             toplevel,
             progress,
-            icon_center,
+            origin,
             ..
         } => Scene {
             window: Some((
                 *toplevel,
-                WindowTransform::from_zoom_progress(progress.value, *icon_center, w, h),
+                WindowTransform::from_zoom_progress(progress.value, *origin, w, h),
             )),
             show_home: true,
             home_page: 0,
-                page_offset: 0.0,
+            page_offset: 0.0,
+            cards: Vec::new(),
         },
         UiState::Grabbing {
             toplevel, tracker, ..
@@ -156,13 +163,14 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
                 show_home: up > 0.05,
                 home_page: 0,
                 page_offset: 0.0,
+                cards: Vec::new(),
             }
         }
         UiState::Settling {
             toplevel,
             target,
             progress,
-            icon_center,
+            origin,
             ..
         } => {
             use sc_input::NavTarget;
@@ -179,10 +187,10 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
                     }
                 }
                 NavTarget::Home | NavTarget::Switcher => {
-                    WindowTransform::from_zoom_progress(1.0 - progress.value, *icon_center, w, h)
+                    WindowTransform::from_zoom_progress(1.0 - progress.value, *origin, w, h)
                 }
                 NavTarget::QuickSwitch(_dir) => {
-                    WindowTransform::from_zoom_progress(1.0 - progress.value, *icon_center, w, h)
+                    WindowTransform::from_zoom_progress(1.0 - progress.value, *origin, w, h)
                 }
             };
             Scene {
@@ -190,6 +198,19 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
                 show_home: !matches!(target, NavTarget::BackToApp),
                 home_page: 0,
                 page_offset: 0.0,
+                cards: Vec::new(),
+            }
+        }
+        UiState::Switcher { cards, scroll, .. } => {
+            let mut card_rects = switcher::layout(cards, scroll.value, (w, h));
+            // Sort ascending z for back-to-front draw order.
+            card_rects.sort_by_key(|r| r.z);
+            Scene {
+                window: None,
+                show_home: true,
+                home_page: 0,
+                page_offset: 0.0,
+                cards: card_rects,
             }
         }
     }
@@ -243,5 +264,19 @@ mod tests {
         let tracker = Tracker::begin(sc_input::Pt { x: 0.5, y: 0.95 });
         let t = WindowTransform::from_tracker(&tracker, w, h);
         assert!((t.scale - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn switcher_scene_has_cards_back_to_front() {
+        let state = UiState::Switcher {
+            cards: vec![0, 1, 2], scroll: sc_anim::Spring::new(0.0),
+        };
+        let scene = compute_scene(&state, TEST_SIZE);
+        assert_eq!(scene.cards.len(), 3);
+        assert!(scene.show_home);
+        assert!(scene.window.is_none());
+        // Cards sorted ascending z: back card first.
+        assert!(scene.cards[0].z < scene.cards[1].z);
+        assert!(scene.cards[1].z < scene.cards[2].z);
     }
 }

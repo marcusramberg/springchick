@@ -2,7 +2,7 @@
 //!
 //! Routes pointer/touch events into UiState transitions based on current state.
 
-use crate::ui_state::{UiEvent, UiState};
+use crate::ui_state::{UiEvent, UiState, ZoomOrigin};
 use sc_input::Pt;
 use sc_layout::{self, Hit};
 use sc_shell_model::ShellModel;
@@ -20,8 +20,8 @@ fn normalize(x: f32, y: f32, width: f32, height: f32) -> Pt {
 pub enum DownAction {
     /// Emit this UiEvent.
     Event(UiEvent),
-    /// Launch/raise an app by id (with icon center for zoom).
-    LaunchApp { app_id: String, icon_center: (f32, f32) },
+    /// Launch/raise an app by id (with zoom origin).
+    LaunchApp { app_id: String, origin: ZoomOrigin },
     /// Start tracking a page drag from this x position.
     StartPageDrag { start_x: f32 },
     /// Start tracking a bar drag (for app switching from Home).
@@ -45,7 +45,7 @@ pub fn on_press(state: &UiState, x: f32, y: f32, model: &ShellModel, output_size
                     let cy = slot.icon_rect.center_y();
                     DownAction::LaunchApp {
                         app_id,
-                        icon_center: (cx, cy),
+                        origin: ZoomOrigin::icon((cx, cy)),
                     }
                 }
                 Hit::DockIcon { app_id, index } => {
@@ -54,7 +54,7 @@ pub fn on_press(state: &UiState, x: f32, y: f32, model: &ShellModel, output_size
                     let cy = slot.icon_rect.center_y();
                     DownAction::LaunchApp {
                         app_id,
-                        icon_center: (cx, cy),
+                        origin: ZoomOrigin::icon((cx, cy)),
                     }
                 }
                 Hit::Bar => DownAction::StartBarDrag { start_x: x, start_y: y },
@@ -81,6 +81,10 @@ pub fn on_press(state: &UiState, x: f32, y: f32, model: &ShellModel, output_size
             // Already grabbing — no action on additional press.
             DownAction::None
         }
+        UiState::Switcher { .. } => {
+            // Switcher handles its own input in input_common.
+            DownAction::None
+        }
     }
 }
 
@@ -90,6 +94,10 @@ pub fn on_move(state: &UiState, x: f32, y: f32, dt: f32, output_size: (i32, i32)
     let pt = normalize(x, y, w, h);
     match state {
         UiState::Grabbing { .. } => Some(UiEvent::GrabMove { point: pt, dt }),
+        UiState::Switcher { .. } => {
+            // Switcher handles its own move in input_common.
+            None
+        }
         _ => None,
     }
 }

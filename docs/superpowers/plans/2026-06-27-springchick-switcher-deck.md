@@ -4,7 +4,7 @@
 
 **Goal:** Add an interactive fanned-stack task switcher: drag the bar up into the middle zone to reveal running apps as window cards, tap to switch (zoom from the card), swipe a card up to close, scroll to unfold the stack.
 
-**Architecture:** Approach A — a new pure `switcher.rs` geometry module (fanned-stack card rects + hit-test, unit-tested) and a new `UiState::Switcher` holding the deck's live state. The grab middle-zone release (already classified `NavTarget::Switcher`) wires to the new state instead of Home. `scene.rs`/`render.rs` draw each card from the app's last-committed buffer (icon+name placeholder fallback), reusing M3's `RescaleRenderElement`/`RelocateRenderElement` transform path. `input_common.rs` routes scroll/tap/swipe-close/dismiss. `app_history` is the MRU ordering. The `AppOpening`/`AppClosing` zoom origin is generalized from a point to `{center, scale}` so card-zoom reuses the existing animation.
+**Architecture:** Approach A — a new pure `switcher.rs` geometry module (fanned-stack card rects + hit-test, unit-tested) and a new `UiState::Switcher` holding only the deck's data state (cards list + scroll spring). Drag tracking (axis, close progress) lives in `input_common.rs` on `State`, not in `UiState`, to keep `transition()` pure. The grab middle-zone release (already classified `NavTarget::Switcher`) wires to the new state instead of Home. `scene.rs`/`render.rs` draw each card from the app's last-committed buffer (icon+name placeholder fallback), reusing M3's `RescaleRenderElement`/`RelocateRenderElement` transform path. `input_common.rs` routes scroll/tap/swipe-close/dismiss. `app_history` is the MRU ordering. The `AppOpening`/`AppClosing` zoom origin is generalized from a point to `{center, scale}` so card-zoom reuses the existing animation.
 
 **Tech Stack:** Rust, Smithay 0.7 (GlesRenderer transformed-surface composite), Skia (placeholder cards + dimmed home), `sc-anim::Spring`, existing `sc-input` tracker/thresholds.
 
@@ -24,8 +24,8 @@
 | `crates/sc-compositor/src/ui_state.rs` (modify) | `ZoomOrigin{center,scale}` replacing `icon_center`; `UiState::Switcher`; switcher `UiEvent`s; entry/exit/scroll/close transitions; `Effect::CloseToplevel`. |
 | `crates/sc-compositor/src/scene.rs` (modify) | `WindowTransform::from_zoom_progress` takes a `ZoomOrigin`; `compute_scene(Switcher)` returns ordered card transforms from `switcher::layout`. |
 | `crates/sc-compositor/src/render.rs` (modify) | Draw the deck: dimmed home behind, cards back-to-front from last-committed buffers (placeholder when absent), bar on top. |
-| `crates/sc-compositor/src/input_common.rs` (modify) | When in `Switcher`: press/move/release → scroll / tap-card / swipe-close / dismiss events. |
-| `crates/sc-compositor/src/main.rs` (modify) | Build the deck from `app_history` on entry; apply `Effect::CloseToplevel` (`send_close`); tap-card → raise/zoom + history promote. |
+| `crates/sc-compositor/src/input_common.rs` (modify) | When in `Switcher`: press/move/release → scroll / tap-card / swipe-close / dismiss events. Drag state (`SwitcherDragState`) tracked here, not in `UiState`. |
+| `crates/sc-compositor/src/main.rs` (modify) | `State` gains `switcher_drag` field. Build deck from `app_history` on entry; apply `Effect::CloseToplevel` (`send_close`); tap-card → raise/zoom + history promote. |
 
 Each task is independently committable. Tasks 1–4 are pure and TDD'd on the host. Tasks 5–7 wire input/render/main (build-verified + manual). Task 8 is manual verification.
 
@@ -199,8 +199,10 @@ pub struct CardRect {
     pub scale: f32,
     pub corner_radius: f32,
     pub z: usize,
-    pub close_progress: f32,
 }
+
+> `close_progress` is tracked in the input layer (`input_common.rs`), not on `CardRect`.
+> The geometry module produces static layout; close animation state is an input concern.
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CardHit {
@@ -246,7 +248,6 @@ pub fn layout(cards: &[ToplevelId], scroll: f32, size: (f32, f32)) -> Vec<CardRe
                 scale: (FRONT_SCALE - DEPTH_SCALE_STEP * depth).max(0.30),
                 corner_radius: CORNER,
                 z: n - i, // front (i=0) has the highest z
-                close_progress: 0.0,
             }
         })
         .collect()
@@ -280,10 +281,28 @@ fn soft_clamp(scroll: f32) -> f32 {
 }
 ```
 
-> Implementer note: `hit_test` needs the real output size to convert `scale` → pixel
-> half-extents. Either pass `size` into `hit_test(rects, x, y, size)` or store `w_px/h_px` on
-> `CardRect`. Pick one and make the tests match — do NOT hard-code 1224/2700 in shipping code;
-> the constants above are a placeholder to be removed.
+- [ ] **Step 3b: Fix `hit_test` to accept `size` parameter**
+
+Replace the hard-coded `1224.0`/`2700.0` in `hit_test` with a `size` parameter:
+```rust
+pub fn hit_test(rects: &[CardRect], x: f32, y: f32, size: (f32, f32)) -> CardHit {
+    let (w, h) = size;
+    let mut best: Option<usize> = None;
+    for (i, r) in rects.iter().enumerate() {
+        let cw = w * r.scale;
+        let ch = h * r.scale;
+        let inside = (x - r.center_x).abs() <= cw / 2.0 && (y - r.center_y).abs() <= ch / 2.0;
+        if inside && best.map_or(true, |b| r.z > rects[b].z) {
+            best = Some(i);
+        }
+    }
+    match best {
+        Some(i) => CardHit::Card(i),
+        None => CardHit::Empty,
+    }
+}
+```
+Update all call sites (tests + `input_common.rs`) to pass `size`. Remove the hard-coded constants from the function body entirely.
 
 - [ ] **Step 4: Run tests, verify pass** — `nix develop -c cargo test -p sc-compositor switcher` → PASS.
 
@@ -320,7 +339,7 @@ fn switcher_preview_release_enters_switcher() {
 #[test]
 fn tap_card_opens_that_app() {
     let mut state = UiState::Switcher {
-        cards: vec![1, 2, 3], scroll: Spring::new(0.0), drag: None,
+        cards: vec![1, 2, 3], scroll: Spring::new(0.0),
     };
     let eff = transition(&mut state, UiEvent::SwitcherTapCard {
         index: 1, origin: ZoomOrigin::card((600.0, 1350.0), 0.62),
@@ -332,7 +351,7 @@ fn tap_card_opens_that_app() {
 #[test]
 fn close_card_removes_and_emits_effect() {
     let mut state = UiState::Switcher {
-        cards: vec![1, 2, 3], scroll: Spring::new(0.0), drag: None,
+        cards: vec![1, 2, 3], scroll: Spring::new(0.0),
     };
     let eff = transition(&mut state, UiEvent::SwitcherCloseCard { index: 1 });
     assert_eq!(eff, Effect::CloseToplevel { toplevel: 2 });
@@ -344,7 +363,7 @@ fn close_card_removes_and_emits_effect() {
 #[test]
 fn close_last_card_goes_home() {
     let mut state = UiState::Switcher {
-        cards: vec![9], scroll: Spring::new(0.0), drag: None,
+        cards: vec![9], scroll: Spring::new(0.0),
     };
     transition(&mut state, UiEvent::SwitcherCloseCard { index: 0 });
     assert!(matches!(state, UiState::Home { .. }));
@@ -353,7 +372,7 @@ fn close_last_card_goes_home() {
 #[test]
 fn dismiss_goes_home() {
     let mut state = UiState::Switcher {
-        cards: vec![1, 2], scroll: Spring::new(0.0), drag: None,
+        cards: vec![1, 2], scroll: Spring::new(0.0),
     };
     transition(&mut state, UiEvent::SwitcherDismiss);
     assert!(matches!(state, UiState::Home { .. }));
@@ -362,12 +381,30 @@ fn dismiss_goes_home() {
 #[test]
 fn toplevel_closed_removes_card() {
     let mut state = UiState::Switcher {
-        cards: vec![1, 2, 3], scroll: Spring::new(0.0), drag: None,
+        cards: vec![1, 2, 3], scroll: Spring::new(0.0),
     };
     transition(&mut state, UiEvent::ToplevelClosed { toplevel: 2 });
     if let UiState::Switcher { cards, .. } = &state {
         assert_eq!(cards, &vec![1, 3]);
     } else { panic!("expected still switcher"); }
+}
+
+#[test]
+fn switcher_needs_animation_while_scroll_moving() {
+    let mut spring = Spring::new(0.0);
+    spring.retarget(1.0);
+    let state = UiState::Switcher {
+        cards: vec![1], scroll: spring,
+    };
+    assert!(state.needs_animation());
+}
+
+#[test]
+fn switcher_foreground_toplevel_returns_front_card() {
+    let state = UiState::Switcher {
+        cards: vec![5, 3, 1], scroll: Spring::new(0.0),
+    };
+    assert_eq!(state.foreground_toplevel(), Some(5));
 }
 ```
 
@@ -380,19 +417,13 @@ Add to `UiState`:
 Switcher {
     cards: Vec<ToplevelId>,      // MRU; cards[0] = front
     scroll: Spring,              // single unfold-then-pan scalar
-    drag: Option<SwitcherDrag>,  // active press: card + axis
 },
 ```
-```rust
-#[derive(Clone, Debug)]
-pub struct SwitcherDrag {
-    pub card: Option<usize>,     // None = pressed empty area
-    pub axis: DragAxis,
-    pub close_progress: f32,
-}
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum DragAxis { Undecided, Scroll, Close }
-```
+> **Drag state stays in the input layer, not `UiState`.** `SwitcherDrag` (card index,
+> axis, close progress) is tracked in `input_common.rs` via a local struct or fields on
+> `State`. The state machine receives only resolved discrete events (`SwitcherScroll`,
+> `SwitcherTapCard`, etc.). This avoids splitting drag logic between input and transition.
+> See Task 5 for the input-layer drag tracker.
 Add events:
 ```rust
 EnterSwitcher { cards: Vec<ToplevelId> },
@@ -406,14 +437,15 @@ Add to `Effect`:
 CloseToplevel { toplevel: ToplevelId },
 ```
 Transitions in `transition()`:
-- `EnterSwitcher { cards }` → `UiState::Switcher { cards, scroll: Spring::new(0.0), drag: None }`.
-- `SwitcherScroll { delta }` (in Switcher) → `scroll.value += delta; scroll.target = scroll.value; scroll.velocity = 0` (finger-follow like page-drag).
+- `EnterSwitcher { cards }` → `UiState::Switcher { cards, scroll: Spring::new(0.0) }`.
+- `SwitcherScroll { delta }` (in Switcher) → finger-follow: `scroll.value += delta; scroll.target = scroll.value; scroll.velocity = 0`. During drag, the spring is NOT animated (direct tracking). On release (handled in `input_common.rs`), set `scroll.velocity` from `tracker.velocity` and let `Tick` animate the spring to rest.
 - `SwitcherTapCard { index, origin }` (in Switcher) → start `AppOpening { toplevel: cards[index], origin, .. }` (reuse the existing opening spring setup).
 - `SwitcherCloseCard { index }` → remove `cards[index]`; if empty → `home(...)`; else stay; return `Effect::CloseToplevel { toplevel }`.
 - `SwitcherDismiss` → `home(...)`.
 - Extend `ToplevelClosed` to also handle the `Switcher` case (remove the card; empty → home).
-- Extend `Tick` to advance `scroll` (and any `drag.close_progress` spring-back) in `Switcher`.
+- Extend `Tick` to advance `scroll` in `Switcher`.
 - `needs_animation()` / `foreground_toplevel()` get `Switcher` arms (animating while scroll unsettled; foreground = `cards.first()`).
+  - Add explicit tests: `fn switcher_needs_animation_while_scroll_moving()` and `fn switcher_foreground_toplevel_returns_front_card()`.
 
 Wire entry from the grab: in `GrabRelease`, when `classify_release` returns `NavTarget::Switcher`, do **not** build `Settling`; instead the caller (main/input) emits `EnterSwitcher` with the history. (Keep `transition` pure — it can't read `app_history`; the cards list is supplied by the caller. See Task 5/7.)
 
@@ -441,7 +473,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 #[test]
 fn switcher_scene_has_cards_back_to_front() {
     let state = UiState::Switcher {
-        cards: vec![0, 1, 2], scroll: sc_anim::Spring::new(0.0), drag: None,
+        cards: vec![0, 1, 2], scroll: sc_anim::Spring::new(0.0),
     };
     let scene = compute_scene(&state, TEST_SIZE);
     assert_eq!(scene.cards.len(), 3);
@@ -478,12 +510,24 @@ In `on_release` (the grab path), when `classify_release` yields `NavTarget::Swit
 
 - [ ] **Step 2: In-switcher press/move/release**
 
-Add a branch: when `state.ui` is `Switcher`:
-- **press(x,y):** `hit_test` the current scene cards (compute via `switcher::layout`) → record `SwitcherDrag { card, axis: Undecided }` on the state; remember origin point.
-- **move(x,y):** if axis `Undecided`, decide by first significant delta (horizontal-dominant → `Scroll`, vertical-up on a card → `Close`); then `Scroll` → `SwitcherScroll { delta }`; `Close` → grow that card's `close_progress`.
-- **release(x,y):** small move on a card → `SwitcherTapCard { index, origin: card-rect center+scale }`; past close threshold → `SwitcherCloseCard { index }`; horizontal → settle scroll spring with `tracker.velocity`; empty tap → `SwitcherDismiss`.
+Add a branch: when `state.ui` is `Switcher`. All drag tracking stays in `input_common.rs` — the state machine sees only resolved discrete events.
 
-Reuse the existing `Tracker` for velocity/up-progress (same as grab). Thresholds: reuse `QUICK_SWITCH_PROGRESS` for axis dominance and a new `SWITCHER_CLOSE_PROGRESS = 0.4` in `sc-input::thresholds`.
+Add a `switcher_drag: Option<SwitcherDragState>` field on `State` (in `main.rs`) to track the active drag:
+```rust
+struct SwitcherDragState {
+    card: Option<usize>,     // None = pressed empty area
+    axis: SwitcherDragAxis,
+    close_progress: f32,
+    origin: (f32, f32),
+}
+enum SwitcherDragAxis { Undecided, Scroll, Close }
+```
+
+- **press(x,y):** `hit_test` the current scene cards (compute via `switcher::layout` with `state.output_size`) → set `switcher_drag = Some(SwitcherDragState { card, axis: Undecided, close_progress: 0.0, origin: (x, y) })`.
+- **move(x,y):** if axis `Undecided`, decide by first significant delta (horizontal-dominant → `Scroll`, vertical-up on a card → `Close`); then `Scroll` → emit `SwitcherScroll { delta }` via `transition`; `Close` → grow `close_progress` locally (no event until release).
+- **release(x,y):** small move on a card → `SwitcherTapCard { index, origin: ZoomOrigin::card(card-rect center, card-rect scale) }`; past close threshold (`SWITCHER_CLOSE_PROGRESS = 0.4`) → `SwitcherCloseCard { index }`; horizontal scroll → set `scroll.velocity` from finger velocity + `Tick` animates; empty tap → `SwitcherDismiss`. Clear `switcher_drag = None`.
+
+Reuse the existing `Tracker` for velocity (same as grab). Thresholds: reuse `QUICK_SWITCH_PROGRESS` for axis dominance and a new `SWITCHER_CLOSE_PROGRESS = 0.4` in `sc-input::thresholds`.
 
 - [ ] **Step 3: Build-verify + winit manual**
 
@@ -507,6 +551,16 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Modify: `crates/sc-compositor/src/render.rs`
 - Modify: `crates/sc-compositor/src/skia_gl.rs` (dimmed-home + placeholder card helpers)
 
+- [ ] **Step 0: Extract `draw_card` helper from existing M3 code**
+
+Factor the existing scaled-window render path (`RescaleRenderElement` + `RelocateRenderElement` + corner clip) into a reusable helper:
+```rust
+fn draw_card(renderer: &mut GlesRenderer, framebuffer: &mut impl Framebuffer,
+             surface: &WlSurface, rect: &switcher::CardRect,
+             size: (i32, i32)) -> Result<(), SwapBuffersError>
+```
+This is the single-card version. The multi-card loop in Step 1 calls this per card.
+
 - [ ] **Step 1: Draw order in `draw_scene`**
 
 When `scene.cards` is non-empty:
@@ -519,6 +573,11 @@ The per-card surface lookup needs the `toplevels` map; pass a resolver closure o
 - [ ] **Step 2: Skia helpers (skia_gl.rs)**
 
 `draw_home(..., dim)` (or a `draw_dim_overlay`) and `draw_card_placeholder(width, height, rect, icon, name, flip_y)`. Respect `flip_y` like the existing draws.
+
+> **Fallback if GL state thrashing is a problem:** ship placeholder-only cards
+> (Skia rounded panel + icon + name, no live buffer). The switcher is still
+> fully functional (scroll, tap, close) — just no live preview. Add live buffer
+> rendering in a follow-up commit once the GL path is tuned.
 
 - [ ] **Step 3: Build-verify** — `nix develop -c cargo build -p sc-compositor`.
 

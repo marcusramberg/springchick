@@ -47,6 +47,11 @@ impl AppHistory {
             _ => None,
         }
     }
+
+    /// Return the full MRU list (front = most recent).
+    pub fn mru_list(&self) -> Vec<ToplevelId> {
+        self.stack.clone()
+    }
 }
 
 #[cfg(test)]

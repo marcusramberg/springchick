@@ -6,8 +6,21 @@
 //! only the Esc return-home shortcut is shared here.
 
 use crate::input_dispatch::{self, DownAction};
-use crate::ui_state::{transition, UiEvent, UiState};
+use crate::switcher;
+use crate::ui_state::{transition, UiEvent, UiState, ZoomOrigin};
 use crate::State;
+use tracing::info;
+
+/// Switcher drag state.
+#[derive(Clone, Copy, Debug)]
+pub enum SwitcherDrag {
+    /// Finger on a card, scrolling.
+    OnCard { start_x: f32, start_scroll: f32 },
+    /// Finger on empty area, waiting to decide.
+    InEmpty { start_x: f32, start_y: f32 },
+    /// Disengaged.
+    None,
+}
 
 /// Esc → return-home shortcut (dev convenience). Returns true if handled.
 pub fn on_escape(state: &mut State) -> bool {
@@ -27,6 +40,17 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
     state.last_pointer_pos = Some((x, y));
 
     if state.pointer_down {
+        // Switcher scroll.
+        if let SwitcherDrag::OnCard { start_x, start_scroll } = state.switcher_drag {
+            if let UiState::Switcher { scroll, .. } = &mut state.ui {
+                let dx = x - start_x;
+                scroll.value = start_scroll - dx / state.output_size.0 as f32;
+                scroll.target = scroll.value;
+                scroll.velocity = 0.0;
+                return;
+            }
+        }
+
         // Page drag: update spring value to follow finger.
         if let Some(start_x) = state.page_drag_start {
             let dx = x - start_x;
@@ -68,13 +92,41 @@ pub fn on_press(state: &mut State) {
         return;
     };
     state.pointer_down = true;
+
+    // Switcher deck input.
+    if matches!(state.ui, UiState::Switcher { .. }) {
+        let hit = switcher::hit_test(
+            &state.switcher_cards,
+            x,
+            y,
+            (state.output_size.0 as f32, state.output_size.1 as f32),
+        );
+        match hit {
+            switcher::CardHit::Card(_idx) => {
+                if let UiState::Switcher { scroll, .. } = &state.ui {
+                    state.switcher_drag = SwitcherDrag::OnCard {
+                        start_x: x,
+                        start_scroll: scroll.value,
+                    };
+                }
+            }
+            switcher::CardHit::Empty => {
+                state.switcher_drag = SwitcherDrag::InEmpty {
+                    start_x: x,
+                    start_y: y,
+                };
+            }
+        }
+        return;
+    }
+
     let action = input_dispatch::on_press(&state.ui, x, y, &state.model, state.output_size);
     match action {
         DownAction::Event(ev) => {
             transition(&mut state.ui, ev);
         }
-        DownAction::LaunchApp { app_id, icon_center } => {
-            state.launch_or_raise(&app_id, icon_center);
+        DownAction::LaunchApp { app_id, origin } => {
+            state.launch_or_raise(&app_id, origin);
         }
         DownAction::StartPageDrag { start_x } => {
             state.page_drag_start = Some(start_x);
@@ -105,7 +157,7 @@ pub fn on_release(state: &mut State) {
             if let Some(tid) = state.history.previous() {
                 if let Some(Some(tl)) = state.toplevels.get(tid) {
                     let app_id = tl.app_id.clone();
-                    state.last_icon_center = (w / 2.0, h / 2.0);
+                    state.last_origin = ZoomOrigin::icon((w / 2.0, h / 2.0));
                     state.history.push_foreground(tid);
                     transition(
                         &mut state.ui,
@@ -122,7 +174,7 @@ pub fn on_release(state: &mut State) {
             if let Some(tid) = state.history.quick_switch(dir) {
                 if let Some(Some(tl)) = state.toplevels.get(tid) {
                     let app_id = tl.app_id.clone();
-                    state.last_icon_center = (w / 2.0, h / 2.0);
+                    state.last_origin = ZoomOrigin::icon((w / 2.0, h / 2.0));
                     state.history.push_foreground(tid);
                     transition(
                         &mut state.ui,
@@ -160,6 +212,41 @@ pub fn on_release(state: &mut State) {
         }
     }
 
+    // Switcher release: tap card or dismiss.
+    if matches!(state.ui, UiState::Switcher { .. }) {
+        let drag = std::mem::replace(&mut state.switcher_drag, SwitcherDrag::None);
+        match drag {
+            SwitcherDrag::OnCard { start_x, .. } => {
+                let dx = (x - start_x).abs();
+                if dx < 15.0 {
+                    // Tap: open the card.
+                    let hit = switcher::hit_test(
+                        &state.switcher_cards,
+                        x,
+                        y,
+                        (state.output_size.0 as f32, state.output_size.1 as f32),
+                    );
+                    if let switcher::CardHit::Card(idx) = hit {
+                        let card = state.switcher_cards.get(idx).copied();
+                        let origin = card.map(|c| ZoomOrigin::card((c.center_x, c.center_y), c.scale))
+                            .unwrap_or_else(|| ZoomOrigin::card((state.output_size.0 as f32 / 2.0, state.output_size.1 as f32 / 2.0), 0.62));
+                        transition(&mut state.ui, UiEvent::SwitcherTapCard { index: idx, origin });
+                        return;
+                    }
+                }
+            }
+            SwitcherDrag::InEmpty { start_x, start_y } => {
+                let dx = (x - start_x).abs();
+                let dy = (y - start_y).abs();
+                if dx < 15.0 && dy < 15.0 {
+                    transition(&mut state.ui, UiEvent::SwitcherDismiss);
+                    return;
+                }
+            }
+            SwitcherDrag::None => {}
+        }
+    }
+
     // Release grab if active.
     let release = if let UiState::Grabbing {
         tracker,
@@ -172,6 +259,7 @@ pub fn on_release(state: &mut State) {
         None
     };
     if let Some((target, cur_tid, cur_app)) = release {
+        info!(target: "springchick::debug", "on_release grab target={:?}", target);
         match target {
             sc_input::NavTarget::QuickSwitch(dir) => {
                 // Grab-based quick-switch: raise the adjacent app directly.
@@ -200,8 +288,8 @@ pub fn on_release(state: &mut State) {
             _ => {
                 transition(&mut state.ui, UiEvent::GrabRelease);
                 // Settling toward Home/Switcher needs the real icon origin.
-                if let UiState::Settling { icon_center, .. } = &mut state.ui {
-                    *icon_center = state.last_icon_center;
+                if let UiState::Settling { origin, .. } = &mut state.ui {
+                    *origin = state.last_origin;
                 }
             }
         }

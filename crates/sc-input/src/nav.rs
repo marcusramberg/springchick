@@ -50,7 +50,11 @@ pub fn classify_release(t: &Tracker) -> NavTarget {
     if t.velocity.y <= th::HOME_FLICK_VELOCITY {
         return NavTarget::Home;
     }
-    // Slow drag held far up → switcher; otherwise home.
+    // Dragged all the way up → home.
+    if progress >= th::HOME_MIN_PROGRESS {
+        return NavTarget::Home;
+    }
+    // Released in the middle band → switcher; below it → home.
     if progress >= th::SWITCHER_SETTLE_PROGRESS {
         NavTarget::Switcher
     } else {
@@ -87,6 +91,13 @@ mod tests {
     fn slow_far_drag_settles_in_switcher() {
         let t = t_with(Pt{x:0.5,y:0.95}, Pt{x:0.5,y:0.35}, Pt{x:0.0,y:-0.5});
         assert_eq!(classify_release(&t), NavTarget::Switcher);
+    }
+
+    #[test]
+    fn all_the_way_up_goes_home() {
+        // Slow drag almost to the top (progress 0.88) → home, not switcher.
+        let t = t_with(Pt{x:0.5,y:0.95}, Pt{x:0.5,y:0.07}, Pt{x:0.0,y:-0.5});
+        assert_eq!(classify_release(&t), NavTarget::Home);
     }
 
     #[test]

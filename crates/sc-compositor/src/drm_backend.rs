@@ -240,12 +240,27 @@ impl App {
         // Tick springs.
         let dt = self.last_frame.elapsed().as_secs_f32().min(1.0 / 30.0);
         self.last_frame = Instant::now();
-        crate::ui_state::transition(&mut self.state.ui, crate::ui_state::UiEvent::Tick { dt });
+        let effect =
+            crate::ui_state::transition(&mut self.state.ui, crate::ui_state::UiEvent::Tick { dt });
+        match effect {
+            crate::ui_state::Effect::CloseToplevel { toplevel } => {
+                self.state.close_toplevel(toplevel);
+            }
+            crate::ui_state::Effect::EnterSwitcher => {
+                let cards = self.state.history.mru_list();
+                crate::ui_state::transition(
+                    &mut self.state.ui,
+                    crate::ui_state::UiEvent::EnterSwitcher { cards },
+                );
+            }
+            _ => {}
+        }
         if let crate::ui_state::UiState::Home { page_count, .. } = &mut self.state.ui {
             *page_count = self.state.model.pages.len().max(1);
         }
 
         let scene = crate::scene::compute_scene(&self.state.ui, self.state.output_size);
+        self.state.switcher_cards = scene.cards.clone();
         let app_surface = scene.window.as_ref().and_then(|(tid, _)| {
             self.state
                 .toplevels
@@ -281,6 +296,7 @@ impl App {
                 model: &self.state.model,
                 icon_cache: &self.state.icon_cache,
                 app_catalog: &self.state.app_catalog,
+                toplevels: &self.state.toplevels,
                 transform: self.drm.transform,
                 skia_flip_y: true,
                 frame_time,

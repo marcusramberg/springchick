@@ -10,6 +10,7 @@ mod launcher;
 mod render;
 pub mod scene;
 mod skia_gl;
+mod switcher;
 pub mod ui_state;
 
 use app_history::AppHistory;
@@ -17,7 +18,7 @@ use backend::{FP5_HEIGHT, FP5_WIDTH};
 use launcher::spawn_app;
 use scene::compute_scene;
 use skia_gl::SkiaGl;
-use ui_state::{transition, ToplevelId, UiEvent, UiState};
+use ui_state::{transition, ToplevelId, UiEvent, UiState, ZoomOrigin};
 
 use sc_config::{catalog, state as config_state, AppEntry};
 use sc_icons::IconPixels;
@@ -160,8 +161,8 @@ struct State {
     toplevels: Vec<Option<AppToplevel>>,
     children: Vec<Child>,
     history: AppHistory,
-    /// Last icon center for zoom-back (cached when launching).
-    last_icon_center: (f32, f32),
+    /// Last zoom origin (cached when launching).
+    last_origin: ZoomOrigin,
     /// Actual output size (may differ from FP5 constants in nested dev mode).
     output_size: (i32, i32),
 
@@ -176,6 +177,12 @@ struct State {
     page_drag_start: Option<f32>,
     /// Bar drag tracking from Home state: (start_x, start_y).
     bar_drag_start: Option<(f32, f32)>,
+    /// Switcher deck drag state.
+    switcher_drag: input_common::SwitcherDrag,
+    /// Switcher card rects for hit-testing during drag.
+    switcher_cards: Vec<switcher::CardRect>,
+    /// Last logged UI state discriminant (to avoid spam).
+    last_log_state: Option<std::mem::Discriminant<UiState>>,
 
     // Timing
     start_time: std::time::Instant,
@@ -264,7 +271,7 @@ impl State {
             toplevels: Vec::new(),
             children: Vec::new(),
             history: AppHistory::new(),
-            last_icon_center: (FP5_WIDTH as f32 / 2.0, FP5_HEIGHT as f32 / 2.0),
+            last_origin: ZoomOrigin::icon((FP5_WIDTH as f32 / 2.0, FP5_HEIGHT as f32 / 2.0)),
             output_size: (FP5_WIDTH, FP5_HEIGHT),
             skia: SkiaGl::new(),
             wayland_socket,
@@ -272,9 +279,12 @@ impl State {
             pointer_down: false,
             page_drag_start: None,
             bar_drag_start: None,
+            switcher_drag: input_common::SwitcherDrag::None,
+            switcher_cards: Vec::new(),
+            last_log_state: None,
             start_time: std::time::Instant::now(),
             stats: frame_stats::FrameStats::new(std::time::Duration::from_micros(11_111)),
-            perf_log: perf_enabled(),
+            perf_log: false, // disabled for debugging
             last_perf_log: std::time::Instant::now(),
             running: true,
         }
@@ -284,13 +294,13 @@ impl State {
         transition(
             &mut self.ui,
             UiEvent::ReturnHome {
-                icon_center: self.last_icon_center,
+                origin: self.last_origin,
             },
         );
     }
 
-    fn launch_or_raise(&mut self, app_id: &str, icon_center: (f32, f32)) {
-        self.last_icon_center = icon_center;
+    fn launch_or_raise(&mut self, app_id: &str, origin: ZoomOrigin) {
+        self.last_origin = origin;
         // Check if already running — raise it (no zoom, instant).
         for (idx, slot) in self.toplevels.iter().enumerate() {
             if let Some(tl) = slot {
@@ -345,7 +355,7 @@ impl State {
             UiEvent::AppMapped {
                 toplevel: id,
                 app_id,
-                icon_center: self.last_icon_center,
+                origin: self.last_origin,
             },
         );
 
@@ -364,8 +374,18 @@ impl State {
             }
         }
         if let Some(id) = closed_id {
-            transition(&mut self.ui, UiEvent::ToplevelClosed { toplevel: id });
+            self.close_toplevel(id);
         }
+    }
+
+    /// Close a toplevel by id (remove from vec, notify UI state).
+    fn close_toplevel(&mut self, id: ToplevelId) {
+        // Remove from toplevels vec.
+        if let Some(slot) = self.toplevels.get_mut(id) {
+            *slot = None;
+        }
+        self.history.remove(id);
+        transition(&mut self.ui, UiEvent::ToplevelClosed { toplevel: id });
     }
 }
 
@@ -709,7 +729,18 @@ fn render_frame(
 
     // Tick animations.
     let dt = 1.0 / 90.0;
-    transition(&mut state.ui, UiEvent::Tick { dt });
+    let effect = transition(&mut state.ui, UiEvent::Tick { dt });
+    match effect {
+        ui_state::Effect::CloseToplevel { toplevel } => {
+            state.close_toplevel(toplevel);
+        }
+        ui_state::Effect::EnterSwitcher => {
+            let cards = state.history.mru_list();
+            info!(target: "springchick::debug", "Effect::EnterSwitcher mru_list={:?}", cards);
+            transition(&mut state.ui, UiEvent::EnterSwitcher { cards });
+        }
+        _ => {}
+    }
 
     // Animations that settle to home reset page_count to 1; restore from the model.
     if let UiState::Home { page_count, .. } = &mut state.ui {
@@ -718,6 +749,12 @@ fn render_frame(
 
     // Compute scene from current state.
     let scene = compute_scene(&state.ui, state.output_size);
+    state.switcher_cards = scene.cards.clone();
+    let disc = std::mem::discriminant(&state.ui);
+    if state.last_log_state != Some(disc) {
+        state.last_log_state = Some(disc);
+        info!(target: "springchick::debug", "state changed to {:?} cards={}", state.ui, scene.cards.len());
+    }
 
     // Resolve the app surface for compositing.
     let app_surface: Option<WlSurface> = scene.window.as_ref().and_then(|(tid, _)| {
@@ -738,6 +775,7 @@ fn render_frame(
             model: &state.model,
             icon_cache: &state.icon_cache,
             app_catalog: &state.app_catalog,
+            toplevels: &state.toplevels,
             transform: Transform::Flipped180,
             skia_flip_y: false,
             frame_time,
