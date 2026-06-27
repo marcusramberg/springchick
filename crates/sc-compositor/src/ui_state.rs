@@ -3,10 +3,29 @@
 //! `UiState` + `UiEvent` → `UiState` transitions, unit-tested without Wayland/GPU.
 
 use sc_anim::Spring;
+use tracing::info;
 use sc_input::{NavTarget, Tracker};
 
 /// Opaque toplevel identifier (index into the compositor's toplevel vec).
 pub type ToplevelId = usize;
+
+/// Origin of a zoom animation: where the window grows from / shrinks to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ZoomOrigin {
+    /// Center in logical pixels.
+    pub center: (f32, f32),
+    /// Start scale (icon ≈ 0.1, switcher card ≈ 0.62).
+    pub scale: f32,
+}
+
+impl ZoomOrigin {
+    pub fn icon(center: (f32, f32)) -> Self {
+        Self { center, scale: 0.1 }
+    }
+    pub fn card(center: (f32, f32), scale: f32) -> Self {
+        Self { center, scale }
+    }
+}
 
 /// The shell's UI states, including transition animations.
 #[derive(Clone, Debug)]
@@ -26,8 +45,8 @@ pub enum UiState {
         app_id: String,
         /// Spring 0→1 (0 = icon size, 1 = fullscreen).
         progress: Spring,
-        /// Icon center in logical pixels.
-        icon_center: (f32, f32),
+        /// Zoom origin (center + start scale).
+        origin: ZoomOrigin,
     },
     /// Fullscreen → icon shrink animation.
     AppClosing {
@@ -35,7 +54,7 @@ pub enum UiState {
         app_id: String,
         /// Spring 1→0.
         progress: Spring,
-        icon_center: (f32, f32),
+        origin: ZoomOrigin,
     },
     /// Finger is on the bar, dragging the window.
     Grabbing {
@@ -50,7 +69,14 @@ pub enum UiState {
         target: NavTarget,
         /// Spring animating toward rest (0 = app fullscreen, 1 = target reached).
         progress: Spring,
-        icon_center: (f32, f32),
+        origin: ZoomOrigin,
+    },
+    /// Switcher deck: fanned stack of running apps.
+    Switcher {
+        /// MRU card order; cards[0] = front (most recent).
+        cards: Vec<ToplevelId>,
+        /// Single unfold-then-pan scroll spring.
+        scroll: Spring,
     },
 }
 
@@ -74,6 +100,7 @@ impl UiState {
             | UiState::Grabbing { toplevel, .. }
             | UiState::Settling { toplevel, .. } => Some(*toplevel),
             UiState::Home { .. } => None,
+            UiState::Switcher { cards, .. } => cards.first().copied(),
         }
     }
 
@@ -86,6 +113,7 @@ impl UiState {
             UiState::Home { page_spring, .. } => !page_spring.is_settled(),
             UiState::Grabbing { .. } => true,
             UiState::App { .. } => false,
+            UiState::Switcher { scroll, .. } => !scroll.is_settled(),
         }
     }
 }
@@ -96,14 +124,14 @@ pub enum UiEvent {
     /// Icon tapped — launch or raise.
     TapIcon {
         app_id: String,
-        /// Icon center for zoom-origin.
-        icon_center: (f32, f32),
+        /// Zoom origin for the launched app.
+        origin: ZoomOrigin,
     },
     /// App launched and matched to a toplevel (with zoom animation).
     AppMapped {
         toplevel: ToplevelId,
         app_id: String,
-        icon_center: (f32, f32),
+        origin: ZoomOrigin,
     },
     /// Raise an already-running app directly (no zoom animation).
     RaiseApp {
@@ -111,7 +139,7 @@ pub enum UiEvent {
         app_id: String,
     },
     /// Return-home (Esc shortcut in dev).
-    ReturnHome { icon_center: (f32, f32) },
+    ReturnHome { origin: ZoomOrigin },
     /// Foreground app's toplevel was destroyed.
     ToplevelClosed { toplevel: ToplevelId },
     /// Horizontal page swipe delta.
@@ -128,19 +156,32 @@ pub enum UiEvent {
     Interrupt { point: sc_input::Pt },
     /// Animation tick — advance springs by dt.
     Tick { dt: f32 },
+    /// Enter switcher deck from grab release.
+    EnterSwitcher { cards: Vec<ToplevelId> },
+    /// Horizontal scroll delta during finger drag.
+    SwitcherScroll { delta: f32 },
+    /// Tap a card to open that app.
+    SwitcherTapCard { index: usize, origin: ZoomOrigin },
+    /// Swipe a card up to close.
+    SwitcherCloseCard { index: usize },
+    /// Dismiss the switcher (tap empty area).
+    SwitcherDismiss,
 }
 
 /// Side effect from a transition.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Launch { app_id: String },
+    CloseToplevel { toplevel: ToplevelId },
+    /// Settling animation resolved to Switcher — caller should populate cards.
+    EnterSwitcher,
     None,
 }
 
 /// Advance the state machine.
 pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
     match event {
-        UiEvent::TapIcon { app_id, .. } => {
+        UiEvent::TapIcon { app_id, origin: _ } => {
             if matches!(state, UiState::Home { .. }) {
                 return Effect::Launch { app_id };
             }
@@ -149,7 +190,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
         UiEvent::AppMapped {
             toplevel,
             app_id,
-            icon_center,
+            origin,
         } => {
             let mut progress = Spring::new(0.0);
             progress.stiffness = 300.0;
@@ -159,7 +200,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 toplevel,
                 app_id,
                 progress,
-                icon_center,
+                origin,
             };
             Effect::None
         }
@@ -167,7 +208,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             *state = UiState::App { toplevel, app_id };
             Effect::None
         }
-        UiEvent::ReturnHome { icon_center } => {
+        UiEvent::ReturnHome { origin } => {
             match state {
                 UiState::App { toplevel, app_id, .. } => {
                     let toplevel = *toplevel;
@@ -180,7 +221,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                         toplevel,
                         app_id,
                         progress,
-                        icon_center,
+                        origin,
                     };
                 }
                 UiState::Grabbing { toplevel, app_id, .. }
@@ -195,7 +236,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                         toplevel,
                         app_id,
                         progress,
-                        icon_center,
+                        origin,
                     };
                 }
                 _ => {}
@@ -213,6 +254,13 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             };
             if is_foreground {
                 *state = UiState::home(0, 1);
+            }
+            // Remove from switcher deck if present.
+            if let UiState::Switcher { cards, .. } = state {
+                cards.retain(|&t| t != toplevel);
+                if cards.is_empty() {
+                    *state = UiState::home(0, 1);
+                }
             }
             Effect::None
         }
@@ -272,6 +320,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             } = state
             {
                 let target = sc_input::classify_release(tracker);
+                info!(target: "springchick::debug", "GrabRelease target={:?} progress={} vel={}", target, tracker.up_progress(), tracker.velocity.y);
                 let toplevel = *toplevel;
                 let app_id = app_id.clone();
                 // Start from current drag progress.
@@ -291,7 +340,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     app_id,
                     target,
                     progress,
-                    icon_center: (0.5, 0.5), // will be overridden by caller with actual icon center
+                    origin: ZoomOrigin::icon((0.5, 0.5)), // will be overridden by caller with actual origin
                 };
             }
             Effect::None
@@ -353,14 +402,19 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 } => {
                     progress.step(dt);
                     if progress.is_settled() {
+                        info!(target: "springchick::debug", "Settling resolved target={:?}", target);
                         match target {
                             NavTarget::BackToApp => {
                                 let toplevel = *toplevel;
                                 let app_id = app_id.clone();
                                 *state = UiState::App { toplevel, app_id };
                             }
-                            NavTarget::Home | NavTarget::Switcher => {
+                            NavTarget::Home => {
                                 *state = UiState::home(0, 1);
+                            }
+                            NavTarget::Switcher => {
+                                *state = UiState::home(0, 1);
+                                return Effect::EnterSwitcher;
                             }
                             NavTarget::QuickSwitch(_) => {
                                 // Handled by caller raising the adjacent app.
@@ -372,8 +426,65 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 UiState::Home { page_spring, .. } => {
                     page_spring.step(dt);
                 }
+                UiState::Switcher { scroll, .. } => {
+                    scroll.step(dt);
+                }
+                UiState::Grabbing { tracker, .. } => {
+                    // Decay velocity so a stationary hold doesn't read as a flick.
+                    tracker.decay(dt);
+                }
                 _ => {}
             }
+            Effect::None
+        }
+        UiEvent::EnterSwitcher { cards } => {
+            info!(target: "springchick::debug", "EnterSwitcher cards={:?}", cards);
+            *state = UiState::Switcher {
+                cards,
+                scroll: Spring::new(0.0),
+            };
+            Effect::None
+        }
+        UiEvent::SwitcherScroll { delta } => {
+            if let UiState::Switcher { scroll, .. } = state {
+                scroll.value += delta;
+                scroll.target = scroll.value;
+                scroll.velocity = 0.0;
+            }
+            Effect::None
+        }
+        UiEvent::SwitcherTapCard { index, origin } => {
+            if let UiState::Switcher { cards, .. } = state {
+                if let Some(&toplevel) = cards.get(index) {
+                    let app_id = format!("app_{}", toplevel);
+                    let mut progress = Spring::new(0.0);
+                    progress.stiffness = 300.0;
+                    progress.damping = 35.0;
+                    progress.retarget(1.0);
+                    *state = UiState::AppOpening {
+                        toplevel,
+                        app_id,
+                        progress,
+                        origin,
+                    };
+                }
+            }
+            Effect::None
+        }
+        UiEvent::SwitcherCloseCard { index } => {
+            if let UiState::Switcher { cards, .. } = state {
+                if let Some(&toplevel) = cards.get(index) {
+                    cards.remove(index);
+                    if cards.is_empty() {
+                        *state = UiState::home(0, 1);
+                    }
+                    return Effect::CloseToplevel { toplevel };
+                }
+            }
+            Effect::None
+        }
+        UiEvent::SwitcherDismiss => {
+            *state = UiState::home(0, 1);
             Effect::None
         }
     }
@@ -391,7 +502,7 @@ mod tests {
             &mut state,
             UiEvent::TapIcon {
                 app_id: "org.foo.Bar".into(),
-                icon_center: (100.0, 200.0),
+                origin: ZoomOrigin::icon((100.0, 200.0)),
             },
         );
         assert!(matches!(effect, Effect::Launch { app_id } if app_id == "org.foo.Bar"));
@@ -406,7 +517,7 @@ mod tests {
             UiEvent::AppMapped {
                 toplevel: 1,
                 app_id: "foo".into(),
-                icon_center: (100.0, 200.0),
+                origin: ZoomOrigin::icon((100.0, 200.0)),
             },
         );
         assert!(matches!(state, UiState::AppOpening { toplevel: 1, .. }));
@@ -420,7 +531,7 @@ mod tests {
             UiEvent::AppMapped {
                 toplevel: 1,
                 app_id: "foo".into(),
-                icon_center: (100.0, 200.0),
+                origin: ZoomOrigin::icon((100.0, 200.0)),
             },
         );
         // Tick until settled.
@@ -552,7 +663,7 @@ mod tests {
             UiEvent::AppMapped {
                 toplevel: 1,
                 app_id: "foo".into(),
-                icon_center: (100.0, 200.0),
+                origin: ZoomOrigin::icon((100.0, 200.0)),
             },
         );
         assert!(matches!(state, UiState::AppOpening { .. }));
@@ -585,7 +696,7 @@ mod tests {
         transition(
             &mut state,
             UiEvent::ReturnHome {
-                icon_center: (200.0, 400.0),
+                origin: ZoomOrigin::icon((200.0, 400.0)),
             },
         );
         assert!(matches!(state, UiState::AppClosing { toplevel: 2, .. }));
@@ -600,7 +711,7 @@ mod tests {
         transition(
             &mut state,
             UiEvent::ReturnHome {
-                icon_center: (200.0, 400.0),
+                origin: ZoomOrigin::icon((200.0, 400.0)),
             },
         );
         for _ in 0..500 {
@@ -625,5 +736,105 @@ mod tests {
         } else {
             panic!("expected Home");
         }
+    }
+
+    // --- Switcher tests ---
+
+    #[test]
+    fn switcher_preview_release_enters_switcher() {
+        let mut state = UiState::App { toplevel: 1, app_id: "a".into() };
+        transition(&mut state, UiEvent::EnterSwitcher { cards: vec![1, 2, 3] });
+        assert!(matches!(state, UiState::Switcher { .. }));
+        if let UiState::Switcher { cards, .. } = &state {
+            assert_eq!(cards, &vec![1, 2, 3]);
+        }
+    }
+
+    #[test]
+    fn settling_to_switcher_emits_effect() {
+        let mut state = UiState::Settling {
+            toplevel: 1,
+            app_id: "a".into(),
+            target: sc_input::NavTarget::Switcher,
+            progress: Spring::new(1.0),
+            origin: ZoomOrigin::icon((0.5, 0.5)),
+        };
+        let eff = transition(&mut state, UiEvent::Tick { dt: 1.0 / 60.0 });
+        assert!(matches!(eff, Effect::EnterSwitcher));
+        assert!(matches!(state, UiState::Home { .. }));
+    }
+
+    #[test]
+    fn tap_card_opens_that_app() {
+        let mut state = UiState::Switcher {
+            cards: vec![1, 2, 3], scroll: Spring::new(0.0),
+        };
+        let _eff = transition(&mut state, UiEvent::SwitcherTapCard {
+            index: 1, origin: ZoomOrigin::card((600.0, 1350.0), 0.62),
+        });
+        assert!(matches!(state, UiState::AppOpening { toplevel: 2, .. }));
+    }
+
+    #[test]
+    fn close_card_removes_and_emits_effect() {
+        let mut state = UiState::Switcher {
+            cards: vec![1, 2, 3], scroll: Spring::new(0.0),
+        };
+        let eff = transition(&mut state, UiEvent::SwitcherCloseCard { index: 1 });
+        assert_eq!(eff, Effect::CloseToplevel { toplevel: 2 });
+        if let UiState::Switcher { cards, .. } = &state {
+            assert_eq!(cards, &vec![1, 3]);
+        } else {
+            panic!("still in switcher");
+        }
+    }
+
+    #[test]
+    fn close_last_card_goes_home() {
+        let mut state = UiState::Switcher {
+            cards: vec![9], scroll: Spring::new(0.0),
+        };
+        transition(&mut state, UiEvent::SwitcherCloseCard { index: 0 });
+        assert!(matches!(state, UiState::Home { .. }));
+    }
+
+    #[test]
+    fn dismiss_goes_home() {
+        let mut state = UiState::Switcher {
+            cards: vec![1, 2], scroll: Spring::new(0.0),
+        };
+        transition(&mut state, UiEvent::SwitcherDismiss);
+        assert!(matches!(state, UiState::Home { .. }));
+    }
+
+    #[test]
+    fn toplevel_closed_removes_card_from_switcher() {
+        let mut state = UiState::Switcher {
+            cards: vec![1, 2, 3], scroll: Spring::new(0.0),
+        };
+        transition(&mut state, UiEvent::ToplevelClosed { toplevel: 2 });
+        if let UiState::Switcher { cards, .. } = &state {
+            assert_eq!(cards, &vec![1, 3]);
+        } else {
+            panic!("expected still switcher");
+        }
+    }
+
+    #[test]
+    fn switcher_needs_animation_while_scroll_moving() {
+        let mut spring = Spring::new(0.0);
+        spring.retarget(1.0);
+        let state = UiState::Switcher {
+            cards: vec![1], scroll: spring,
+        };
+        assert!(state.needs_animation());
+    }
+
+    #[test]
+    fn switcher_foreground_toplevel_returns_front_card() {
+        let state = UiState::Switcher {
+            cards: vec![5, 3, 1], scroll: Spring::new(0.0),
+        };
+        assert_eq!(state.foreground_toplevel(), Some(5));
     }
 }

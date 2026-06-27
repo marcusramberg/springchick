@@ -7,6 +7,9 @@ pub const BACK_TO_APP_MAX_PROGRESS: f32 = 0.10;
 pub const SWITCHER_REVEAL_PROGRESS: f32 = 0.35;
 /// Slow drag released at/above this progress settles into the switcher.
 pub const SWITCHER_SETTLE_PROGRESS: f32 = 0.55;
+/// Released at/above this progress goes home — "dragged all the way up". The
+/// switcher zone is the band [SWITCHER_SETTLE_PROGRESS, HOME_MIN_PROGRESS).
+pub const HOME_MIN_PROGRESS: f32 = 0.80;
 /// Upward velocity (fraction of screen height per second) above which a flick
 /// always flings home regardless of distance. Negative = upward.
 pub const HOME_FLICK_VELOCITY: f32 = -2.2;
