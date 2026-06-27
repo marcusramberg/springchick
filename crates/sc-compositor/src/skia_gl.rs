@@ -133,11 +133,15 @@ impl SkiaGl {
     }
 
     /// Draw the home screen (grid + dock + dots + bar).
+    /// Draw the home screen. `page_offset` is a fractional pixel offset for smooth swiping
+    /// (0 = page aligned, negative = swiping left to next page).
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_home(
         &mut self,
         width: i32,
         height: i32,
         page: usize,
+        page_offset: f32,
         model: &ShellModel,
         icon_cache: &HashMap<String, IconPixels>,
         app_catalog: &HashMap<String, AppEntry>,
@@ -156,8 +160,6 @@ impl SkiaGl {
                 self.get_or_upload_icon(app_id, pixels);
             }
         }
-
-        let layout = sc_layout::compute(width as f32, height as f32, page, model);
 
         // Acquire surface.
         let fboid = self.current_fbo();
@@ -201,21 +203,49 @@ impl SkiaGl {
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
         let canvas = surface.canvas();
 
-        // Draw grid icons.
-        for slot in &layout.grid {
-            draw_icon_slot(canvas, slot, &self.icon_images, &self.font, app_catalog);
+        let page_count = model.pages.len().max(1);
+
+        // Draw current page and adjacent page(s) for smooth swiping.
+        // page_offset: negative = swiping left (toward next page)
+        let pages_to_draw: Vec<(usize, f32)> = {
+            let mut pages = vec![(page, page_offset)];
+            // If offset is negative (swiping left), draw next page to the right.
+            if page_offset < 0.0 && page + 1 < page_count {
+                pages.push((page + 1, page_offset + width as f32));
+            }
+            // If offset is positive (swiping right), draw prev page to the left.
+            if page_offset > 0.0 && page > 0 {
+                pages.push((page - 1, page_offset - width as f32));
+            }
+            pages
+        };
+
+        for (pg, offset_x) in &pages_to_draw {
+            let layout = sc_layout::compute(width as f32, height as f32, *pg, model);
+
+            canvas.save();
+            canvas.translate((*offset_x, 0.0));
+
+            // Draw grid icons.
+            for slot in &layout.grid {
+                draw_icon_slot(canvas, slot, &self.icon_images, &self.font, app_catalog);
+            }
+
+            canvas.restore();
         }
 
-        // Draw dock icons.
-        for slot in &layout.dock {
+        // Dock and dots don't scroll with pages.
+        let current_layout = sc_layout::compute(width as f32, height as f32, page, model);
+
+        for slot in &current_layout.dock {
             draw_icon_slot(canvas, slot, &self.icon_images, &self.font, app_catalog);
         }
 
         // Draw page indicator dots.
-        draw_dots(canvas, &layout, page);
+        draw_dots(canvas, &current_layout, page);
 
         // Draw bar.
-        draw_bar(canvas, &layout);
+        draw_bar(canvas, &current_layout);
 
         if let Some(ctx) = self.context.as_mut() {
             ctx.flush_and_submit();

@@ -337,7 +337,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let apps_dir = dir.path().join("256x256/apps");
         std::fs::create_dir_all(&apps_dir).unwrap();
-        std::fs::write(apps_dir.join("test-app.png"), &minimal_png()).unwrap();
+        std::fs::write(apps_dir.join("test-app.png"), minimal_png()).unwrap();
 
         let dirs = [dir.path().to_str().unwrap()];
         let found = find_icon("test-app", &dirs);

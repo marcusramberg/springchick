@@ -1,27 +1,30 @@
-//! springchick compositor — M2: calloop-based Wayland compositor with home screen.
-//!
-//! Adopts Smithay's idiomatic calloop architecture. A single `State` holds Wayland
-//! globals, running toplevels, the ShellModel, renderer + SkiaGl, and UI state.
+//! springchick compositor — M3: gestures + app transitions.
 
+mod app_history;
 mod backend;
+mod input_dispatch;
 mod launcher;
+pub mod scene;
 mod skia_gl;
 pub mod ui_state;
 
+use app_history::AppHistory;
 use backend::{FP5_HEIGHT, FP5_WIDTH};
+use input_dispatch::DownAction;
 use launcher::spawn_app;
+use scene::compute_scene;
 use skia_gl::SkiaGl;
 use ui_state::{transition, ToplevelId, UiEvent, UiState};
 
 use sc_config::{catalog, state as config_state, AppEntry};
 use sc_icons::IconPixels;
-use sc_layout::{self, Hit};
 use sc_shell_model::ShellModel;
 
 use smithay::backend::input::{InputEvent, KeyboardKeyEvent, KeyState};
 use smithay::backend::input::Keycode;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::element::surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement};
+use smithay::backend::renderer::element::utils::{RescaleRenderElement, RelocateRenderElement, Relocate};
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::utils::{draw_render_elements, on_commit_buffer_handler};
 use smithay::backend::renderer::{Color32F, Frame, Renderer};
@@ -32,6 +35,7 @@ use smithay::delegate_data_device;
 use smithay::delegate_output;
 use smithay::delegate_seat;
 use smithay::delegate_shm;
+use smithay::delegate_xdg_decoration;
 use smithay::delegate_xdg_shell;
 use smithay::input::keyboard::{FilterResult, XkbConfig};
 use smithay::input::{Seat, SeatHandler, SeatState};
@@ -43,7 +47,7 @@ use smithay::reexports::wayland_server::{Client, Display, ListeningSocket};
 use smithay::reexports::winit::dpi::LogicalSize;
 use smithay::reexports::winit::platform::pump_events::PumpStatus;
 use smithay::reexports::winit::window::Window as WinitWindow;
-use smithay::utils::{Rectangle, Serial, Transform};
+use smithay::utils::{Point, Physical, Rectangle, Serial, Transform};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     with_surface_tree_downward, CompositorClientState, CompositorHandler, CompositorState,
@@ -58,8 +62,11 @@ use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
     XdgToplevelSurfaceData,
 };
+use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::wayland::shm::{ShmHandler, ShmState};
-use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel};
+use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 
 use std::collections::HashMap;
 use std::os::unix::io::OwnedFd;
@@ -127,13 +134,6 @@ fn scan_apps() -> Vec<AppEntry> {
     entries
 }
 
-/// Tracks a horizontal drag for page swiping.
-#[derive(Clone, Copy, Debug)]
-struct DragState {
-    start_x: f32,
-    current_x: f32,
-}
-
 /// A running app's toplevel state.
 struct AppToplevel {
     surface: ToplevelSurface,
@@ -144,6 +144,8 @@ struct AppToplevel {
 struct State {
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
+    #[allow(dead_code)] // Must stay alive to keep the global registered.
+    xdg_decoration_state: XdgDecorationState,
     shm_state: ShmState,
     data_device_state: DataDeviceState,
     seat_state: SeatState<Self>,
@@ -156,6 +158,11 @@ struct State {
     icon_cache: HashMap<String, IconPixels>,
     toplevels: Vec<Option<AppToplevel>>,
     children: Vec<Child>,
+    history: AppHistory,
+    /// Last icon center for zoom-back (cached when launching).
+    last_icon_center: (f32, f32),
+    /// Actual output size (may differ from FP5 constants in nested dev mode).
+    output_size: (i32, i32),
 
     // Rendering
     skia: SkiaGl,
@@ -163,8 +170,11 @@ struct State {
 
     // Input
     last_pointer_pos: Option<(f32, f32)>,
-    /// Drag state for page swiping: (start_x, is_dragging)
-    drag_state: Option<DragState>,
+    pointer_down: bool,
+    /// Page drag tracking: start_x when dragging on home screen.
+    page_drag_start: Option<f32>,
+    /// Bar drag tracking from Home state: (start_x, start_y).
+    bar_drag_start: Option<(f32, f32)>,
 
     // Timing
     start_time: std::time::Instant,
@@ -179,6 +189,7 @@ impl State {
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let mut seat_state = SeatState::new();
@@ -198,7 +209,7 @@ impl State {
             size: (FP5_WIDTH, FP5_HEIGHT).into(),
             refresh: 90_000, // 90 Hz in mHz
         };
-        output.change_current_state(Some(mode), None, Some(Scale::Integer(1)), None);
+        output.change_current_state(Some(mode), None, Some(smithay::output::Scale::Integer(1)), None);
         output.set_preferred(mode);
         output.create_global::<Self>(&dh);
 
@@ -235,6 +246,7 @@ impl State {
         State {
             compositor_state,
             xdg_shell_state,
+            xdg_decoration_state,
             shm_state,
             data_device_state,
             seat_state,
@@ -245,47 +257,39 @@ impl State {
             icon_cache,
             toplevels: Vec::new(),
             children: Vec::new(),
+            history: AppHistory::new(),
+            last_icon_center: (FP5_WIDTH as f32 / 2.0, FP5_HEIGHT as f32 / 2.0),
+            output_size: (FP5_WIDTH, FP5_HEIGHT),
             skia: SkiaGl::new(),
             wayland_socket,
             last_pointer_pos: None,
-            drag_state: None,
+            pointer_down: false,
+            page_drag_start: None,
+            bar_drag_start: None,
             start_time: std::time::Instant::now(),
             running: true,
         }
     }
 
-    fn handle_tap(&mut self, x: f32, y: f32) {
-        let page = match &self.ui {
-            UiState::Home { page, .. } => *page,
-            UiState::App { .. } => return,
-        };
-
-        let layout =
-            sc_layout::compute(FP5_WIDTH as f32, FP5_HEIGHT as f32, page, &self.model);
-
-        match sc_layout::hit_test(&layout, x, y) {
-            Hit::GridIcon { app_id, .. } | Hit::DockIcon { app_id, .. } => {
-                self.launch_or_raise(&app_id);
-            }
-            Hit::Bar | Hit::Miss => {}
-        }
-    }
-
     fn handle_return_home(&mut self) {
-        transition(&mut self.ui, UiEvent::ReturnHome);
-        if let UiState::Home { page_count, .. } = &mut self.ui {
-            *page_count = self.model.pages.len().max(1);
-        }
+        transition(
+            &mut self.ui,
+            UiEvent::ReturnHome {
+                icon_center: self.last_icon_center,
+            },
+        );
     }
 
-    fn launch_or_raise(&mut self, app_id: &str) {
-        // Check if already running — raise it.
+    fn launch_or_raise(&mut self, app_id: &str, icon_center: (f32, f32)) {
+        self.last_icon_center = icon_center;
+        // Check if already running — raise it (no zoom, instant).
         for (idx, slot) in self.toplevels.iter().enumerate() {
             if let Some(tl) = slot {
                 if tl.app_id == app_id {
+                    self.history.push_foreground(idx);
                     transition(
                         &mut self.ui,
-                        UiEvent::AppMapped {
+                        UiEvent::RaiseApp {
                             toplevel: idx,
                             app_id: app_id.to_string(),
                         },
@@ -326,11 +330,13 @@ impl State {
             app_id: app_id.clone(),
         }));
 
+        self.history.push_foreground(id);
         transition(
             &mut self.ui,
             UiEvent::AppMapped {
                 toplevel: id,
                 app_id,
+                icon_center: self.last_icon_center,
             },
         );
 
@@ -376,8 +382,12 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        let (w, h) = self.output_size;
         surface.with_pending_state(|state| {
-            state.size = Some((FP5_WIDTH, FP5_HEIGHT).into());
+            state.size = Some((w, h).into());
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+            state.states.set(xdg_toplevel::State::Fullscreen);
+            state.states.set(xdg_toplevel::State::Activated);
         });
         surface.send_configure();
         self.register_toplevel(surface);
@@ -445,12 +455,37 @@ impl ServerDndGrabHandler for State {
 
 impl OutputHandler for State {}
 
+impl XdgDecorationHandler for State {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        // Always request server-side decorations (= no CSD).
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+}
+
 delegate_compositor!(State);
 delegate_xdg_shell!(State);
 delegate_seat!(State);
 delegate_shm!(State);
 delegate_data_device!(State);
 delegate_output!(State);
+delegate_xdg_decoration!(State);
 
 /// Per-client state.
 #[derive(Default)]
@@ -467,7 +502,7 @@ impl ClientData for ClientState {
 
 fn main() {
     init_tracing();
-    info!("springchick M2 — calloop compositor");
+    info!("springchick M3 — gestures + transitions");
     run_winit();
 }
 
@@ -511,6 +546,11 @@ fn run_winit() {
     info!(%socket_name, "wayland socket listening");
 
     let mut state = State::new(&display, socket_name.clone());
+
+    // Update output size from actual backend window dimensions.
+    let actual_size = gfx_backend.window_size();
+    state.output_size = (actual_size.w, actual_size.h);
+    info!(w = actual_size.w, h = actual_size.h, "actual output size");
 
     // Add keyboard to seat.
     let keyboard = state
@@ -597,14 +637,17 @@ fn handle_winit_input(
             let key_code = event.key_code();
             let key_state = event.state();
 
-            // Esc (evdev key 1) intercept for return-home.
             // ESC in evdev = 1, XKB offset +8 = 9
             let esc_keycode: Keycode = 9u32.into();
-            if key_code == esc_keycode && key_state == KeyState::Pressed {
-                if matches!(state.ui, UiState::App { .. }) {
-                    state.handle_return_home();
-                    return;
-                }
+            if key_code == esc_keycode
+                && key_state == KeyState::Pressed
+                && matches!(
+                    state.ui,
+                    UiState::App { .. } | UiState::Grabbing { .. } | UiState::Settling { .. }
+                )
+            {
+                state.handle_return_home();
+                return;
             }
 
             // Forward to focused client.
@@ -620,64 +663,170 @@ fn handle_winit_input(
         InputEvent::PointerButton { event } => {
             if let Some((x, y)) = state.last_pointer_pos {
                 if event.state() == ButtonState::Pressed {
-                    // Start tracking a potential drag.
-                    state.drag_state = Some(DragState {
-                        start_x: x,
-                        current_x: x,
-                    });
+                    state.pointer_down = true;
+                    let action = input_dispatch::on_press(&state.ui, x, y, &state.model, state.output_size);
+                    match action {
+                        DownAction::Event(ev) => {
+                            transition(&mut state.ui, ev);
+                        }
+                        DownAction::LaunchApp { app_id, icon_center } => {
+                            state.launch_or_raise(&app_id, icon_center);
+                        }
+                        DownAction::StartPageDrag { start_x } => {
+                            state.page_drag_start = Some(start_x);
+                        }
+                        DownAction::StartBarDrag { start_x, start_y } => {
+                            state.bar_drag_start = Some((start_x, start_y));
+                        }
+                        DownAction::None => {}
+                    }
                 } else {
-                    // Released — determine if this was a tap or a swipe.
-                    let was_swipe = if let Some(drag) = state.drag_state.take() {
-                        let dx = drag.current_x - drag.start_x;
-                        let threshold = FP5_WIDTH as f32 * 0.15;
-                        if dx.abs() > threshold {
-                            // Page swipe.
-                            if let UiState::Home { page, page_count, .. } = &mut state.ui {
-                                if dx < 0.0 && *page + 1 < *page_count {
-                                    *page += 1;
-                                } else if dx > 0.0 && *page > 0 {
-                                    *page -= 1;
-                                }
-                            }
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
+                    state.pointer_down = false;
+                    // Bar drag from Home: classify swipe direction.
+                    if let Some((start_x, start_y)) = state.bar_drag_start.take() {
+                        let dx = x - start_x;
+                        let dy = start_y - y; // positive = swiped up
+                        let w = state.output_size.0 as f32;
+                        let h = state.output_size.1 as f32;
 
-                    if !was_swipe {
-                        // Treat as tap.
-                        match &state.ui {
-                            UiState::Home { .. } => {
-                                state.handle_tap(x, y);
+                        if dy > h * 0.08 {
+                            // Swiped up from bar → raise most recent app.
+                            if let Some(tid) = state.history.previous() {
+                                if let Some(Some(tl)) = state.toplevels.get(tid) {
+                                    let app_id = tl.app_id.clone();
+                                    state.last_icon_center = (w / 2.0, h / 2.0);
+                                    state.history.push_foreground(tid);
+                                    transition(
+                                        &mut state.ui,
+                                        UiEvent::RaiseApp {
+                                            toplevel: tid,
+                                            app_id,
+                                        },
+                                    );
+                                }
                             }
-                            UiState::App { .. } => {
-                                let layout = sc_layout::compute(
-                                    FP5_WIDTH as f32,
-                                    FP5_HEIGHT as f32,
-                                    0,
-                                    &state.model,
-                                );
-                                if layout.bar_rect.contains(x, y) {
-                                    state.handle_return_home();
+                        } else if dx.abs() > w * 0.15 {
+                            // Horizontal swipe on bar → quick-switch.
+                            let dir = if dx < 0.0 { 1 } else { -1 };
+                            if let Some(tid) = state.history.quick_switch(dir) {
+                                if let Some(Some(tl)) = state.toplevels.get(tid) {
+                                    let app_id = tl.app_id.clone();
+                                    state.last_icon_center = (w / 2.0, h / 2.0);
+                                    state.history.push_foreground(tid);
+                                    transition(
+                                        &mut state.ui,
+                                        UiEvent::RaiseApp {
+                                            toplevel: tid,
+                                            app_id,
+                                        },
+                                    );
                                 }
                             }
                         }
+                    }
+                    // Page swipe: snap based on 30% threshold.
+                    if let Some(start_x) = state.page_drag_start.take() {
+                        let dx = x - start_x;
+                        let w = state.output_size.0 as f32;
+                        let page_delta = -dx / w; // positive = swiping to next page
+                        if let UiState::Home { page, page_spring, page_count, .. } = &mut state.ui {
+                            let target_page = if page_delta > 0.3 && *page + 1 < *page_count {
+                                *page + 1
+                            } else if page_delta < -0.3 && *page > 0 {
+                                *page - 1
+                            } else {
+                                *page
+                            };
+                            *page = target_page;
+                            page_spring.retarget(target_page as f32);
+                        }
+                    }
+                    // Release grab if active.
+                    let release = if let UiState::Grabbing { tracker, toplevel, app_id } = &state.ui {
+                        Some((sc_input::classify_release(tracker), *toplevel, app_id.clone()))
+                    } else {
+                        None
+                    };
+                    if let Some((target, cur_tid, cur_app)) = release {
+                        match target {
+                            sc_input::NavTarget::QuickSwitch(dir) => {
+                                // Grab-based quick-switch: raise the adjacent app directly.
+                                let adj = state
+                                    .history
+                                    .quick_switch(dir)
+                                    .filter(|tid| matches!(state.toplevels.get(*tid), Some(Some(_))));
+                                match adj {
+                                    Some(tid) => {
+                                        let app_id =
+                                            state.toplevels[tid].as_ref().unwrap().app_id.clone();
+                                        state.history.push_foreground(tid);
+                                        transition(
+                                            &mut state.ui,
+                                            UiEvent::RaiseApp { toplevel: tid, app_id },
+                                        );
+                                    }
+                                    // No adjacent app — snap back to the current one.
+                                    None => {
+                                        transition(
+                                            &mut state.ui,
+                                            UiEvent::RaiseApp {
+                                                toplevel: cur_tid,
+                                                app_id: cur_app,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                            _ => {
+                                transition(&mut state.ui, UiEvent::GrabRelease);
+                                // Settling toward Home/Switcher needs the real icon origin.
+                                if let UiState::Settling { icon_center, .. } = &mut state.ui {
+                                    *icon_center = state.last_icon_center;
+                                }
+                            }
+                        }
+                    }
+                    // Update page_count after returning home.
+                    if let UiState::Home { page_count, .. } = &mut state.ui {
+                        *page_count = state.model.pages.len().max(1);
                     }
                 }
             }
         }
         InputEvent::PointerMotionAbsolute { event } => {
             let (x, y) = (
-                event.x_transformed(FP5_WIDTH) as f32,
-                event.y_transformed(FP5_HEIGHT) as f32,
+                event.x_transformed(state.output_size.0) as f32,
+                event.y_transformed(state.output_size.1) as f32,
             );
             state.last_pointer_pos = Some((x, y));
-            // Update drag tracking.
-            if let Some(ref mut drag) = state.drag_state {
-                drag.current_x = x;
+
+            if state.pointer_down {
+                // Page drag: update spring value to follow finger.
+                if let Some(start_x) = state.page_drag_start {
+                    let dx = x - start_x;
+                    let w = state.output_size.0 as f32;
+                    if let UiState::Home { page, page_spring, page_count, .. } = &mut state.ui {
+                        // Directly set spring value to track finger (no spring physics during drag).
+                        let raw_target = *page as f32 - dx / w;
+                        // Rubber-band past edges.
+                        let max_page = (*page_count).saturating_sub(1) as f32;
+                        page_spring.value = if raw_target < 0.0 {
+                            raw_target * 0.3 // rubber-band left
+                        } else if raw_target > max_page {
+                            max_page + (raw_target - max_page) * 0.3 // rubber-band right
+                        } else {
+                            raw_target
+                        };
+                        page_spring.target = page_spring.value;
+                        page_spring.velocity = 0.0;
+                    }
+                }
+
+                // Feed movement to grab if active.
+                let dt = 1.0 / 90.0;
+                if let Some(ev) = input_dispatch::on_move(&state.ui, x, y, dt, state.output_size) {
+                    transition(&mut state.ui, ev);
+                }
             }
         }
         _ => {}
@@ -692,43 +841,52 @@ fn render_frame(
     let size = backend.window_size();
     let damage = Rectangle::from_size(size);
 
-    // In App state, collect render elements from the focused toplevel.
-    let app_surface: Option<WlSurface> = match &state.ui {
-        UiState::App { toplevel, .. } => state
+    // Tick animations.
+    let dt = 1.0 / 90.0;
+    transition(&mut state.ui, UiEvent::Tick { dt });
+
+    // Animations that settle to home reset page_count to 1; restore from the model.
+    if let UiState::Home { page_count, .. } = &mut state.ui {
+        *page_count = state.model.pages.len().max(1);
+    }
+
+    // Compute scene from current state.
+    let scene = compute_scene(&state.ui, state.output_size);
+
+    // Resolve the app surface for compositing.
+    let app_surface: Option<WlSurface> = scene.window.as_ref().and_then(|(tid, _)| {
+        state
             .toplevels
-            .get(*toplevel)
+            .get(*tid)
             .and_then(|slot| slot.as_ref())
-            .map(|tl| tl.surface.wl_surface().clone()),
-        _ => None,
-    };
+            .map(|tl| tl.surface.wl_surface().clone())
+    });
+
+    let transform = scene.window.as_ref().map(|(_, t)| *t);
+    let is_fullscreen = transform.is_none_or(|t| t.scale >= 0.99);
 
     let (renderer, mut framebuffer) = backend.bind()?;
 
-    // Collect render elements before starting frame (avoids double-borrow of renderer).
-    let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if let Some(ref wl_surface) = app_surface {
-        render_elements_from_surface_tree(
-            renderer,
-            wl_surface,
-            (0, 0),
-            1.0,
-            1.0,
-            Kind::Unspecified,
-        )
-    } else {
-        Vec::new()
-    };
+    // Collect render elements.
+    let base_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+        if let Some(ref wl_surface) = app_surface {
+            render_elements_from_surface_tree(
+                renderer, wl_surface, (0, 0), 1.0, 1.0, Kind::Unspecified,
+            )
+        } else {
+            Vec::new()
+        };
 
+    // Pass 1: Clear background.
     {
         let mut frame = renderer
             .render(&mut framebuffer, size, Transform::Flipped180)
             .map_err(SwapBuffersError::from)?;
-        frame
-            .clear(CLEAR_COLOR, &[damage])
-            .map_err(SwapBuffersError::from)?;
+        frame.clear(CLEAR_COLOR, &[damage]).map_err(SwapBuffersError::from)?;
 
-        // If in App state, composite the client's surface fullscreen.
-        if !elements.is_empty() {
-            if let Err(e) = draw_render_elements(&mut frame, 1.0, &elements, &[damage]) {
+        // If fullscreen, draw app in this pass (no home behind).
+        if is_fullscreen && !base_elements.is_empty() {
+            if let Err(e) = draw_render_elements(&mut frame, 1.0, &base_elements, &[damage]) {
                 warn!(?e, "failed to draw app elements");
             }
         }
@@ -736,26 +894,55 @@ fn render_frame(
         let _sync = frame.finish().map_err(SwapBuffersError::from)?;
     }
 
-    // Skia draws home screen or bar overlay on top.
-    match &state.ui {
-        UiState::Home { page, .. } => {
-            let page = *page;
-            state.skia.draw_home(
-                size.w,
-                size.h,
-                page,
-                &state.model,
-                &state.icon_cache,
-                &state.app_catalog,
-            );
-        }
-        UiState::App { .. } => {
-            // Bar overlay so return-home affordance is always visible.
-            state.skia.draw_bar_overlay(size.w, size.h);
+    // Skia: draw home screen behind (if transitioning).
+    if scene.show_home {
+        state.skia.draw_home(
+            size.w, size.h, scene.home_page, scene.page_offset,
+            &state.model, &state.icon_cache, &state.app_catalog,
+        );
+    }
+
+    // Pass 2: Draw scaled app ON TOP of home (no clear).
+    if !is_fullscreen && !base_elements.is_empty() {
+        if let Some(t) = transform {
+            let scale_f = t.scale as f64;
+            let card_w = size.w as f32 * t.scale;
+            let card_h = size.h as f32 * t.scale;
+            let card_x = (t.center_x - card_w / 2.0) as i32;
+            let card_y = (t.center_y - card_h / 2.0) as i32;
+
+            let scaled: Vec<RescaleRenderElement<RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>> =
+                base_elements
+                    .into_iter()
+                    .map(|e| {
+                        let relocated = RelocateRenderElement::from_element(
+                            e,
+                            Point::<i32, Physical>::from((card_x, card_y)),
+                            Relocate::Relative,
+                        );
+                        RescaleRenderElement::from_element(
+                            relocated,
+                            Point::<i32, Physical>::from((card_x, card_y)),
+                            smithay::utils::Scale::from(scale_f),
+                        )
+                    })
+                    .collect();
+
+            // Second render pass without clearing.
+            let mut frame = renderer
+                .render(&mut framebuffer, size, Transform::Flipped180)
+                .map_err(SwapBuffersError::from)?;
+            if let Err(e) = draw_render_elements(&mut frame, 1.0, &scaled, &[damage]) {
+                warn!(?e, "failed to draw scaled app elements");
+            }
+            let _sync = frame.finish().map_err(SwapBuffersError::from)?;
         }
     }
 
-    // Send frame callbacks to the focused client so it keeps rendering.
+    // Always draw the bar on top.
+    state.skia.draw_bar_overlay(size.w, size.h);
+
+    // Send frame callbacks.
     if let Some(ref wl_surface) = app_surface {
         send_frames_surface_tree(wl_surface, state.start_time.elapsed().as_millis() as u32);
     }
