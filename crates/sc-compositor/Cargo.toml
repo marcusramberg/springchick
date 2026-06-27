@@ -20,10 +20,20 @@ smithay = { version = "0.7", default-features = false, features = [
   "backend_winit",
   "backend_egl",
   "renderer_gl",
+  "renderer_multi",
+  "backend_drm",
+  "backend_gbm",
+  "backend_udev",
+  "backend_libinput",
+  "backend_session_libseat",
   "wayland_frontend",
   "desktop",
   "xwayland",
 ] }
+
+# libinput / DRM / session types are used via smithay's re-exports
+# (smithay::reexports::{input, drm, gbm, ...}) to avoid version skew.
+libc = "0.2"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
