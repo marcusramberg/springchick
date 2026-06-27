@@ -24,11 +24,13 @@ use tracing::{debug, warn};
 
 const GL_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
 type GlGetIntegerv = unsafe extern "system" fn(pname: u32, params: *mut c_int);
+type GlFinish = unsafe extern "system" fn();
 
 /// Skia Ganesh-GL renderer bound to Smithay's existing GLES/EGL context.
 pub struct SkiaGl {
     context: Option<DirectContext>,
     gl_get_integerv: Option<GlGetIntegerv>,
+    gl_finish: Option<GlFinish>,
     setup_failed: bool,
     cached_surface: Option<CachedSurface>,
     icon_images: HashMap<String, Image>,
@@ -47,6 +49,7 @@ impl SkiaGl {
         Self {
             context: None,
             gl_get_integerv: None,
+            gl_finish: None,
             setup_failed: false,
             cached_surface: None,
             icon_images: HashMap::new(),
@@ -90,10 +93,24 @@ impl SkiaGl {
         }
         let gl_get_integerv: GlGetIntegerv = unsafe { std::mem::transmute(getter_ptr) };
 
+        let finish_ptr = loader("glFinish");
+        if !finish_ptr.is_null() {
+            self.gl_finish = Some(unsafe { std::mem::transmute::<*const c_void, GlFinish>(finish_ptr) });
+        }
+
         self.context = Some(context);
         self.gl_get_integerv = Some(gl_get_integerv);
         debug!("Skia Ganesh-GL context initialized");
         true
+    }
+
+    /// Block until all submitted GL commands (smithay + Skia) have completed.
+    /// Used by the DRM backend to fence the frame before a page-flip so scanout
+    /// never shows a partially-rendered buffer (tearing).
+    pub fn finish_gpu(&self) {
+        if let Some(finish) = self.gl_finish {
+            unsafe { finish() };
+        }
     }
 
     fn current_fbo(&self) -> u32 {
@@ -145,6 +162,7 @@ impl SkiaGl {
         model: &ShellModel,
         icon_cache: &HashMap<String, IconPixels>,
         app_catalog: &HashMap<String, AppEntry>,
+        flip_y: bool,
     ) {
         if width <= 0 || height <= 0 {
             return;
@@ -203,6 +221,16 @@ impl SkiaGl {
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
         let canvas = surface.canvas();
 
+        // Panel-orientation flip: the DRM/GBM scanout buffer has the opposite
+        // Y-origin from Skia's BottomLeft surface, so the home/bar render
+        // upside-down on the panel. Mirror vertically for the DRM path.
+        // Save/restore so the cached surface's matrix doesn't accumulate.
+        canvas.save();
+        if flip_y {
+            canvas.translate((0.0, height as f32));
+            canvas.scale((1.0, -1.0));
+        }
+
         let page_count = model.pages.len().max(1);
 
         // Draw current page and adjacent page(s) for smooth swiping.
@@ -247,13 +275,15 @@ impl SkiaGl {
         // Draw bar.
         draw_bar(canvas, &current_layout);
 
+        canvas.restore();
+
         if let Some(ctx) = self.context.as_mut() {
             ctx.flush_and_submit();
         }
     }
 
     /// Draw bar overlay on top of the app (return-home affordance).
-    pub fn draw_bar_overlay(&mut self, width: i32, height: i32) {
+    pub fn draw_bar_overlay(&mut self, width: i32, height: i32, flip_y: bool) {
         if width <= 0 || height <= 0 {
             return;
         }
@@ -306,7 +336,13 @@ impl SkiaGl {
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
         let canvas = surface.canvas();
 
+        canvas.save();
+        if flip_y {
+            canvas.translate((0.0, height as f32));
+            canvas.scale((1.0, -1.0));
+        }
         draw_bar(canvas, &layout);
+        canvas.restore();
 
         if let Some(ctx) = self.context.as_mut() {
             ctx.flush_and_submit();

@@ -2,15 +2,18 @@
 
 mod app_history;
 mod backend;
+mod drm_backend;
+mod frame_stats;
+mod input_common;
 mod input_dispatch;
 mod launcher;
+mod render;
 pub mod scene;
 mod skia_gl;
 pub mod ui_state;
 
 use app_history::AppHistory;
 use backend::{FP5_HEIGHT, FP5_WIDTH};
-use input_dispatch::DownAction;
 use launcher::spawn_app;
 use scene::compute_scene;
 use skia_gl::SkiaGl;
@@ -23,11 +26,7 @@ use sc_shell_model::ShellModel;
 use smithay::backend::input::{InputEvent, KeyboardKeyEvent, KeyState};
 use smithay::backend::input::Keycode;
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::backend::renderer::element::surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement};
-use smithay::backend::renderer::element::utils::{RescaleRenderElement, RelocateRenderElement, Relocate};
-use smithay::backend::renderer::element::Kind;
-use smithay::backend::renderer::utils::{draw_render_elements, on_commit_buffer_handler};
-use smithay::backend::renderer::{Color32F, Frame, Renderer};
+use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::backend::winit::{self, WinitEvent, WinitGraphicsBackend};
 use smithay::backend::SwapBuffersError;
 use smithay::delegate_compositor;
@@ -47,11 +46,10 @@ use smithay::reexports::wayland_server::{Client, Display, ListeningSocket};
 use smithay::reexports::winit::dpi::LogicalSize;
 use smithay::reexports::winit::platform::pump_events::PumpStatus;
 use smithay::reexports::winit::window::Window as WinitWindow;
-use smithay::utils::{Point, Physical, Rectangle, Serial, Transform};
+use smithay::utils::{Rectangle, Serial, Transform};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
-    with_surface_tree_downward, CompositorClientState, CompositorHandler, CompositorState,
-    SurfaceAttributes, TraversalAction,
+    CompositorClientState, CompositorHandler, CompositorState,
 };
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
@@ -77,12 +75,15 @@ use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
 
-/// Background clear color.
-const CLEAR_COLOR: Color32F = Color32F::new(0.06, 0.10, 0.14, 1.0);
-
 /// Frame budget (~90 Hz).
 #[allow(dead_code)]
 const FRAME_BUDGET: Duration = Duration::from_micros(11_111);
+
+/// Whether to emit the per-second perf log line. Set via `SPRINGCHICK_PERF`;
+/// the DRM backend additionally forces it on at startup.
+fn perf_enabled() -> bool {
+    std::env::var("SPRINGCHICK_PERF").is_ok()
+}
 
 /// Config file path.
 fn config_path() -> PathBuf {
@@ -179,6 +180,11 @@ struct State {
     // Timing
     start_time: std::time::Instant,
 
+    // Perf instrumentation
+    stats: frame_stats::FrameStats,
+    perf_log: bool,
+    last_perf_log: std::time::Instant,
+
     // Control
     running: bool,
 }
@@ -267,6 +273,9 @@ impl State {
             page_drag_start: None,
             bar_drag_start: None,
             start_time: std::time::Instant::now(),
+            stats: frame_stats::FrameStats::new(std::time::Duration::from_micros(11_111)),
+            perf_log: perf_enabled(),
+            last_perf_log: std::time::Instant::now(),
             running: true,
         }
     }
@@ -502,8 +511,16 @@ impl ClientData for ClientState {
 
 fn main() {
     init_tracing();
-    info!("springchick M3 — gestures + transitions");
-    run_winit();
+    match backend::BackendKind::from_env() {
+        backend::BackendKind::Winit => {
+            info!("springchick M4 — winit dev backend");
+            run_winit();
+        }
+        backend::BackendKind::Drm => {
+            info!("springchick M4 — DRM device backend");
+            drm_backend::run_drm();
+        }
+    }
 }
 
 fn init_tracing() {
@@ -511,6 +528,31 @@ fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,sc_compositor=debug"));
     let _ = fmt().with_env_filter(filter).try_init();
+}
+
+/// Create the Wayland display + an auto-bound listening socket. Shared by the
+/// winit and DRM backends.
+fn create_display(
+) -> Result<(Display<State>, ListeningSocket, String), Box<dyn std::error::Error>> {
+    let display: Display<State> = Display::new()?;
+    let listener = ListeningSocket::bind_auto("springchick", 0..32)?;
+    let socket_name = listener
+        .socket_name()
+        .ok_or("wayland socket has no name")?
+        .to_string_lossy()
+        .to_string();
+    info!(%socket_name, "wayland socket listening");
+    Ok((display, listener, socket_name))
+}
+
+/// Accept one pending client on the listener, if any.
+fn accept_client(display: &Display<State>, listener: &ListeningSocket) {
+    if let Some(stream) = listener.accept().ok().flatten() {
+        debug!("new wayland client connected");
+        let _ = display
+            .handle()
+            .insert_client(stream, Arc::new(ClientState::default()));
+    }
 }
 
 fn run_winit() {
@@ -535,15 +577,8 @@ fn run_winit() {
         };
 
     // Create Wayland display + listening socket.
-    let mut display: Display<State> = Display::new().expect("create display");
-    let listener = ListeningSocket::bind_auto("springchick", 0..32)
-        .expect("bind wayland socket");
-    let socket_name = listener
-        .socket_name()
-        .expect("socket has name")
-        .to_string_lossy()
-        .to_string();
-    info!(%socket_name, "wayland socket listening");
+    let (mut display, listener, socket_name) =
+        create_display().expect("create wayland display");
 
     let mut state = State::new(&display, socket_name.clone());
 
@@ -560,19 +595,10 @@ fn run_winit() {
     state.seat.add_pointer();
 
     info!("entering frame loop");
-    let mut clients: Vec<Client> = Vec::new();
 
     while state.running {
         // Accept new clients.
-        if let Some(stream) = listener.accept().ok().flatten() {
-            debug!("new wayland client connected");
-            if let Ok(client) = display
-                .handle()
-                .insert_client(stream, Arc::new(ClientState::default()))
-            {
-                clients.push(client);
-            }
-        }
+        accept_client(&display, &listener);
 
         // Pump winit events.
         let status = winit_evt.dispatch_new_events(|event| match event {
@@ -641,12 +667,8 @@ fn handle_winit_input(
             let esc_keycode: Keycode = 9u32.into();
             if key_code == esc_keycode
                 && key_state == KeyState::Pressed
-                && matches!(
-                    state.ui,
-                    UiState::App { .. } | UiState::Grabbing { .. } | UiState::Settling { .. }
-                )
+                && input_common::on_escape(state)
             {
-                state.handle_return_home();
                 return;
             }
 
@@ -661,173 +683,16 @@ fn handle_winit_input(
             );
         }
         InputEvent::PointerButton { event } => {
-            if let Some((x, y)) = state.last_pointer_pos {
-                if event.state() == ButtonState::Pressed {
-                    state.pointer_down = true;
-                    let action = input_dispatch::on_press(&state.ui, x, y, &state.model, state.output_size);
-                    match action {
-                        DownAction::Event(ev) => {
-                            transition(&mut state.ui, ev);
-                        }
-                        DownAction::LaunchApp { app_id, icon_center } => {
-                            state.launch_or_raise(&app_id, icon_center);
-                        }
-                        DownAction::StartPageDrag { start_x } => {
-                            state.page_drag_start = Some(start_x);
-                        }
-                        DownAction::StartBarDrag { start_x, start_y } => {
-                            state.bar_drag_start = Some((start_x, start_y));
-                        }
-                        DownAction::None => {}
-                    }
-                } else {
-                    state.pointer_down = false;
-                    // Bar drag from Home: classify swipe direction.
-                    if let Some((start_x, start_y)) = state.bar_drag_start.take() {
-                        let dx = x - start_x;
-                        let dy = start_y - y; // positive = swiped up
-                        let w = state.output_size.0 as f32;
-                        let h = state.output_size.1 as f32;
-
-                        if dy > h * 0.08 {
-                            // Swiped up from bar → raise most recent app.
-                            if let Some(tid) = state.history.previous() {
-                                if let Some(Some(tl)) = state.toplevels.get(tid) {
-                                    let app_id = tl.app_id.clone();
-                                    state.last_icon_center = (w / 2.0, h / 2.0);
-                                    state.history.push_foreground(tid);
-                                    transition(
-                                        &mut state.ui,
-                                        UiEvent::RaiseApp {
-                                            toplevel: tid,
-                                            app_id,
-                                        },
-                                    );
-                                }
-                            }
-                        } else if dx.abs() > w * 0.15 {
-                            // Horizontal swipe on bar → quick-switch.
-                            let dir = if dx < 0.0 { 1 } else { -1 };
-                            if let Some(tid) = state.history.quick_switch(dir) {
-                                if let Some(Some(tl)) = state.toplevels.get(tid) {
-                                    let app_id = tl.app_id.clone();
-                                    state.last_icon_center = (w / 2.0, h / 2.0);
-                                    state.history.push_foreground(tid);
-                                    transition(
-                                        &mut state.ui,
-                                        UiEvent::RaiseApp {
-                                            toplevel: tid,
-                                            app_id,
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    // Page swipe: snap based on 30% threshold.
-                    if let Some(start_x) = state.page_drag_start.take() {
-                        let dx = x - start_x;
-                        let w = state.output_size.0 as f32;
-                        let page_delta = -dx / w; // positive = swiping to next page
-                        if let UiState::Home { page, page_spring, page_count, .. } = &mut state.ui {
-                            let target_page = if page_delta > 0.3 && *page + 1 < *page_count {
-                                *page + 1
-                            } else if page_delta < -0.3 && *page > 0 {
-                                *page - 1
-                            } else {
-                                *page
-                            };
-                            *page = target_page;
-                            page_spring.retarget(target_page as f32);
-                        }
-                    }
-                    // Release grab if active.
-                    let release = if let UiState::Grabbing { tracker, toplevel, app_id } = &state.ui {
-                        Some((sc_input::classify_release(tracker), *toplevel, app_id.clone()))
-                    } else {
-                        None
-                    };
-                    if let Some((target, cur_tid, cur_app)) = release {
-                        match target {
-                            sc_input::NavTarget::QuickSwitch(dir) => {
-                                // Grab-based quick-switch: raise the adjacent app directly.
-                                let adj = state
-                                    .history
-                                    .quick_switch(dir)
-                                    .filter(|tid| matches!(state.toplevels.get(*tid), Some(Some(_))));
-                                match adj {
-                                    Some(tid) => {
-                                        let app_id =
-                                            state.toplevels[tid].as_ref().unwrap().app_id.clone();
-                                        state.history.push_foreground(tid);
-                                        transition(
-                                            &mut state.ui,
-                                            UiEvent::RaiseApp { toplevel: tid, app_id },
-                                        );
-                                    }
-                                    // No adjacent app — snap back to the current one.
-                                    None => {
-                                        transition(
-                                            &mut state.ui,
-                                            UiEvent::RaiseApp {
-                                                toplevel: cur_tid,
-                                                app_id: cur_app,
-                                            },
-                                        );
-                                    }
-                                }
-                            }
-                            _ => {
-                                transition(&mut state.ui, UiEvent::GrabRelease);
-                                // Settling toward Home/Switcher needs the real icon origin.
-                                if let UiState::Settling { icon_center, .. } = &mut state.ui {
-                                    *icon_center = state.last_icon_center;
-                                }
-                            }
-                        }
-                    }
-                    // Update page_count after returning home.
-                    if let UiState::Home { page_count, .. } = &mut state.ui {
-                        *page_count = state.model.pages.len().max(1);
-                    }
-                }
+            if event.state() == ButtonState::Pressed {
+                input_common::on_press(state);
+            } else {
+                input_common::on_release(state);
             }
         }
         InputEvent::PointerMotionAbsolute { event } => {
-            let (x, y) = (
-                event.x_transformed(state.output_size.0) as f32,
-                event.y_transformed(state.output_size.1) as f32,
-            );
-            state.last_pointer_pos = Some((x, y));
-
-            if state.pointer_down {
-                // Page drag: update spring value to follow finger.
-                if let Some(start_x) = state.page_drag_start {
-                    let dx = x - start_x;
-                    let w = state.output_size.0 as f32;
-                    if let UiState::Home { page, page_spring, page_count, .. } = &mut state.ui {
-                        // Directly set spring value to track finger (no spring physics during drag).
-                        let raw_target = *page as f32 - dx / w;
-                        // Rubber-band past edges.
-                        let max_page = (*page_count).saturating_sub(1) as f32;
-                        page_spring.value = if raw_target < 0.0 {
-                            raw_target * 0.3 // rubber-band left
-                        } else if raw_target > max_page {
-                            max_page + (raw_target - max_page) * 0.3 // rubber-band right
-                        } else {
-                            raw_target
-                        };
-                        page_spring.target = page_spring.value;
-                        page_spring.velocity = 0.0;
-                    }
-                }
-
-                // Feed movement to grab if active.
-                let dt = 1.0 / 90.0;
-                if let Some(ev) = input_dispatch::on_move(&state.ui, x, y, dt, state.output_size) {
-                    transition(&mut state.ui, ev);
-                }
-            }
+            let x = event.x_transformed(state.output_size.0) as f32;
+            let y = event.y_transformed(state.output_size.1) as f32;
+            input_common::on_motion(state, x, y);
         }
         _ => {}
     }
@@ -840,6 +705,7 @@ fn render_frame(
 ) -> Result<(), SwapBuffersError> {
     let size = backend.window_size();
     let damage = Rectangle::from_size(size);
+    let frame_start = std::time::Instant::now();
 
     // Tick animations.
     let dt = 1.0 / 90.0;
@@ -862,112 +728,32 @@ fn render_frame(
             .map(|tl| tl.surface.wl_surface().clone())
     });
 
-    let transform = scene.window.as_ref().map(|(_, t)| *t);
-    let is_fullscreen = transform.is_none_or(|t| t.scale >= 0.99);
-
+    let frame_time = state.start_time.elapsed().as_millis() as u32;
     let (renderer, mut framebuffer) = backend.bind()?;
-
-    // Collect render elements.
-    let base_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-        if let Some(ref wl_surface) = app_surface {
-            render_elements_from_surface_tree(
-                renderer, wl_surface, (0, 0), 1.0, 1.0, Kind::Unspecified,
-            )
-        } else {
-            Vec::new()
-        };
-
-    // Pass 1: Clear background.
     {
-        let mut frame = renderer
-            .render(&mut framebuffer, size, Transform::Flipped180)
-            .map_err(SwapBuffersError::from)?;
-        frame.clear(CLEAR_COLOR, &[damage]).map_err(SwapBuffersError::from)?;
-
-        // If fullscreen, draw app in this pass (no home behind).
-        if is_fullscreen && !base_elements.is_empty() {
-            if let Err(e) = draw_render_elements(&mut frame, 1.0, &base_elements, &[damage]) {
-                warn!(?e, "failed to draw app elements");
-            }
-        }
-
-        let _sync = frame.finish().map_err(SwapBuffersError::from)?;
-    }
-
-    // Skia: draw home screen behind (if transitioning).
-    if scene.show_home {
-        state.skia.draw_home(
-            size.w, size.h, scene.home_page, scene.page_offset,
-            &state.model, &state.icon_cache, &state.app_catalog,
-        );
-    }
-
-    // Pass 2: Draw scaled app ON TOP of home (no clear).
-    if !is_fullscreen && !base_elements.is_empty() {
-        if let Some(t) = transform {
-            let scale_f = t.scale as f64;
-            let card_w = size.w as f32 * t.scale;
-            let card_h = size.h as f32 * t.scale;
-            let card_x = (t.center_x - card_w / 2.0) as i32;
-            let card_y = (t.center_y - card_h / 2.0) as i32;
-
-            let scaled: Vec<RescaleRenderElement<RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>> =
-                base_elements
-                    .into_iter()
-                    .map(|e| {
-                        let relocated = RelocateRenderElement::from_element(
-                            e,
-                            Point::<i32, Physical>::from((card_x, card_y)),
-                            Relocate::Relative,
-                        );
-                        RescaleRenderElement::from_element(
-                            relocated,
-                            Point::<i32, Physical>::from((card_x, card_y)),
-                            smithay::utils::Scale::from(scale_f),
-                        )
-                    })
-                    .collect();
-
-            // Second render pass without clearing.
-            let mut frame = renderer
-                .render(&mut framebuffer, size, Transform::Flipped180)
-                .map_err(SwapBuffersError::from)?;
-            if let Err(e) = draw_render_elements(&mut frame, 1.0, &scaled, &[damage]) {
-                warn!(?e, "failed to draw scaled app elements");
-            }
-            let _sync = frame.finish().map_err(SwapBuffersError::from)?;
-        }
-    }
-
-    // Always draw the bar on top.
-    state.skia.draw_bar_overlay(size.w, size.h);
-
-    // Send frame callbacks.
-    if let Some(ref wl_surface) = app_surface {
-        send_frames_surface_tree(wl_surface, state.start_time.elapsed().as_millis() as u32);
+        let mut ctx = render::DrawCtx {
+            scene: &scene,
+            app_surface: app_surface.as_ref(),
+            skia: &mut state.skia,
+            model: &state.model,
+            icon_cache: &state.icon_cache,
+            app_catalog: &state.app_catalog,
+            transform: Transform::Flipped180,
+            skia_flip_y: false,
+            frame_time,
+        };
+        render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }
 
     drop(framebuffer);
-    backend.submit(Some(&[damage]))
-}
+    let result = backend.submit(Some(&[damage]));
 
-/// Send frame callbacks to all surfaces in the tree.
-fn send_frames_surface_tree(surface: &WlSurface, time: u32) {
-    with_surface_tree_downward(
-        surface,
-        (),
-        |_, _, &()| TraversalAction::DoChildren(()),
-        |_surf, states, &()| {
-            for callback in states
-                .cached_state
-                .get::<SurfaceAttributes>()
-                .current()
-                .frame_callbacks
-                .drain(..)
-            {
-                callback.done(time);
-            }
-        },
-        |_, _, &()| true,
-    );
+    // Record + periodically log frame timing.
+    state.stats.record_frame(frame_start.elapsed());
+    if state.perf_log && state.last_perf_log.elapsed() >= Duration::from_secs(1) {
+        info!(target: "springchick::perf", "{}", state.stats.format_line());
+        state.last_perf_log = std::time::Instant::now();
+    }
+
+    result
 }
