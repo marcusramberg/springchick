@@ -212,9 +212,10 @@ wraps. Updated on every `App` transition.
 - Structured input dispatch replacing M2 ad-hoc handler.
 
 **Out (later):**
-- Full interactive switcher deck with tap-to-select (M3.5 or M4).
-- Edit mode / folders / page-reorder (M4).
-- Device backend / DRM (M5).
+- Full interactive switcher deck with tap-to-select (M3.5 or M5).
+- Device backend / DRM + on-device perf validation (M4). *(promoted ahead of edit mode —
+  validate animation perf on real hardware before adding shell features.)*
+- Edit mode / folders / page-reorder (M5).
 
 ## Key risks
 
