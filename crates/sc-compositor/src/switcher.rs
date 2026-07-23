@@ -27,7 +27,7 @@ pub enum CardHit {
 
 const FRONT_SCALE: f32 = 0.62;
 const DEPTH_SCALE_STEP: f32 = 0.06; // each card behind is this much smaller
-const FOLDED_PEEK: f32 = 18.0; // px of edge showing when stacked
+const FOLDED_PEEK: f32 = 90.0; // px of edge showing when stacked (resting fan)
 const CORNER: f32 = 28.0;
 
 /// Compute card rects, back-to-front. `cards[0]` = front.
