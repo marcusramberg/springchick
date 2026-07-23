@@ -2,8 +2,8 @@
 //!
 //! Computes window transforms from UiState for the renderer to apply.
 
-use crate::ui_state::{ToplevelId, UiState};
 use crate::switcher;
+use crate::ui_state::{ToplevelId, UiState};
 use sc_input::Tracker;
 
 /// Window transform applied to the composited app texture.
@@ -104,7 +104,9 @@ pub struct Scene {
 pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
     let (w, h) = (output_size.0 as f32, output_size.1 as f32);
     match state {
-        UiState::Home { page, page_spring, .. } => {
+        UiState::Home {
+            page, page_spring, ..
+        } => {
             // page_spring.value is the fractional page position.
             // offset = difference from integer page × screen width.
             let fractional = page_spring.value - *page as f32;
@@ -269,7 +271,8 @@ mod tests {
     #[test]
     fn switcher_scene_has_cards_back_to_front() {
         let state = UiState::Switcher {
-            cards: vec![0, 1, 2], scroll: sc_anim::Spring::new(0.0),
+            cards: vec![0, 1, 2],
+            scroll: sc_anim::Spring::new(0.0),
         };
         let scene = compute_scene(&state, TEST_SIZE);
         assert_eq!(scene.cards.len(), 3);

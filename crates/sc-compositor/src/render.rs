@@ -71,19 +71,13 @@ pub fn draw_scene(
     let is_fullscreen = window_transform.is_none_or(|t| t.scale >= 0.99);
 
     // Collect render elements for the app surface (if any).
-    let base_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-        if let Some(wl_surface) = ctx.app_surface {
-            render_elements_from_surface_tree(
-                renderer,
-                wl_surface,
-                (0, 0),
-                1.0,
-                1.0,
-                Kind::Unspecified,
-            )
-        } else {
-            Vec::new()
-        };
+    let base_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if let Some(wl_surface) =
+        ctx.app_surface
+    {
+        render_elements_from_surface_tree(renderer, wl_surface, (0, 0), 1.0, 1.0, Kind::Unspecified)
+    } else {
+        Vec::new()
+    };
 
     // Pass 1: clear background; draw the app here if fullscreen (no home behind).
     {
@@ -127,7 +121,9 @@ pub fn draw_scene(
             let card_y = (t.center_y - card_h / 2.0) as i32;
 
             let scaled: Vec<
-                RescaleRenderElement<RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
+                RescaleRenderElement<
+                    RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
+                >,
             > = base_elements
                 .into_iter()
                 .map(|e| {
@@ -157,7 +153,9 @@ pub fn draw_scene(
     // Switcher cards: draw each card back-to-front (already sorted ascending z).
     if !scene.cards.is_empty() {
         for card in &scene.cards {
-            let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) else { continue };
+            let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) else {
+                continue;
+            };
             let card_w = size.w as f32 * card.scale;
             let card_h = size.h as f32 * card.scale;
             let card_x = (card.center_x - card_w / 2.0) as i32;
@@ -177,7 +175,9 @@ pub fn draw_scene(
             }
 
             let scaled: Vec<
-                RescaleRenderElement<RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
+                RescaleRenderElement<
+                    RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
+                >,
             > = card_elements
                 .into_iter()
                 .map(|e| {

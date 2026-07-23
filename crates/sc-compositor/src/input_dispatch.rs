@@ -31,7 +31,13 @@ pub enum DownAction {
 }
 
 /// Process a pointer/touch down event.
-pub fn on_press(state: &UiState, x: f32, y: f32, model: &ShellModel, output_size: (i32, i32)) -> DownAction {
+pub fn on_press(
+    state: &UiState,
+    x: f32,
+    y: f32,
+    model: &ShellModel,
+    output_size: (i32, i32),
+) -> DownAction {
     let (w, h) = (output_size.0 as f32, output_size.1 as f32);
     let pt = normalize(x, y, w, h);
 
@@ -57,7 +63,10 @@ pub fn on_press(state: &UiState, x: f32, y: f32, model: &ShellModel, output_size
                         origin: ZoomOrigin::icon((cx, cy)),
                     }
                 }
-                Hit::Bar => DownAction::StartBarDrag { start_x: x, start_y: y },
+                Hit::Bar => DownAction::StartBarDrag {
+                    start_x: x,
+                    start_y: y,
+                },
                 Hit::Miss => DownAction::StartPageDrag { start_x: x },
             }
         }
@@ -74,9 +83,7 @@ pub fn on_press(state: &UiState, x: f32, y: f32, model: &ShellModel, output_size
             // Interrupt the animation.
             DownAction::Event(UiEvent::Interrupt { point: pt })
         }
-        UiState::AppOpening { .. } => {
-            DownAction::Event(UiEvent::Interrupt { point: pt })
-        }
+        UiState::AppOpening { .. } => DownAction::Event(UiEvent::Interrupt { point: pt }),
         UiState::Grabbing { .. } => {
             // Already grabbing — no action on additional press.
             DownAction::None
@@ -89,7 +96,13 @@ pub fn on_press(state: &UiState, x: f32, y: f32, model: &ShellModel, output_size
 }
 
 /// Process pointer/touch move during a grab.
-pub fn on_move(state: &UiState, x: f32, y: f32, dt: f32, output_size: (i32, i32)) -> Option<UiEvent> {
+pub fn on_move(
+    state: &UiState,
+    x: f32,
+    y: f32,
+    dt: f32,
+    output_size: (i32, i32),
+) -> Option<UiEvent> {
     let (w, h) = (output_size.0 as f32, output_size.1 as f32);
     let pt = normalize(x, y, w, h);
     match state {

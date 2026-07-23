@@ -10,10 +10,12 @@ use sc_layout::{self, IconSlot, Layout};
 use sc_shell_model::ShellModel;
 
 use skia_safe::gpu::gl::{Format, FramebufferInfo, Interface};
-use skia_safe::gpu::{backend_render_targets, direct_contexts, surfaces, DirectContext, SurfaceOrigin};
+use skia_safe::gpu::{
+    backend_render_targets, direct_contexts, surfaces, DirectContext, SurfaceOrigin,
+};
 use skia_safe::{
-    Color, ColorType, Font, FontMgr, FontStyle, Image, ImageInfo, Paint, RRect, Rect, Surface,
-    TextBlob, images,
+    images, Color, ColorType, Font, FontMgr, FontStyle, Image, ImageInfo, Paint, RRect, Rect,
+    Surface, TextBlob,
 };
 
 use std::collections::HashMap;
@@ -95,7 +97,8 @@ impl SkiaGl {
 
         let finish_ptr = loader("glFinish");
         if !finish_ptr.is_null() {
-            self.gl_finish = Some(unsafe { std::mem::transmute::<*const c_void, GlFinish>(finish_ptr) });
+            self.gl_finish =
+                Some(unsafe { std::mem::transmute::<*const c_void, GlFinish>(finish_ptr) });
         }
 
         self.context = Some(context);
@@ -144,7 +147,8 @@ impl SkiaGl {
             None,
         );
         let row_bytes = pixels.width as usize * 4;
-        let image = images::raster_from_data(&info, skia_safe::Data::new_copy(&pixels.data), row_bytes)?;
+        let image =
+            images::raster_from_data(&info, skia_safe::Data::new_copy(&pixels.data), row_bytes)?;
         self.icon_images.insert(app_id.to_string(), image.clone());
         Some(image)
     }
@@ -197,8 +201,7 @@ impl SkiaGl {
                 format: Format::RGBA8.into(),
                 ..Default::default()
             };
-            let render_target =
-                backend_render_targets::make_gl((width, height), None, 8, fb_info);
+            let render_target = backend_render_targets::make_gl((width, height), None, 8, fb_info);
             let Some(surface) = surfaces::wrap_backend_render_target(
                 context,
                 &render_target,
@@ -312,8 +315,7 @@ impl SkiaGl {
                 format: Format::RGBA8.into(),
                 ..Default::default()
             };
-            let render_target =
-                backend_render_targets::make_gl((width, height), None, 8, fb_info);
+            let render_target = backend_render_targets::make_gl((width, height), None, 8, fb_info);
             let Some(surface) = surfaces::wrap_backend_render_target(
                 context,
                 &render_target,

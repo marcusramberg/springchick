@@ -41,7 +41,11 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
 
     if state.pointer_down {
         // Switcher scroll.
-        if let SwitcherDrag::OnCard { start_x, start_scroll } = state.switcher_drag {
+        if let SwitcherDrag::OnCard {
+            start_x,
+            start_scroll,
+        } = state.switcher_drag
+        {
             if let UiState::Switcher { scroll, .. } = &mut state.ui {
                 let dx = x - start_x;
                 scroll.value = start_scroll - dx / state.output_size.0 as f32;
@@ -228,9 +232,21 @@ pub fn on_release(state: &mut State) {
                     );
                     if let switcher::CardHit::Card(idx) = hit {
                         let card = state.switcher_cards.get(idx).copied();
-                        let origin = card.map(|c| ZoomOrigin::card((c.center_x, c.center_y), c.scale))
-                            .unwrap_or_else(|| ZoomOrigin::card((state.output_size.0 as f32 / 2.0, state.output_size.1 as f32 / 2.0), 0.62));
-                        transition(&mut state.ui, UiEvent::SwitcherTapCard { index: idx, origin });
+                        let origin = card
+                            .map(|c| ZoomOrigin::card((c.center_x, c.center_y), c.scale))
+                            .unwrap_or_else(|| {
+                                ZoomOrigin::card(
+                                    (
+                                        state.output_size.0 as f32 / 2.0,
+                                        state.output_size.1 as f32 / 2.0,
+                                    ),
+                                    0.62,
+                                )
+                            });
+                        transition(
+                            &mut state.ui,
+                            UiEvent::SwitcherTapCard { index: idx, origin },
+                        );
                         return;
                     }
                 }
@@ -254,7 +270,11 @@ pub fn on_release(state: &mut State) {
         app_id,
     } = &state.ui
     {
-        Some((sc_input::classify_release(tracker), *toplevel, app_id.clone()))
+        Some((
+            sc_input::classify_release(tracker),
+            *toplevel,
+            app_id.clone(),
+        ))
     } else {
         None
     };
@@ -271,7 +291,13 @@ pub fn on_release(state: &mut State) {
                     Some(tid) => {
                         let app_id = state.toplevels[tid].as_ref().unwrap().app_id.clone();
                         state.history.push_foreground(tid);
-                        transition(&mut state.ui, UiEvent::RaiseApp { toplevel: tid, app_id });
+                        transition(
+                            &mut state.ui,
+                            UiEvent::RaiseApp {
+                                toplevel: tid,
+                                app_id,
+                            },
+                        );
                     }
                     // No adjacent app — snap back to the current one.
                     None => {
