@@ -2,6 +2,7 @@
 
 mod app_history;
 mod backend;
+mod debug_input;
 mod drm_backend;
 mod frame_stats;
 mod input_common;
@@ -181,6 +182,10 @@ struct State {
     switcher_drag: input_common::SwitcherDrag,
     /// Switcher card rects for hit-testing during drag.
     switcher_cards: Vec<switcher::CardRect>,
+    /// In-flight synthetic swipe from the debug socket (dev harness).
+    active_gesture: Option<debug_input::ActiveGesture>,
+    /// Pending debug `settle`: reply channel + deadline.
+    pending_settle: Option<(std::sync::mpsc::SyncSender<String>, std::time::Instant)>,
     /// Last logged UI state discriminant (to avoid spam).
     last_log_state: Option<std::mem::Discriminant<UiState>>,
 
@@ -222,7 +227,12 @@ impl State {
             size: (FP5_WIDTH, FP5_HEIGHT).into(),
             refresh: 90_000, // 90 Hz in mHz
         };
-        output.change_current_state(Some(mode), None, Some(smithay::output::Scale::Integer(1)), None);
+        output.change_current_state(
+            Some(mode),
+            None,
+            Some(smithay::output::Scale::Integer(1)),
+            None,
+        );
         output.set_preferred(mode);
         output.create_global::<Self>(&dh);
 
@@ -281,6 +291,8 @@ impl State {
             bar_drag_start: None,
             switcher_drag: input_common::SwitcherDrag::None,
             switcher_cards: Vec::new(),
+            active_gesture: None,
+            pending_settle: None,
             last_log_state: None,
             start_time: std::time::Instant::now(),
             stats: frame_stats::FrameStats::new(std::time::Duration::from_micros(11_111)),
@@ -552,8 +564,8 @@ fn init_tracing() {
 
 /// Create the Wayland display + an auto-bound listening socket. Shared by the
 /// winit and DRM backends.
-fn create_display(
-) -> Result<(Display<State>, ListeningSocket, String), Box<dyn std::error::Error>> {
+fn create_display() -> Result<(Display<State>, ListeningSocket, String), Box<dyn std::error::Error>>
+{
     let display: Display<State> = Display::new()?;
     let listener = ListeningSocket::bind_auto("springchick", 0..32)?;
     let socket_name = listener
@@ -584,7 +596,10 @@ fn run_winit() {
 
     let attributes = WinitWindow::default_attributes()
         .with_title("springchick")
-        .with_inner_size(LogicalSize::new(f64::from(FP5_WIDTH), f64::from(FP5_HEIGHT)))
+        .with_inner_size(LogicalSize::new(
+            f64::from(FP5_WIDTH),
+            f64::from(FP5_HEIGHT),
+        ))
         .with_visible(true);
 
     let (mut gfx_backend, mut winit_evt) =
@@ -597,8 +612,7 @@ fn run_winit() {
         };
 
     // Create Wayland display + listening socket.
-    let (mut display, listener, socket_name) =
-        create_display().expect("create wayland display");
+    let (mut display, listener, socket_name) = create_display().expect("create wayland display");
 
     let mut state = State::new(&display, socket_name.clone());
 
@@ -613,6 +627,27 @@ fn run_winit() {
         .add_keyboard(XkbConfig::default(), 200, 25)
         .expect("add keyboard");
     state.seat.add_pointer();
+
+    // Optional debug input socket (dev/test harness). Inert unless env is set.
+    let debug_chan = match std::env::var("SPRINGCHICK_DEBUG_SOCK") {
+        Ok(path) => {
+            match debug_input::spawn(
+                &path,
+                state.output_size.0 as f32,
+                state.output_size.1 as f32,
+            ) {
+                Ok(chan) => {
+                    info!(path = %path, "debug input socket listening");
+                    Some((path, chan))
+                }
+                Err(e) => {
+                    error!(%e, "failed to bind debug input socket");
+                    None
+                }
+            }
+        }
+        Err(_) => None,
+    };
 
     info!("entering frame loop");
 
@@ -640,6 +675,11 @@ fn run_winit() {
             break;
         }
 
+        // Drain debug input (dev harness) before rendering this frame.
+        if let Some((_, chan)) = &debug_chan {
+            debug_input::drain(&mut state, chan);
+        }
+
         // Dispatch Wayland clients.
         display.dispatch_clients(&mut state).ok();
         display.flush_clients().ok();
@@ -660,6 +700,11 @@ fn run_winit() {
         std::thread::sleep(Duration::from_millis(1));
     }
 
+    // Remove the debug socket file (best-effort).
+    if let Some((path, _)) = &debug_chan {
+        let _ = std::fs::remove_file(path);
+    }
+
     // Save state.
     if let Err(e) = config_state::save(&state.model, &config_path()) {
         warn!(%e, "failed to save shell model");
@@ -674,9 +719,7 @@ fn handle_winit_input(
     keyboard: &smithay::input::keyboard::KeyboardHandle<State>,
     event: smithay::backend::input::InputEvent<smithay::backend::winit::WinitInput>,
 ) {
-    use smithay::backend::input::{
-        AbsolutePositionEvent, ButtonState, PointerButtonEvent,
-    };
+    use smithay::backend::input::{AbsolutePositionEvent, ButtonState, PointerButtonEvent};
 
     match event {
         InputEvent::Keyboard { event } => {
@@ -693,14 +736,9 @@ fn handle_winit_input(
             }
 
             // Forward to focused client.
-            keyboard.input::<(), _>(
-                state,
-                key_code,
-                key_state,
-                0.into(),
-                0,
-                |_, _, _| FilterResult::Forward,
-            );
+            keyboard.input::<(), _>(state, key_code, key_state, 0.into(), 0, |_, _, _| {
+                FilterResult::Forward
+            });
         }
         InputEvent::PointerButton { event } => {
             if event.state() == ButtonState::Pressed {
