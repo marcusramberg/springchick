@@ -7,15 +7,26 @@
 
 use crate::input_dispatch::{self, DownAction};
 use crate::switcher;
-use crate::ui_state::{transition, UiEvent, UiState, ZoomOrigin};
+use crate::ui_state::{transition, ToplevelId, UiEvent, UiState, ZoomOrigin};
 use crate::State;
 use tracing::info;
+
+/// Upward travel (fraction of screen height) that drives close_progress from 0
+/// to 1. A release past `CLOSE_COMMIT_PROGRESS` closes the card.
+const CLOSE_FULL_RISE: f32 = 0.25;
+const CLOSE_COMMIT_PROGRESS: f32 = 0.4;
 
 /// Switcher drag state.
 #[derive(Clone, Copy, Debug)]
 pub enum SwitcherDrag {
-    /// Finger on a card, scrolling.
-    OnCard { start_x: f32, start_scroll: f32 },
+    /// Finger on a card. Horizontal drag scrolls the deck; a dominant upward
+    /// drag closes `toplevel` (tracked live via close_progress).
+    OnCard {
+        start_x: f32,
+        start_y: f32,
+        start_scroll: f32,
+        toplevel: ToplevelId,
+    },
     /// Finger on empty area, waiting to decide.
     InEmpty { start_x: f32, start_y: f32 },
     /// Disengaged.
@@ -40,14 +51,27 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
     state.last_pointer_pos = Some((x, y));
 
     if state.pointer_down {
-        // Switcher scroll.
+        // Card drag: dominant-up closes that card, otherwise horizontal scroll.
         if let SwitcherDrag::OnCard {
             start_x,
+            start_y,
             start_scroll,
+            toplevel,
         } = state.switcher_drag
         {
-            if let UiState::Switcher { scroll, .. } = &mut state.ui {
-                let dx = x - start_x;
+            let dx = x - start_x;
+            let dy = y - start_y;
+            let h = state.output_size.1 as f32;
+            if dy < 0.0 && dy.abs() > dx.abs() {
+                // Swiping the card up to close: track finger via close_progress.
+                let progress = ((-dy) / (h * CLOSE_FULL_RISE)).clamp(0.0, 1.0);
+                if let UiState::Switcher { close, .. } = &mut state.ui {
+                    *close = Some((toplevel, progress));
+                    return;
+                }
+            } else if let UiState::Switcher { scroll, close, .. } = &mut state.ui {
+                // Horizontal (or downward): scroll the deck, cancel any close.
+                *close = None;
                 scroll.value = start_scroll - dx / state.output_size.0 as f32;
                 scroll.target = scroll.value;
                 scroll.velocity = 0.0;
@@ -106,11 +130,14 @@ pub fn on_press(state: &mut State) {
             (state.output_size.0 as f32, state.output_size.1 as f32),
         );
         match hit {
-            switcher::CardHit::Card(_idx) => {
-                if let UiState::Switcher { scroll, .. } = &state.ui {
+            switcher::CardHit::Card(idx) => {
+                let toplevel = state.switcher_cards.get(idx).map(|c| c.toplevel);
+                if let (UiState::Switcher { scroll, .. }, Some(toplevel)) = (&state.ui, toplevel) {
                     state.switcher_drag = SwitcherDrag::OnCard {
                         start_x: x,
+                        start_y: y,
                         start_scroll: scroll.value,
+                        toplevel,
                     };
                 }
             }
@@ -220,9 +247,33 @@ pub fn on_release(state: &mut State) {
     if matches!(state.ui, UiState::Switcher { .. }) {
         let drag = std::mem::replace(&mut state.switcher_drag, SwitcherDrag::None);
         match drag {
-            SwitcherDrag::OnCard { start_x, .. } => {
+            SwitcherDrag::OnCard {
+                start_x, start_y, ..
+            } => {
+                // If this drag was closing a card, commit past the threshold or
+                // snap it back.
+                let closing = if let UiState::Switcher { close, .. } = &state.ui {
+                    *close
+                } else {
+                    None
+                };
+                if let Some((ct, progress)) = closing {
+                    if progress >= CLOSE_COMMIT_PROGRESS {
+                        // Remove the card from the deck, then close the client.
+                        let eff =
+                            transition(&mut state.ui, UiEvent::SwitcherCloseCard { toplevel: ct });
+                        if let crate::ui_state::Effect::CloseToplevel { toplevel } = eff {
+                            state.detach_toplevel(toplevel);
+                        }
+                    } else if let UiState::Switcher { close, .. } = &mut state.ui {
+                        *close = None; // cancelled — spring back to rest
+                    }
+                    return;
+                }
+
                 let dx = (x - start_x).abs();
-                if dx < 15.0 {
+                let dy = (y - start_y).abs();
+                if dx < 15.0 && dy < 15.0 {
                     // Tap: open the card.
                     let hit = switcher::hit_test(
                         &state.switcher_cards,

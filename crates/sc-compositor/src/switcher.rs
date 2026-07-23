@@ -16,6 +16,9 @@ pub struct CardRect {
     pub scale: f32,
     pub corner_radius: f32,
     pub z: usize,
+    /// 0 = at rest; →1 = sliding up to close (lift + fade). Only the card being
+    /// swiped up is non-zero.
+    pub close_progress: f32,
 }
 
 /// Result of a hit test against the deck.
@@ -33,7 +36,16 @@ const FOLDED_PEEK_FRAC: f32 = 0.12;
 const CORNER: f32 = 28.0;
 
 /// Compute card rects, back-to-front. `cards[0]` = front.
-pub fn layout(cards: &[ToplevelId], scroll: f32, size: (f32, f32)) -> Vec<CardRect> {
+///
+/// `close` optionally names a toplevel being swiped up to close and its progress
+/// (0..1); that card is lifted upward by `progress * h` and carries the progress
+/// for the renderer to fade it.
+pub fn layout(
+    cards: &[ToplevelId],
+    scroll: f32,
+    size: (f32, f32),
+    close: Option<(ToplevelId, f32)>,
+) -> Vec<CardRect> {
     let (w, h) = size;
     let n = cards.len();
     if n == 0 {
@@ -58,13 +70,18 @@ pub fn layout(cards: &[ToplevelId], scroll: f32, size: (f32, f32)) -> Vec<CardRe
         .enumerate()
         .map(|(i, &toplevel)| {
             let depth = i as f32;
+            let close_progress = match close {
+                Some((t, p)) if t == toplevel => p,
+                _ => 0.0,
+            };
             CardRect {
                 toplevel,
                 center_x: front_cx - gap * depth + pan,
-                center_y: cy,
+                center_y: cy - close_progress * h, // lift upward as it closes
                 scale: (FRONT_SCALE - DEPTH_SCALE_STEP * depth).max(0.30),
                 corner_radius: CORNER,
                 z: n - i, // front (i=0) has the highest z
+                close_progress,
             }
         })
         .collect()
@@ -105,7 +122,7 @@ mod tests {
 
     #[test]
     fn front_is_rightmost_when_folded() {
-        let rects = layout(&[0, 1, 2], 0.0, SIZE);
+        let rects = layout(&[0, 1, 2], 0.0, SIZE, None);
         // cards[0] is the front; it sits furthest right and is largest / top z.
         let front = rects.iter().find(|r| r.toplevel == 0).unwrap();
         for r in &rects {
@@ -119,8 +136,8 @@ mod tests {
 
     #[test]
     fn folded_stacks_tight_unfold_widens() {
-        let folded = layout(&[0, 1, 2], 0.0, SIZE);
-        let open = layout(&[0, 1, 2], 1.0, SIZE);
+        let folded = layout(&[0, 1, 2], 0.0, SIZE, None);
+        let open = layout(&[0, 1, 2], 1.0, SIZE, None);
         let gap = |v: &[CardRect]| (v[0].center_x - v[1].center_x).abs();
         assert!(gap(&open) > gap(&folded)); // unfolding widens the x-gap
     }
@@ -128,27 +145,27 @@ mod tests {
     #[test]
     fn scroll_clamps_and_rubber_bands() {
         // Past max, positions keep moving but sub-linearly (rubber-band), never NaN.
-        let a = layout(&[0, 1, 2], 5.0, SIZE);
-        let b = layout(&[0, 1, 2], 50.0, SIZE);
+        let a = layout(&[0, 1, 2], 5.0, SIZE, None);
+        let b = layout(&[0, 1, 2], 50.0, SIZE, None);
         assert!(a.iter().all(|r| r.center_x.is_finite()));
         assert!(b.iter().all(|r| r.center_x.is_finite()));
     }
 
     #[test]
     fn single_card_centers() {
-        let rects = layout(&[7], 0.0, SIZE);
+        let rects = layout(&[7], 0.0, SIZE, None);
         assert_eq!(rects.len(), 1);
         assert_eq!(rects[0].toplevel, 7);
     }
 
     #[test]
     fn empty_is_empty() {
-        assert!(layout(&[], 0.0, SIZE).is_empty());
+        assert!(layout(&[], 0.0, SIZE, None).is_empty());
     }
 
     #[test]
     fn hit_test_picks_topmost() {
-        let rects = layout(&[0, 1, 2], 1.0, SIZE);
+        let rects = layout(&[0, 1, 2], 1.0, SIZE, None);
         let front = rects.iter().max_by_key(|r| r.z).unwrap();
         match hit_test(&rects, front.center_x, front.center_y, SIZE) {
             CardHit::Card(i) => assert_eq!(rects[i].toplevel, front.toplevel),
@@ -158,7 +175,23 @@ mod tests {
 
     #[test]
     fn hit_test_empty_off_card() {
-        let rects = layout(&[0], 0.0, SIZE);
+        let rects = layout(&[0], 0.0, SIZE, None);
         assert!(matches!(hit_test(&rects, 5.0, 5.0, SIZE), CardHit::Empty));
+    }
+
+    #[test]
+    fn close_lifts_and_records_only_that_card() {
+        let base = layout(&[0, 1, 2], 0.0, SIZE, None);
+        let rects = layout(&[0, 1, 2], 0.0, SIZE, Some((1, 0.5)));
+        let closing = rects.iter().find(|r| r.toplevel == 1).unwrap();
+        let base1 = base.iter().find(|r| r.toplevel == 1).unwrap();
+        // Records progress and lifts the card upward (smaller y = higher).
+        assert_eq!(closing.close_progress, 0.5);
+        assert!(closing.center_y < base1.center_y);
+        assert!((base1.center_y - closing.center_y - 0.5 * SIZE.1).abs() < 0.001);
+        // Other cards untouched.
+        let other = rects.iter().find(|r| r.toplevel == 0).unwrap();
+        assert_eq!(other.close_progress, 0.0);
+        assert_eq!(other.center_y, SIZE.1 / 2.0);
     }
 }
