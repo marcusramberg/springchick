@@ -203,8 +203,12 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
                 cards: Vec::new(),
             }
         }
-        UiState::Switcher { cards, scroll, .. } => {
-            let mut card_rects = switcher::layout(cards, scroll.value, (w, h));
+        UiState::Switcher {
+            cards,
+            scroll,
+            close,
+        } => {
+            let mut card_rects = switcher::layout(cards, scroll.value, (w, h), *close);
             // Sort ascending z for back-to-front draw order.
             card_rects.sort_by_key(|r| r.z);
             Scene {
@@ -273,6 +277,7 @@ mod tests {
         let state = UiState::Switcher {
             cards: vec![0, 1, 2],
             scroll: sc_anim::Spring::new(0.0),
+            close: None,
         };
         let scene = compute_scene(&state, TEST_SIZE);
         assert_eq!(scene.cards.len(), 3);

@@ -392,12 +392,20 @@ impl State {
 
     /// Close a toplevel by id (remove from vec, notify UI state).
     fn close_toplevel(&mut self, id: ToplevelId) {
-        // Remove from toplevels vec.
-        if let Some(slot) = self.toplevels.get_mut(id) {
-            *slot = None;
+        self.detach_toplevel(id);
+        transition(&mut self.ui, UiEvent::ToplevelClosed { toplevel: id });
+    }
+
+    /// Ask the client to close, without emitting a `ToplevelClosed` UI
+    /// transition. Used when the UI has already removed the card (e.g. switcher
+    /// swipe-to-close). The slot is kept until the client actually exits and
+    /// `toplevel_destroyed` fires — dropping the `ToplevelSurface` here would
+    /// destroy the xdg resource before the queued `close` event is flushed.
+    pub(crate) fn detach_toplevel(&mut self, id: ToplevelId) {
+        if let Some(Some(tl)) = self.toplevels.get(id) {
+            tl.surface.send_close();
         }
         self.history.remove(id);
-        transition(&mut self.ui, UiEvent::ToplevelClosed { toplevel: id });
     }
 }
 

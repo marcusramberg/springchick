@@ -77,6 +77,8 @@ pub enum UiState {
         cards: Vec<ToplevelId>,
         /// Single unfold-then-pan scroll spring.
         scroll: Spring,
+        /// Card being swiped up to close: (toplevel, progress 0..1). `None` at rest.
+        close: Option<(ToplevelId, f32)>,
     },
 }
 
@@ -161,7 +163,10 @@ pub enum UiEvent {
     /// Horizontal scroll delta during finger drag.
     SwitcherScroll { delta: f32 },
     /// Tap a card to open that app.
-    SwitcherTapCard { toplevel: ToplevelId, origin: ZoomOrigin },
+    SwitcherTapCard {
+        toplevel: ToplevelId,
+        origin: ZoomOrigin,
+    },
     /// Swipe a card up to close.
     SwitcherCloseCard { toplevel: ToplevelId },
     /// Dismiss the switcher (tap empty area).
@@ -455,6 +460,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             *state = UiState::Switcher {
                 cards,
                 scroll: Spring::new(0.0),
+                close: None,
             };
             Effect::None
         }
@@ -485,9 +491,10 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             Effect::None
         }
         UiEvent::SwitcherCloseCard { toplevel } => {
-            if let UiState::Switcher { cards, .. } = state {
+            if let UiState::Switcher { cards, close, .. } = state {
                 if let Some(pos) = cards.iter().position(|&t| t == toplevel) {
                     cards.remove(pos);
+                    *close = None;
                     if cards.is_empty() {
                         *state = UiState::home(0, 1);
                     }
@@ -793,6 +800,7 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
+            close: None,
         };
         // Events carry the toplevel id, not a positional index — so the render
         // z-order and the MRU order can never desync (regression: tapping the
@@ -812,6 +820,7 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
+            close: None,
         };
         let eff = transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 2 });
         assert_eq!(eff, Effect::CloseToplevel { toplevel: 2 });
@@ -827,6 +836,7 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
+            close: None,
         };
         transition(
             &mut state,
@@ -843,6 +853,7 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![9],
             scroll: Spring::new(0.0),
+            close: None,
         };
         transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 9 });
         assert!(matches!(state, UiState::Home { .. }));
@@ -853,6 +864,7 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2],
             scroll: Spring::new(0.0),
+            close: None,
         };
         transition(&mut state, UiEvent::SwitcherDismiss);
         assert!(matches!(state, UiState::Home { .. }));
@@ -863,6 +875,7 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
+            close: None,
         };
         transition(&mut state, UiEvent::ToplevelClosed { toplevel: 2 });
         if let UiState::Switcher { cards, .. } = &state {
@@ -879,6 +892,7 @@ mod tests {
         let state = UiState::Switcher {
             cards: vec![1],
             scroll: spring,
+            close: None,
         };
         assert!(state.needs_animation());
     }
@@ -888,6 +902,7 @@ mod tests {
         let state = UiState::Switcher {
             cards: vec![5, 3, 1],
             scroll: Spring::new(0.0),
+            close: None,
         };
         assert_eq!(state.foreground_toplevel(), Some(5));
     }

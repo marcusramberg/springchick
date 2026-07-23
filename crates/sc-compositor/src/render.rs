@@ -194,6 +194,8 @@ pub fn draw_scene(
                 })
                 .collect();
 
+            // close_progress lifts the card upward (via layout) as it slides
+            // off-screen to close; the deck itself needs no extra scaling here.
             let mut frame = renderer
                 .render(&mut *framebuffer, size, ctx.transform)
                 .map_err(SwapBuffersError::from)?;
