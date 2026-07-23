@@ -207,9 +207,17 @@ pub fn draw_scene(
     // Always draw the bar on top.
     ctx.skia.draw_bar_overlay(size.w, size.h, ctx.skia_flip_y);
 
-    // Send frame callbacks.
+    // Send frame callbacks. The foreground app surface always gets one; in the
+    // switcher, every card surface must also be driven, otherwise backgrounded
+    // clients (which throttle drawing to frame callbacks) stop presenting and
+    // their card renders blank after the entry animation settles.
     if let Some(wl_surface) = ctx.app_surface {
         send_frames_surface_tree(wl_surface, ctx.frame_time);
+    }
+    for card in &scene.cards {
+        if let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) {
+            send_frames_surface_tree(tl.surface.wl_surface(), ctx.frame_time);
+        }
     }
 
     Ok(())
