@@ -3,8 +3,8 @@
 //! `UiState` + `UiEvent` → `UiState` transitions, unit-tested without Wayland/GPU.
 
 use sc_anim::Spring;
-use tracing::info;
 use sc_input::{NavTarget, Tracker};
+use tracing::info;
 
 /// Opaque toplevel identifier (index into the compositor's toplevel vec).
 pub type ToplevelId = usize;
@@ -171,8 +171,12 @@ pub enum UiEvent {
 /// Side effect from a transition.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
-    Launch { app_id: String },
-    CloseToplevel { toplevel: ToplevelId },
+    Launch {
+        app_id: String,
+    },
+    CloseToplevel {
+        toplevel: ToplevelId,
+    },
     /// Settling animation resolved to Switcher — caller should populate cards.
     EnterSwitcher,
     None,
@@ -210,7 +214,9 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
         }
         UiEvent::ReturnHome { origin } => {
             match state {
-                UiState::App { toplevel, app_id, .. } => {
+                UiState::App {
+                    toplevel, app_id, ..
+                } => {
                     let toplevel = *toplevel;
                     let app_id = app_id.clone();
                     let mut progress = Spring::new(1.0);
@@ -224,8 +230,12 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                         origin,
                     };
                 }
-                UiState::Grabbing { toplevel, app_id, .. }
-                | UiState::Settling { toplevel, app_id, .. } => {
+                UiState::Grabbing {
+                    toplevel, app_id, ..
+                }
+                | UiState::Settling {
+                    toplevel, app_id, ..
+                } => {
                     let toplevel = *toplevel;
                     let app_id = app_id.clone();
                     let mut progress = Spring::new(1.0);
@@ -295,7 +305,10 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             Effect::None
         }
         UiEvent::GrabStart { point } => {
-            if let UiState::App { toplevel, app_id, .. } = state {
+            if let UiState::App {
+                toplevel, app_id, ..
+            } = state
+            {
                 let toplevel = *toplevel;
                 let app_id = app_id.clone();
                 *state = UiState::Grabbing {
@@ -730,7 +743,10 @@ mod tests {
             page_spring.value = 1.7;
         }
         transition(&mut state, UiEvent::PageRelease);
-        if let UiState::Home { page, page_spring, .. } = &state {
+        if let UiState::Home {
+            page, page_spring, ..
+        } = &state
+        {
             assert_eq!(*page, 2);
             assert!((page_spring.target - 2.0).abs() < 0.01);
         } else {
@@ -742,8 +758,16 @@ mod tests {
 
     #[test]
     fn switcher_preview_release_enters_switcher() {
-        let mut state = UiState::App { toplevel: 1, app_id: "a".into() };
-        transition(&mut state, UiEvent::EnterSwitcher { cards: vec![1, 2, 3] });
+        let mut state = UiState::App {
+            toplevel: 1,
+            app_id: "a".into(),
+        };
+        transition(
+            &mut state,
+            UiEvent::EnterSwitcher {
+                cards: vec![1, 2, 3],
+            },
+        );
         assert!(matches!(state, UiState::Switcher { .. }));
         if let UiState::Switcher { cards, .. } = &state {
             assert_eq!(cards, &vec![1, 2, 3]);
@@ -767,18 +791,24 @@ mod tests {
     #[test]
     fn tap_card_opens_that_app() {
         let mut state = UiState::Switcher {
-            cards: vec![1, 2, 3], scroll: Spring::new(0.0),
+            cards: vec![1, 2, 3],
+            scroll: Spring::new(0.0),
         };
-        let _eff = transition(&mut state, UiEvent::SwitcherTapCard {
-            index: 1, origin: ZoomOrigin::card((600.0, 1350.0), 0.62),
-        });
+        let _eff = transition(
+            &mut state,
+            UiEvent::SwitcherTapCard {
+                index: 1,
+                origin: ZoomOrigin::card((600.0, 1350.0), 0.62),
+            },
+        );
         assert!(matches!(state, UiState::AppOpening { toplevel: 2, .. }));
     }
 
     #[test]
     fn close_card_removes_and_emits_effect() {
         let mut state = UiState::Switcher {
-            cards: vec![1, 2, 3], scroll: Spring::new(0.0),
+            cards: vec![1, 2, 3],
+            scroll: Spring::new(0.0),
         };
         let eff = transition(&mut state, UiEvent::SwitcherCloseCard { index: 1 });
         assert_eq!(eff, Effect::CloseToplevel { toplevel: 2 });
@@ -792,7 +822,8 @@ mod tests {
     #[test]
     fn close_last_card_goes_home() {
         let mut state = UiState::Switcher {
-            cards: vec![9], scroll: Spring::new(0.0),
+            cards: vec![9],
+            scroll: Spring::new(0.0),
         };
         transition(&mut state, UiEvent::SwitcherCloseCard { index: 0 });
         assert!(matches!(state, UiState::Home { .. }));
@@ -801,7 +832,8 @@ mod tests {
     #[test]
     fn dismiss_goes_home() {
         let mut state = UiState::Switcher {
-            cards: vec![1, 2], scroll: Spring::new(0.0),
+            cards: vec![1, 2],
+            scroll: Spring::new(0.0),
         };
         transition(&mut state, UiEvent::SwitcherDismiss);
         assert!(matches!(state, UiState::Home { .. }));
@@ -810,7 +842,8 @@ mod tests {
     #[test]
     fn toplevel_closed_removes_card_from_switcher() {
         let mut state = UiState::Switcher {
-            cards: vec![1, 2, 3], scroll: Spring::new(0.0),
+            cards: vec![1, 2, 3],
+            scroll: Spring::new(0.0),
         };
         transition(&mut state, UiEvent::ToplevelClosed { toplevel: 2 });
         if let UiState::Switcher { cards, .. } = &state {
@@ -825,7 +858,8 @@ mod tests {
         let mut spring = Spring::new(0.0);
         spring.retarget(1.0);
         let state = UiState::Switcher {
-            cards: vec![1], scroll: spring,
+            cards: vec![1],
+            scroll: spring,
         };
         assert!(state.needs_animation());
     }
@@ -833,7 +867,8 @@ mod tests {
     #[test]
     fn switcher_foreground_toplevel_returns_front_card() {
         let state = UiState::Switcher {
-            cards: vec![5, 3, 1], scroll: Spring::new(0.0),
+            cards: vec![5, 3, 1],
+            scroll: Spring::new(0.0),
         };
         assert_eq!(state.foreground_toplevel(), Some(5));
     }

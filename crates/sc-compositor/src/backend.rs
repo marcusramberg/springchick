@@ -34,7 +34,10 @@ mod tests {
     fn from_value_selects_drm_only_for_drm() {
         assert_eq!(BackendKind::from_value(Some("drm")), BackendKind::Drm);
         assert_eq!(BackendKind::from_value(Some("winit")), BackendKind::Winit);
-        assert_eq!(BackendKind::from_value(Some("nonsense")), BackendKind::Winit);
+        assert_eq!(
+            BackendKind::from_value(Some("nonsense")),
+            BackendKind::Winit
+        );
         assert_eq!(BackendKind::from_value(None), BackendKind::Winit);
     }
 }

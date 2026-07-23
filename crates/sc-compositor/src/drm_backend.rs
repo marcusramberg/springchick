@@ -62,15 +62,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     info!(seat = %seat_name, "libseat session acquired");
 
     // --- Pick the primary GPU ---
-    let gpu_path = udev::primary_gpu(&seat_name)?
-        .ok_or("no primary GPU found")?;
+    let gpu_path = udev::primary_gpu(&seat_name)?.ok_or("no primary GPU found")?;
     info!(path = ?gpu_path, "primary GPU");
 
     // --- Open the DRM node through the session ---
-    let fd = session.open(
-        &gpu_path,
-        OFlags::RDWR | OFlags::CLOEXEC | OFlags::NONBLOCK,
-    )?;
+    let fd = session.open(&gpu_path, OFlags::RDWR | OFlags::CLOEXEC | OFlags::NONBLOCK)?;
     let device_fd = DrmDeviceFd::new(DeviceFd::from(fd));
 
     // --- DRM device + GBM + EGL + GLES renderer ---
@@ -87,8 +83,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     info!(w = mw, h = mh, "selected mode");
 
     // --- Scanout surface (GBM double-buffered, page-flip on vblank) ---
-    let drm_surface =
-        drm_device.create_surface(crtc_handle, mode, &[connector_handle])?;
+    let drm_surface = drm_device.create_surface(crtc_handle, mode, &[connector_handle])?;
     let allocator = GbmAllocator::new(
         gbm.clone(),
         GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
@@ -148,9 +143,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("insert drm source: {e}"))?;
 
     // 2. libinput touch + keyboard.
-    let mut libinput = Libinput::new_with_udev(LibinputSessionInterface::from(
-        app.drm._session.clone(),
-    ));
+    let mut libinput =
+        Libinput::new_with_udev(LibinputSessionInterface::from(app.drm._session.clone()));
     libinput
         .udev_assign_seat(&seat_name)
         .map_err(|_| "libinput assign seat")?;
@@ -326,9 +320,7 @@ impl App {
         }
 
         self.state.stats.record_frame(frame_start.elapsed());
-        if self.state.perf_log
-            && self.state.last_perf_log.elapsed() >= Duration::from_secs(1)
-        {
+        if self.state.perf_log && self.state.last_perf_log.elapsed() >= Duration::from_secs(1) {
             info!(target: "springchick::perf", "{}", self.state.stats.format_line());
             self.state.last_perf_log = Instant::now();
         }
@@ -338,8 +330,14 @@ impl App {
 /// Find the first connected connector, a usable crtc, and its preferred mode.
 fn find_output(
     drm: &DrmDevice,
-) -> Result<(connector::Handle, crtc::Handle, smithay::reexports::drm::control::Mode), Box<dyn std::error::Error>>
-{
+) -> Result<
+    (
+        connector::Handle,
+        crtc::Handle,
+        smithay::reexports::drm::control::Mode,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let res = drm.resource_handles()?;
 
     for &conn_handle in res.connectors() {
@@ -361,9 +359,7 @@ fn find_output(
         // Find a crtc reachable from one of the connector's encoders.
         for &enc_handle in conn.encoders() {
             let enc = drm.get_encoder(enc_handle)?;
-            if let Some(crtc_handle) =
-                res.filter_crtcs(enc.possible_crtcs()).into_iter().next()
-            {
+            if let Some(crtc_handle) = res.filter_crtcs(enc.possible_crtcs()).into_iter().next() {
                 return Ok((conn_handle, crtc_handle, mode));
             }
         }
