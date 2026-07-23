@@ -27,7 +27,9 @@ pub enum CardHit {
 
 const FRONT_SCALE: f32 = 0.62;
 const DEPTH_SCALE_STEP: f32 = 0.06; // each card behind is this much smaller
-const FOLDED_PEEK: f32 = 90.0; // px of edge showing when stacked (resting fan)
+/// Resting peek between stacked cards, as a fraction of output width. Wide
+/// enough that each card is a tappable target without any scroll.
+const FOLDED_PEEK_FRAC: f32 = 0.12;
 const CORNER: f32 = 28.0;
 
 /// Compute card rects, back-to-front. `cards[0]` = front.
@@ -44,7 +46,7 @@ pub fn layout(cards: &[ToplevelId], scroll: f32, size: (f32, f32)) -> Vec<CardRe
 
     // Spread distance per card grows with scroll: folded → just the peek; open → full card.
     let spread = soft_clamp(scroll); // 0..~1+ (rubber-band handled in soft_clamp)
-    let gap = FOLDED_PEEK + spread * (front_w * 0.55);
+    let gap = w * FOLDED_PEEK_FRAC + spread * (front_w * 0.55);
 
     // Pan: once unfolded, extra scroll beyond the point where all cards fit pans left.
     let total_w = gap * (n as f32 - 1.0);
