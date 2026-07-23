@@ -236,6 +236,9 @@ pub fn on_release(state: &mut State) {
                         if let Some(card) = state.switcher_cards.get(idx).copied() {
                             let origin =
                                 ZoomOrigin::card((card.center_x, card.center_y), card.scale);
+                            // Selecting a card makes it the most-recent app, so
+                            // the next switcher shows it as the front card.
+                            state.history.push_foreground(card.toplevel);
                             transition(
                                 &mut state.ui,
                                 UiEvent::SwitcherTapCard {
