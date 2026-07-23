@@ -161,9 +161,9 @@ pub enum UiEvent {
     /// Horizontal scroll delta during finger drag.
     SwitcherScroll { delta: f32 },
     /// Tap a card to open that app.
-    SwitcherTapCard { index: usize, origin: ZoomOrigin },
+    SwitcherTapCard { toplevel: ToplevelId, origin: ZoomOrigin },
     /// Swipe a card up to close.
-    SwitcherCloseCard { index: usize },
+    SwitcherCloseCard { toplevel: ToplevelId },
     /// Dismiss the switcher (tap empty area).
     SwitcherDismiss,
 }
@@ -466,9 +466,9 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             }
             Effect::None
         }
-        UiEvent::SwitcherTapCard { index, origin } => {
+        UiEvent::SwitcherTapCard { toplevel, origin } => {
             if let UiState::Switcher { cards, .. } = state {
-                if let Some(&toplevel) = cards.get(index) {
+                if cards.contains(&toplevel) {
                     let app_id = format!("app_{}", toplevel);
                     let mut progress = Spring::new(0.0);
                     progress.stiffness = 300.0;
@@ -484,10 +484,10 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             }
             Effect::None
         }
-        UiEvent::SwitcherCloseCard { index } => {
+        UiEvent::SwitcherCloseCard { toplevel } => {
             if let UiState::Switcher { cards, .. } = state {
-                if let Some(&toplevel) = cards.get(index) {
-                    cards.remove(index);
+                if let Some(pos) = cards.iter().position(|&t| t == toplevel) {
+                    cards.remove(pos);
                     if cards.is_empty() {
                         *state = UiState::home(0, 1);
                     }
@@ -789,19 +789,22 @@ mod tests {
     }
 
     #[test]
-    fn tap_card_opens_that_app() {
+    fn tap_card_opens_that_toplevel() {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
         };
+        // Events carry the toplevel id, not a positional index — so the render
+        // z-order and the MRU order can never desync (regression: tapping the
+        // front card used to open the mirrored back card).
         let _eff = transition(
             &mut state,
             UiEvent::SwitcherTapCard {
-                index: 1,
+                toplevel: 3,
                 origin: ZoomOrigin::card((600.0, 1350.0), 0.62),
             },
         );
-        assert!(matches!(state, UiState::AppOpening { toplevel: 2, .. }));
+        assert!(matches!(state, UiState::AppOpening { toplevel: 3, .. }));
     }
 
     #[test]
@@ -810,7 +813,7 @@ mod tests {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
         };
-        let eff = transition(&mut state, UiEvent::SwitcherCloseCard { index: 1 });
+        let eff = transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 2 });
         assert_eq!(eff, Effect::CloseToplevel { toplevel: 2 });
         if let UiState::Switcher { cards, .. } = &state {
             assert_eq!(cards, &vec![1, 3]);
@@ -820,12 +823,28 @@ mod tests {
     }
 
     #[test]
+    fn tap_unknown_toplevel_is_noop() {
+        let mut state = UiState::Switcher {
+            cards: vec![1, 2, 3],
+            scroll: Spring::new(0.0),
+        };
+        transition(
+            &mut state,
+            UiEvent::SwitcherTapCard {
+                toplevel: 99,
+                origin: ZoomOrigin::card((600.0, 1350.0), 0.62),
+            },
+        );
+        assert!(matches!(state, UiState::Switcher { .. }));
+    }
+
+    #[test]
     fn close_last_card_goes_home() {
         let mut state = UiState::Switcher {
             cards: vec![9],
             scroll: Spring::new(0.0),
         };
-        transition(&mut state, UiEvent::SwitcherCloseCard { index: 0 });
+        transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 9 });
         assert!(matches!(state, UiState::Home { .. }));
     }
 
