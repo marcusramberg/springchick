@@ -231,23 +231,20 @@ pub fn on_release(state: &mut State) {
                         (state.output_size.0 as f32, state.output_size.1 as f32),
                     );
                     if let switcher::CardHit::Card(idx) = hit {
-                        let card = state.switcher_cards.get(idx).copied();
-                        let origin = card
-                            .map(|c| ZoomOrigin::card((c.center_x, c.center_y), c.scale))
-                            .unwrap_or_else(|| {
-                                ZoomOrigin::card(
-                                    (
-                                        state.output_size.0 as f32 / 2.0,
-                                        state.output_size.1 as f32 / 2.0,
-                                    ),
-                                    0.62,
-                                )
-                            });
-                        transition(
-                            &mut state.ui,
-                            UiEvent::SwitcherTapCard { index: idx, origin },
-                        );
-                        return;
+                        // `idx` indexes the z-sorted render array; resolve it to
+                        // the card's toplevel id so ordering can't desync.
+                        if let Some(card) = state.switcher_cards.get(idx).copied() {
+                            let origin =
+                                ZoomOrigin::card((card.center_x, card.center_y), card.scale);
+                            transition(
+                                &mut state.ui,
+                                UiEvent::SwitcherTapCard {
+                                    toplevel: card.toplevel,
+                                    origin,
+                                },
+                            );
+                            return;
+                        }
                     }
                 }
             }
