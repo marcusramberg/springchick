@@ -32,6 +32,73 @@ sandbox forbids, so `nix/package.nix` pins that archive with `fetchurl` and pass
 `SKIA_BINARIES_URL=file://…`. Bumping `skia-safe` means updating the version, rust-skia repo
 hash, feature string, and both target hashes there.
 
+## Keybindings
+
+Config: `$XDG_CONFIG_HOME/springchick/keybindings.toml` (→ `~/.config/springchick/…`),
+overridable with `SPRINGCHICK_KEYBINDS=<path>`. A missing file means the compiled-in
+defaults apply; nothing is written to disk. Loaded once at startup — edits need a restart.
+
+```toml
+long_press_ms = 500          # optional, global
+
+[[binding]]
+key = "XF86AudioRaiseVolume" # xkb keysym name
+press = "short"              # "short" | "long"
+command = "wpctl set-volume @DEFAULT_SINK@ 5%+"
+
+[[binding]]
+key = "XF86AudioRaiseVolume"
+press = "long"
+action = "close-app"         # internal action; mutually exclusive with `command`
+
+[[binding]]
+key = "Return"
+mods = ["Super"]             # optional; exact match on Ctrl/Alt/Shift/Super
+press = "short"
+command = "foot"
+```
+
+`command` runs through `sh -c`, so pipes and quoting work as written. Actions are
+`close-app` (close the front toplevel), `home` (return to the home screen) and
+`toggle-display` (blank/unblank the panel — DRM backend only; a no-op under winit).
+
+Defaults, mirroring the niri bindings this replaced:
+
+| key | short | long |
+|---|---|---|
+| `XF86AudioRaiseVolume` | `wpctl` volume up | action `close-app` |
+| `XF86AudioLowerVolume` | `wpctl` volume down | `pkill -SIGRTMIN -f wvkbd-mobintl` |
+| `XF86PowerOff` | action `toggle-display` | `systemctl poweroff` |
+| `Escape` | action `home` | — |
+
+Timing — a long press fires while the key is **still held**, and suppresses the short one:
+
+```
+press ───┬─────────────── 500ms ───┬──────────── release
+         │                         │
+    short armed              long FIRES here
+                             short suppressed
+```
+
+Two behaviors worth knowing before you debug something surprising:
+
+- **A key with any binding never reaches clients**, in either direction. A key that only has
+  a long binding still swallows its short press; give it an explicit short binding if an app
+  should ever see it.
+- **Config errors are skipped, not fatal.** An unknown keysym name, a bad `press` value or a
+  binding with both `command` and `action` logs a warning and is dropped; the compositor
+  still starts. Check the log for `skipping keybinding` if a button does nothing.
+
+Bind power-long to `logger -t springchick poweroff-would-fire` first and watch
+`journalctl -f -t springchick` to confirm the timing before trusting it with the real
+`systemctl poweroff` — a 500ms slip otherwise powers the phone off mid-test.
+
+Headless testing without hardware: set `SPRINGCHICK_DEBUG_SOCK=<short path>` and send
+`key <keysym-name> [hold_ms]` (e.g. `key XF86PowerOff 700`). Injected keys travel the real
+path — xkb lookup, binding match, long-press timing, client forwarding. Keep the socket path
+short; `sun_path` is ~100 bytes and a long temp dir fails to bind. `tests/integration.sh`
+test 7 does exactly this.
+
 ## Seat access: seatd over SSH (no physical login)
 
 The DRM node `/dev/dri/card0` is `root:video` with an ACL logind grants to the **active VT
