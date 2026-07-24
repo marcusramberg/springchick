@@ -44,6 +44,12 @@ pub enum Action {
     Home,
     /// Blank / unblank the panel (DRM backend only).
     ToggleDisplay,
+    /// Raise the volume and show the OSD.
+    VolumeUp,
+    /// Lower the volume and show the OSD.
+    VolumeDown,
+    /// Toggle mute and show the OSD.
+    VolumeMute,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,18 +67,19 @@ pub struct Config {
     pub bindings: Vec<Binding>,
 }
 
-/// Long-press threshold when the config does not say otherwise.
-pub const DEFAULT_LONG_PRESS_MS: u64 = 500;
+/// Long-press threshold when the config does not say otherwise. 800ms so a
+/// volume nudge does not accidentally cross into the long-press action.
+pub const DEFAULT_LONG_PRESS_MS: u64 = 800;
 
 /// Shipped defaults, mirroring the user's niri bindings. Defined as TOML so the
 /// documented example and the built-in behavior cannot drift apart.
 pub const DEFAULT_TOML: &str = r#"
-long_press_ms = 500
+long_press_ms = 800
 
 [[binding]]
 key = "XF86AudioRaiseVolume"
 press = "short"
-command = "wpctl set-volume @DEFAULT_SINK@ 5%+"
+action = "volume-up"
 
 [[binding]]
 key = "XF86AudioRaiseVolume"
@@ -82,7 +89,7 @@ action = "close-app"
 [[binding]]
 key = "XF86AudioLowerVolume"
 press = "short"
-command = "wpctl set-volume @DEFAULT_SINK@ 5%-"
+action = "volume-down"
 
 [[binding]]
 key = "XF86AudioLowerVolume"
@@ -183,6 +190,9 @@ fn convert(raw: RawBinding) -> Option<Binding> {
             "close-app" => Action::CloseApp,
             "home" => Action::Home,
             "toggle-display" => Action::ToggleDisplay,
+            "volume-up" => Action::VolumeUp,
+            "volume-down" => Action::VolumeDown,
+            "volume-mute" => Action::VolumeMute,
             other => {
                 warn!(key = %raw.key, action = %other, "skipping keybinding: unknown action");
                 return None;
@@ -234,7 +244,7 @@ mod tests {
             command = "wpctl set-volume @DEFAULT_SINK@ 5%+"
             "#,
         );
-        assert_eq!(cfg.long_press_ms, 500);
+        assert_eq!(cfg.long_press_ms, DEFAULT_LONG_PRESS_MS);
         assert_eq!(cfg.bindings.len(), 1);
         let b = &cfg.bindings[0];
         assert_eq!(b.key, "XF86AudioRaiseVolume");
@@ -324,10 +334,18 @@ mod tests {
                 .find(|b| b.key == key && b.press == press)
                 .cloned()
         };
-        assert!(matches!(
-            find("XF86AudioRaiseVolume", PressKind::Short).unwrap().action,
-            Action::Command(ref c) if c.contains("wpctl")
-        ));
+        assert_eq!(
+            find("XF86AudioRaiseVolume", PressKind::Short)
+                .unwrap()
+                .action,
+            Action::VolumeUp
+        );
+        assert_eq!(
+            find("XF86AudioLowerVolume", PressKind::Short)
+                .unwrap()
+                .action,
+            Action::VolumeDown
+        );
         assert_eq!(
             find("XF86AudioRaiseVolume", PressKind::Long)
                 .unwrap()
@@ -350,6 +368,32 @@ mod tests {
             find("Escape", PressKind::Short).unwrap().action,
             Action::Home
         );
+    }
+
+    #[test]
+    fn parses_volume_actions() {
+        let cfg = Config::parse(
+            r#"
+            [[binding]]
+            key = "XF86AudioRaiseVolume"
+            press = "short"
+            action = "volume-up"
+
+            [[binding]]
+            key = "XF86AudioLowerVolume"
+            press = "short"
+            action = "volume-down"
+
+            [[binding]]
+            key = "XF86AudioMute"
+            press = "short"
+            action = "volume-mute"
+            "#,
+        );
+        assert_eq!(cfg.bindings.len(), 3);
+        assert_eq!(cfg.bindings[0].action, Action::VolumeUp);
+        assert_eq!(cfg.bindings[1].action, Action::VolumeDown);
+        assert_eq!(cfg.bindings[2].action, Action::VolumeMute);
     }
 
     #[test]

@@ -204,6 +204,45 @@ pub fn run_action(state: &mut State, action: Action) {
         Action::CloseApp => state.close_front_app(),
         Action::Home => state.handle_return_home(),
         Action::ToggleDisplay => state.blank.toggle(),
+        Action::VolumeUp => adjust_volume(state, VolumeChange::Up),
+        Action::VolumeDown => adjust_volume(state, VolumeChange::Down),
+        Action::VolumeMute => adjust_volume(state, VolumeChange::Mute),
+    }
+}
+
+/// One volume step.
+enum VolumeChange {
+    Up,
+    Down,
+    Mute,
+}
+
+/// The audio sink the volume actions target.
+const SINK: &str = "@DEFAULT_SINK@";
+
+/// Change the volume via `wpctl`, read it back, and refresh the OSD. Runs
+/// `wpctl` synchronously (it returns in a few ms) so the read reflects the
+/// change we just made.
+fn adjust_volume(state: &mut State, change: VolumeChange) {
+    let set_args: [&str; 3] = match change {
+        VolumeChange::Up => ["set-volume", SINK, "5%+"],
+        VolumeChange::Down => ["set-volume", SINK, "5%-"],
+        VolumeChange::Mute => ["set-mute", SINK, "toggle"],
+    };
+    if let Err(e) = Command::new("wpctl").args(set_args).status() {
+        warn!(%e, "wpctl set failed");
+        return;
+    }
+    match Command::new("wpctl").args(["get-volume", SINK]).output() {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some((level, muted)) = crate::osd::parse_wpctl_volume(&text) {
+                state.osd.show(level, muted, Instant::now());
+            } else {
+                warn!(output = %text.trim(), "could not parse wpctl volume");
+            }
+        }
+        Err(e) => warn!(%e, "wpctl get-volume failed"),
     }
 }
 
@@ -214,6 +253,9 @@ pub fn action_name(action: &Action) -> &'static str {
         Action::CloseApp => "close-app",
         Action::Home => "home",
         Action::ToggleDisplay => "toggle-display",
+        Action::VolumeUp => "volume-up",
+        Action::VolumeDown => "volume-down",
+        Action::VolumeMute => "volume-mute",
     }
 }
 

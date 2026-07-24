@@ -10,6 +10,7 @@ mod input_common;
 mod input_dispatch;
 mod keybinds;
 mod launcher;
+mod osd;
 mod render;
 pub mod scene;
 mod skia_gl;
@@ -164,6 +165,8 @@ struct State {
     keys: keybinds::Keys,
     /// Panel blanking (acted on by the DRM backend; inert under winit).
     blank: blank::Blank,
+    /// Volume on-screen display state.
+    osd: osd::Osd,
 
     // Shell state
     ui: UiState,
@@ -296,6 +299,7 @@ impl State {
             focused_surface: None,
             keys: keybinds::Keys::load(),
             blank: blank::Blank::new(),
+            osd: osd::Osd::new(),
             ui,
             model,
             app_catalog,
@@ -873,6 +877,11 @@ fn render_frame(
     });
 
     let frame_time = state.start_time.elapsed().as_millis() as u32;
+    let osd_now = std::time::Instant::now();
+    let osd_view = state
+        .osd
+        .is_active(osd_now)
+        .then(|| (state.osd.level, state.osd.muted, state.osd.alpha(osd_now)));
     let (renderer, mut framebuffer) = backend.bind()?;
     {
         let mut ctx = render::DrawCtx {
@@ -886,6 +895,7 @@ fn render_frame(
             transform: Transform::Flipped180,
             skia_flip_y: false,
             frame_time,
+            osd: osd_view,
         };
         render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }
