@@ -1,7 +1,10 @@
 /// Normalized point: x in [0,1] of screen width, y in [0,1] of screen height
 /// with y=0 at the top. Keeps the logic resolution-independent.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Pt { pub x: f32, pub y: f32 }
+pub struct Pt {
+    pub x: f32,
+    pub y: f32,
+}
 
 /// Tracks a single touch and produces a low-passed velocity (units: fraction/sec).
 #[derive(Clone, Copy, Debug)]
@@ -12,11 +15,20 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    pub fn begin(p: Pt) -> Self { Self { start: p, current: p, velocity: Pt { x: 0.0, y: 0.0 } } }
+    pub fn begin(p: Pt) -> Self {
+        Self {
+            start: p,
+            current: p,
+            velocity: Pt { x: 0.0, y: 0.0 },
+        }
+    }
 
     pub fn update(&mut self, p: Pt, dt: f32) {
         if dt > 0.0 {
-            let inst = Pt { x: (p.x - self.current.x) / dt, y: (p.y - self.current.y) / dt };
+            let inst = Pt {
+                x: (p.x - self.current.x) / dt,
+                y: (p.y - self.current.y) / dt,
+            };
             let a = crate::thresholds::VELOCITY_SMOOTHING;
             self.velocity.x = a * inst.x + (1.0 - a) * self.velocity.x;
             self.velocity.y = a * inst.y + (1.0 - a) * self.velocity.y;
@@ -35,9 +47,13 @@ impl Tracker {
     }
 
     /// Upward progress: how far up from the start (0 at start, 1 = full screen up).
-    pub fn up_progress(&self) -> f32 { (self.start.y - self.current.y).max(0.0) }
+    pub fn up_progress(&self) -> f32 {
+        (self.start.y - self.current.y).max(0.0)
+    }
     /// Signed horizontal travel from start.
-    pub fn dx(&self) -> f32 { self.current.x - self.start.x }
+    pub fn dx(&self) -> f32 {
+        self.current.x - self.start.x
+    }
 }
 
 #[cfg(test)]
@@ -61,7 +77,10 @@ mod tests {
         for _ in 0..14 {
             t.decay(1.0 / 90.0);
         }
-        assert!(t.velocity.y.abs() < flick.abs() * 0.1, "velocity should decay during a hold");
+        assert!(
+            t.velocity.y.abs() < flick.abs() * 0.1,
+            "velocity should decay during a hold"
+        );
     }
 
     #[test]

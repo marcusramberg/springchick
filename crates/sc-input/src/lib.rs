@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
-pub mod thresholds;
 pub mod gesture;
 pub mod nav;
+pub mod thresholds;
 pub use gesture::{Pt, Tracker};
-pub use nav::{NavState, NavTarget, classify_release};
+pub use nav::{classify_release, NavState, NavTarget};
