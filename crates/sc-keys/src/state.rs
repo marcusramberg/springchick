@@ -156,7 +156,11 @@ impl PressTracker {
 
         for (keysym, _) in ready {
             let mods = self.held[&keysym].mods;
-            if let Some(action) = self.bindings.slot(keysym, mods).and_then(|s| s.long.clone()) {
+            if let Some(action) = self
+                .bindings
+                .slot(keysym, mods)
+                .and_then(|s| s.long.clone())
+            {
                 if let Some(h) = self.held.get_mut(&keysym) {
                     h.long_fired = true;
                 }

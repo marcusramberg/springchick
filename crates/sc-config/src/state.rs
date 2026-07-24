@@ -3,7 +3,9 @@ use std::path::Path;
 
 pub fn save(model: &ShellModel, path: &Path) -> std::io::Result<()> {
     let s = toml::to_string_pretty(model).expect("serialize model");
-    if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     std::fs::write(path, s)
 }
 

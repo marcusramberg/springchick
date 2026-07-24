@@ -1,4 +1,4 @@
 #![forbid(unsafe_code)]
-pub mod state;
 pub mod catalog;
-pub use catalog::{AppEntry, parse_desktop};
+pub mod state;
+pub use catalog::{parse_desktop, AppEntry};

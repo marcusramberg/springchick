@@ -2,6 +2,7 @@
 
 mod app_history;
 mod backend;
+mod blank;
 mod debug_input;
 mod drm_backend;
 mod frame_stats;
@@ -26,8 +27,7 @@ use sc_config::{catalog, state as config_state, AppEntry};
 use sc_icons::IconPixels;
 use sc_shell_model::ShellModel;
 
-use smithay::backend::input::{InputEvent, KeyboardKeyEvent, KeyState};
-use smithay::backend::input::Keycode;
+use smithay::backend::input::{Event, InputEvent, KeyboardKeyEvent};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::backend::winit::{self, WinitEvent, WinitGraphicsBackend};
@@ -39,7 +39,7 @@ use smithay::delegate_seat;
 use smithay::delegate_shm;
 use smithay::delegate_xdg_decoration;
 use smithay::delegate_xdg_shell;
-use smithay::input::keyboard::{FilterResult, XkbConfig};
+use smithay::input::keyboard::XkbConfig;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_buffer;
@@ -49,7 +49,7 @@ use smithay::reexports::wayland_server::{Client, Display, ListeningSocket};
 use smithay::reexports::winit::dpi::LogicalSize;
 use smithay::reexports::winit::platform::pump_events::PumpStatus;
 use smithay::reexports::winit::window::Window as WinitWindow;
-use smithay::utils::{Rectangle, Serial, Transform};
+use smithay::utils::{Rectangle, Serial, Transform, SERIAL_COUNTER};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     CompositorClientState, CompositorHandler, CompositorState,
@@ -153,7 +153,17 @@ struct State {
     shm_state: ShmState,
     data_device_state: DataDeviceState,
     seat_state: SeatState<Self>,
+    #[allow(dead_code)] // Must stay alive to keep the wl_seat global registered.
     seat: Seat<Self>,
+    /// Seat keyboard. Owned by State (not the winit loop) so both backends
+    /// share one key path.
+    keyboard: smithay::input::keyboard::KeyboardHandle<Self>,
+    /// Surface currently holding keyboard focus, to avoid re-sending it.
+    focused_surface: Option<WlSurface>,
+    /// Resolved keybindings + in-flight press state.
+    keys: keybinds::Keys,
+    /// Panel blanking (acted on by the DRM backend; inert under winit).
+    blank: blank::Blank,
 
     // Shell state
     ui: UiState,
@@ -212,7 +222,12 @@ impl State {
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let mut seat_state = SeatState::new();
-        let seat = seat_state.new_wl_seat(&dh, "springchick");
+        let mut seat = seat_state.new_wl_seat(&dh, "springchick");
+        // 200ms delay / 25Hz repeat: xkb defaults, forwarded to clients.
+        let keyboard = seat
+            .add_keyboard(XkbConfig::default(), 200, 25)
+            .expect("add keyboard");
+        seat.add_pointer();
 
         // Advertise an output so clients know the display geometry.
         let output = Output::new(
@@ -275,6 +290,10 @@ impl State {
             data_device_state,
             seat_state,
             seat,
+            keyboard,
+            focused_surface: None,
+            keys: keybinds::Keys::load(),
+            blank: blank::Blank::new(),
             ui,
             model,
             app_catalog,
@@ -392,6 +411,30 @@ impl State {
     }
 
     /// Close a toplevel by id (remove from vec, notify UI state).
+    /// Close whatever app is in front, if any. Backs the `close-app` binding.
+    fn close_front_app(&mut self) {
+        let Some(id) = ui_state::desired_focus(&self.ui) else {
+            return;
+        };
+        self.detach_toplevel(id);
+        transition(&mut self.ui, UiEvent::ToplevelClosed { toplevel: id });
+    }
+
+    /// Push `desired_focus` into the seat keyboard when it changed. Cheap enough
+    /// to call every frame; the comparison keeps it from re-sending focus.
+    fn sync_keyboard_focus(&mut self) {
+        let want = ui_state::desired_focus(&self.ui)
+            .and_then(|tid| self.toplevels.get(tid))
+            .and_then(|slot| slot.as_ref())
+            .map(|tl| tl.surface.wl_surface().clone());
+        if want == self.focused_surface {
+            return;
+        }
+        self.focused_surface = want.clone();
+        let keyboard = self.keyboard.clone();
+        keyboard.set_focus(self, want, SERIAL_COUNTER.next_serial());
+    }
+
     fn close_toplevel(&mut self, id: ToplevelId) {
         self.detach_toplevel(id);
         transition(&mut self.ui, UiEvent::ToplevelClosed { toplevel: id });
@@ -630,13 +673,6 @@ fn run_winit() {
     state.output_size = (actual_size.w, actual_size.h);
     info!(w = actual_size.w, h = actual_size.h, "actual output size");
 
-    // Add keyboard to seat.
-    let keyboard = state
-        .seat
-        .add_keyboard(XkbConfig::default(), 200, 25)
-        .expect("add keyboard");
-    state.seat.add_pointer();
-
     // Optional debug input socket (dev/test harness). Inert unless env is set.
     let debug_chan = match std::env::var("SPRINGCHICK_DEBUG_SOCK") {
         Ok(path) => {
@@ -671,7 +707,7 @@ fn run_winit() {
                 state.running = false;
             }
             WinitEvent::Input(input_event) => {
-                handle_winit_input(&mut state, &keyboard, input_event);
+                handle_winit_input(&mut state, input_event);
             }
             WinitEvent::Resized { .. } | WinitEvent::Focus(_) | WinitEvent::Redraw => {}
         });
@@ -725,29 +761,13 @@ fn run_winit() {
 /// Handle input events from the winit backend.
 fn handle_winit_input(
     state: &mut State,
-    keyboard: &smithay::input::keyboard::KeyboardHandle<State>,
     event: smithay::backend::input::InputEvent<smithay::backend::winit::WinitInput>,
 ) {
     use smithay::backend::input::{AbsolutePositionEvent, ButtonState, PointerButtonEvent};
 
     match event {
         InputEvent::Keyboard { event } => {
-            let key_code = event.key_code();
-            let key_state = event.state();
-
-            // ESC in evdev = 1, XKB offset +8 = 9
-            let esc_keycode: Keycode = 9u32.into();
-            if key_code == esc_keycode
-                && key_state == KeyState::Pressed
-                && input_common::on_escape(state)
-            {
-                return;
-            }
-
-            // Forward to focused client.
-            keyboard.input::<(), _>(state, key_code, key_state, 0.into(), 0, |_, _, _| {
-                FilterResult::Forward
-            });
+            keybinds::on_key_event(state, event.key_code(), event.state(), event.time_msec());
         }
         InputEvent::PointerButton { event } => {
             if event.state() == ButtonState::Pressed {
@@ -788,6 +808,9 @@ fn render_frame(
         }
         _ => {}
     }
+
+    keybinds::poll(state);
+    state.sync_keyboard_focus();
 
     // Animations that settle to home reset page_count to 1; restore from the model.
     if let UiState::Home { page_count, .. } = &mut state.ui {

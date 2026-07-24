@@ -199,6 +199,18 @@ pub enum Effect {
     None,
 }
 
+/// Which toplevel should hold keyboard focus in this state.
+///
+/// Only the settled `App` state focuses a client: during zoom, grab, settle and
+/// switcher the compositor owns the screen, and a mapped-but-hidden app must not
+/// eat keys.
+pub fn desired_focus(state: &UiState) -> Option<ToplevelId> {
+    match state {
+        UiState::App { toplevel, .. } => Some(*toplevel),
+        _ => None,
+    }
+}
+
 /// Advance the state machine.
 pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
     match event {

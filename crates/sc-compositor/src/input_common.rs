@@ -1,9 +1,8 @@
 //! Backend-agnostic input handling.
 //!
 //! winit and libinput both decode their native events into these calls, so the
-//! gesture behavior is identical across backends. Keyboard *forwarding* to the
-//! focused client stays backend-specific (it needs the seat keyboard handle);
-//! only the Esc return-home shortcut is shared here.
+//! gesture behavior is identical across backends. Keys take a different route:
+//! `keybinds` handles them for both backends via the seat keyboard on `State`.
 
 use crate::input_dispatch::{self, DownAction};
 use crate::switcher;
@@ -34,19 +33,6 @@ pub enum SwitcherDrag {
     InEmpty { start_x: f32, start_y: f32 },
     /// Disengaged.
     None,
-}
-
-/// Esc → return-home shortcut (dev convenience). Returns true if handled.
-pub fn on_escape(state: &mut State) -> bool {
-    if matches!(
-        state.ui,
-        UiState::App { .. } | UiState::Grabbing { .. } | UiState::Settling { .. }
-    ) {
-        state.handle_return_home();
-        true
-    } else {
-        false
-    }
 }
 
 /// Absolute pointer/touch position update (output pixels).

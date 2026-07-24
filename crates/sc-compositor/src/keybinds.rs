@@ -4,11 +4,15 @@
 //! The timing rules live in `sc-keys`; the I/O (xkb, config file, spawning)
 //! lives here.
 
-use sc_keys::{Action, Config, KeyBindings, ModMask, PressTracker};
-use smithay::input::keyboard::{xkb, ModifiersState};
+use crate::State;
+use sc_keys::{Action, Config, KeyBindings, ModMask, PressOutcome, PressTracker};
+use smithay::backend::input::{KeyState, Keycode};
+use smithay::input::keyboard::{xkb, FilterResult, ModifiersState};
+use smithay::utils::SERIAL_COUNTER;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::Duration;
+use std::time::Instant;
 use tracing::{info, warn};
 
 /// Keybinding runtime state owned by `State`.
@@ -78,15 +82,16 @@ pub fn resolve_keysym(name: &str) -> Option<u32> {
 /// not know.
 pub fn resolve(config: Config) -> KeyBindings {
     let long_press = Duration::from_millis(config.long_press_ms);
-    let entries = config.bindings.into_iter().filter_map(|b| {
-        match resolve_keysym(&b.key) {
+    let entries = config
+        .bindings
+        .into_iter()
+        .filter_map(|b| match resolve_keysym(&b.key) {
             Some(keysym) => Some((keysym, b.mods, b.press, b.action)),
             None => {
                 warn!(key = %b.key, "skipping keybinding: unknown keysym name");
                 None
             }
-        }
-    });
+        });
     KeyBindings::new(entries, long_press)
 }
 
@@ -114,6 +119,73 @@ pub fn spawn_command(command: &str, children: &mut Vec<Child>) {
 /// Drop finished children so they do not linger as zombies.
 pub fn reap(children: &mut Vec<Child>) {
     children.retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_)) | Err(_)));
+}
+
+/// Feed one key event through the bindings, forwarding it to the focused client
+/// only when nothing is bound to it.
+///
+/// Runs inside the seat keyboard's filter closure so `Intercept` genuinely keeps
+/// the key from the client.
+pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, time: u32) {
+    let keyboard = state.keyboard.clone();
+    let now = Instant::now();
+    let pressed = key_state == KeyState::Pressed;
+    keyboard.input::<(), _>(
+        state,
+        key_code,
+        key_state,
+        SERIAL_COUNTER.next_serial(),
+        time,
+        |state, mods, handle| {
+            let keysym = handle.modified_sym().raw();
+            let mask = mod_mask(mods);
+            let outcome = if pressed {
+                // A press while the panel is blanked wakes it and fires nothing.
+                if state.blank.on_key_press() == crate::blank::KeyWhileBlanked::Woke {
+                    PressOutcome::Swallow
+                } else {
+                    state.keys.tracker.on_press(keysym, mask, now)
+                }
+            } else {
+                state.keys.tracker.on_release(keysym, now)
+            };
+            match outcome {
+                PressOutcome::Forward => FilterResult::Forward,
+                PressOutcome::Swallow => FilterResult::Intercept(()),
+                PressOutcome::Fire(action) => {
+                    run_action(state, action);
+                    FilterResult::Intercept(())
+                }
+            }
+        },
+    );
+}
+
+/// Fire any long presses whose threshold has passed, and reap finished
+/// commands. Called once per frame (winit) or per event-loop wake (DRM).
+pub fn poll(state: &mut State) {
+    let now = Instant::now();
+    while let Some(action) = state.keys.tracker.poll(now) {
+        run_action(state, action);
+    }
+    let mut children = std::mem::take(&mut state.keys.children);
+    reap(&mut children);
+    state.keys.children = children;
+}
+
+/// Perform a fired action.
+pub fn run_action(state: &mut State, action: Action) {
+    info!(action = action_name(&action), "keybinding fired");
+    match action {
+        Action::Command(cmd) => {
+            let mut children = std::mem::take(&mut state.keys.children);
+            spawn_command(&cmd, &mut children);
+            state.keys.children = children;
+        }
+        Action::CloseApp => state.close_front_app(),
+        Action::Home => state.handle_return_home(),
+        Action::ToggleDisplay => state.blank.toggle(),
+    }
 }
 
 /// Names an action for logs.
@@ -148,8 +220,9 @@ mod tests {
 
     #[test]
     fn unresolvable_names_are_dropped_not_fatal() {
-        let cfg =
-            Config::parse("[[binding]]\nkey = \"Nonsense\"\npress = \"short\"\ncommand = \"true\"\n");
+        let cfg = Config::parse(
+            "[[binding]]\nkey = \"Nonsense\"\npress = \"short\"\ncommand = \"true\"\n",
+        );
         assert!(resolve(cfg).is_empty());
     }
 

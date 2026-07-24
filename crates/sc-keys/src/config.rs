@@ -329,7 +329,9 @@ mod tests {
             Action::Command(ref c) if c.contains("wpctl")
         ));
         assert_eq!(
-            find("XF86AudioRaiseVolume", PressKind::Long).unwrap().action,
+            find("XF86AudioRaiseVolume", PressKind::Long)
+                .unwrap()
+                .action,
             Action::CloseApp
         );
         assert!(matches!(
@@ -344,7 +346,10 @@ mod tests {
             find("XF86PowerOff", PressKind::Long).unwrap().action,
             Action::Command(ref c) if c.contains("poweroff")
         ));
-        assert_eq!(find("Escape", PressKind::Short).unwrap().action, Action::Home);
+        assert_eq!(
+            find("Escape", PressKind::Short).unwrap().action,
+            Action::Home
+        );
     }
 
     #[test]
