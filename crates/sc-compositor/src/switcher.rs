@@ -58,10 +58,8 @@ pub fn layout(
     if n == 0 {
         return Vec::new();
     }
+    let (front_cx, cy, _) = front_slot(size);
     let front_w = w * FRONT_SCALE;
-    // Front slot: centered-right with a small right margin.
-    let front_cx = w - front_w / 2.0 - w * 0.06;
-    let cy = h / 2.0;
     let gap_back = w * FOLDED_PEEK_FRAC; // fanned peek behind the front slot
     let slide_off = front_w * SLIDE_OFF_FRAC; // travel per unit once past the front
 
@@ -106,6 +104,15 @@ pub fn layout(
             }
         })
         .collect()
+}
+
+/// Geometry of the front (focused) card slot: `(center_x, center_y, scale)`.
+/// The app settles into this when releasing into the switcher, so the hand-off
+/// from the shrinking window to the front card is seamless.
+pub fn front_slot(size: (f32, f32)) -> (f32, f32, f32) {
+    let (w, h) = size;
+    let front_w = w * FRONT_SCALE;
+    (w - front_w / 2.0 - w * 0.06, h / 2.0, FRONT_SCALE)
 }
 
 /// Clamp the focus index to the deck with soft rubber-banding past the ends.

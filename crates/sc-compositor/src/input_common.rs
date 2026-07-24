@@ -375,10 +375,19 @@ pub fn on_release(state: &mut State) {
                 }
             }
             _ => {
+                let last_origin = state.last_origin;
+                let size = (state.output_size.0 as f32, state.output_size.1 as f32);
                 transition(&mut state.ui, UiEvent::GrabRelease);
-                // Settling toward Home/Switcher needs the real icon origin.
-                if let UiState::Settling { origin, .. } = &mut state.ui {
-                    *origin = state.last_origin;
+                // Settling toward Home zooms back to the launcher icon; toward
+                // the switcher it settles into the front-card slot so the shrink
+                // flows straight into the fan (no shrink-to-point then pop).
+                if let UiState::Settling { origin, target, .. } = &mut state.ui {
+                    *origin = if matches!(target, sc_input::NavTarget::Switcher) {
+                        let (cx, cy, s) = switcher::front_slot(size);
+                        ZoomOrigin::card((cx, cy), s)
+                    } else {
+                        last_origin
+                    };
                 }
             }
         }
