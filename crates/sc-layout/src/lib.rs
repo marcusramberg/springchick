@@ -90,6 +90,16 @@ const ICON_SIZE_FRAC: f32 = 0.62;
 const LABEL_HEIGHT_FRAC: f32 = 0.18;
 
 /// Compute the full home screen layout for the given output size, page, and model.
+/// The bottom home-bar zone rectangle, standalone (no full layout needed).
+pub fn bar_rect(width: f32, height: f32) -> Rect {
+    Rect {
+        x: 0.0,
+        y: height * (1.0 - BAR_HEIGHT),
+        w: width,
+        h: height * BAR_HEIGHT,
+    }
+}
+
 pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layout {
     let page_count = model.pages.len().max(1);
     let clamped_page = page.min(page_count.saturating_sub(1));

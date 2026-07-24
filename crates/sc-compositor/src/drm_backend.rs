@@ -243,7 +243,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // The OSD fades over time with no other event driving frames; keep
         // rendering while it is visible. `render` early-returns on pending_flip,
         // so this tracks vblank cadence rather than the 2ms wake.
-        if app.state.osd.is_active(Instant::now()) {
+        if app.state.osd.is_active(Instant::now()) || app.state.bar_fading() {
             app.render();
         }
     })?;
@@ -388,6 +388,7 @@ impl App {
             }
         };
 
+        let bar_alpha = self.state.tick_bar_alpha();
         let (layers_below, layers_above) = self.state.layers.render_lists();
         {
             let mut ctx = crate::render::DrawCtx {
@@ -404,6 +405,7 @@ impl App {
                 osd: osd_view,
                 layers_below: &layers_below,
                 layers_above: &layers_above,
+                bar_alpha,
             };
             if let Err(e) =
                 crate::render::draw_scene(&mut self.drm.renderer, &mut framebuffer, size, &mut ctx)
