@@ -7,6 +7,7 @@ mod drm_backend;
 mod frame_stats;
 mod input_common;
 mod input_dispatch;
+mod keybinds;
 mod launcher;
 mod render;
 pub mod scene;
