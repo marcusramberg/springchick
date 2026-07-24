@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=springchick
+Comment=iOS Springboard-style Wayland compositor
+Exec=springchick-session
+Type=Application
+DesktopNames=springchick
