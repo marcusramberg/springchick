@@ -157,13 +157,20 @@ The DRM backend gains the `InputEvent::Keyboard` arm it currently lacks.
 
 ### Long-press timing
 
-The winit loop polls `PressTracker::poll` once per frame. The DRM backend arms a calloop
-`Timer` from `next_deadline()` instead of relying on frames, because page-flips stop when
-nothing animates — a frame-polled long press would never fire on an idle screen.
+The winit loop polls `PressTracker::poll` once per frame. The DRM backend cannot poll per
+frame, because page-flips stop when nothing animates — a frame-polled long press would never
+fire on an idle screen. Its calloop already wakes every 2ms to dispatch wayland clients
+(`event_loop.run(Some(Duration::from_millis(2)), ..)` in `drm_backend.rs`), so the poll goes in
+that callback. `next_deadline()` exists for a future idle-timeout loop; no extra timer source
+is needed today.
 
 ### Keyboard focus
 
-`ui_state.rs` gains a `FocusToplevel(Option<WlSurface>)` effect that both backends apply:
+`ui_state.rs` gains a pure `desired_focus(&UiState) -> Option<ToplevelId>` function, and
+`State::sync_keyboard_focus()` maps that id to a surface and calls `KeyboardHandle::set_focus`
+when it differs from the current focus. Both backends call it once per frame. Keeping the
+policy as a pure function of `UiState` (rather than a `FocusToplevel(WlSurface)` effect) leaves
+`ui_state.rs` free of wayland types and makes the table below directly unit-testable:
 
 | UI state | focus |
 |---|---|
