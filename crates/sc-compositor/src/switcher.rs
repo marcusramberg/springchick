@@ -33,13 +33,20 @@ const DEPTH_SCALE_STEP: f32 = 0.06; // each card behind is this much smaller
 /// Resting peek between stacked cards, as a fraction of output width. Wide
 /// enough that each card is a tappable target without any scroll.
 const FOLDED_PEEK_FRAC: f32 = 0.12;
+/// How far (fraction of front card width) a card slides right per unit of scroll
+/// once it has passed the front slot and is leaving to the right.
+const SLIDE_OFF_FRAC: f32 = 1.15;
 const CORNER: f32 = 28.0;
 
-/// Compute card rects, back-to-front. `cards[0]` = front.
+/// Compute card rects, back-to-front. `cards[0]` = most-recent.
+///
+/// `scroll` is a continuous focus index into the deck (carousel): `0` puts
+/// `cards[0]` in the front slot with the rest fanned behind to the left; as it
+/// grows the whole deck pans right — the focused card slides off the right edge
+/// and the next card scales up into the front slot.
 ///
 /// `close` optionally names a toplevel being swiped up to close and its progress
-/// (0..1); that card is lifted upward by `progress * h` and carries the progress
-/// for the renderer to fade it.
+/// (0..1); that card is lifted upward by `progress * h` and shrinks away.
 pub fn layout(
     cards: &[ToplevelId],
     scroll: f32,
@@ -52,39 +59,65 @@ pub fn layout(
         return Vec::new();
     }
     let front_w = w * FRONT_SCALE;
-    // Front card rests centered-right with a small right margin.
+    // Front slot: centered-right with a small right margin.
     let front_cx = w - front_w / 2.0 - w * 0.06;
     let cy = h / 2.0;
+    let gap_back = w * FOLDED_PEEK_FRAC; // fanned peek behind the front slot
+    let slide_off = front_w * SLIDE_OFF_FRAC; // travel per unit once past the front
 
-    // Spread distance per card grows with scroll: folded → just the peek; open → full card.
-    let spread = soft_clamp(scroll); // 0..~1+ (rubber-band handled in soft_clamp)
-    let gap = w * FOLDED_PEEK_FRAC + spread * (front_w * 0.55);
-
-    // Pan: once unfolded, extra scroll beyond the point where all cards fit pans left.
-    let total_w = gap * (n as f32 - 1.0);
-    let overflow = (total_w - (front_cx - w * 0.04)).max(0.0);
-    let pan = (spread - 1.0).max(0.0) * overflow;
+    let focus = clamp_focus(scroll, n);
 
     cards
         .iter()
         .enumerate()
         .map(|(i, &toplevel)| {
-            let depth = i as f32;
+            // Position relative to the focused (front) slot.
+            let rel = i as f32 - focus;
+            let (center_x, base_scale) = if rel >= 0.0 {
+                // At or behind the front: fanned to the left, smaller with depth.
+                (
+                    front_cx - rel * gap_back,
+                    (FRONT_SCALE - DEPTH_SCALE_STEP * rel).max(0.30),
+                )
+            } else {
+                // Passed the front: sliding off to the right at full size.
+                (front_cx + (-rel) * slide_off, FRONT_SCALE)
+            };
+
             let close_progress = match close {
                 Some((t, p)) if t == toplevel => p,
                 _ => 0.0,
             };
+            // Closing card lifts up and shrinks away.
+            let scale = (base_scale * (1.0 - close_progress)).max(0.0);
+
+            // Draw/hit priority: front slot on top, passed cards above it (they
+            // slide over the deck), cards behind lowest. Monotonic in -rel.
+            let z = ((-rel + 100.0) * 10.0) as usize;
+
             CardRect {
                 toplevel,
-                center_x: front_cx - gap * depth + pan,
-                center_y: cy - close_progress * h, // lift upward as it closes
-                scale: (FRONT_SCALE - DEPTH_SCALE_STEP * depth).max(0.30),
+                center_x,
+                center_y: cy - close_progress * h,
+                scale,
                 corner_radius: CORNER,
-                z: n - i, // front (i=0) has the highest z
+                z,
                 close_progress,
             }
         })
         .collect()
+}
+
+/// Clamp the focus index to the deck with soft rubber-banding past the ends.
+fn clamp_focus(scroll: f32, n: usize) -> f32 {
+    let max = (n as f32 - 1.0).max(0.0);
+    if scroll < 0.0 {
+        scroll * 0.3
+    } else if scroll > max {
+        max + (scroll - max) * 0.3
+    } else {
+        scroll
+    }
 }
 
 /// Topmost (highest z) card whose rect contains the point, else Empty.
@@ -102,15 +135,6 @@ pub fn hit_test(rects: &[CardRect], x: f32, y: f32, size: (f32, f32)) -> CardHit
     match best {
         Some(i) => CardHit::Card(i),
         None => CardHit::Empty,
-    }
-}
-
-/// Map raw scroll to a spread factor with rubber-banding past the ends.
-fn soft_clamp(scroll: f32) -> f32 {
-    if scroll < 0.0 {
-        scroll * 0.3
-    } else {
-        scroll // upper rubber-band applied by the caller's pan term; positions stay finite
     }
 }
 
@@ -135,11 +159,18 @@ mod tests {
     }
 
     #[test]
-    fn folded_stacks_tight_unfold_widens() {
-        let folded = layout(&[0, 1, 2], 0.0, SIZE, None);
-        let open = layout(&[0, 1, 2], 1.0, SIZE, None);
-        let gap = |v: &[CardRect]| (v[0].center_x - v[1].center_x).abs();
-        assert!(gap(&open) > gap(&folded)); // unfolding widens the x-gap
+    fn scroll_advances_focus_to_front_and_slides_active_off_right() {
+        let s0 = layout(&[0, 1, 2], 0.0, SIZE, None);
+        let s1 = layout(&[0, 1, 2], 1.0, SIZE, None);
+        let front_x = s0.iter().find(|r| r.toplevel == 0).unwrap().center_x;
+        // At scroll 1, the next card (1) occupies the front slot...
+        let c1 = s1.iter().find(|r| r.toplevel == 1).unwrap();
+        assert!((c1.center_x - front_x).abs() < 1.0);
+        // ...and the previously-active card (0) has slid off to the right.
+        let c0 = s1.iter().find(|r| r.toplevel == 0).unwrap();
+        assert!(c0.center_x > front_x);
+        // The card leaving to the right renders on top of the deck.
+        assert!(c0.z > c1.z);
     }
 
     #[test]

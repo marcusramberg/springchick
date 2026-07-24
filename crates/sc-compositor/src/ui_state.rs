@@ -9,6 +9,9 @@ use tracing::info;
 /// Opaque toplevel identifier (index into the compositor's toplevel vec).
 pub type ToplevelId = usize;
 
+/// Seconds for a cancelled close-swipe to spring back to rest.
+const CLOSE_SPRINGBACK_SECS: f32 = 0.18;
+
 /// Origin of a zoom animation: where the window grows from / shrinks to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ZoomOrigin {
@@ -75,10 +78,12 @@ pub enum UiState {
     Switcher {
         /// MRU card order; cards[0] = front (most recent).
         cards: Vec<ToplevelId>,
-        /// Single unfold-then-pan scroll spring.
+        /// Carousel focus spring (continuous card index).
         scroll: Spring,
-        /// Card being swiped up to close: (toplevel, progress 0..1). `None` at rest.
-        close: Option<(ToplevelId, f32)>,
+        /// Card being swiped up to close: `(toplevel, progress 0..1, releasing)`.
+        /// `releasing` = finger let go below the commit threshold, so `Tick`
+        /// decays progress back to 0. `None` at rest.
+        close: Option<(ToplevelId, f32, bool)>,
     },
 }
 
@@ -115,7 +120,9 @@ impl UiState {
             UiState::Home { page_spring, .. } => !page_spring.is_settled(),
             UiState::Grabbing { .. } => true,
             UiState::App { .. } => false,
-            UiState::Switcher { scroll, .. } => !scroll.is_settled(),
+            UiState::Switcher { scroll, close, .. } => {
+                !scroll.is_settled() || matches!(close, Some((_, _, true)))
+            }
         }
     }
 }
@@ -444,8 +451,15 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 UiState::Home { page_spring, .. } => {
                     page_spring.step(dt);
                 }
-                UiState::Switcher { scroll, .. } => {
+                UiState::Switcher { scroll, close, .. } => {
                     scroll.step(dt);
+                    // Decay a cancelled close-swipe back to rest.
+                    if let Some((_, progress, true)) = close {
+                        *progress -= dt / CLOSE_SPRINGBACK_SECS;
+                        if *progress <= 0.0 {
+                            *close = None;
+                        }
+                    }
                 }
                 UiState::Grabbing { tracker, .. } => {
                     // Decay velocity so a stationary hold doesn't read as a flick.

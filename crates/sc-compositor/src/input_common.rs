@@ -15,6 +15,9 @@ use tracing::info;
 /// to 1. A release past `CLOSE_COMMIT_PROGRESS` closes the card.
 const CLOSE_FULL_RISE: f32 = 0.25;
 const CLOSE_COMMIT_PROGRESS: f32 = 0.4;
+/// Finger travel to advance the carousel one card, as a fraction of output
+/// width (≈ front card width * slide distance).
+const FRONT_SCALE_PX_FRAC: f32 = 0.7;
 
 /// Switcher drag state.
 #[derive(Clone, Copy, Debug)]
@@ -66,13 +69,16 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
                 // Swiping the card up to close: track finger via close_progress.
                 let progress = ((-dy) / (h * CLOSE_FULL_RISE)).clamp(0.0, 1.0);
                 if let UiState::Switcher { close, .. } = &mut state.ui {
-                    *close = Some((toplevel, progress));
+                    *close = Some((toplevel, progress, false));
                     return;
                 }
             } else if let UiState::Switcher { scroll, close, .. } = &mut state.ui {
-                // Horizontal (or downward): scroll the deck, cancel any close.
+                // Horizontal: carousel-pan the deck. Dragging right advances the
+                // focus (active card slides off right, next comes forward). One
+                // card advances per ~front-card width of travel.
                 *close = None;
-                scroll.value = start_scroll - dx / state.output_size.0 as f32;
+                let per_index = state.output_size.0 as f32 * FRONT_SCALE_PX_FRAC;
+                scroll.value = start_scroll + dx / per_index;
                 scroll.target = scroll.value;
                 scroll.velocity = 0.0;
                 return;
@@ -257,7 +263,7 @@ pub fn on_release(state: &mut State) {
                 } else {
                     None
                 };
-                if let Some((ct, progress)) = closing {
+                if let Some((ct, progress, _)) = closing {
                     if progress >= CLOSE_COMMIT_PROGRESS {
                         // Remove the card from the deck, then close the client.
                         let eff =
@@ -266,7 +272,8 @@ pub fn on_release(state: &mut State) {
                             state.detach_toplevel(toplevel);
                         }
                     } else if let UiState::Switcher { close, .. } = &mut state.ui {
-                        *close = None; // cancelled — spring back to rest
+                        // Cancelled — mark releasing so Tick springs it back.
+                        *close = Some((ct, progress, true));
                     }
                     return;
                 }
@@ -300,6 +307,11 @@ pub fn on_release(state: &mut State) {
                             return;
                         }
                     }
+                } else if let UiState::Switcher { cards, scroll, .. } = &mut state.ui {
+                    // Carousel scroll released: settle to the nearest card.
+                    let max = cards.len().saturating_sub(1) as f32;
+                    let target = scroll.value.round().clamp(0.0, max);
+                    scroll.retarget(target);
                 }
             }
             SwitcherDrag::InEmpty { start_x, start_y } => {
