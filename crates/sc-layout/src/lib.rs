@@ -6,6 +6,8 @@
 //! rectangles for every icon, dock slot, page-indicator dots, and the bottom bar zone.
 //! Also provides the inverse: `point → Hit`.
 
+pub mod layer;
+
 use sc_shell_model::{ShellModel, COLS, DOCK_CAP, ROWS};
 
 /// A rectangle in logical pixels (origin top-left).
