@@ -12,11 +12,19 @@ pub struct Spring {
 
 impl Spring {
     pub fn new(value: f32) -> Self {
-        Self { value, velocity: 0.0, target: value, stiffness: 220.0, damping: 30.0 }
+        Self {
+            value,
+            velocity: 0.0,
+            target: value,
+            stiffness: 220.0,
+            damping: 30.0,
+        }
     }
 
     /// Retarget without losing current value/velocity (interruptible).
-    pub fn retarget(&mut self, target: f32) { self.target = target; }
+    pub fn retarget(&mut self, target: f32) {
+        self.target = target;
+    }
 
     /// Advance by dt seconds (semi-implicit Euler). Returns true while still moving.
     pub fn step(&mut self, dt: f32) -> bool {
@@ -38,7 +46,9 @@ mod tests {
     fn run_to_rest(s: &mut Spring, max_steps: usize) -> usize {
         let dt = 1.0 / 90.0;
         for i in 0..max_steps {
-            if !s.step(dt) { return i; }
+            if !s.step(dt) {
+                return i;
+            }
         }
         max_steps
     }
@@ -58,7 +68,13 @@ mod tests {
         s.retarget(100.0);
         let dt = 1.0 / 90.0;
         let mut peak = 0.0_f32;
-        for _ in 0..1000 { s.step(dt); peak = peak.max(s.value); if s.is_settled() { break; } }
+        for _ in 0..1000 {
+            s.step(dt);
+            peak = peak.max(s.value);
+            if s.is_settled() {
+                break;
+            }
+        }
         assert!(peak <= 100.0 * 1.05, "overshoot too large: peak={}", peak);
     }
 
@@ -67,7 +83,9 @@ mod tests {
         let mut s = Spring::new(0.0);
         s.retarget(100.0);
         let dt = 1.0 / 90.0;
-        for _ in 0..5 { s.step(dt); }
+        for _ in 0..5 {
+            s.step(dt);
+        }
         let v = s.velocity;
         s.retarget(50.0); // interrupt
         assert_eq!(s.velocity, v, "retarget must not zero velocity");

@@ -12,7 +12,9 @@ use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
-use smithay::backend::input::{AbsolutePositionEvent, InputEvent};
+use smithay::backend::input::{
+    AbsolutePositionEvent, Event as InputEventTrait, InputEvent, KeyboardKeyEvent,
+};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::{Bind, ImportDma};
@@ -182,6 +184,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // when no DRM/input event fires.
     event_loop.run(Some(Duration::from_millis(2)), &mut app, |app| {
         app.dispatch_wayland();
+        // Long presses are polled here, not in `render`: page-flips stop when
+        // nothing animates, so a frame-driven poll would never fire on an idle
+        // screen.
+        crate::keybinds::poll(&mut app.state);
+        app.state.sync_keyboard_focus();
+        app.apply_blanking();
     })?;
 
     Ok(())
@@ -220,13 +228,40 @@ impl App {
             InputEvent::TouchUp { .. } => {
                 crate::input_common::on_release(&mut self.state);
             }
+            InputEvent::Keyboard { event } => {
+                crate::keybinds::on_key_event(
+                    &mut self.state,
+                    event.key_code(),
+                    event.state(),
+                    event.time_msec(),
+                );
+            }
             _ => {}
+        }
+    }
+
+    /// Act on a blank/unblank request. Turning the panel off just stops driving
+    /// it; turning it back on reuses the VT-switch restore path, which is the
+    /// known-good way to get scanout back.
+    fn apply_blanking(&mut self) {
+        let Some(blanked) = self.state.blank.take_change() else {
+            return;
+        };
+        if blanked {
+            info!("blanking panel");
+            self.drm.gbm_surface.reset_buffers();
+            self.drm.pending_flip = false;
+        } else {
+            info!("unblanking panel");
+            self.drm.gbm_surface.reset_buffers();
+            self.drm.pending_flip = false;
+            self.render();
         }
     }
 
     /// Render one frame to the scanout buffer and queue a page-flip.
     fn render(&mut self) {
-        if !self.drm.active || self.drm.pending_flip {
+        if !self.drm.active || self.drm.pending_flip || self.state.blank.is_blanked() {
             return;
         }
         let frame_start = Instant::now();

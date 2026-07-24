@@ -27,7 +27,9 @@ impl ShellModel {
 
     /// Remove an app entirely (delete from home).
     pub fn delete(&mut self, app: &str) {
-        for page in &mut self.pages { page.retain(|a| a != app); }
+        for page in &mut self.pages {
+            page.retain(|a| a != app);
+        }
         self.dock.retain(|a| a != app);
         self.pages.retain(|p| !p.is_empty());
     }
@@ -35,7 +37,9 @@ impl ShellModel {
     /// Move an app to (page, index), shifting others. Used by drag-rearrange.
     pub fn move_to(&mut self, app: &str, page: usize, index: usize) {
         self.delete_keep_pages(app);
-        while self.pages.len() <= page { self.pages.push(Vec::new()); }
+        while self.pages.len() <= page {
+            self.pages.push(Vec::new());
+        }
         let p = &mut self.pages[page];
         let idx = index.min(p.len());
         p.insert(idx, app.to_string());
@@ -43,7 +47,9 @@ impl ShellModel {
 
     // delete without collapsing empty pages (internal helper for moves)
     fn delete_keep_pages(&mut self, app: &str) {
-        for page in &mut self.pages { page.retain(|a| a != app); }
+        for page in &mut self.pages {
+            page.retain(|a| a != app);
+        }
         self.dock.retain(|a| a != app);
     }
 }
@@ -55,7 +61,9 @@ mod tests {
     #[test]
     fn place_fills_pages_then_overflows() {
         let mut m = ShellModel::default();
-        for i in 0..(PAGE_CAP + 1) { m.place(format!("app{i}")); }
+        for i in 0..(PAGE_CAP + 1) {
+            m.place(format!("app{i}"));
+        }
         assert_eq!(m.pages.len(), 2);
         assert_eq!(m.pages[0].len(), PAGE_CAP);
         assert_eq!(m.pages[1].len(), 1);
@@ -72,8 +80,10 @@ mod tests {
     #[test]
     fn move_to_reorders_within_page() {
         let mut m = ShellModel::default();
-        for n in ["a","b","c"] { m.place(n.into()); }
+        for n in ["a", "b", "c"] {
+            m.place(n.into());
+        }
         m.move_to("c", 0, 0);
-        assert_eq!(m.pages[0], vec!["c","a","b"]);
+        assert_eq!(m.pages[0], vec!["c", "a", "b"]);
     }
 }
