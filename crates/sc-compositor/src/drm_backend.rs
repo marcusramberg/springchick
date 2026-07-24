@@ -22,7 +22,9 @@ use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev;
 use smithay::reexports::calloop::EventLoop;
-use smithay::reexports::drm::control::{connector, crtc, Device as ControlDevice, ModeTypeFlags};
+use smithay::reexports::drm::control::{
+    connector, crtc, property, Device as ControlDevice, ModeTypeFlags,
+};
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::{Display, ListeningSocket};
@@ -46,6 +48,41 @@ struct Drm {
     active: bool,
     /// True while a page-flip is in flight (waiting on vblank).
     pending_flip: bool,
+    /// DRM node fd, kept for DPMS toggling (blanking).
+    device_fd: DrmDeviceFd,
+    /// The connector we scan out to, and its `DPMS` property handle if the
+    /// driver exposes one. `None` means blanking falls back to freezing.
+    connector: connector::Handle,
+    dpms_prop: Option<property::Handle>,
+}
+
+/// DPMS levels, per `drm_mode.h`. Off (3) disables the pipe and powers the
+/// panel down; On (0) restores it.
+const DPMS_ON: property::RawValue = 0;
+const DPMS_OFF: property::RawValue = 3;
+
+impl Drm {
+    /// Drive the connector's DPMS property. No-op if the driver exposes none.
+    fn set_dpms(&self, on: bool) {
+        let Some(prop) = self.dpms_prop else {
+            return;
+        };
+        let value = if on { DPMS_ON } else { DPMS_OFF };
+        if let Err(e) = self.device_fd.set_property(self.connector, prop, value) {
+            warn!("set DPMS {}: {e}", if on { "on" } else { "off" });
+        }
+    }
+}
+
+/// Find the `DPMS` property handle on a connector, if the driver exposes it.
+fn find_dpms_prop(device: &DrmDeviceFd, connector: connector::Handle) -> Option<property::Handle> {
+    let props = device.get_properties(connector).ok()?;
+    let handles: Vec<property::Handle> = props.as_props_and_values().0.to_vec();
+    handles.into_iter().find(|handle| {
+        device
+            .get_property(*handle)
+            .is_ok_and(|info| info.name().to_str() == Ok("DPMS"))
+    })
 }
 
 /// Entry point for the DRM backend. Selected by `SPRINGCHICK_BACKEND=drm`.
@@ -100,9 +137,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Wayland display + shell State ---
     let (display, listener, socket_name) = create_display()?;
+    // Session backend: publish to systemd/dbus so user services (e.g. wvkbd)
+    // can reach our socket.
+    crate::publish_wayland_display(&socket_name, true);
     let mut state = State::new(&display, socket_name);
     state.output_size = (output_size.w, output_size.h);
     state.perf_log = true; // perf logging is the point of this backend
+
+    // Look up the connector's DPMS property so power-short can truly blank the
+    // panel (disabling scanout) rather than freezing the last frame.
+    let dpms_prop = find_dpms_prop(&device_fd, connector_handle);
+    if dpms_prop.is_none() {
+        warn!("connector exposes no DPMS property; blanking will freeze, not power off");
+    }
 
     let drm = Drm {
         _session: session,
@@ -117,6 +164,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         transform: Transform::Normal,
         active: true,
         pending_flip: false,
+        device_fd: device_fd.clone(),
+        connector: connector_handle,
+        dpms_prop,
     };
 
     let mut app = App {
@@ -240,19 +290,21 @@ impl App {
         }
     }
 
-    /// Act on a blank/unblank request. Turning the panel off just stops driving
-    /// it; turning it back on reuses the VT-switch restore path, which is the
-    /// known-good way to get scanout back.
+    /// Act on a blank/unblank request. Blanking drives the connector's DPMS
+    /// property to Off, which disables scanout and powers the panel down;
+    /// unblanking sets it back On and forces a redraw. If the driver has no DPMS
+    /// property we can only stop flipping (the last frame freezes).
     fn apply_blanking(&mut self) {
         let Some(blanked) = self.state.blank.take_change() else {
             return;
         };
         if blanked {
             info!("blanking panel");
-            self.drm.gbm_surface.reset_buffers();
             self.drm.pending_flip = false;
+            self.drm.set_dpms(false);
         } else {
             info!("unblanking panel");
+            self.drm.set_dpms(true);
             self.drm.gbm_surface.reset_buffers();
             self.drm.pending_flip = false;
             self.render();
