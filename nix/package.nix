@@ -121,6 +121,10 @@ rustPlatform.buildRustPackage {
       $out/share/wayland-sessions/springchick.desktop
   '';
 
+  # Required by services.displayManager.sessionPackages; must match the
+  # desktop file's DesktopNames.
+  passthru.providedSessions = [ "springchick" ];
+
   meta = {
     description = "iOS Springboard-style Wayland compositor";
     mainProgram = "springchick";
