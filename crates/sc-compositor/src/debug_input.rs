@@ -26,6 +26,9 @@ pub enum DebugCmd {
         name: String,
         hold_ms: u32,
     },
+    /// A real touch-down+up tap at `(x, y)` through the surface-routing path
+    /// (`touch::down`/`up`), for exercising layer-surface/app input.
+    Touch(f32, f32),
 }
 
 /// Parse one command line. `w`/`h` are the logical output bounds used for the
@@ -76,6 +79,15 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
                 "move" => DebugCmd::Move(x, y),
                 _ => DebugCmd::Tap(x, y),
             }
+        }
+        "touch" => {
+            let x = num(&mut tok)?;
+            let y = num(&mut tok)?;
+            done(tok)?;
+            if !in_bounds(x, y) {
+                return Err("range".to_string());
+            }
+            DebugCmd::Touch(x, y)
         }
         "up" => {
             done(tok)?;
@@ -147,6 +159,14 @@ pub struct ActiveKey {
     reply: SyncSender<Reply>,
 }
 
+/// A touch held down across render-loop ticks, lifted once `release_at` passes,
+/// so clients see a realistic tap dwell rather than an instant down+up.
+pub struct ActiveTouch {
+    slot: smithay::backend::input::TouchSlot,
+    release_at: Instant,
+    reply: SyncSender<Reply>,
+}
+
 /// Handle held by the render loop: the receiving end of the command channel.
 pub struct DebugChannel {
     rx: Receiver<Job>,
@@ -213,6 +233,10 @@ pub fn drain(state: &mut State, chan: &DebugChannel) {
         advance_key(state);
         return;
     }
+    if state.active_touch.is_some() {
+        advance_touch(state);
+        return;
+    }
     // A pending settle likewise holds the one-in-flight slot.
     if state.pending_settle.is_some() {
         check_settle(state);
@@ -275,6 +299,19 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
                 reply,
             });
         }
+        DebugCmd::Touch(x, y) => {
+            // Real touch tap through the surface-routing path, held ~120ms so
+            // clients register a proper tap. Slot 0 = a valid libinput slot;
+            // real monotonic time so clients don't see stale events.
+            let slot = smithay::backend::input::TouchSlot::from(Some(0));
+            let time = state.start_time.elapsed().as_millis() as u32;
+            crate::touch::down(state, x, y, slot, time);
+            state.active_touch = Some(ActiveTouch {
+                slot,
+                release_at: Instant::now() + std::time::Duration::from_millis(120),
+                reply,
+            });
+        }
         DebugCmd::Settle { timeout_ms } => {
             if idle(state) {
                 let _ = reply.send("ok\n".into());
@@ -313,6 +350,17 @@ fn advance_gesture(state: &mut State) {
 /// Release a held debug key once its hold time has passed. Long-press bindings
 /// fire from the normal per-frame poll while it is still held, exactly as they
 /// do for a real key.
+fn advance_touch(state: &mut State) {
+    let t = state.active_touch.take().expect("advance with touch");
+    if Instant::now() < t.release_at {
+        state.active_touch = Some(t);
+        return;
+    }
+    let time = state.start_time.elapsed().as_millis() as u32;
+    crate::touch::up(state, t.slot, time);
+    let _ = t.reply.send("ok\n".into());
+}
+
 fn advance_key(state: &mut State) {
     let key = state.active_key.take().expect("advance with key");
     if Instant::now() < key.release_at {
@@ -343,7 +391,7 @@ fn check_settle(state: &mut State) {
 fn idle(state: &State) -> bool {
     is_idle(
         state.ui.needs_animation(),
-        state.active_gesture.is_some() || state.active_key.is_some(),
+        state.active_gesture.is_some() || state.active_key.is_some() || state.active_touch.is_some(),
         state.pointer_down,
     )
 }

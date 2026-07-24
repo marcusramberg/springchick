@@ -182,6 +182,8 @@ struct State {
     touch: smithay::input::touch::TouchHandle<Self>,
     /// Which layer surface (if any) currently owns the touch sequence.
     touch_grab: Option<WlSurface>,
+    /// Whether the pointer press is currently held on a client surface.
+    pointer_grab: bool,
     /// Home-bar opacity, faded to 0 when a bottom exclusive-zone surface (the
     /// on-screen keyboard) covers it.
     bar_alpha: f32,
@@ -218,6 +220,7 @@ struct State {
     active_gesture: Option<debug_input::ActiveGesture>,
     /// In-flight synthetic key hold from the debug socket (dev harness).
     active_key: Option<debug_input::ActiveKey>,
+    active_touch: Option<debug_input::ActiveTouch>,
     /// Pending debug `settle`: reply channel + deadline.
     pending_settle: Option<(std::sync::mpsc::SyncSender<String>, std::time::Instant)>,
     /// Last logged UI state discriminant (to avoid spam).
@@ -333,6 +336,7 @@ impl State {
             layers: layer_shell::LayerShell::new(FP5_WIDTH as f32, FP5_HEIGHT as f32),
             touch,
             touch_grab: None,
+            pointer_grab: false,
             bar_alpha: 1.0,
             ui,
             model,
@@ -353,6 +357,7 @@ impl State {
             switcher_cards: Vec::new(),
             active_gesture: None,
             active_key: None,
+            active_touch: None,
             pending_settle: None,
             last_log_state: None,
             start_time: std::time::Instant::now(),
@@ -942,16 +947,13 @@ fn handle_winit_input(
             keybinds::on_key_event(state, event.key_code(), event.state(), event.time_msec());
         }
         InputEvent::PointerButton { event } => {
-            if event.state() == ButtonState::Pressed {
-                input_common::on_press(state);
-            } else {
-                input_common::on_release(state);
-            }
+            let pressed = event.state() == ButtonState::Pressed;
+            touch::pointer_button(state, pressed, event.button_code(), event.time_msec());
         }
         InputEvent::PointerMotionAbsolute { event } => {
             let x = event.x_transformed(state.output_size.0) as f32;
             let y = event.y_transformed(state.output_size.1) as f32;
-            input_common::on_motion(state, x, y);
+            touch::pointer_motion(state, x, y, event.time_msec());
         }
         _ => {}
     }
