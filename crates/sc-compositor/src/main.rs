@@ -236,7 +236,8 @@ impl State {
     fn new(display: &Display<Self>, wayland_socket: String) -> Self {
         let dh = display.handle();
 
-        let compositor_state = CompositorState::new::<Self>(&dh);
+        // v6 so clients like wvkbd that bind wl_compositor@6 can connect.
+        let compositor_state = CompositorState::new_v6::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
