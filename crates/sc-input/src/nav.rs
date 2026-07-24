@@ -43,23 +43,19 @@ pub fn classify_release(t: &Tracker) -> NavTarget {
     }
 
     let progress = t.up_progress();
+    // Barely moved → fall back into the app.
     if progress < th::BACK_TO_APP_MAX_PROGRESS {
         return NavTarget::BackToApp;
     }
-    // Fast upward flick always flings home.
+    // Home only two ways: a decisive upward flick, or dragging all the way up.
     if t.velocity.y <= th::HOME_FLICK_VELOCITY {
         return NavTarget::Home;
     }
-    // Dragged all the way up → home.
     if progress >= th::HOME_MIN_PROGRESS {
         return NavTarget::Home;
     }
-    // Released in the middle band → switcher; below it → home.
-    if progress >= th::SWITCHER_SETTLE_PROGRESS {
-        NavTarget::Switcher
-    } else {
-        NavTarget::Home
-    }
+    // Everything else — the whole slow middle band — settles in the fan stack.
+    NavTarget::Switcher
 }
 
 #[cfg(test)]
@@ -77,44 +73,85 @@ mod tests {
 
     #[test]
     fn tiny_rise_returns_to_app() {
-        let t = t_with(Pt{x:0.5,y:0.95}, Pt{x:0.5,y:0.90}, Pt{x:0.0,y:-0.2});
+        let t = t_with(
+            Pt { x: 0.5, y: 0.95 },
+            Pt { x: 0.5, y: 0.90 },
+            Pt { x: 0.0, y: -0.2 },
+        );
         assert_eq!(classify_release(&t), NavTarget::BackToApp);
     }
 
     #[test]
     fn fast_upward_flick_goes_home_even_if_short() {
-        let t = t_with(Pt{x:0.5,y:0.95}, Pt{x:0.5,y:0.75}, Pt{x:0.0,y:-3.0});
+        let t = t_with(
+            Pt { x: 0.5, y: 0.95 },
+            Pt { x: 0.5, y: 0.75 },
+            Pt { x: 0.0, y: -3.0 },
+        );
         assert_eq!(classify_release(&t), NavTarget::Home);
     }
 
     #[test]
     fn slow_far_drag_settles_in_switcher() {
-        let t = t_with(Pt{x:0.5,y:0.95}, Pt{x:0.5,y:0.35}, Pt{x:0.0,y:-0.5});
+        let t = t_with(
+            Pt { x: 0.5, y: 0.95 },
+            Pt { x: 0.5, y: 0.35 },
+            Pt { x: 0.0, y: -0.5 },
+        );
         assert_eq!(classify_release(&t), NavTarget::Switcher);
     }
 
     #[test]
     fn all_the_way_up_goes_home() {
         // Slow drag almost to the top (progress 0.88) → home, not switcher.
-        let t = t_with(Pt{x:0.5,y:0.95}, Pt{x:0.5,y:0.07}, Pt{x:0.0,y:-0.5});
+        let t = t_with(
+            Pt { x: 0.5, y: 0.95 },
+            Pt { x: 0.5, y: 0.07 },
+            Pt { x: 0.0, y: -0.5 },
+        );
         assert_eq!(classify_release(&t), NavTarget::Home);
     }
 
     #[test]
-    fn moderate_slow_drag_goes_home() {
-        let t = t_with(Pt{x:0.5,y:0.95}, Pt{x:0.5,y:0.65}, Pt{x:0.0,y:-0.5});
-        assert_eq!(classify_release(&t), NavTarget::Home);
+    fn moderate_slow_drag_settles_in_fan_stack() {
+        // A slow drag into the middle band should land in the switcher, not
+        // home — the whole slow middle is forgiving now.
+        let t = t_with(
+            Pt { x: 0.5, y: 0.95 },
+            Pt { x: 0.5, y: 0.65 },
+            Pt { x: 0.0, y: -0.5 },
+        );
+        assert_eq!(classify_release(&t), NavTarget::Switcher);
+    }
+
+    #[test]
+    fn short_slow_drag_just_past_backstop_is_switcher() {
+        // Just past the back-to-app deadzone, a slow drag already reveals the fan.
+        let t = t_with(
+            Pt { x: 0.5, y: 0.95 },
+            Pt { x: 0.5, y: 0.80 },
+            Pt { x: 0.0, y: -0.4 },
+        );
+        assert_eq!(classify_release(&t), NavTarget::Switcher);
     }
 
     #[test]
     fn horizontal_flick_quick_switches_next() {
-        let t = t_with(Pt{x:0.5,y:0.95}, Pt{x:0.2,y:0.93}, Pt{x:-2.0,y:0.0});
+        let t = t_with(
+            Pt { x: 0.5, y: 0.95 },
+            Pt { x: 0.2, y: 0.93 },
+            Pt { x: -2.0, y: 0.0 },
+        );
         assert_eq!(classify_release(&t), NavTarget::QuickSwitch(1));
     }
 
     #[test]
     fn live_state_reveals_switcher_past_threshold() {
-        let t = t_with(Pt{x:0.5,y:0.95}, Pt{x:0.5,y:0.55}, Pt{x:0.0,y:-0.5});
+        let t = t_with(
+            Pt { x: 0.5, y: 0.95 },
+            Pt { x: 0.5, y: 0.55 },
+            Pt { x: 0.0, y: -0.5 },
+        );
         assert_eq!(live_state(&t), NavState::SwitcherPreview);
     }
 }
