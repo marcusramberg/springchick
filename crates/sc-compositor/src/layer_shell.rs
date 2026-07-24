@@ -140,6 +140,15 @@ impl LayerShell {
         )
     }
 
+    /// Whether any Top/Overlay surface overlaps `rect` — used to hide the
+    /// home-bar when the on-screen keyboard covers it, independent of whether
+    /// the keyboard reserved an exclusive zone.
+    pub fn top_overlaps(&self, rect: Rect) -> bool {
+        self.surfaces
+            .iter()
+            .any(|m| matches!(m.layer, Layer::Top | Layer::Overlay) && rects_overlap(m.rect, rect))
+    }
+
     /// The topmost hit-testable (Top/Overlay) surface containing the point, if
     /// any. Overlay is above Top; within a layer, later-created is on top.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<&MappedLayer> {
@@ -155,6 +164,11 @@ impl LayerShell {
         }
         None
     }
+}
+
+/// Axis-aligned rectangle overlap (touching edges do not count).
+fn rects_overlap(a: Rect, b: Rect) -> bool {
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
 /// Read a layer surface's current (committed) cached state.

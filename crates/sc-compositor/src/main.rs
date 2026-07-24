@@ -182,6 +182,9 @@ struct State {
     touch: smithay::input::touch::TouchHandle<Self>,
     /// Which layer surface (if any) currently owns the touch sequence.
     touch_grab: Option<WlSurface>,
+    /// Home-bar opacity, faded to 0 when a bottom exclusive-zone surface (the
+    /// on-screen keyboard) covers it.
+    bar_alpha: f32,
 
     // Shell state
     ui: UiState,
@@ -330,6 +333,7 @@ impl State {
             layers: layer_shell::LayerShell::new(FP5_WIDTH as f32, FP5_HEIGHT as f32),
             touch,
             touch_grab: None,
+            bar_alpha: 1.0,
             ui,
             model,
             app_catalog,
@@ -472,6 +476,37 @@ impl State {
             });
             slot.surface.send_configure();
         }
+    }
+
+    /// Bar fade target: 0 when a Top/Overlay layer surface (the OSK) covers the
+    /// bar, else 1.
+    fn bar_alpha_target(&self) -> f32 {
+        let bar = sc_layout::bar_rect(self.output_size.0 as f32, self.output_size.1 as f32);
+        if self.layers.top_overlaps(bar) {
+            0.0
+        } else {
+            1.0
+        }
+    }
+
+    /// Step the home-bar fade toward its target and return the current alpha.
+    /// ~0.13s fade (0.15 per 90Hz frame).
+    fn tick_bar_alpha(&mut self) -> f32 {
+        let target = self.bar_alpha_target();
+        let step = 0.15;
+        if (self.bar_alpha - target).abs() <= step {
+            self.bar_alpha = target;
+        } else if self.bar_alpha < target {
+            self.bar_alpha += step;
+        } else {
+            self.bar_alpha -= step;
+        }
+        self.bar_alpha
+    }
+
+    /// True while the bar fade is still animating (keeps the DRM loop rendering).
+    fn bar_fading(&self) -> bool {
+        (self.bar_alpha - self.bar_alpha_target()).abs() > f32::EPSILON
     }
 
     /// Close whatever app is in front, if any. Backs the `close-app` binding.
@@ -978,6 +1013,7 @@ fn render_frame(
         .osd
         .is_active(osd_now)
         .then(|| (state.osd.level, state.osd.muted, state.osd.alpha(osd_now)));
+    let bar_alpha = state.tick_bar_alpha();
     let (layers_below, layers_above) = state.layers.render_lists();
     let (renderer, mut framebuffer) = backend.bind()?;
     {
@@ -995,6 +1031,7 @@ fn render_frame(
             osd: osd_view,
             layers_below: &layers_below,
             layers_above: &layers_above,
+            bar_alpha,
         };
         render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }

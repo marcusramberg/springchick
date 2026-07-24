@@ -276,7 +276,7 @@ impl SkiaGl {
         draw_dots(canvas, &current_layout, page);
 
         // Draw bar.
-        draw_bar(canvas, &current_layout);
+        draw_bar(canvas, &current_layout, 1.0);
 
         canvas.restore();
 
@@ -356,10 +356,17 @@ impl SkiaGl {
     }
 
     /// Draw bar overlay on top of the app (return-home affordance).
-    pub fn draw_bar_overlay(&mut self, width: i32, height: i32, flip_y: bool) {
+    /// Draw the home-affordance bar over the app. `alpha` (0..=1) fades it out
+    /// when an exclusive-zone layer surface (e.g. the OSK) covers the bottom.
+    pub fn draw_bar_overlay(&mut self, width: i32, height: i32, alpha: f32, flip_y: bool) {
+        if alpha <= 0.0 {
+            return;
+        }
         let model = ShellModel::default();
         let layout = sc_layout::compute(width as f32, height as f32, 0, &model);
-        self.with_overlay_canvas(width, height, flip_y, |canvas| draw_bar(canvas, &layout));
+        self.with_overlay_canvas(width, height, flip_y, |canvas| {
+            draw_bar(canvas, &layout, alpha)
+        });
     }
 
     /// Draw the volume OSD: a vertical bar on the right edge, in the top third,
@@ -515,7 +522,7 @@ fn draw_dots(canvas: &skia_safe::Canvas, layout: &Layout, current_page: usize) {
     }
 }
 
-fn draw_bar(canvas: &skia_safe::Canvas, layout: &Layout) {
+fn draw_bar(canvas: &skia_safe::Canvas, layout: &Layout, alpha: f32) {
     let bar = &layout.bar_rect;
     let pill_w = bar.w * 0.35;
     let pill_h = 8.0_f32;
@@ -524,7 +531,8 @@ fn draw_bar(canvas: &skia_safe::Canvas, layout: &Layout) {
 
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    paint.set_color(Color::from_argb(180, 255, 255, 255));
+    let a = (180.0 * alpha.clamp(0.0, 1.0)).round() as u8;
+    paint.set_color(Color::from_argb(a, 255, 255, 255));
 
     let rect = Rect::new(pill_x, pill_y, pill_x + pill_w, pill_y + pill_h);
     let rrect = RRect::new_rect_xy(rect, pill_h / 2.0, pill_h / 2.0);

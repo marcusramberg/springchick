@@ -60,6 +60,8 @@ pub struct DrawCtx<'a> {
     pub layers_below: &'a [(WlSurface, (i32, i32))],
     /// Layer-shell surfaces above the app (top/overlay): `(surface, origin)`.
     pub layers_above: &'a [(WlSurface, (i32, i32))],
+    /// Home-bar opacity (faded out when the OSK covers it).
+    pub bar_alpha: f32,
 }
 
 /// Render a layer surface's tree at `origin` in its own pass. Used for both the
@@ -270,7 +272,8 @@ pub fn draw_scene(
     }
 
     // Always draw the bar on top.
-    ctx.skia.draw_bar_overlay(size.w, size.h, ctx.skia_flip_y);
+    ctx.skia
+        .draw_bar_overlay(size.w, size.h, ctx.bar_alpha, ctx.skia_flip_y);
 
     // Volume OSD sits above everything, including a fullscreen app.
     if let Some((level, muted, alpha)) = ctx.osd {
