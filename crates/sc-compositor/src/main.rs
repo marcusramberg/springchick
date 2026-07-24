@@ -195,6 +195,8 @@ struct State {
     switcher_cards: Vec<switcher::CardRect>,
     /// In-flight synthetic swipe from the debug socket (dev harness).
     active_gesture: Option<debug_input::ActiveGesture>,
+    /// In-flight synthetic key hold from the debug socket (dev harness).
+    active_key: Option<debug_input::ActiveKey>,
     /// Pending debug `settle`: reply channel + deadline.
     pending_settle: Option<(std::sync::mpsc::SyncSender<String>, std::time::Instant)>,
     /// Last logged UI state discriminant (to avoid spam).
@@ -312,6 +314,7 @@ impl State {
             switcher_drag: input_common::SwitcherDrag::None,
             switcher_cards: Vec::new(),
             active_gesture: None,
+            active_key: None,
             pending_settle: None,
             last_log_state: None,
             start_time: std::time::Instant::now(),

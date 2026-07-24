@@ -9,6 +9,7 @@
 #   4. Multiple clients can connect
 #   5. Client closing doesn't crash the compositor
 #   6. Esc key returns to home (via wtype)
+#   7. Keybindings: short vs long press fire the right command (via debug socket)
 #
 # Usage: nix develop --command ./tests/integration.sh
 #   or:  nix develop --command ./tests/integration.sh --quick  (skip slow tests)
@@ -167,6 +168,101 @@ if [[ "$QUICK" -eq 0 ]]; then
 
     kill "$C1" "$C2" 2>/dev/null; wait "$C1" "$C2" 2>/dev/null || true
 fi
+
+# --- Test 7: Keybindings (short vs long press) ---
+
+bold "Test 7: Keybindings fire on short and long press"
+
+KB_DIR=$(mktemp -d)
+KB_CONF="$KB_DIR/keybindings.toml"
+cat > "$KB_CONF" <<EOF
+long_press_ms = 500
+
+[[binding]]
+key = "F1"
+press = "short"
+command = "touch $KB_DIR/short"
+
+[[binding]]
+key = "F1"
+press = "long"
+command = "touch $KB_DIR/long"
+EOF
+
+KB_SOCK="$KB_DIR/debug.sock"
+
+# Send one debug-socket line and print the reply.
+dbg() {
+    python3 - "$KB_SOCK" "$1" <<'PYEOF'
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sys.argv[1])
+s.sendall((sys.argv[2] + "\n").encode())
+print(s.recv(64).decode().strip())
+PYEOF
+}
+
+# Wait up to ~2s for a file to appear.
+wait_for() {
+    for _ in $(seq 1 20); do
+        [[ -e "$1" ]] && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+stop_compositor
+SPRINGCHICK_KEYBINDS="$KB_CONF" SPRINGCHICK_DEBUG_SOCK="$KB_SOCK" \
+    "$SPRINGCHICK" 2>/tmp/springchick-keys.log &
+SC_PID=$!
+for i in $(seq 1 30); do
+    [[ -S "$KB_SOCK" ]] && break
+    sleep 0.1
+done
+
+if [[ -S "$KB_SOCK" ]]; then
+    pass "debug socket up with keybindings config"
+else
+    fail "keybindings setup" "debug socket never appeared"
+fi
+
+# Short press: held well under the 500ms threshold.
+dbg "key F1 50" >/dev/null
+if wait_for "$KB_DIR/short"; then
+    pass "short press ran its command"
+else
+    fail "short press" "command never ran"
+fi
+if [[ -e "$KB_DIR/long" ]]; then
+    fail "short press" "long command also ran"
+else
+    pass "short press did not fire the long binding"
+fi
+
+# Long press: held past the threshold. The long command must fire while the key
+# is still down, and the short one must stay suppressed on release.
+rm -f "$KB_DIR/short"
+dbg "key F1 700" >/dev/null
+if wait_for "$KB_DIR/long"; then
+    pass "long press ran its command"
+else
+    fail "long press" "command never ran"
+fi
+if [[ -e "$KB_DIR/short" ]]; then
+    fail "long press" "short command fired on release too"
+else
+    pass "long press suppressed the short binding"
+fi
+
+if kill -0 "$SC_PID" 2>/dev/null; then
+    pass "compositor stable through keybinding injection"
+else
+    fail "compositor crash" "died during keybinding test"
+fi
+
+stop_compositor
+rm -rf "$KB_DIR"
+start_compositor
 
 # --- Test 5: Compositor shuts down cleanly ---
 
