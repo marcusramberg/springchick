@@ -158,20 +158,72 @@ mod tests {
     #[test]
     fn no_reservations_is_full_output() {
         let u = usable_area(W, H, &[]);
-        assert_eq!(u, Rect { x: 0.0, y: 0.0, w: W, h: H });
+        assert_eq!(
+            u,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: W,
+                h: H
+            }
+        );
     }
 
     #[test]
     fn bottom_reservation_shrinks_height_from_the_bottom() {
-        let u = usable_area(W, H, &[Reservation { edge: Edge::Bottom, size: 300.0 }]);
-        assert_eq!(u, Rect { x: 0.0, y: 0.0, w: W, h: H - 300.0 });
+        let u = usable_area(
+            W,
+            H,
+            &[Reservation {
+                edge: Edge::Bottom,
+                size: 300.0,
+            }],
+        );
+        assert_eq!(
+            u,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: W,
+                h: H - 300.0
+            }
+        );
     }
 
     #[test]
     fn each_edge_reserves_correctly() {
-        assert_eq!(usable_area(W, H, &[Reservation { edge: Edge::Top, size: 100.0 }]).y, 100.0);
-        assert_eq!(usable_area(W, H, &[Reservation { edge: Edge::Left, size: 100.0 }]).x, 100.0);
-        let right = usable_area(W, H, &[Reservation { edge: Edge::Right, size: 100.0 }]);
+        assert_eq!(
+            usable_area(
+                W,
+                H,
+                &[Reservation {
+                    edge: Edge::Top,
+                    size: 100.0
+                }]
+            )
+            .y,
+            100.0
+        );
+        assert_eq!(
+            usable_area(
+                W,
+                H,
+                &[Reservation {
+                    edge: Edge::Left,
+                    size: 100.0
+                }]
+            )
+            .x,
+            100.0
+        );
+        let right = usable_area(
+            W,
+            H,
+            &[Reservation {
+                edge: Edge::Right,
+                size: 100.0,
+            }],
+        );
         assert_eq!(right.x, 0.0);
         assert_eq!(right.w, W - 100.0);
     }
@@ -182,8 +234,14 @@ mod tests {
             W,
             H,
             &[
-                Reservation { edge: Edge::Bottom, size: 200.0 },
-                Reservation { edge: Edge::Bottom, size: 100.0 },
+                Reservation {
+                    edge: Edge::Bottom,
+                    size: 200.0,
+                },
+                Reservation {
+                    edge: Edge::Bottom,
+                    size: 100.0,
+                },
             ],
         );
         assert_eq!(u.h, H - 300.0);
@@ -191,7 +249,14 @@ mod tests {
 
     #[test]
     fn oversized_reservation_clamps_to_empty_not_negative() {
-        let u = usable_area(W, H, &[Reservation { edge: Edge::Bottom, size: H + 500.0 }]);
+        let u = usable_area(
+            W,
+            H,
+            &[Reservation {
+                edge: Edge::Bottom,
+                size: H + 500.0,
+            }],
+        );
         assert_eq!(u.y, 0.0);
         assert_eq!(u.h, 0.0);
     }
@@ -208,7 +273,10 @@ mod tests {
 
     #[test]
     fn margins_inset_from_the_anchored_edge() {
-        let m = Margins { bottom: 20.0, ..Margins::default() };
+        let m = Margins {
+            bottom: 20.0,
+            ..Margins::default()
+        };
         let r = layer_rect(W, H, bottom_anchor(), 0.0, 400.0, m);
         // Bottom edge stays anchored; the bottom margin lifts it.
         assert_eq!(r.y, H - 400.0 - 20.0);
@@ -216,7 +284,12 @@ mod tests {
 
     #[test]
     fn top_anchored_bar_sits_at_the_top() {
-        let anchor = Anchor { top: true, left: true, right: true, bottom: false };
+        let anchor = Anchor {
+            top: true,
+            left: true,
+            right: true,
+            bottom: false,
+        };
         let r = layer_rect(W, H, anchor, 0.0, 60.0, Margins::default());
         assert_eq!(r.y, 0.0);
         assert_eq!(r.w, W);
@@ -226,7 +299,12 @@ mod tests {
     #[test]
     fn unanchored_axis_is_centered() {
         // Anchored to neither left nor right: centered horizontally.
-        let anchor = Anchor { top: true, bottom: true, left: false, right: false };
+        let anchor = Anchor {
+            top: true,
+            bottom: true,
+            left: false,
+            right: false,
+        };
         let r = layer_rect(W, H, anchor, 200.0, 0.0, Margins::default());
         assert_eq!(r.x, (W - 200.0) / 2.0);
         assert_eq!(r.w, 200.0);

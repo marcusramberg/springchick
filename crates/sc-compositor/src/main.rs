@@ -10,11 +10,13 @@ mod input_common;
 mod input_dispatch;
 mod keybinds;
 mod launcher;
+mod layer_shell;
 mod osd;
 mod render;
 pub mod scene;
 mod skia_gl;
 mod switcher;
+mod touch;
 pub mod ui_state;
 
 use app_history::AppHistory;
@@ -167,6 +169,19 @@ struct State {
     blank: blank::Blank,
     /// Volume on-screen display state.
     osd: osd::Osd,
+    /// wlr-layer-shell protocol state.
+    layer_shell_state: smithay::wayland::shell::wlr_layer::WlrLayerShellState,
+    /// Virtual-keyboard protocol state (OSK key injection). Held to keep the
+    /// global registered; injected keys are delivered by smithay to the focused
+    /// keyboard client directly.
+    #[allow(dead_code)]
+    virtual_keyboard_state: smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState,
+    /// Tracked layer surfaces + reserved-area bookkeeping.
+    layers: layer_shell::LayerShell,
+    /// Seat touch handle, for forwarding taps to layer surfaces.
+    touch: smithay::input::touch::TouchHandle<Self>,
+    /// Which layer surface (if any) currently owns the touch sequence.
+    touch_grab: Option<WlSurface>,
 
     // Shell state
     ui: UiState,
@@ -233,6 +248,15 @@ impl State {
             .add_keyboard(XkbConfig::default(), 200, 25)
             .expect("add keyboard");
         seat.add_pointer();
+        let touch = seat.add_touch();
+
+        let layer_shell_state =
+            smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<Self>(&dh);
+        let virtual_keyboard_state =
+            smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState::new::<Self, _>(
+                &dh,
+                |_client| true,
+            );
 
         // Advertise an output so clients know the display geometry.
         let output = Output::new(
@@ -300,6 +324,11 @@ impl State {
             keys: keybinds::Keys::load(),
             blank: blank::Blank::new(),
             osd: osd::Osd::new(),
+            layer_shell_state,
+            virtual_keyboard_state,
+            layers: layer_shell::LayerShell::new(FP5_WIDTH as f32, FP5_HEIGHT as f32),
+            touch,
+            touch_grab: None,
             ui,
             model,
             app_catalog,
@@ -418,6 +447,32 @@ impl State {
     }
 
     /// Close a toplevel by id (remove from vec, notify UI state).
+    /// Recompute layer-surface geometry + reserved area. If the area apps may
+    /// use changed, resize the toplevels to fit around it (e.g. above an OSK).
+    fn recompute_layers(&mut self) {
+        let (ow, oh) = (self.output_size.0 as f32, self.output_size.1 as f32);
+        let before = self.layers.usable;
+        let after = self.layers.recompute(ow, oh);
+        if after != before {
+            self.reconfigure_toplevels();
+        }
+    }
+
+    /// Send every app toplevel a configure at the current usable size, so apps
+    /// render within the area not covered by exclusive-zone layer surfaces.
+    fn reconfigure_toplevels(&mut self) {
+        let size = (
+            self.layers.usable.w.round() as i32,
+            self.layers.usable.h.round() as i32,
+        );
+        for slot in self.toplevels.iter().flatten() {
+            slot.surface.with_pending_state(|state| {
+                state.size = Some(size.into());
+            });
+            slot.surface.send_configure();
+        }
+    }
+
     /// Close whatever app is in front, if any. Backs the `close-app` binding.
     fn close_front_app(&mut self) {
         let Some(id) = ui_state::desired_focus(&self.ui) else {
@@ -473,6 +528,16 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+
+        // A layer surface committing may change its geometry or reserved area.
+        if self
+            .layers
+            .surfaces
+            .iter()
+            .any(|m| m.surface.wl_surface() == surface)
+        {
+            self.recompute_layers();
+        }
     }
 }
 
@@ -482,7 +547,10 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        let (w, h) = self.output_size;
+        // Size to the usable area (output minus any exclusive-zone reservations),
+        // so an app that opens while an OSK is up already fits above it.
+        let w = self.layers.usable.w.round() as i32;
+        let h = self.layers.usable.h.round() as i32;
         surface.with_pending_state(|state| {
             state.size = Some((w, h).into());
             state.decoration_mode = Some(DecorationMode::ServerSide);
@@ -586,6 +654,33 @@ delegate_shm!(State);
 delegate_data_device!(State);
 delegate_output!(State);
 delegate_xdg_decoration!(State);
+smithay::delegate_layer_shell!(State);
+smithay::delegate_virtual_keyboard_manager!(State);
+
+impl smithay::wayland::shell::wlr_layer::WlrLayerShellHandler for State {
+    fn shell_state(&mut self) -> &mut smithay::wayland::shell::wlr_layer::WlrLayerShellState {
+        &mut self.layer_shell_state
+    }
+
+    fn new_layer_surface(
+        &mut self,
+        surface: smithay::wayland::shell::wlr_layer::LayerSurface,
+        _output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
+        layer: smithay::wayland::shell::wlr_layer::Layer,
+        namespace: String,
+    ) {
+        info!(%namespace, ?layer, "new layer surface");
+        self.layers.add(surface, layer);
+        // Geometry + the initial configure happen on the next commit, once the
+        // client's anchor/size/exclusive-zone state has arrived.
+    }
+
+    fn layer_destroyed(&mut self, surface: smithay::wayland::shell::wlr_layer::LayerSurface) {
+        if self.layers.remove(&surface) {
+            self.recompute_layers();
+        }
+    }
+}
 
 /// Per-client state.
 #[derive(Default)]
@@ -882,6 +977,7 @@ fn render_frame(
         .osd
         .is_active(osd_now)
         .then(|| (state.osd.level, state.osd.muted, state.osd.alpha(osd_now)));
+    let (layers_below, layers_above) = state.layers.render_lists();
     let (renderer, mut framebuffer) = backend.bind()?;
     {
         let mut ctx = render::DrawCtx {
@@ -896,6 +992,8 @@ fn render_frame(
             skia_flip_y: false,
             frame_time,
             osd: osd_view,
+            layers_below: &layers_below,
+            layers_above: &layers_above,
         };
         render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }

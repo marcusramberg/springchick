@@ -271,18 +271,23 @@ impl App {
         let (w, h) = (self.drm.output_size.w, self.drm.output_size.h);
         match event {
             InputEvent::TouchDown { event } => {
+                use smithay::backend::input::{Event as _, TouchEvent as _};
                 let x = event.x_transformed(w) as f32;
                 let y = event.y_transformed(h) as f32;
-                crate::input_common::on_motion(&mut self.state, x, y);
-                crate::input_common::on_press(&mut self.state);
+                let slot = event.slot();
+                crate::touch::down(&mut self.state, x, y, slot, event.time_msec());
             }
             InputEvent::TouchMotion { event } => {
+                use smithay::backend::input::{Event as _, TouchEvent as _};
                 let x = event.x_transformed(w) as f32;
                 let y = event.y_transformed(h) as f32;
-                crate::input_common::on_motion(&mut self.state, x, y);
+                let slot = event.slot();
+                crate::touch::motion(&mut self.state, x, y, slot, event.time_msec());
             }
-            InputEvent::TouchUp { .. } => {
-                crate::input_common::on_release(&mut self.state);
+            InputEvent::TouchUp { event } => {
+                use smithay::backend::input::{Event as _, TouchEvent as _};
+                let slot = event.slot();
+                crate::touch::up(&mut self.state, slot, event.time_msec());
             }
             InputEvent::Keyboard { event } => {
                 crate::keybinds::on_key_event(
@@ -383,6 +388,7 @@ impl App {
             }
         };
 
+        let (layers_below, layers_above) = self.state.layers.render_lists();
         {
             let mut ctx = crate::render::DrawCtx {
                 scene: &scene,
@@ -396,6 +402,8 @@ impl App {
                 skia_flip_y: true,
                 frame_time,
                 osd: osd_view,
+                layers_below: &layers_below,
+                layers_above: &layers_above,
             };
             if let Err(e) =
                 crate::render::draw_scene(&mut self.drm.renderer, &mut framebuffer, size, &mut ctx)
