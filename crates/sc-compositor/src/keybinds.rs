@@ -161,6 +161,25 @@ pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, t
     );
 }
 
+/// Find the keycode that produces `keysym` in the active layout.
+///
+/// Used by the debug socket so injected keys travel the same path as real ones
+/// (xkb mapping, filter closure, client forwarding) rather than poking the
+/// tracker directly.
+pub fn keycode_for_keysym(state: &mut State, keysym: u32) -> Option<Keycode> {
+    let keyboard = state.keyboard.clone();
+    keyboard.with_xkb_state(state, |ctx| {
+        let xkb = ctx.xkb().lock().unwrap();
+        let layout = xkb.active_layout();
+        // evdev keycodes are xkb keycodes minus 8; 8..=255 covers the keyboard.
+        (8u32..=255).map(Keycode::from).find(|code| {
+            xkb.raw_syms_for_key_in_layout(*code, layout)
+                .iter()
+                .any(|s| s.raw() == keysym)
+        })
+    })
+}
+
 /// Fire any long presses whose threshold has passed, and reap finished
 /// commands. Called once per frame (winit) or per event-loop wake (DRM).
 pub fn poll(state: &mut State) {

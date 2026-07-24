@@ -7,7 +7,7 @@
 //! `docs/superpowers/specs/2026-07-24-debug-input-socket-design.md`.
 
 /// A parsed command from the debug socket.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DebugCmd {
     Down(f32, f32),
     Move(f32, f32),
@@ -20,6 +20,11 @@ pub enum DebugCmd {
     },
     Settle {
         timeout_ms: u32,
+    },
+    /// Press a key by xkb keysym name, holding it `hold_ms` before release.
+    Key {
+        name: String,
+        hold_ms: u32,
     },
 }
 
@@ -92,6 +97,15 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
                 dur_ms,
             }
         }
+        "key" => {
+            let name = tok
+                .next()
+                .ok_or_else(|| "parse: missing key name".to_string())?
+                .to_string();
+            let hold_ms = opt_u32(&mut tok, 0)?;
+            done(tok)?;
+            DebugCmd::Key { name, hold_ms }
+        }
         "settle" => {
             let timeout_ms = opt_u32(&mut tok, 2000)?;
             done(tok)?;
@@ -123,6 +137,13 @@ pub struct ActiveGesture {
     from: (f32, f32),
     to: (f32, f32),
     started: bool,
+    reply: SyncSender<Reply>,
+}
+
+/// A key held down across render-loop ticks, released once `hold_ms` elapses.
+pub struct ActiveKey {
+    keycode: smithay::backend::input::Keycode,
+    release_at: Instant,
     reply: SyncSender<Reply>,
 }
 
@@ -187,6 +208,11 @@ pub fn drain(state: &mut State, chan: &DebugChannel) {
         advance_gesture(state);
         return;
     }
+    // A held key likewise holds the one-in-flight slot until it is released.
+    if state.active_key.is_some() {
+        advance_key(state);
+        return;
+    }
     // A pending settle likewise holds the one-in-flight slot.
     if state.pending_settle.is_some() {
         check_settle(state);
@@ -228,6 +254,27 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
                 reply,
             });
         }
+        DebugCmd::Key { name, hold_ms } => {
+            let Some(keysym) = crate::keybinds::resolve_keysym(&name) else {
+                let _ = reply.send("err unknown-keysym\n".into());
+                return;
+            };
+            let Some(keycode) = crate::keybinds::keycode_for_keysym(state, keysym) else {
+                let _ = reply.send("err unmapped-keysym\n".into());
+                return;
+            };
+            crate::keybinds::on_key_event(
+                state,
+                keycode,
+                smithay::backend::input::KeyState::Pressed,
+                0,
+            );
+            state.active_key = Some(ActiveKey {
+                keycode,
+                release_at: Instant::now() + std::time::Duration::from_millis(hold_ms as u64),
+                reply,
+            });
+        }
         DebugCmd::Settle { timeout_ms } => {
             if idle(state) {
                 let _ = reply.send("ok\n".into());
@@ -263,6 +310,24 @@ fn advance_gesture(state: &mut State) {
     }
 }
 
+/// Release a held debug key once its hold time has passed. Long-press bindings
+/// fire from the normal per-frame poll while it is still held, exactly as they
+/// do for a real key.
+fn advance_key(state: &mut State) {
+    let key = state.active_key.take().expect("advance with key");
+    if Instant::now() < key.release_at {
+        state.active_key = Some(key);
+        return;
+    }
+    crate::keybinds::on_key_event(
+        state,
+        key.keycode,
+        smithay::backend::input::KeyState::Released,
+        0,
+    );
+    let _ = key.reply.send("ok\n".into());
+}
+
 fn check_settle(state: &mut State) {
     let (reply, deadline) = state.pending_settle.take().expect("settle pending");
     if idle(state) {
@@ -278,7 +343,7 @@ fn check_settle(state: &mut State) {
 fn idle(state: &State) -> bool {
     is_idle(
         state.ui.needs_animation(),
-        state.active_gesture.is_some(),
+        state.active_gesture.is_some() || state.active_key.is_some(),
         state.pointer_down,
     )
 }
@@ -377,6 +442,26 @@ mod tests {
                 dur_ms: 200
             })
         );
+    }
+
+    #[test]
+    fn parses_key_with_and_without_hold() {
+        assert_eq!(
+            parse_line("key XF86PowerOff", W, H),
+            Ok(DebugCmd::Key {
+                name: "XF86PowerOff".into(),
+                hold_ms: 0
+            })
+        );
+        assert_eq!(
+            parse_line("key XF86PowerOff 600", W, H),
+            Ok(DebugCmd::Key {
+                name: "XF86PowerOff".into(),
+                hold_ms: 600
+            })
+        );
+        assert!(parse_line("key", W, H).is_err());
+        assert!(parse_line("key A 600 extra", W, H).is_err());
     }
 
     #[test]
