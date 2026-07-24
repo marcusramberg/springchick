@@ -208,7 +208,8 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
             scroll,
             close,
         } => {
-            let mut card_rects = switcher::layout(cards, scroll.value, (w, h), *close);
+            let close_geo = close.map(|(t, p, _)| (t, p));
+            let mut card_rects = switcher::layout(cards, scroll.value, (w, h), close_geo);
             // Sort ascending z for back-to-front draw order.
             card_rects.sort_by_key(|r| r.z);
             Scene {
