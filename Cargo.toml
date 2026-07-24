@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/sc-anim",
   "crates/sc-input",
+  "crates/sc-keys",
   "crates/sc-shell-model",
   "crates/sc-config",
   "crates/sc-layout",
