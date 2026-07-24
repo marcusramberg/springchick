@@ -207,9 +207,11 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
             cards,
             scroll,
             close,
+            entry,
         } => {
             let close_geo = close.map(|(t, p, _)| (t, p));
-            let mut card_rects = switcher::layout(cards, scroll.value, (w, h), close_geo);
+            let mut card_rects =
+                switcher::layout(cards, scroll.value, (w, h), close_geo, entry.value);
             // Sort ascending z for back-to-front draw order.
             card_rects.sort_by_key(|r| r.z);
             Scene {
@@ -279,6 +281,7 @@ mod tests {
             cards: vec![0, 1, 2],
             scroll: sc_anim::Spring::new(0.0),
             close: None,
+            entry: sc_anim::Spring::new(1.0),
         };
         let scene = compute_scene(&state, TEST_SIZE);
         assert_eq!(scene.cards.len(), 3);

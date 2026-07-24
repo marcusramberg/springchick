@@ -84,6 +84,8 @@ pub enum UiState {
         /// `releasing` = finger let go below the commit threshold, so `Tick`
         /// decays progress back to 0. `None` at rest.
         close: Option<(ToplevelId, f32, bool)>,
+        /// Deck fan-in animation, 0→1 (cards spread out from behind the front).
+        entry: Spring,
     },
 }
 
@@ -120,9 +122,12 @@ impl UiState {
             UiState::Home { page_spring, .. } => !page_spring.is_settled(),
             UiState::Grabbing { .. } => true,
             UiState::App { .. } => false,
-            UiState::Switcher { scroll, close, .. } => {
-                !scroll.is_settled() || matches!(close, Some((_, _, true)))
-            }
+            UiState::Switcher {
+                scroll,
+                close,
+                entry,
+                ..
+            } => !scroll.is_settled() || !entry.is_settled() || matches!(close, Some((_, _, true))),
         }
     }
 }
@@ -451,8 +456,14 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 UiState::Home { page_spring, .. } => {
                     page_spring.step(dt);
                 }
-                UiState::Switcher { scroll, close, .. } => {
+                UiState::Switcher {
+                    scroll,
+                    close,
+                    entry,
+                    ..
+                } => {
                     scroll.step(dt);
+                    entry.step(dt);
                     // Decay a cancelled close-swipe back to rest.
                     if let Some((_, progress, true)) = close {
                         *progress -= dt / CLOSE_SPRINGBACK_SECS;
@@ -471,10 +482,15 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
         }
         UiEvent::EnterSwitcher { cards } => {
             info!(target: "springchick::debug", "EnterSwitcher cards={:?}", cards);
+            let mut entry = Spring::new(0.0);
+            entry.stiffness = 260.0;
+            entry.damping = 30.0;
+            entry.retarget(1.0);
             *state = UiState::Switcher {
                 cards,
                 scroll: Spring::new(0.0),
                 close: None,
+                entry,
             };
             Effect::None
         }
@@ -815,6 +831,7 @@ mod tests {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
             close: None,
+            entry: Spring::new(1.0),
         };
         // Events carry the toplevel id, not a positional index — so the render
         // z-order and the MRU order can never desync (regression: tapping the
@@ -835,6 +852,7 @@ mod tests {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
             close: None,
+            entry: Spring::new(1.0),
         };
         let eff = transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 2 });
         assert_eq!(eff, Effect::CloseToplevel { toplevel: 2 });
@@ -851,6 +869,7 @@ mod tests {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
             close: None,
+            entry: Spring::new(1.0),
         };
         transition(
             &mut state,
@@ -868,6 +887,7 @@ mod tests {
             cards: vec![9],
             scroll: Spring::new(0.0),
             close: None,
+            entry: Spring::new(1.0),
         };
         transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 9 });
         assert!(matches!(state, UiState::Home { .. }));
@@ -879,6 +899,7 @@ mod tests {
             cards: vec![1, 2],
             scroll: Spring::new(0.0),
             close: None,
+            entry: Spring::new(1.0),
         };
         transition(&mut state, UiEvent::SwitcherDismiss);
         assert!(matches!(state, UiState::Home { .. }));
@@ -890,6 +911,7 @@ mod tests {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
             close: None,
+            entry: Spring::new(1.0),
         };
         transition(&mut state, UiEvent::ToplevelClosed { toplevel: 2 });
         if let UiState::Switcher { cards, .. } = &state {
@@ -907,6 +929,7 @@ mod tests {
             cards: vec![1],
             scroll: spring,
             close: None,
+            entry: Spring::new(1.0),
         };
         assert!(state.needs_animation());
     }
@@ -917,6 +940,7 @@ mod tests {
             cards: vec![5, 3, 1],
             scroll: Spring::new(0.0),
             close: None,
+            entry: Spring::new(1.0),
         };
         assert_eq!(state.foreground_toplevel(), Some(5));
     }
