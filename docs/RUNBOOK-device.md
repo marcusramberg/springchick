@@ -17,7 +17,7 @@ seatd-over-SSH hack.
 In the device's `/etc/nixos/flake.nix`:
 
 ```nix
-inputs.springchick.url = "git+ssh://git@code.bas.es:443/marcus/springchick?ref=marcus/fanstack";
+inputs.springchick.url = "git+https://code.bas.es/marcus/springchick.git?ref=marcus/fanstack";
 inputs.springchick.inputs.nixpkgs.follows = "nixpkgs";
 # … in nixosConfigurations.dmsMobile.modules:
 inputs.springchick.nixosModules.springchick
