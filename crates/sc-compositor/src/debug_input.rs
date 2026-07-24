@@ -391,7 +391,9 @@ fn check_settle(state: &mut State) {
 fn idle(state: &State) -> bool {
     is_idle(
         state.ui.needs_animation(),
-        state.active_gesture.is_some() || state.active_key.is_some() || state.active_touch.is_some(),
+        state.active_gesture.is_some()
+            || state.active_key.is_some()
+            || state.active_touch.is_some(),
         state.pointer_down,
     )
 }
@@ -490,6 +492,17 @@ mod tests {
                 dur_ms: 200
             })
         );
+    }
+
+    #[test]
+    fn parses_touch() {
+        assert_eq!(
+            parse_line("touch 10 20", W, H),
+            Ok(DebugCmd::Touch(10.0, 20.0))
+        );
+        assert!(parse_line("touch 10", W, H).is_err());
+        assert!(parse_line("touch -1 20", W, H).is_err()); // out of bounds
+        assert!(parse_line("touch 10 20 30", W, H).is_err());
     }
 
     #[test]

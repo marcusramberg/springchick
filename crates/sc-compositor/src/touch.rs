@@ -9,9 +9,7 @@
 use crate::input_common;
 use crate::State;
 use smithay::backend::input::TouchSlot;
-use smithay::input::pointer::{
-    ButtonEvent, MotionEvent as PointerMotionEvent,
-};
+use smithay::input::pointer::{ButtonEvent, MotionEvent as PointerMotionEvent};
 use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Point, SERIAL_COUNTER};
@@ -80,7 +78,7 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
                 state,
                 &ButtonEvent {
                     button,
-                    state: smithay::backend::input::ButtonState::Pressed.into(),
+                    state: smithay::backend::input::ButtonState::Pressed,
                     serial: SERIAL_COUNTER.next_serial(),
                     time,
                 },
@@ -97,7 +95,7 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
                 state,
                 &ButtonEvent {
                     button,
-                    state: smithay::backend::input::ButtonState::Released.into(),
+                    state: smithay::backend::input::ButtonState::Released,
                     serial: SERIAL_COUNTER.next_serial(),
                     time,
                 },
@@ -112,9 +110,7 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
 
 /// A finger touched down at output-pixel `(x, y)`.
 pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
-    if let Some(m) = state.layers.hit_test(x, y) {
-        let surface = m.surface.wl_surface().clone();
-        let origin = (m.rect.x as f64, m.rect.y as f64);
+    if let Some((surface, origin)) = surface_under(state, x, y) {
         state.touch_grab = Some(surface.clone());
         let touch = state.touch.clone();
         let event = DownEvent {
@@ -127,7 +123,7 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
         touch.frame(state);
         return;
     }
-    // Not on a layer surface — drive the gesture system.
+    // Not on a client surface — drive the gesture system.
     input_common::on_motion(state, x, y);
     input_common::on_press(state);
 }
