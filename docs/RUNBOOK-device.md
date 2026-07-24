@@ -1,7 +1,36 @@
 # Running springchick on the Fairphone 5 (M4 device backend)
 
-Device: `ssh dmsmobile` — Mobile NixOS, Phosh on VT1, logind/`seat0`. The repo is
-checked out at `~/Source/springchick` and builds happen on-device.
+Device: `ssh dmsmobile` — Mobile NixOS, logind/`seat0`, greeter + default session are now
+`dms-greeter` + niri (this doc's older Phosh/greetd references still describe the same
+greetd-holds-DRM-master situation). The repo is checked out at `~/Source/springchick` and
+builds happen on-device.
+
+## Installing springchick as a login session
+
+The flake exposes `packages.springchick` and `nixosModules.springchick`. The package ships
+`bin/springchick`, `bin/springchick-session` (same binary with `SPRINGCHICK_BACKEND=drm` +
+`XDG_SESSION_TYPE=wayland`), and `share/wayland-sessions/springchick.desktop`; the module
+adds it to `environment.systemPackages` and `services.displayManager.sessionPackages`, so
+the greeter lists "springchick" as a session and hands it a real logind seat — no
+seatd-over-SSH hack.
+
+In the device's `/etc/nixos/flake.nix`:
+
+```nix
+inputs.springchick.url = "git+ssh://git@code.bas.es:443/marcus/springchick?ref=marcus/fanstack";
+inputs.springchick.inputs.nixpkgs.follows = "nixpkgs";
+# … in nixosConfigurations.dmsMobile.modules:
+inputs.springchick.nixosModules.springchick
+{ programs.springchick.enable = true; }
+```
+
+Then `sudo nixos-rebuild switch --flake /etc/nixos#dmsMobile`, log out, and pick springchick
+in the greeter. `defaultSession` stays niri, so a bad build is one logout away from recovery.
+
+Skia in the Nix build: `skia-bindings` would fetch prebuilt Skia over the network, which the
+sandbox forbids, so `nix/package.nix` pins that archive with `fetchurl` and passes it via
+`SKIA_BINARIES_URL=file://…`. Bumping `skia-safe` means updating the version, rust-skia repo
+hash, feature string, and both target hashes there.
 
 ## Seat access: seatd over SSH (no physical login)
 

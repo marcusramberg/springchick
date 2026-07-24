@@ -12,16 +12,42 @@
       rust-overlay,
       flake-utils,
     }:
-    flake-utils.lib.eachDefaultSystem (
+    let
+      overlay = final: prev: {
+        springchick = final.callPackage ./nix/package.nix {
+          src = self;
+          rustPlatform = final.makeRustPlatform {
+            cargo = final.springchickRustToolchain;
+            rustc = final.springchickRustToolchain;
+          };
+        };
+        springchickRustToolchain = final.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+      };
+    in
+    {
+      overlays.default = nixpkgs.lib.composeManyExtensions [
+        rust-overlay.overlays.default
+        overlay
+      ];
+      nixosModules.springchick = import ./nix/module.nix { inherit self; };
+      nixosModules.default = self.nixosModules.springchick;
+    }
+    // flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ rust-overlay.overlays.default ];
+          overlays = [
+            rust-overlay.overlays.default
+            overlay
+          ];
         };
         rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
       in
       {
+        packages.springchick = pkgs.springchick;
+        packages.default = pkgs.springchick;
+
         devShells.default = pkgs.mkShell {
           buildInputs = [
             rust
