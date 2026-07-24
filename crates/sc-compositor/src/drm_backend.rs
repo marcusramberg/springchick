@@ -240,6 +240,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         crate::keybinds::poll(&mut app.state);
         app.state.sync_keyboard_focus();
         app.apply_blanking();
+        // The OSD fades over time with no other event driving frames; keep
+        // rendering while it is visible. `render` early-returns on pending_flip,
+        // so this tracks vblank cadence rather than the 2ms wake.
+        if app.state.osd.is_active(Instant::now()) {
+            app.render();
+        }
     })?;
 
     Ok(())
@@ -350,6 +356,14 @@ impl App {
                 .map(|tl| tl.surface.wl_surface().clone())
         });
         let frame_time = self.state.start_time.elapsed().as_millis() as u32;
+        let osd_now = Instant::now();
+        let osd_view = self.state.osd.is_active(osd_now).then(|| {
+            (
+                self.state.osd.level,
+                self.state.osd.muted,
+                self.state.osd.alpha(osd_now),
+            )
+        });
         let size = self.drm.output_size;
         let damage = Rectangle::from_size(size);
 
@@ -381,6 +395,7 @@ impl App {
                 transform: self.drm.transform,
                 skia_flip_y: true,
                 frame_time,
+                osd: osd_view,
             };
             if let Err(e) =
                 crate::render::draw_scene(&mut self.drm.renderer, &mut framebuffer, size, &mut ctx)

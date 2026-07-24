@@ -54,6 +54,8 @@ pub struct DrawCtx<'a> {
     pub skia_flip_y: bool,
     /// Time in ms for frame callbacks.
     pub frame_time: u32,
+    /// Volume OSD to overlay: `(level, muted, alpha)`. `None` when inactive.
+    pub osd: Option<(f32, bool, f32)>,
 }
 
 /// Execute the full two-pass scene draw against an already-bound framebuffer.
@@ -208,6 +210,12 @@ pub fn draw_scene(
 
     // Always draw the bar on top.
     ctx.skia.draw_bar_overlay(size.w, size.h, ctx.skia_flip_y);
+
+    // Volume OSD sits above everything, including a fullscreen app.
+    if let Some((level, muted, alpha)) = ctx.osd {
+        ctx.skia
+            .draw_osd_overlay(size.w, size.h, level, muted, alpha, ctx.skia_flip_y);
+    }
 
     // Send frame callbacks. The foreground app surface always gets one; in the
     // switcher, every card surface must also be driven, otherwise backgrounded

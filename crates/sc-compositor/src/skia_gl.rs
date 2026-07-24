@@ -285,8 +285,16 @@ impl SkiaGl {
         }
     }
 
-    /// Draw bar overlay on top of the app (return-home affordance).
-    pub fn draw_bar_overlay(&mut self, width: i32, height: i32, flip_y: bool) {
+    /// Acquire the cached GL-backed Skia surface and run `f` against its canvas,
+    /// applying the y-flip if needed and flushing afterward. Shared by the
+    /// overlay draws so they don't each repeat the surface-acquire dance.
+    fn with_overlay_canvas<F: FnOnce(&skia_safe::Canvas)>(
+        &mut self,
+        width: i32,
+        height: i32,
+        flip_y: bool,
+        f: F,
+    ) {
         if width <= 0 || height <= 0 {
             return;
         }
@@ -294,10 +302,6 @@ impl SkiaGl {
             return;
         }
 
-        let model = ShellModel::default();
-        let layout = sc_layout::compute(width as f32, height as f32, 0, &model);
-
-        // Acquire surface.
         let fboid = self.current_fbo();
         let context = match self.context.as_mut() {
             Some(c) => c,
@@ -343,12 +347,98 @@ impl SkiaGl {
             canvas.translate((0.0, height as f32));
             canvas.scale((1.0, -1.0));
         }
-        draw_bar(canvas, &layout);
+        f(canvas);
         canvas.restore();
 
         if let Some(ctx) = self.context.as_mut() {
             ctx.flush_and_submit();
         }
+    }
+
+    /// Draw bar overlay on top of the app (return-home affordance).
+    pub fn draw_bar_overlay(&mut self, width: i32, height: i32, flip_y: bool) {
+        let model = ShellModel::default();
+        let layout = sc_layout::compute(width as f32, height as f32, 0, &model);
+        self.with_overlay_canvas(width, height, flip_y, |canvas| draw_bar(canvas, &layout));
+    }
+
+    /// Draw the volume OSD: a vertical bar on the right edge, in the top third,
+    /// next to the physical rockers. `level` is 0.0..=~1.5 (1.0 = 100%);
+    /// `alpha` fades it in/out.
+    pub fn draw_osd_overlay(
+        &mut self,
+        width: i32,
+        height: i32,
+        level: f32,
+        muted: bool,
+        alpha: f32,
+        flip_y: bool,
+    ) {
+        if alpha <= 0.0 {
+            return;
+        }
+        self.with_overlay_canvas(width, height, flip_y, |canvas| {
+            draw_volume_osd(canvas, width as f32, height as f32, level, muted, alpha);
+        });
+    }
+}
+
+/// Draw the volume OSD track + fill. Geometry is a slim vertical pill hugging
+/// the right edge, vertically centered in the top third of the screen.
+fn draw_volume_osd(
+    canvas: &skia_safe::Canvas,
+    width: f32,
+    height: f32,
+    level: f32,
+    muted: bool,
+    alpha: f32,
+) {
+    let a = |x: f32| (x * alpha).round().clamp(0.0, 255.0) as u8;
+
+    let track_w = (width * 0.020).clamp(10.0, 22.0);
+    let track_h = height * 0.24;
+    let margin = width * 0.03;
+    let x = width - margin - track_w;
+    let y = height * 0.10; // top third, a little below the top edge
+    let radius = track_w / 2.0;
+
+    // Track (dim background).
+    let mut track = Paint::default();
+    track.set_anti_alias(true);
+    track.set_color(Color::from_argb(a(90.0), 40, 40, 40));
+    let track_rect = Rect::new(x, y, x + track_w, y + track_h);
+    canvas.draw_rrect(RRect::new_rect_xy(track_rect, radius, radius), &track);
+
+    // Fill grows from the bottom. Over 100% is tinted; muted is greyed.
+    let frac = level.clamp(0.0, 1.0);
+    let fill_h = track_h * frac;
+    let fill_top = y + track_h - fill_h;
+    let (r, g, b) = if muted {
+        (110, 110, 120)
+    } else if level > 1.0 {
+        (255, 170, 60) // overdriven past 100%
+    } else {
+        (255, 255, 255)
+    };
+    let mut fill = Paint::default();
+    fill.set_anti_alias(true);
+    fill.set_color(Color::from_argb(a(235.0), r, g, b));
+    if fill_h > 0.5 {
+        let fill_rect = Rect::new(x, fill_top, x + track_w, y + track_h);
+        canvas.draw_rrect(RRect::new_rect_xy(fill_rect, radius, radius), &fill);
+    }
+
+    // A slash across the pill signals muted.
+    if muted {
+        let mut slash = Paint::default();
+        slash.set_anti_alias(true);
+        slash.set_color(Color::from_argb(a(235.0), 235, 90, 90));
+        slash.set_stroke_width(track_w * 0.22);
+        slash.set_stroke(true);
+        let cx = x + track_w / 2.0;
+        let cy = y + track_h / 2.0;
+        let r = track_w * 1.1;
+        canvas.draw_line((cx - r, cy - r), (cx + r, cy + r), &slash);
     }
 }
 

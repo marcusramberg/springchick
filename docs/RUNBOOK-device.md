@@ -39,17 +39,17 @@ overridable with `SPRINGCHICK_KEYBINDS=<path>`. A missing file means the compile
 defaults apply; nothing is written to disk. Loaded once at startup — edits need a restart.
 
 ```toml
-long_press_ms = 500          # optional, global
+long_press_ms = 800          # optional, global
 
 [[binding]]
 key = "XF86AudioRaiseVolume" # xkb keysym name
 press = "short"              # "short" | "long"
-command = "wpctl set-volume @DEFAULT_SINK@ 5%+"
+action = "volume-up"         # internal action; mutually exclusive with `command`
 
 [[binding]]
 key = "XF86AudioRaiseVolume"
 press = "long"
-action = "close-app"         # internal action; mutually exclusive with `command`
+action = "close-app"
 
 [[binding]]
 key = "Return"
@@ -58,23 +58,34 @@ press = "short"
 command = "foot"
 ```
 
-`command` runs through `sh -c`, so pipes and quoting work as written. Actions are
-`close-app` (close the front toplevel), `home` (return to the home screen) and
-`toggle-display` (blank/unblank the panel — DRM backend only; a no-op under winit).
+`command` runs through `sh -c`, so pipes and quoting work as written. Actions:
+
+| action | effect |
+|---|---|
+| `close-app` | close the front toplevel |
+| `home` | return to the home screen |
+| `toggle-display` | blank/unblank the panel via DPMS — DRM only, no-op under winit |
+| `volume-up` / `volume-down` | `wpctl` step the default sink ±5% and show the OSD |
+| `volume-mute` | `wpctl` toggle mute and show the OSD |
+
+The volume actions run `wpctl` (PipeWire), read the level back, and show a vertical OSD bar
+on the right edge (top third, next to the rockers): white fill for the level, amber past
+100%, greyed with a red slash when muted. It fades after ~1.5s.
 
 Defaults, mirroring the niri bindings this replaced:
 
 | key | short | long |
 |---|---|---|
-| `XF86AudioRaiseVolume` | `wpctl` volume up | action `close-app` |
-| `XF86AudioLowerVolume` | `wpctl` volume down | `pkill -SIGRTMIN -f wvkbd-mobintl` |
+| `XF86AudioRaiseVolume` | action `volume-up` | action `close-app` |
+| `XF86AudioLowerVolume` | action `volume-down` | `pkill -SIGRTMIN -f wvkbd-mobintl` |
 | `XF86PowerOff` | action `toggle-display` | `systemctl poweroff` |
 | `Escape` | action `home` | — |
 
-Timing — a long press fires while the key is **still held**, and suppresses the short one:
+Timing — a long press fires while the key is **still held**, and suppresses the short one.
+The default threshold is 800ms so a volume nudge does not slip into the long action:
 
 ```
-press ───┬─────────────── 500ms ───┬──────────── release
+press ───┬─────────────── 800ms ───┬──────────── release
          │                         │
     short armed              long FIRES here
                              short suppressed
@@ -91,7 +102,7 @@ Two behaviors worth knowing before you debug something surprising:
 
 Bind power-long to `logger -t springchick poweroff-would-fire` first and watch
 `journalctl -f -t springchick` to confirm the timing before trusting it with the real
-`systemctl poweroff` — a 500ms slip otherwise powers the phone off mid-test.
+`systemctl poweroff` — an 800ms slip otherwise powers the phone off mid-test.
 
 Headless testing without hardware: set `SPRINGCHICK_DEBUG_SOCK=<short path>` and send
 `key <keysym-name> [hold_ms]` (e.g. `key XF86PowerOff 700`). Injected keys travel the real
