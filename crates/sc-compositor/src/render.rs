@@ -56,6 +56,36 @@ pub struct DrawCtx<'a> {
     pub frame_time: u32,
     /// Volume OSD to overlay: `(level, muted, alpha)`. `None` when inactive.
     pub osd: Option<(f32, bool, f32)>,
+    /// Layer-shell surfaces below the app (background/bottom): `(surface, origin)`.
+    pub layers_below: &'a [(WlSurface, (i32, i32))],
+    /// Layer-shell surfaces above the app (top/overlay): `(surface, origin)`.
+    pub layers_above: &'a [(WlSurface, (i32, i32))],
+}
+
+/// Render a layer surface's tree at `origin` in its own pass. Used for both the
+/// below-app and above-app layers.
+fn draw_layer(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    transform: Transform,
+    surface: &WlSurface,
+    origin: (i32, i32),
+) -> Result<(), SwapBuffersError> {
+    let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+        render_elements_from_surface_tree(renderer, surface, origin, 1.0, 1.0, Kind::Unspecified);
+    if elements.is_empty() {
+        return Ok(());
+    }
+    let damage = Rectangle::from_size(size);
+    let mut frame = renderer
+        .render(framebuffer, size, transform)
+        .map_err(SwapBuffersError::from)?;
+    if let Err(e) = draw_render_elements(&mut frame, 1.0, &elements, &[damage]) {
+        warn!(?e, "failed to draw layer surface");
+    }
+    let _sync = frame.finish().map_err(SwapBuffersError::from)?;
+    Ok(())
 }
 
 /// Execute the full two-pass scene draw against an already-bound framebuffer.
@@ -81,6 +111,24 @@ pub fn draw_scene(
         Vec::new()
     };
 
+    // Layer-shell surface elements, pre-collected before any render pass (they
+    // borrow the renderer). Each is positioned at its computed rect origin.
+    let below_elements: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> = ctx
+        .layers_below
+        .iter()
+        .map(|(surface, origin)| {
+            render_elements_from_surface_tree(
+                renderer,
+                surface,
+                *origin,
+                1.0,
+                1.0,
+                Kind::Unspecified,
+            )
+        })
+        .filter(|e| !e.is_empty())
+        .collect();
+
     // Pass 1: clear background; draw the app here if fullscreen (no home behind).
     {
         let mut frame = renderer
@@ -89,6 +137,13 @@ pub fn draw_scene(
         frame
             .clear(CLEAR_COLOR, &[damage])
             .map_err(SwapBuffersError::from)?;
+
+        // Background/bottom layer surfaces sit behind the app.
+        for elements in &below_elements {
+            if let Err(e) = draw_render_elements(&mut frame, 1.0, elements, &[damage]) {
+                warn!(?e, "failed to draw background layer surface");
+            }
+        }
 
         if is_fullscreen && !base_elements.is_empty() {
             if let Err(e) = draw_render_elements(&mut frame, 1.0, &base_elements, &[damage]) {
@@ -208,6 +263,12 @@ pub fn draw_scene(
         }
     }
 
+    // Top/overlay layer surfaces (e.g. the on-screen keyboard) sit above the
+    // app but below springchick's own chrome.
+    for (surface, origin) in ctx.layers_above {
+        draw_layer(renderer, framebuffer, size, ctx.transform, surface, *origin)?;
+    }
+
     // Always draw the bar on top.
     ctx.skia.draw_bar_overlay(size.w, size.h, ctx.skia_flip_y);
 
@@ -228,6 +289,10 @@ pub fn draw_scene(
         if let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) {
             send_frames_surface_tree(tl.surface.wl_surface(), ctx.frame_time);
         }
+    }
+    // Layer surfaces (e.g. wvkbd) throttle to frame callbacks too.
+    for (surface, _) in ctx.layers_below.iter().chain(ctx.layers_above) {
+        send_frames_surface_tree(surface, ctx.frame_time);
     }
 
     Ok(())
