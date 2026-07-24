@@ -18,6 +18,7 @@ mod skia_gl;
 mod switcher;
 mod touch;
 pub mod ui_state;
+mod virtual_keyboard;
 
 use app_history::AppHistory;
 use backend::{FP5_HEIGHT, FP5_WIDTH};
@@ -171,11 +172,6 @@ struct State {
     osd: osd::Osd,
     /// wlr-layer-shell protocol state.
     layer_shell_state: smithay::wayland::shell::wlr_layer::WlrLayerShellState,
-    /// Virtual-keyboard protocol state (OSK key injection). Held to keep the
-    /// global registered; injected keys are delivered by smithay to the focused
-    /// keyboard client directly.
-    #[allow(dead_code)]
-    virtual_keyboard_state: smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState,
     /// Tracked layer surfaces + reserved-area bookkeeping.
     layers: layer_shell::LayerShell,
     /// Seat touch handle, for forwarding taps to layer surfaces.
@@ -259,11 +255,9 @@ impl State {
 
         let layer_shell_state =
             smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<Self>(&dh);
-        let virtual_keyboard_state =
-            smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState::new::<Self, _>(
-                &dh,
-                |_client| true,
-            );
+        // Custom virtual-keyboard handling (see virtual_keyboard.rs for why we
+        // don't use smithay's).
+        virtual_keyboard::init(&dh);
 
         // Advertise an output so clients know the display geometry.
         let output = Output::new(
@@ -332,7 +326,6 @@ impl State {
             blank: blank::Blank::new(),
             osd: osd::Osd::new(),
             layer_shell_state,
-            virtual_keyboard_state,
             layers: layer_shell::LayerShell::new(FP5_WIDTH as f32, FP5_HEIGHT as f32),
             touch,
             touch_grab: None,
@@ -606,7 +599,18 @@ impl XdgShellHandler for State {
         self.unregister_toplevel(surface.wl_surface());
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        // Send the initial configure. wvkbd (and other layer-shell OSKs) create
+        // an xdg_popup child and ignore ALL input until that popup is
+        // configured, so without this the on-screen keyboard never registers a
+        // tap.
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+        });
+        if let Err(e) = surface.send_configure() {
+            warn!(?e, "failed to configure popup");
+        }
+    }
 
     fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
 
@@ -696,7 +700,6 @@ delegate_data_device!(State);
 delegate_output!(State);
 delegate_xdg_decoration!(State);
 smithay::delegate_layer_shell!(State);
-smithay::delegate_virtual_keyboard_manager!(State);
 
 impl smithay::wayland::shell::wlr_layer::WlrLayerShellHandler for State {
     fn shell_state(&mut self) -> &mut smithay::wayland::shell::wlr_layer::WlrLayerShellState {
