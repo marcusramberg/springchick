@@ -1743,10 +1743,12 @@ dependencies = [
  "sc-config",
  "sc-icons",
  "sc-input",
+ "sc-keys",
  "sc-layout",
  "sc-shell-model",
  "skia-safe",
  "smithay",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

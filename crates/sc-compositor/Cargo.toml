@@ -15,6 +15,7 @@ sc-shell-model = { path = "../sc-shell-model" }
 sc-config = { path = "../sc-config" }
 sc-layout = { path = "../sc-layout" }
 sc-icons = { path = "../sc-icons" }
+sc-keys = { path = "../sc-keys" }
 
 smithay = { version = "0.7", default-features = false, features = [
   "backend_winit",
@@ -40,3 +41,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 skia-safe = { version = "0.99", features = ["gl"] }
 calloop = "0.14"
+
+[dev-dependencies]
+tempfile = "3"
