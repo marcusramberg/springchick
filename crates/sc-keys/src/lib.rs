@@ -5,5 +5,7 @@
 //! keysym names and supplies `Instant`s, so every rule here is unit-testable.
 
 pub mod config;
+pub mod state;
 
 pub use config::{Action, Binding, Config, ModMask, PressKind};
+pub use state::{KeyBindings, PressOutcome, PressTracker};
