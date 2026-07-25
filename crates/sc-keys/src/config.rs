@@ -74,39 +74,40 @@ pub const DEFAULT_LONG_PRESS_MS: u64 = 800;
 /// Shipped defaults, mirroring the user's niri bindings. Defined as TOML so the
 /// documented example and the built-in behavior cannot drift apart.
 pub const DEFAULT_TOML: &str = r#"
+[keybinds]
 long_press_ms = 800
 
-[[binding]]
+[[keybinds.binding]]
 key = "XF86AudioRaiseVolume"
 press = "short"
 action = "volume-up"
 
-[[binding]]
+[[keybinds.binding]]
 key = "XF86AudioRaiseVolume"
 press = "long"
 action = "close-app"
 
-[[binding]]
+[[keybinds.binding]]
 key = "XF86AudioLowerVolume"
 press = "short"
 action = "volume-down"
 
-[[binding]]
+[[keybinds.binding]]
 key = "XF86AudioLowerVolume"
 press = "long"
 command = "pkill -SIGRTMIN -f wvkbd-mobintl"
 
-[[binding]]
+[[keybinds.binding]]
 key = "XF86PowerOff"
 press = "short"
 action = "toggle-display"
 
-[[binding]]
+[[keybinds.binding]]
 key = "XF86PowerOff"
 press = "long"
 command = "systemctl poweroff"
 
-[[binding]]
+[[keybinds.binding]]
 key = "Escape"
 press = "short"
 action = "home"
@@ -114,11 +115,19 @@ action = "home"
 
 /// Serde mirror of the on-disk shape, kept separate so the public types stay
 /// free of `Option` soup and validation lives in one place.
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct RawConfig {
     long_press_ms: Option<u64>,
     #[serde(default)]
     binding: Vec<RawBinding>,
+}
+
+/// Top-level shape of `config.toml`. Other sections (display, gestures, ...)
+/// may be added here later; unknown top-level keys are ignored by serde's
+/// default behavior.
+#[derive(Deserialize, Default)]
+struct RawConfigFile {
+    keybinds: Option<RawConfig>,
 }
 
 #[derive(Deserialize)]
@@ -141,16 +150,17 @@ impl Config {
     /// yields an empty config; use [`Config::parse_or_defaults`] to fall back to
     /// the shipped bindings instead.
     pub fn parse(text: &str) -> Config {
-        let raw: RawConfig = match toml::from_str(text) {
-            Ok(raw) => raw,
+        let file: RawConfigFile = match toml::from_str(text) {
+            Ok(file) => file,
             Err(e) => {
-                warn!(%e, "keybindings config is not valid TOML");
+                warn!(%e, "config is not valid TOML");
                 return Config {
                     long_press_ms: DEFAULT_LONG_PRESS_MS,
                     bindings: Vec::new(),
                 };
             }
         };
+        let raw = file.keybinds.unwrap_or_default();
 
         let bindings = raw.binding.into_iter().filter_map(convert).collect();
         Config {
@@ -162,10 +172,10 @@ impl Config {
     /// Like [`Config::parse`], but an unparseable file leaves the defaults in
     /// place so the hardware buttons keep working.
     pub fn parse_or_defaults(text: &str) -> Config {
-        match toml::from_str::<RawConfig>(text) {
+        match toml::from_str::<RawConfigFile>(text) {
             Ok(_) => Config::parse(text),
             Err(e) => {
-                warn!(%e, "keybindings config is not valid TOML; using defaults");
+                warn!(%e, "config is not valid TOML; using defaults");
                 Config::defaults()
             }
         }
@@ -238,7 +248,8 @@ mod tests {
     fn parses_a_command_binding() {
         let cfg = Config::parse(
             r#"
-            [[binding]]
+            [keybinds]
+            [[keybinds.binding]]
             key = "XF86AudioRaiseVolume"
             press = "short"
             command = "wpctl set-volume @DEFAULT_SINK@ 5%+"
@@ -260,7 +271,8 @@ mod tests {
     fn parses_an_internal_action_with_mods() {
         let cfg = Config::parse(
             r#"
-            [[binding]]
+            [keybinds]
+            [[keybinds.binding]]
             key = "Return"
             mods = ["Super", "Shift"]
             press = "long"
@@ -277,27 +289,28 @@ mod tests {
     fn skips_invalid_entries_without_failing() {
         let cfg = Config::parse(
             r#"
-            [[binding]]
+            [keybinds]
+            [[keybinds.binding]]
             key = "A"
             press = "sideways"
             command = "true"
 
-            [[binding]]
+            [[keybinds.binding]]
             key = "B"
             press = "short"
 
-            [[binding]]
+            [[keybinds.binding]]
             key = "C"
             press = "short"
             command = "true"
             action = "home"
 
-            [[binding]]
+            [[keybinds.binding]]
             key = "D"
             press = "short"
             action = "not-a-real-action"
 
-            [[binding]]
+            [[keybinds.binding]]
             key = "E"
             press = "short"
             command = "true"
@@ -321,8 +334,15 @@ mod tests {
 
     #[test]
     fn custom_long_press_ms_is_read() {
-        let cfg = Config::parse("long_press_ms = 800\n");
+        let cfg = Config::parse("[keybinds]\nlong_press_ms = 800\n");
         assert_eq!(cfg.long_press_ms, 800);
+    }
+
+    #[test]
+    fn missing_keybinds_table_yields_empty_not_defaults() {
+        let cfg = Config::parse("");
+        assert_eq!(cfg.long_press_ms, DEFAULT_LONG_PRESS_MS);
+        assert!(cfg.bindings.is_empty());
     }
 
     #[test]
@@ -374,17 +394,18 @@ mod tests {
     fn parses_volume_actions() {
         let cfg = Config::parse(
             r#"
-            [[binding]]
+            [keybinds]
+            [[keybinds.binding]]
             key = "XF86AudioRaiseVolume"
             press = "short"
             action = "volume-up"
 
-            [[binding]]
+            [[keybinds.binding]]
             key = "XF86AudioLowerVolume"
             press = "short"
             action = "volume-down"
 
-            [[binding]]
+            [[keybinds.binding]]
             key = "XF86AudioMute"
             press = "short"
             action = "volume-mute"

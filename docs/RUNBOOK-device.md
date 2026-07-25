@@ -32,26 +32,36 @@ sandbox forbids, so `nix/package.nix` pins that archive with `fetchurl` and pass
 `SKIA_BINARIES_URL=file://…`. Bumping `skia-safe` means updating the version, rust-skia repo
 hash, feature string, and both target hashes there.
 
-## Keybindings
+## Config
 
-Config: `$XDG_CONFIG_HOME/springchick/keybindings.toml` (→ `~/.config/springchick/…`),
-overridable with `SPRINGCHICK_KEYBINDS=<path>`. A missing file means the compiled-in
-defaults apply; nothing is written to disk. Loaded once at startup — edits need a restart.
+Config file: `$XDG_CONFIG_HOME/springchick/config.toml` (→ `~/.config/springchick/…`),
+then `/etc/springchick/config.toml`, overridable with `SPRINGCHICK_CONFIG=<path>` (strict
+override — no fallthrough to the other tiers if that file is missing). A missing or unreadable
+file falls through to the next tier (or to compiled-in defaults if none remain); a file that
+exists and is readable but fails to parse as TOML uses the compiled-in defaults immediately,
+without trying further tiers. Nothing is written to disk. Loaded once at startup — edits need
+a restart.
+
+On NixOS, `programs.springchick.config` writes `/etc/springchick/config.toml` from a raw TOML
+string (`null` by default — leaves it unmanaged).
+
+### Keybinds
 
 ```toml
+[keybinds]
 long_press_ms = 800          # optional, global
 
-[[binding]]
+[[keybinds.binding]]
 key = "XF86AudioRaiseVolume" # xkb keysym name
 press = "short"              # "short" | "long"
 action = "volume-up"         # internal action; mutually exclusive with `command`
 
-[[binding]]
+[[keybinds.binding]]
 key = "XF86AudioRaiseVolume"
 press = "long"
 action = "close-app"
 
-[[binding]]
+[[keybinds.binding]]
 key = "Return"
 mods = ["Super"]             # optional; exact match on Ctrl/Alt/Shift/Super
 press = "short"
