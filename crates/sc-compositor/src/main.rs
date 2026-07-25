@@ -287,7 +287,7 @@ impl State {
         output.change_current_state(
             Some(mode),
             None,
-            Some(smithay::output::Scale::Integer(1)),
+            Some(smithay::output::Scale::Integer(keybinds::load_dpi() as i32)),
             None,
         );
         output.set_preferred(mode);

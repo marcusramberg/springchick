@@ -25,7 +25,10 @@ pub struct Keys {
 impl Keys {
     /// Load the config from disk (or defaults) and resolve it.
     pub fn load() -> Keys {
-        let config = load_config();
+        Keys::from_config(load_config())
+    }
+
+    fn from_config(config: Config) -> Keys {
         let long_press = Duration::from_millis(config.long_press_ms);
         let bindings = resolve(config);
         info!(
@@ -38,6 +41,13 @@ impl Keys {
             children: Vec::new(),
         }
     }
+}
+
+/// The output scale (`[main].dpi` in `config.toml`) to advertise to clients.
+/// Reads the same config file as [`Keys::load`]; called separately because
+/// the output is created before `Keys` is constructed.
+pub fn load_dpi() -> u32 {
+    load_config().dpi
 }
 
 /// Config lookup: `SPRINGCHICK_CONFIG` is a strict override — if set, it is the
