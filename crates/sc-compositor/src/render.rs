@@ -20,13 +20,13 @@ use smithay::backend::renderer::element::surface::{
 use smithay::backend::renderer::element::utils::{
     Relocate, RelocateRenderElement, RescaleRenderElement,
 };
-use smithay::backend::renderer::element::Kind;
+use smithay::backend::renderer::element::{Element, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::backend::renderer::utils::draw_render_elements;
+use smithay::backend::renderer::utils::{draw_render_elements, CommitCounter};
 use smithay::backend::renderer::{Color32F, Frame, Renderer, RendererSuper};
 use smithay::backend::SwapBuffersError;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Physical, Point, Rectangle, Size, Transform};
+use smithay::utils::{Physical, Point, Rectangle, Scale, Size, Transform};
 use smithay::wayland::compositor::{
     with_surface_tree_downward, SurfaceAttributes, TraversalAction,
 };
@@ -68,6 +68,15 @@ pub struct DrawCtx<'a> {
     pub bar_alpha: f32,
     /// App id of the icon currently pressed on Home (draws a press highlight).
     pub pressed_app: Option<&'a str>,
+    /// When true, the frame is a "quiet fullscreen app" (nothing but the app
+    /// surface can have changed) and `draw_scene` may return a narrowed KMS
+    /// page-flip damage hint instead of the full rect. The backend computes
+    /// this; when false the hint is always the full output.
+    pub report_partial_damage: bool,
+    /// Per-app commit cursor for `report_partial_damage`. Holds the app surface
+    /// and the `CommitCounter` last presented for it, so `damage_since` returns
+    /// only what changed since. Reset (→ full damage) when the surface differs.
+    pub last_present: &'a mut Option<(WlSurface, CommitCounter)>,
 }
 
 /// Render a layer surface's tree at `origin` in its own pass. Used for both the
@@ -103,7 +112,7 @@ pub fn draw_scene(
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
     size: Size<i32, Physical>,
     ctx: &mut DrawCtx<'_>,
-) -> Result<(), SwapBuffersError> {
+) -> Result<Vec<Rectangle<i32, Physical>>, SwapBuffersError> {
     let damage = Rectangle::from_size(size);
     let scene = ctx.scene;
 
@@ -145,6 +154,38 @@ pub fn draw_scene(
         .collect();
 
     let app_fills_screen = is_fullscreen && !base_elements.is_empty();
+
+    // KMS page-flip damage hint. Default: the whole output (always correct —
+    // drivers without FB_DAMAGE_CLIPS ignore it anyway). Narrow it only when the
+    // backend says this is a quiet fullscreen app AND the app is a single render
+    // element at the origin, so element-space damage equals output-space damage.
+    // Anything else (subsurfaces, animation, chrome) stays full to avoid leaving
+    // stale pixels the driver would skip.
+    let full_damage = Rectangle::from_size(size);
+    let flip_damage: Vec<Rectangle<i32, Physical>> = if ctx.report_partial_damage
+        && app_fills_screen
+        && base_elements.len() == 1
+    {
+        let app_wl = ctx.app_surface.expect("app_fills_screen implies app_surface");
+        let elem = &base_elements[0];
+        let same_surface = ctx
+            .last_present
+            .as_ref()
+            .is_some_and(|(s, _)| s == app_wl);
+        let since = same_surface
+            .then(|| ctx.last_present.as_ref().map(|(_, c)| *c))
+            .flatten();
+        let damage = elem.damage_since(Scale::from(ctx.app_scale), since);
+        *ctx.last_present = Some((app_wl.clone(), elem.current_commit()));
+        // First frame on a freshly-focused surface has no baseline: repaint all.
+        if same_surface {
+            damage.to_vec()
+        } else {
+            vec![full_damage]
+        }
+    } else {
+        vec![full_damage]
+    };
 
     // Pass 1: clear background; draw the app here if fullscreen (no home behind).
     {
@@ -322,7 +363,7 @@ pub fn draw_scene(
         send_frames_surface_tree(surface, ctx.frame_time);
     }
 
-    Ok(())
+    Ok(flip_damage)
 }
 
 /// Send frame callbacks to all surfaces in the tree.
