@@ -8,16 +8,26 @@ Keybindings config today (`crates/sc-keys/src/config.rs`, `crates/sc-compositor/
 
 ### Rust: add `/etc` as a lookup tier
 
-`crates/sc-compositor/src/keybinds.rs` — `load_config()` search order becomes:
+`SPRINGCHICK_KEYBINDS` keeps its current semantics unchanged: if set, it is the *only* path tried — no fallthrough to XDG or `/etc` if that file is missing or unreadable, straight to `Config::defaults()`, exactly like today. This preserves an explicit override's "this is the file, full stop" contract.
 
-1. `SPRINGCHICK_KEYBINDS` env var (explicit override, unchanged)
-2. `$XDG_CONFIG_HOME/springchick/keybindings.toml` (or `~/.config/...` via `$HOME`)
-3. `/etc/springchick/keybindings.toml`
-4. `Config::defaults()` (built-in `DEFAULT_TOML`)
+When `SPRINGCHICK_KEYBINDS` is unset, `load_config()` now tries, in order:
 
-First path that exists and is readable wins. A file that exists but fails to parse still falls back to `Config::defaults()` via `Config::parse_or_defaults`, same behavior as today — a config typo must never block compositor startup.
+1. `$XDG_CONFIG_HOME/springchick/keybindings.toml` (or `~/.config/...` via `$HOME`)
+2. `/etc/springchick/keybindings.toml`
+3. `Config::defaults()` (built-in `DEFAULT_TOML`)
 
-Refactor `config_path() -> Option<PathBuf>` into an ordered candidate list (e.g. `candidate_paths() -> Vec<PathBuf>`) so `load_config()` can iterate tiers, and so the new `/etc` tier is unit-testable without touching the real filesystem paths (inject search roots, or test at the `load_config`-equivalent level with tempdir-based candidates).
+First of these that exists and is readable wins. A file that exists but fails to parse still falls back to `Config::defaults()` via `Config::parse_or_defaults`, same behavior as today — a config typo must never block compositor startup.
+
+Refactor `config_path() -> Option<PathBuf>` (keybinds.rs:45) into two pieces so the new tier is unit-testable without racing on real process env vars (Rust tests run multithreaded in-process, so mutating `std::env` from a test would race other tests):
+
+- `env_override(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf>` — resolves `SPRINGCHICK_KEYBINDS` only, taking an injectable env lookup.
+- `candidate_paths(env: impl Fn(&str) -> Option<String>) -> Vec<PathBuf>` — resolves the XDG and `/etc` tiers in order, same injectable signature.
+
+`load_config()` calls `env_override` first (short-circuit, no fallthrough); if `None`, iterates `candidate_paths()`, tries each with `std::fs::read_to_string`, and falls back to `Config::defaults()` if none exist. Tests pass a closure over a local `HashMap` instead of touching real env vars, and can point `/etc`-tier assertions at literal `PathBuf::from("/etc/springchick/keybindings.toml")` without needing a real file — feasibility of the fallback logic is what's tested, not actual disk I/O for that tier.
+
+If both `XDG_CONFIG_HOME` and `HOME` are unset, `candidate_paths` simply omits the XDG entry, returning only `/etc/springchick/keybindings.toml` — same absence-handling as today's `config_path`, just no longer short-circuiting to `None`.
+
+Update the doc comment currently at keybinds.rs:43-44 (documents only the two existing tiers) to describe the new three/four-tier order.
 
 No changes to `sc-keys/src/config.rs` parsing/validation logic, `resolve_keysym`, or `Keys::load`.
 
@@ -57,7 +67,7 @@ Raw TOML text, not a structured submodule — avoids duplicating the binding sch
 ## Testing
 
 - Existing `sc-keys::config` and `sc-compositor::keybinds` unit tests are unaffected.
-- Add a test in `keybinds.rs` exercising the new `/etc`-tier fallback in the search order (falls through to it when env var and XDG path are both absent/missing).
+- Add tests in `keybinds.rs` against `candidate_paths`/`env_override` using injected closures (a local `HashMap`, no real env var or filesystem mutation): env override present → single-element result and no fallthrough; env override absent → XDG-then-`/etc` ordering.
 - `nix flake check` continues to build the module; no new Nix-level test (module is a thin `environment.etc` passthrough).
 
 ## Out of scope
