@@ -186,6 +186,10 @@ struct State {
     keys: keybinds::Keys,
     /// Panel blanking (acted on by the DRM backend; inert under winit).
     blank: blank::Blank,
+    /// Set when a client commit or input changed on-screen state, so the
+    /// vblank-driven DRM loop re-primes a page-flip on the next wake. Inert
+    /// under winit (which renders every loop iteration).
+    needs_render: bool,
     /// Volume on-screen display state.
     osd: osd::Osd,
     /// wlr-layer-shell protocol state.
@@ -358,6 +362,7 @@ impl State {
             focused_surface: None,
             keys: keybinds::Keys::load(),
             blank: blank::Blank::new(),
+            needs_render: false,
             osd: osd::Osd::new(),
             layer_shell_state,
             layers: layer_shell::LayerShell::new(out_w as f32, out_h as f32),
@@ -691,6 +696,11 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+
+        // A client presented new content; ask the DRM loop to render. Without
+        // this, an app committing while the screen is otherwise idle never
+        // gets its frame callback (only sent during a render), so it stalls.
+        self.needs_render = true;
 
         // A layer surface committing may change its geometry or reserved area.
         if self

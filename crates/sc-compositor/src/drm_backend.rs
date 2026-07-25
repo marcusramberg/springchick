@@ -242,7 +242,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // The OSD fades over time with no other event driving frames; keep
         // rendering while it is visible. `render` early-returns on pending_flip,
         // so this tracks vblank cadence rather than the 2ms wake.
-        if app.state.osd.is_active(Instant::now()) || app.state.bar_fading() {
+        if app.state.needs_render
+            || app.state.osd.is_active(Instant::now())
+            || app.state.bar_fading()
+        {
             app.render();
         }
     })?;
@@ -267,6 +270,9 @@ impl App {
     }
 
     fn handle_input(&mut self, event: InputEvent<LibinputInputBackend>) {
+        // Any input may change on-screen state (or the app it's forwarded to
+        // will commit in response). Prime a render for the next loop wake.
+        self.state.needs_render = true;
         let (w, h) = (self.drm.output_size.w, self.drm.output_size.h);
         match event {
             InputEvent::TouchDown { event } => {
@@ -326,6 +332,9 @@ impl App {
         if !self.drm.active || self.drm.pending_flip || self.state.blank.is_blanked() {
             return;
         }
+        // Consuming the request now: this frame reflects current state. A commit
+        // arriving after this point re-sets the flag and gets its own render.
+        self.state.needs_render = false;
         let frame_start = Instant::now();
 
         // Variable step, clamped so a long stall can't fling the springs.
