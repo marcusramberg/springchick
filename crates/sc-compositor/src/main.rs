@@ -480,6 +480,26 @@ impl State {
 
     /// Close a toplevel by id (remove from vec, notify UI state).
     /// Recompute layer-surface geometry + reserved area. If the area apps may
+    /// Adopt the real output size once a backend knows it (winit window size /
+    /// DRM mode). The `State` is built with the FP5 defaults; this reseeds the
+    /// layer layout and re-advertises the output mode so app sizing and client
+    /// geometry track the actual panel resolution, not FP5. Call once at
+    /// startup, before any client maps.
+    fn set_output_size(&mut self, w: i32, h: i32) {
+        self.output_size = (w, h);
+        // Reseed the layout to the real panel (no layer surfaces exist yet).
+        self.layers = layer_shell::LayerShell::new(w as f32, h as f32);
+        // Re-advertise the mode so clients see the real geometry (the scale is
+        // already set from [main].dpi and is preserved by passing None).
+        let mode = OutputMode {
+            size: (w, h).into(),
+            refresh: 90_000,
+        };
+        self.output.change_current_state(Some(mode), None, None, None);
+        self.output.set_preferred(mode);
+        self.recompute_layers();
+    }
+
     /// use changed, resize the toplevels to fit around it (e.g. above an OSK).
     fn recompute_layers(&mut self) {
         let (ow, oh) = self.output_size_f();
@@ -970,7 +990,7 @@ fn run_winit() {
 
     // Update output size from actual backend window dimensions.
     let actual_size = gfx_backend.window_size();
-    state.output_size = (actual_size.w, actual_size.h);
+    state.set_output_size(actual_size.w, actual_size.h);
     info!(w = actual_size.w, h = actual_size.h, "actual output size");
 
     // Optional debug input socket (dev/test harness). Inert unless env is set.
