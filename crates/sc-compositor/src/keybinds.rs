@@ -40,36 +40,62 @@ impl Keys {
     }
 }
 
-/// Config path: `SPRINGCHICK_KEYBINDS`, else `$XDG_CONFIG_HOME/springchick/`,
-/// else `~/.config/springchick/`.
-fn config_path() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("SPRINGCHICK_KEYBINDS") {
-        return Some(PathBuf::from(p));
-    }
-    let base = std::env::var("XDG_CONFIG_HOME")
+/// Config lookup: `SPRINGCHICK_CONFIG` is a strict override — if set, it is the
+/// only path tried, with no fallthrough to XDG or `/etc` if that file is
+/// missing. Otherwise, in order: `$XDG_CONFIG_HOME/springchick/config.toml`
+/// (or `~/.config/...`), then `/etc/springchick/config.toml`.
+fn env_override(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    env("SPRINGCHICK_CONFIG").map(PathBuf::from)
+}
+
+/// XDG-then-`/etc` candidates, in lookup order. Takes an injectable env lookup
+/// so tests don't mutate real process env vars (multithreaded test binary).
+fn candidate_paths(env: impl Fn(&str) -> Option<String>) -> Vec<PathBuf> {
+    let xdg = env("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .ok()?;
-    Some(base.join("springchick/keybindings.toml"))
+        .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .map(|base| base.join("springchick/config.toml"));
+
+    xdg.into_iter()
+        .chain(std::iter::once(PathBuf::from(
+            "/etc/springchick/config.toml",
+        )))
+        .collect()
 }
 
 /// Read the config file, falling back to the shipped defaults. A missing file is
 /// normal; an unreadable or unparseable one is a warning, never fatal.
 fn load_config() -> Config {
-    let Some(path) = config_path() else {
-        return Config::defaults();
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(text) => {
-            info!(path = %path.display(), "loading keybindings");
-            Config::parse_or_defaults(&text)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::defaults(),
-        Err(e) => {
-            warn!(%e, path = %path.display(), "cannot read keybindings; using defaults");
-            Config::defaults()
+    let real_env = |k: &str| std::env::var(k).ok();
+
+    if let Some(path) = env_override(real_env) {
+        return match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                info!(path = %path.display(), "loading config");
+                Config::parse_or_defaults(&text)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::defaults(),
+            Err(e) => {
+                warn!(%e, path = %path.display(), "cannot read config; using defaults");
+                Config::defaults()
+            }
+        };
+    }
+
+    for path in candidate_paths(real_env) {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                info!(path = %path.display(), "loading config");
+                return Config::parse_or_defaults(&text);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                warn!(%e, path = %path.display(), "cannot read config; trying next");
+                continue;
+            }
         }
     }
+    Config::defaults()
 }
 
 /// xkb keysym name → raw keysym value. Case-sensitive, as xkb defines them.
@@ -282,7 +308,7 @@ mod tests {
     #[test]
     fn unresolvable_names_are_dropped_not_fatal() {
         let cfg = Config::parse(
-            "[[binding]]\nkey = \"Nonsense\"\npress = \"short\"\ncommand = \"true\"\n",
+            "[keybinds]\n[[keybinds.binding]]\nkey = \"Nonsense\"\npress = \"short\"\ncommand = \"true\"\n",
         );
         assert!(resolve(cfg).is_empty());
     }
@@ -321,5 +347,59 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(mod_mask(&mods), ModMask::NONE);
+    }
+
+    #[test]
+    fn env_override_short_circuits_on_missing_var() {
+        let env = |_: &str| None;
+        assert_eq!(env_override(env), None);
+    }
+
+    #[test]
+    fn env_override_uses_springchick_config_only() {
+        let env = |k: &str| match k {
+            "SPRINGCHICK_CONFIG" => Some("/tmp/x.toml".to_string()),
+            _ => None,
+        };
+        assert_eq!(env_override(env), Some(PathBuf::from("/tmp/x.toml")));
+    }
+
+    #[test]
+    fn candidate_paths_orders_xdg_then_etc() {
+        let env = |k: &str| match k {
+            "XDG_CONFIG_HOME" => Some("/home/u/.config".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            candidate_paths(env),
+            vec![
+                PathBuf::from("/home/u/.config/springchick/config.toml"),
+                PathBuf::from("/etc/springchick/config.toml"),
+            ]
+        );
+    }
+
+    #[test]
+    fn candidate_paths_falls_back_to_home_for_xdg() {
+        let env = |k: &str| match k {
+            "HOME" => Some("/home/u".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            candidate_paths(env),
+            vec![
+                PathBuf::from("/home/u/.config/springchick/config.toml"),
+                PathBuf::from("/etc/springchick/config.toml"),
+            ]
+        );
+    }
+
+    #[test]
+    fn candidate_paths_omits_xdg_when_neither_var_set() {
+        let env = |_: &str| None;
+        assert_eq!(
+            candidate_paths(env),
+            vec![PathBuf::from("/etc/springchick/config.toml")],
+        );
     }
 }
