@@ -362,6 +362,7 @@ impl App {
                 icon_cache: &self.state.icon_cache,
                 app_catalog: &self.state.app_catalog,
                 toplevels: &self.state.toplevels,
+                app_scale: self.state.dpi as f64,
                 transform: self.drm.transform,
                 skia_flip_y: true,
                 frame_time: prep.frame_time,

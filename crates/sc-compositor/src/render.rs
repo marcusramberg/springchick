@@ -46,6 +46,10 @@ pub struct DrawCtx<'a> {
     pub app_catalog: &'a HashMap<String, AppEntry>,
     /// Toplevels for switcher card rendering.
     pub toplevels: &'a Vec<Option<crate::AppToplevel>>,
+    /// Output scale (`[main].dpi`). App surfaces are configured at physical/dpi
+    /// logical size and render an oversized buffer, so their render elements are
+    /// generated at this scale to land back at physical size.
+    pub app_scale: f64,
     /// Output transform (winit = Flipped180; DRM = connector transform).
     pub transform: Transform,
     /// Mirror the Skia home/bar vertically — the DRM/GBM scanout buffer has the
@@ -108,7 +112,14 @@ pub fn draw_scene(
     let base_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if let Some(wl_surface) =
         ctx.app_surface
     {
-        render_elements_from_surface_tree(renderer, wl_surface, (0, 0), 1.0, 1.0, Kind::Unspecified)
+        render_elements_from_surface_tree(
+            renderer,
+            wl_surface,
+            (0, 0),
+            ctx.app_scale,
+            1.0,
+            Kind::Unspecified,
+        )
     } else {
         Vec::new()
     };
@@ -150,7 +161,8 @@ pub fn draw_scene(
         }
 
         if app_fills_screen {
-            if let Err(e) = draw_render_elements(&mut frame, 1.0, &base_elements, &[damage]) {
+            if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &base_elements, &[damage])
+            {
                 warn!(?e, "failed to draw app elements");
             }
         }
@@ -211,7 +223,7 @@ pub fn draw_scene(
             let mut frame = renderer
                 .render(&mut *framebuffer, size, ctx.transform)
                 .map_err(SwapBuffersError::from)?;
-            if let Err(e) = draw_render_elements(&mut frame, 1.0, &scaled, &[damage]) {
+            if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &scaled, &[damage]) {
                 warn!(?e, "failed to draw scaled app elements");
             }
             let _sync = frame.finish().map_err(SwapBuffersError::from)?;
@@ -234,7 +246,7 @@ pub fn draw_scene(
                     renderer,
                     tl.surface.wl_surface(),
                     (0, 0),
-                    1.0,
+                    ctx.app_scale,
                     1.0,
                     Kind::Unspecified,
                 );
@@ -267,7 +279,7 @@ pub fn draw_scene(
             let mut frame = renderer
                 .render(&mut *framebuffer, size, ctx.transform)
                 .map_err(SwapBuffersError::from)?;
-            if let Err(e) = draw_render_elements(&mut frame, 1.0, &scaled, &[damage]) {
+            if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &scaled, &[damage]) {
                 warn!(?e, "failed to draw switcher card");
             }
             let _sync = frame.finish().map_err(SwapBuffersError::from)?;

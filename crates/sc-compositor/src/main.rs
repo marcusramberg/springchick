@@ -826,9 +826,9 @@ impl smithay::wayland::shell::wlr_layer::WlrLayerShellHandler for State {
         namespace: String,
     ) {
         info!(%namespace, ?layer, "new layer surface");
-        // Enter the output so the OSK/layer client renders at the output scale
-        // too, matching the app windows.
-        self.output.enter(surface.wl_surface());
+        // Note: layer surfaces (OSK) deliberately do NOT enter the output, so
+        // they stay at scale 1. Their geometry (layer_rect) is computed in
+        // physical px; entering the output would make them render at 1/dpi.
         self.layers.add(surface, layer);
         // Geometry + the initial configure happen on the next commit, once the
         // client's anchor/size/exclusive-zone state has arrived.
@@ -1102,6 +1102,7 @@ fn render_frame(
             icon_cache: &state.icon_cache,
             app_catalog: &state.app_catalog,
             toplevels: &state.toplevels,
+            app_scale: state.dpi as f64,
             transform: Transform::Flipped180,
             skia_flip_y: false,
             frame_time: prep.frame_time,
