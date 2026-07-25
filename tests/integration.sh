@@ -174,16 +174,17 @@ fi
 bold "Test 7: Keybindings fire on short and long press"
 
 KB_DIR=$(mktemp -d)
-KB_CONF="$KB_DIR/keybindings.toml"
+KB_CONF="$KB_DIR/config.toml"
 cat > "$KB_CONF" <<EOF
+[keybinds]
 long_press_ms = 500
 
-[[binding]]
+[[keybinds.binding]]
 key = "F1"
 press = "short"
 command = "touch $KB_DIR/short"
 
-[[binding]]
+[[keybinds.binding]]
 key = "F1"
 press = "long"
 command = "touch $KB_DIR/long"
@@ -212,7 +213,7 @@ wait_for() {
 }
 
 stop_compositor
-SPRINGCHICK_KEYBINDS="$KB_CONF" SPRINGCHICK_DEBUG_SOCK="$KB_SOCK" \
+SPRINGCHICK_CONFIG="$KB_CONF" SPRINGCHICK_DEBUG_SOCK="$KB_SOCK" \
     "$SPRINGCHICK" 2>/tmp/springchick-keys.log &
 SC_PID=$!
 for i in $(seq 1 30); do
