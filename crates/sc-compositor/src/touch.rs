@@ -15,28 +15,37 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Point, SERIAL_COUNTER};
 
 /// Resolve which client surface (if any) should receive input at output-pixel
-/// `(x, y)`, returning it with its origin in global space. Checks Top/Overlay
-/// layer surfaces (the OSK); everything else falls through to the gesture
-/// funnel by returning `None`.
-fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64))> {
-    // 1. Top/Overlay layer surfaces (the OSK) win.
+/// `(x, y)`, returning it with its origin in global space and its coordinate
+/// scale. The scale (1.0 for scale-1 layer surfaces, `dpi` for scaled app
+/// surfaces) is what physical input coords are divided by to reach the surface's
+/// logical space. Checks Top/Overlay layer surfaces (the OSK); everything else
+/// falls through to the gesture funnel by returning `None`.
+fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64), f64)> {
+    // 1. Top/Overlay layer surfaces (the OSK) win. They render at scale 1.
     if let Some(m) = state.layers.hit_test(x, y) {
         return Some((
             m.surface.wl_surface().clone(),
             (m.rect.x as f64, m.rect.y as f64),
+            1.0,
         ));
     }
     // 2. The focused fullscreen app, except the bottom bar zone (home gesture).
+    //    App surfaces render at `dpi`, so input maps into logical space by /dpi.
     if let crate::ui_state::UiState::App { toplevel, .. } = &state.ui {
         let (w, h) = state.output_size_f();
         let bar = sc_layout::bar_rect(w, h);
         if !bar.contains(x, y) {
             if let Some(Some(tl)) = state.toplevels.get(*toplevel) {
-                return Some((tl.surface.wl_surface().clone(), (0.0, 0.0)));
+                return Some((tl.surface.wl_surface().clone(), (0.0, 0.0), state.dpi as f64));
             }
         }
     }
     None
+}
+
+/// Convert a physical output-pixel point into a surface's local logical space.
+fn to_local(x: f32, y: f32, scale: f64) -> Point<f64, smithay::utils::Logical> {
+    Point::from((x as f64 / scale, y as f64 / scale))
 }
 
 /// Pointer moved to `(x, y)` (winit/desktop). Forwards to a client surface under
@@ -44,14 +53,15 @@ fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64)
 pub fn pointer_motion(state: &mut State, x: f32, y: f32, time: u32) {
     state.last_pointer_pos = Some((x, y));
     if state.pointer_grab {
-        if let Some((surface, origin)) = surface_under(state, x, y) {
+        if let Some((surface, origin, scale)) = surface_under(state, x, y) {
             let ptr = state.seat.get_pointer().unwrap();
             let event = PointerMotionEvent {
-                location: Point::from((x as f64, y as f64)),
+                location: to_local(x, y, scale),
                 serial: SERIAL_COUNTER.next_serial(),
                 time,
             };
-            ptr.motion(state, Some((surface, Point::from(origin))), &event);
+            let focus = Point::from((origin.0 / scale, origin.1 / scale));
+            ptr.motion(state, Some((surface, focus)), &event);
             ptr.frame(state);
             return;
         }
@@ -63,14 +73,16 @@ pub fn pointer_motion(state: &mut State, x: f32, y: f32, time: u32) {
 pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) {
     let (x, y) = state.last_pointer_pos.unwrap_or((0.0, 0.0));
     if pressed {
-        if let Some((surface, origin)) = surface_under(state, x, y) {
+        if let Some((surface, origin, scale)) = surface_under(state, x, y) {
+            state.input_scale = scale;
             let ptr = state.seat.get_pointer().unwrap();
             // Enter/position the pointer, then press.
+            let focus = Point::from((origin.0 / scale, origin.1 / scale));
             ptr.motion(
                 state,
-                Some((surface, Point::from(origin))),
+                Some((surface, focus)),
                 &PointerMotionEvent {
-                    location: Point::from((x as f64, y as f64)),
+                    location: to_local(x, y, scale),
                     serial: SERIAL_COUNTER.next_serial(),
                     time,
                 },
@@ -111,16 +123,18 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
 
 /// A finger touched down at output-pixel `(x, y)`.
 pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
-    if let Some((surface, origin)) = surface_under(state, x, y) {
+    if let Some((surface, origin, scale)) = surface_under(state, x, y) {
         state.touch_grab = Some(surface.clone());
+        state.input_scale = scale;
         let touch = state.touch.clone();
         let event = DownEvent {
             slot,
-            location: Point::from((x as f64, y as f64)),
+            location: to_local(x, y, scale),
             serial: SERIAL_COUNTER.next_serial(),
             time,
         };
-        touch.down(state, Some((surface, Point::from(origin))), &event);
+        let focus = Point::from((origin.0 / scale, origin.1 / scale));
+        touch.down(state, Some((surface, focus)), &event);
         touch.frame(state);
         return;
     }
@@ -135,7 +149,7 @@ pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
         let touch = state.touch.clone();
         let event = MotionEvent {
             slot,
-            location: Point::from((x as f64, y as f64)),
+            location: to_local(x, y, state.input_scale),
             time,
         };
         // Focus is only used for DnD during motion; we pass none.

@@ -189,6 +189,10 @@ struct State {
     touch: smithay::input::touch::TouchHandle<Self>,
     /// Which layer surface (if any) currently owns the touch sequence.
     touch_grab: Option<WlSurface>,
+    /// Coordinate scale of the surface currently receiving forwarded input
+    /// (1.0 for scale-1 layer surfaces, `dpi` for scaled app surfaces). Physical
+    /// input coords are divided by this to reach the surface's logical space.
+    input_scale: f64,
     /// Whether the pointer press is currently held on a client surface.
     pointer_grab: bool,
     /// Home-bar opacity, faded to 0 when a bottom exclusive-zone surface (the
@@ -347,6 +351,7 @@ impl State {
             layers: layer_shell::LayerShell::new(FP5_WIDTH as f32, FP5_HEIGHT as f32),
             touch,
             touch_grab: None,
+            input_scale: 1.0,
             pointer_grab: false,
             bar_alpha: 1.0,
             ui,
