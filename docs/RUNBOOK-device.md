@@ -36,10 +36,11 @@ hash, feature string, and both target hashes there.
 
 Config file: `$XDG_CONFIG_HOME/springchick/config.toml` (→ `~/.config/springchick/…`),
 then `/etc/springchick/config.toml`, overridable with `SPRINGCHICK_CONFIG=<path>` (strict
-override — no fallthrough to the other tiers if that file is missing). A missing/unreadable/
-unparseable file at any tier falls through to the next; if none apply, the compiled-in
-keybinding defaults apply. Nothing is written to disk. Loaded once at startup — edits need a
-restart.
+override — no fallthrough to the other tiers if that file is missing). A missing or unreadable
+file falls through to the next tier (or to compiled-in defaults if none remain); a file that
+exists and is readable but fails to parse as TOML uses the compiled-in defaults immediately,
+without trying further tiers. Nothing is written to disk. Loaded once at startup — edits need
+a restart.
 
 On NixOS, `programs.springchick.config` writes `/etc/springchick/config.toml` from a raw TOML
 string (`null` by default — leaves it unmanaged).
