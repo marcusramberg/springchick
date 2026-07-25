@@ -45,6 +45,18 @@ a restart.
 On NixOS, `programs.springchick.config` writes `/etc/springchick/config.toml` from a raw TOML
 string (`null` by default — leaves it unmanaged).
 
+### Main
+
+```toml
+[main]
+dpi = 3   # optional; output scale advertised to clients. Defaults to 3.
+```
+
+The FP5 panel (1224×2700) is dense enough that 1:1 client rendering looks tiny, so the
+default is `3` rather than smithay's usual `1`. This is an integer `wl_output` scale, not a
+fractional DPI value — clients render 3x and the compositor's own UI is independently
+sized for the panel.
+
 ### Keybinds
 
 ```toml
@@ -171,8 +183,8 @@ horizontal flick on the bar (quick-switch). Read the per-second perf line
 - **Tearing (resolved):** `queue_buffer(sync=None)` presented buffers before the GPU
   finished → top-row + whole-screen flicker. Fixed with `skia.finish_gpu()` (glFinish)
   before the page-flip.
-- **App HiDPI (open / M5):** the output advertises `Scale::Integer(1)`, so clients render
-  1:1 on the dense 1224×2700 panel and look tiny. Display-scaling is out of M4 scope.
+- **App HiDPI (resolved):** the output advertises `Scale::Integer(3)` by default (see
+  [Config § Main](#main)), configurable via `[main].dpi` in `config.toml`.
 - **Perf:** steady render cost ~`p50 4.9ms / p99 5.4ms / dropped 0` against the 11.1ms
   90Hz budget. NB: the perf line's `fps` is render throughput (render duration), not the
   present rate.

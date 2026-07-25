@@ -64,12 +64,17 @@ pub struct Binding {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub long_press_ms: u64,
+    pub dpi: u32,
     pub bindings: Vec<Binding>,
 }
 
 /// Long-press threshold when the config does not say otherwise. 800ms so a
 /// volume nudge does not accidentally cross into the long-press action.
 pub const DEFAULT_LONG_PRESS_MS: u64 = 800;
+
+/// Output scale when `[main]` does not say otherwise: the FP5 panel is dense
+/// enough that 1:1 client rendering (the old M4 behavior) is illegibly small.
+pub const DEFAULT_DPI: u32 = 3;
 
 /// Shipped defaults, mirroring the user's niri bindings. Defined as TOML so the
 /// documented example and the built-in behavior cannot drift apart.
@@ -127,7 +132,13 @@ struct RawConfig {
 /// default behavior.
 #[derive(Deserialize, Default)]
 struct RawConfigFile {
+    main: Option<RawMain>,
     keybinds: Option<RawConfig>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawMain {
+    dpi: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -156,15 +167,18 @@ impl Config {
                 warn!(%e, "config is not valid TOML");
                 return Config {
                     long_press_ms: DEFAULT_LONG_PRESS_MS,
+                    dpi: DEFAULT_DPI,
                     bindings: Vec::new(),
                 };
             }
         };
+        let dpi = file.main.and_then(|m| m.dpi).unwrap_or(DEFAULT_DPI);
         let raw = file.keybinds.unwrap_or_default();
 
         let bindings = raw.binding.into_iter().filter_map(convert).collect();
         Config {
             long_press_ms: raw.long_press_ms.unwrap_or(DEFAULT_LONG_PRESS_MS),
+            dpi,
             bindings,
         }
     }
@@ -336,6 +350,18 @@ mod tests {
     fn custom_long_press_ms_is_read() {
         let cfg = Config::parse("[keybinds]\nlong_press_ms = 800\n");
         assert_eq!(cfg.long_press_ms, 800);
+    }
+
+    #[test]
+    fn dpi_defaults_to_3_when_main_section_absent() {
+        let cfg = Config::parse("[keybinds]\nlong_press_ms = 800\n");
+        assert_eq!(cfg.dpi, 3);
+    }
+
+    #[test]
+    fn dpi_is_read_from_main_section() {
+        let cfg = Config::parse("[main]\ndpi = 2\n");
+        assert_eq!(cfg.dpi, 2);
     }
 
     #[test]
