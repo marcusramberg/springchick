@@ -94,10 +94,26 @@ fn config_home() -> PathBuf {
 }
 
 /// `$XDG_DATA_HOME`, else `~/.local/share`.
-fn data_home() -> PathBuf {
-    std::env::var("XDG_DATA_HOME")
+/// XDG base data directories, highest precedence first:
+/// `$XDG_DATA_HOME` (default `~/.local/share`), then each `$XDG_DATA_DIRS`
+/// entry (default `/usr/local/share:/usr/share`) left-to-right.
+fn xdg_data_dirs() -> Vec<PathBuf> {
+    let data_home = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir().join(".local/share"))
+        .unwrap_or_else(|| home_dir().join(".local/share"));
+    let data_dirs = std::env::var("XDG_DATA_DIRS")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
+
+    let mut dirs = vec![data_home];
+    dirs.extend(
+        data_dirs
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from),
+    );
+    dirs
 }
 
 /// Config file path.
@@ -107,22 +123,12 @@ fn config_path() -> PathBuf {
 
 /// Scan .desktop files from standard locations.
 fn scan_apps() -> Vec<AppEntry> {
-    let data_home = data_home();
-
-    let dirs = [
-        PathBuf::from("/usr/share/applications"),
-        PathBuf::from("/usr/local/share/applications"),
-        // NixOS system-wide
-        PathBuf::from("/run/current-system/sw/share/applications"),
-        // NixOS per-user profile
-        PathBuf::from("/etc/profiles/per-user")
-            .join(std::env::var("USER").unwrap_or_default())
-            .join("share/applications"),
-        data_home.join("applications"),
-    ];
     let mut entries = Vec::new();
-    for dir in &dirs {
-        let Ok(read) = std::fs::read_dir(dir) else {
+    let mut seen = std::collections::HashSet::new();
+    // Search `<datadir>/applications` for each XDG data dir. Dirs are ordered
+    // highest precedence first, so the first .desktop seen for a given id wins.
+    for dir in xdg_data_dirs() {
+        let Ok(read) = std::fs::read_dir(dir.join("applications")) else {
             continue;
         };
         for entry in read.flatten() {
@@ -130,7 +136,9 @@ fn scan_apps() -> Vec<AppEntry> {
             if path.extension().is_some_and(|e| e == "desktop") {
                 if let Ok(contents) = std::fs::read_to_string(&path) {
                     if let Some(app) = catalog::parse_desktop(&path, &contents) {
-                        entries.push(app);
+                        if seen.insert(app.id.clone()) {
+                            entries.push(app);
+                        }
                     }
                 }
             }

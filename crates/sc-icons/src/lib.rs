@@ -19,14 +19,43 @@ pub struct IconPixels {
 /// Target icon render size in logical pixels.
 const TARGET_SIZE: u32 = 128;
 
-/// Standard icon search directories (XDG-ish, pragmatic subset).
-const THEME_DIRS: &[&str] = &[
-    "/run/current-system/sw/share/icons/hicolor",
-    "/usr/share/icons/hicolor",
-    "/usr/share/icons/Adwaita",
-    "/usr/share/pixmaps",
-    "/run/current-system/sw/share/pixmaps",
-];
+/// Icon theme subdirectories to search under each XDG data dir's `icons/`.
+const ICON_THEMES: &[&str] = &["hicolor", "Adwaita"];
+
+/// Build the icon search directories from `$XDG_DATA_DIRS` (plus `$XDG_DATA_HOME`).
+/// For each data dir `<d>` we search `<d>/icons/<theme>` and `<d>/pixmaps`.
+fn theme_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for base in xdg_data_dirs() {
+        for theme in ICON_THEMES {
+            dirs.push(base.join("icons").join(theme));
+        }
+        dirs.push(base.join("pixmaps"));
+    }
+    dirs
+}
+
+/// XDG base data directories, highest precedence first: `$XDG_DATA_HOME`
+/// (default `~/.local/share`), then each `$XDG_DATA_DIRS` entry
+/// (default `/usr/local/share:/usr/share`) left-to-right.
+fn xdg_data_dirs() -> Vec<PathBuf> {
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+    let data_dirs = std::env::var("XDG_DATA_DIRS")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
+
+    let mut dirs: Vec<PathBuf> = data_home.into_iter().collect();
+    dirs.extend(
+        data_dirs
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from),
+    );
+    dirs
+}
 
 /// Size subdirectories to search, largest first.
 const SIZE_SUBDIRS: &[&str] = &[
@@ -40,11 +69,11 @@ const SIZE_SUBDIRS: &[&str] = &[
 
 /// Resolve an icon name to RGBA pixels. Falls back to a placeholder on failure.
 pub fn resolve(icon_name: &str) -> IconPixels {
-    resolve_with_dirs(icon_name, THEME_DIRS)
+    resolve_with_dirs(icon_name, &theme_dirs())
 }
 
 /// Resolve with custom search directories (for testing).
-pub fn resolve_with_dirs(icon_name: &str, theme_dirs: &[&str]) -> IconPixels {
+pub fn resolve_with_dirs<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> IconPixels {
     // If icon_name is an absolute path, try it directly.
     if icon_name.starts_with('/') {
         if let Some(pixels) = load_icon_file(Path::new(icon_name)) {
@@ -64,9 +93,9 @@ pub fn resolve_with_dirs(icon_name: &str, theme_dirs: &[&str]) -> IconPixels {
 }
 
 /// Search theme dirs for an icon file matching the name.
-fn find_icon(icon_name: &str, theme_dirs: &[&str]) -> Option<PathBuf> {
+fn find_icon<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> Option<PathBuf> {
     for dir in theme_dirs {
-        let base = Path::new(dir);
+        let base = dir.as_ref();
 
         // Check size subdirs.
         for subdir in SIZE_SUBDIRS {
