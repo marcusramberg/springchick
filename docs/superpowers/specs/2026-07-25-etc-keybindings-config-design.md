@@ -19,7 +19,7 @@ struct RawConfigFile {
 }
 ```
 
-`Config::parse`/`Config::parse_or_defaults` deserialize `RawConfigFile` first, then operate on `.keybinds.unwrap_or_default()` (`RawConfig` needs `#[derive(Default)]`, i.e. `long_press_ms: None, binding: vec![]`). A file with no `[keybinds]` table at all still parses cleanly to `Config::defaults()`-equivalent empty bindings — same "never fatal" contract as today.
+`Config::parse`/`Config::parse_or_defaults` deserialize `RawConfigFile` first, then operate on `.keybinds.unwrap_or_default()` (`RawConfig` needs `#[derive(Default)]`, i.e. `long_press_ms: None, binding: vec![]`). A file with no `[keybinds]` table is valid TOML, so it does **not** trigger the whole-file parse-error path — it yields `Config { long_press_ms: DEFAULT_LONG_PRESS_MS, bindings: vec![] }`, i.e. zero bindings, same as an empty `keybindings.toml` does today via `Config::parse`. This is `Config::parse`'s existing behavior for "valid but empty," distinct from `Config::defaults()` (which returns the shipped volume/power/escape bindings) — `defaults()` is only reached when the file is missing or fails to parse at all, unchanged from today. No behavior change here, just calling out that "no `[keybinds]` table" and "unparseable file" are different cases with different outcomes.
 
 `DEFAULT_TOML` gains the wrapping table:
 
@@ -84,7 +84,7 @@ config = lib.mkIf cfg.enable {
 };
 ```
 
-Named `config` (not `keybindings`) since the file is now general-purpose — avoids a second rename when future sections (display, gestures, ...) are added. Raw TOML text, not a structured submodule — avoids duplicating the schema in Nix, which would drift from the Rust source as `sc-keys::config` evolves. Per-user `$XDG_CONFIG_HOME` override keeps working unmodified; `/etc` only matters when no user config is present.
+Named `config` (not `keybindings`) since the file is now general-purpose — avoids a second rename when future sections (display, gestures, ...) are added. This does mean `cfg.config` reads as an echo of the module's own `config = lib.mkIf cfg.enable {...}` result attribute; the two are unrelated (one is the option value, the other is the standard NixOS module output) and this pattern (an option literally named `config`) is unambiguous but worth a comment in the module source to orient a reader. Raw TOML text, not a structured submodule — avoids duplicating the schema in Nix, which would drift from the Rust source as `sc-keys::config` evolves. Per-user `$XDG_CONFIG_HOME` override keeps working unmodified; `/etc` only matters when no user config is present.
 
 `nix/package.nix` is unaffected.
 
