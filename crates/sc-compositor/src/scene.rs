@@ -100,6 +100,17 @@ pub struct Scene {
     pub cards: Vec<switcher::CardRect>,
 }
 
+impl Scene {
+    /// Whether the app window (if any) fully covers the screen this frame.
+    /// When true, home must not be drawn — it would paint over the window's
+    /// content, since the window itself is drawn opaque and undamaged behind
+    /// it. Mirrors the `is_fullscreen` threshold used to pick the app's draw
+    /// pass in the renderer.
+    pub fn window_covers_screen(&self) -> bool {
+        self.window.is_none_or(|(_, t)| t.scale >= 0.99)
+    }
+}
+
 /// Compute the scene from the current UiState.
 pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
     let (w, h) = (output_size.0 as f32, output_size.1 as f32);
@@ -237,6 +248,46 @@ mod tests {
         let state = UiState::home(0, 1);
         let scene = compute_scene(&state, TEST_SIZE);
         assert!(scene.window.is_none());
+        assert!(scene.show_home);
+    }
+
+    #[test]
+    fn app_opening_stops_covering_home_once_fullscreen() {
+        // Regression: near the end of the icon-zoom-in animation the window
+        // reaches fullscreen scale before the spring is formally "settled"
+        // (state is still AppOpening, show_home still true). The renderer
+        // must treat this as "home occluded" — window_covers_screen() is the
+        // signal it uses to skip drawing home on top of the finished window.
+        use crate::ui_state::{transition, UiEvent, ZoomOrigin};
+
+        let mut state = UiState::home(0, 1);
+        transition(
+            &mut state,
+            UiEvent::AppMapped {
+                toplevel: 0,
+                app_id: "x".into(),
+                origin: ZoomOrigin::icon((100.0, 200.0)),
+            },
+        );
+        assert!(matches!(state, UiState::AppOpening { .. }));
+
+        // Tick until the window transform reaches (near-)fullscreen scale.
+        let mut scene = compute_scene(&state, TEST_SIZE);
+        for _ in 0..200 {
+            if scene.window_covers_screen() {
+                break;
+            }
+            transition(&mut state, UiEvent::Tick { dt: 1.0 / 60.0 });
+            scene = compute_scene(&state, TEST_SIZE);
+        }
+
+        assert!(
+            scene.window_covers_screen(),
+            "window never reached fullscreen scale"
+        );
+        // At this point show_home is still true (state hasn't settled to
+        // UiState::App yet) — window_covers_screen() is what the renderer
+        // must consult to avoid painting home over the finished window.
         assert!(scene.show_home);
     }
 

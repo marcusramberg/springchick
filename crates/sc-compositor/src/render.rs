@@ -102,7 +102,7 @@ pub fn draw_scene(
     let scene = ctx.scene;
 
     let window_transform = scene.window.as_ref().map(|(_, t)| *t);
-    let is_fullscreen = window_transform.is_none_or(|t| t.scale >= 0.99);
+    let is_fullscreen = scene.window_covers_screen();
 
     // Collect render elements for the app surface (if any).
     let base_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if let Some(wl_surface) =
@@ -131,6 +131,8 @@ pub fn draw_scene(
         .filter(|e| !e.is_empty())
         .collect();
 
+    let app_fills_screen = is_fullscreen && !base_elements.is_empty();
+
     // Pass 1: clear background; draw the app here if fullscreen (no home behind).
     {
         let mut frame = renderer
@@ -147,7 +149,7 @@ pub fn draw_scene(
             }
         }
 
-        if is_fullscreen && !base_elements.is_empty() {
+        if app_fills_screen {
             if let Err(e) = draw_render_elements(&mut frame, 1.0, &base_elements, &[damage]) {
                 warn!(?e, "failed to draw app elements");
             }
@@ -156,8 +158,15 @@ pub fn draw_scene(
         let _sync = frame.finish().map_err(SwapBuffersError::from)?;
     }
 
-    // Skia: draw the home screen behind a shrinking window (during transitions).
-    if scene.show_home {
+    // Skia: draw the home screen behind a shrinking window (during
+    // transitions). Skip only once the app has actually been drawn covering
+    // the screen above — painting home on top of that would flash home over
+    // the finished window for the last few frames before the state machine
+    // formally settles into UiState::App. Gating on scale alone (without
+    // requiring content) blanks home instead of the app during the window
+    // where the animation has reached fullscreen scale but the client hasn't
+    // painted its first frame yet.
+    if scene.show_home && !app_fills_screen {
         ctx.skia.draw_home(
             size.w,
             size.h,
