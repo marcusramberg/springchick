@@ -16,7 +16,7 @@ const CLOSE_FULL_RISE: f32 = 0.25;
 const CLOSE_COMMIT_PROGRESS: f32 = 0.4;
 /// Finger travel to advance the carousel one card, as a fraction of output
 /// width (≈ front card width * slide distance).
-const FRONT_SCALE_PX_FRAC: f32 = 0.7;
+const FRONT_SCALE_PX_FRAC: f32 = 0.42;
 
 /// Switcher drag state.
 #[derive(Clone, Copy, Debug)]

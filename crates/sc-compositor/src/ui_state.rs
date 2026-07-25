@@ -495,8 +495,10 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
         UiEvent::EnterSwitcher { cards } => {
             info!(target: "springchick::debug", "EnterSwitcher cards={:?}", cards);
             let mut entry = Spring::new(0.0);
-            entry.stiffness = 260.0;
-            entry.damping = 30.0;
+            // Snappy launch so the fan unfolds immediately (no perceived delay
+            // from a slow spring ease-in). Near-critical damping keeps it clean.
+            entry.stiffness = 520.0;
+            entry.damping = 42.0;
             entry.retarget(1.0);
             *state = UiState::Switcher {
                 cards,
