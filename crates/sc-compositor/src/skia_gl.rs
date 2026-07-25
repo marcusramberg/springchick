@@ -167,6 +167,7 @@ impl SkiaGl {
         icon_cache: &HashMap<String, IconPixels>,
         app_catalog: &HashMap<String, AppEntry>,
         flip_y: bool,
+        pressed_app: Option<&str>,
     ) {
         if width <= 0 || height <= 0 {
             return;
@@ -259,7 +260,14 @@ impl SkiaGl {
 
             // Draw grid icons.
             for slot in &layout.grid {
-                draw_icon_slot(canvas, slot, &self.icon_images, &self.font, app_catalog);
+                draw_icon_slot(
+                    canvas,
+                    slot,
+                    &self.icon_images,
+                    &self.font,
+                    app_catalog,
+                    pressed_app == Some(slot.app_id.as_str()),
+                );
             }
 
             canvas.restore();
@@ -269,7 +277,14 @@ impl SkiaGl {
         let current_layout = sc_layout::compute(width as f32, height as f32, page, model);
 
         for slot in &current_layout.dock {
-            draw_icon_slot(canvas, slot, &self.icon_images, &self.font, app_catalog);
+            draw_icon_slot(
+                canvas,
+                slot,
+                &self.icon_images,
+                &self.font,
+                app_catalog,
+                pressed_app == Some(slot.app_id.as_str()),
+            );
         }
 
         // Draw page indicator dots.
@@ -463,7 +478,25 @@ fn draw_icon_slot(
     icon_images: &HashMap<String, Image>,
     font: &Option<Font>,
     app_catalog: &HashMap<String, AppEntry>,
+    pressed: bool,
 ) {
+    // Press highlight: a translucent rounded backing behind the icon so a tap
+    // reads as "launching" before the zoom animation begins.
+    if pressed {
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(Color::from_argb(60, 255, 255, 255));
+        let pad = slot.icon_rect.w * 0.12;
+        let rect = Rect::new(
+            slot.icon_rect.x - pad,
+            slot.icon_rect.y - pad,
+            slot.icon_rect.x + slot.icon_rect.w + pad,
+            slot.icon_rect.y + slot.icon_rect.h + pad,
+        );
+        let rrect = RRect::new_rect_xy(rect, 24.0, 24.0);
+        canvas.draw_rrect(rrect, &paint);
+    }
+
     // Draw icon image.
     if let Some(image) = icon_images.get(&slot.app_id) {
         let dst = Rect::new(

@@ -369,6 +369,11 @@ impl App {
                 layers_below: &prep.layers_below,
                 layers_above: &prep.layers_above,
                 bar_alpha: prep.bar_alpha,
+                pressed_app: self
+                    .state
+                    .pending_launch
+                    .as_ref()
+                    .map(|p| p.app_id.as_str()),
             };
             if let Err(e) =
                 crate::render::draw_scene(&mut self.drm.renderer, &mut framebuffer, size, &mut ctx)

@@ -17,6 +17,20 @@ const CLOSE_COMMIT_PROGRESS: f32 = 0.4;
 /// Finger travel to advance the carousel one card, as a fraction of output
 /// width (≈ front card width * slide distance).
 const FRONT_SCALE_PX_FRAC: f32 = 0.42;
+/// Pixels a finger may travel from an icon press and still count as a tap
+/// (launch). Past this the press is cancelled and the gesture becomes a page
+/// swipe.
+const ICON_TAP_SLOP: f32 = 12.0;
+
+/// A finger held on an app icon, waiting to see if it becomes a tap (launch)
+/// or a page swipe. Cleared once movement exceeds `ICON_TAP_SLOP`.
+#[derive(Clone, Debug)]
+pub struct PendingLaunch {
+    pub app_id: String,
+    pub origin: ZoomOrigin,
+    pub start_x: f32,
+    pub start_y: f32,
+}
 
 /// Switcher drag state.
 #[derive(Clone, Copy, Debug)]
@@ -68,6 +82,16 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
                 scroll.target = scroll.value;
                 scroll.velocity = 0.0;
                 return;
+            }
+        }
+
+        // Icon press: cancel the pending launch (and its highlight) once the
+        // finger travels past the tap slop — the gesture is a page swipe.
+        if let Some(p) = &state.pending_launch {
+            let dx = x - p.start_x;
+            let dy = y - p.start_y;
+            if (dx * dx + dy * dy).sqrt() > ICON_TAP_SLOP {
+                state.pending_launch = None;
             }
         }
 
@@ -148,8 +172,22 @@ pub fn on_press(state: &mut State) {
         DownAction::Event(ev) => {
             transition(&mut state.ui, ev);
         }
-        DownAction::LaunchApp { app_id, origin } => {
-            state.launch_or_raise(&app_id, origin);
+        DownAction::PressIcon {
+            app_id,
+            origin,
+            start_x,
+            start_y,
+        } => {
+            // Arm a launch, but also start a page drag from the same point so a
+            // swipe that begins on an icon still flips pages. Whichever the
+            // release resolves to (tap vs swipe) wins.
+            state.pending_launch = Some(PendingLaunch {
+                app_id,
+                origin,
+                start_x,
+                start_y,
+            });
+            state.page_drag_start = Some(start_x);
         }
         DownAction::StartPageDrag { start_x } => {
             state.page_drag_start = Some(start_x);
@@ -167,6 +205,14 @@ pub fn on_release(state: &mut State) {
         return;
     };
     state.pointer_down = false;
+
+    // Icon tap: the pending launch survived (finger never passed the tap slop),
+    // so this was a tap, not a swipe. Launch and drop the page drag.
+    if let Some(p) = state.pending_launch.take() {
+        state.page_drag_start = None;
+        state.launch_or_raise(&p.app_id, p.origin);
+        return;
+    }
 
     // Bar drag from Home: classify swipe direction.
     if let Some((start_x, start_y)) = state.bar_drag_start.take() {
