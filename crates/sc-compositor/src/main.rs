@@ -190,6 +190,10 @@ struct State {
     /// vblank-driven DRM loop re-primes a page-flip on the next wake. Inert
     /// under winit (which renders every loop iteration).
     needs_render: bool,
+    /// Commit cursor for the partial page-flip damage hint: the fullscreen app
+    /// surface and the `CommitCounter` last presented for it. See
+    /// [`crate::render::DrawCtx::last_present`].
+    last_present: Option<(WlSurface, smithay::backend::renderer::utils::CommitCounter)>,
     /// Volume on-screen display state.
     osd: osd::Osd,
     /// wlr-layer-shell protocol state.
@@ -363,6 +367,7 @@ impl State {
             keys: keybinds::Keys::load(),
             blank: blank::Blank::new(),
             needs_render: false,
+            last_present: None,
             osd: osd::Osd::new(),
             layer_shell_state,
             layers: layer_shell::LayerShell::new(out_w as f32, out_h as f32),
@@ -1132,6 +1137,9 @@ fn render_frame(
             layers_above: &prep.layers_above,
             bar_alpha: prep.bar_alpha,
             pressed_app: state.pending_launch.as_ref().map(|p| p.app_id.as_str()),
+            // winit dev backend submits full damage; no partial hint.
+            report_partial_damage: false,
+            last_present: &mut state.last_present,
         };
         render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }

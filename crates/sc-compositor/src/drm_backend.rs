@@ -28,7 +28,7 @@ use smithay::reexports::drm::control::{
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::{Display, ListeningSocket};
-use smithay::utils::{DeviceFd, Rectangle, Size, Transform};
+use smithay::utils::{DeviceFd, Size, Transform};
 
 use tracing::{error, info, warn};
 
@@ -343,7 +343,19 @@ impl App {
         let prep = self.state.advance_frame(dt);
 
         let size = self.drm.output_size;
-        let damage = Rectangle::from_size(size);
+
+        // Partial page-flip damage is only safe when nothing but the app surface
+        // could have changed: fullscreen app, no switcher/home/OSD/OSK, and the
+        // bar not mid-fade. Any of these repaint via Skia (untracked) and would
+        // leave stale pixels if excluded from the damage hint.
+        let report_partial = prep.scene.window_covers_screen()
+            && prep.app_surface.is_some()
+            && prep.scene.cards.is_empty()
+            && !prep.scene.show_home
+            && prep.osd_view.is_none()
+            && !self.state.bar_fading()
+            && prep.layers_below.is_empty()
+            && prep.layers_above.is_empty();
 
         // Acquire the next scanout buffer and bind it as the framebuffer.
         let (mut dmabuf, _age) = match self.drm.gbm_surface.next_buffer() {
@@ -361,7 +373,7 @@ impl App {
             }
         };
 
-        {
+        let flip_damage = {
             let mut ctx = crate::render::DrawCtx {
                 scene: &prep.scene,
                 app_surface: prep.app_surface.as_ref(),
@@ -383,14 +395,22 @@ impl App {
                     .pending_launch
                     .as_ref()
                     .map(|p| p.app_id.as_str()),
+                report_partial_damage: report_partial,
+                last_present: &mut self.state.last_present,
             };
-            if let Err(e) =
-                crate::render::draw_scene(&mut self.drm.renderer, &mut framebuffer, size, &mut ctx)
-            {
-                warn!("draw_scene failed: {e}");
-                return;
+            match crate::render::draw_scene(
+                &mut self.drm.renderer,
+                &mut framebuffer,
+                size,
+                &mut ctx,
+            ) {
+                Ok(damage) => damage,
+                Err(e) => {
+                    warn!("draw_scene failed: {e}");
+                    return;
+                }
             }
-        }
+        };
         drop(framebuffer);
 
         // Fence the frame: block until smithay + Skia GL work has completed so
@@ -402,7 +422,7 @@ impl App {
         match self
             .drm
             .gbm_surface
-            .queue_buffer(None, Some(vec![damage]), ())
+            .queue_buffer(None, Some(flip_damage), ())
         {
             Ok(()) => self.drm.pending_flip = true,
             Err(e) => warn!("queue_buffer failed: {e}"),
