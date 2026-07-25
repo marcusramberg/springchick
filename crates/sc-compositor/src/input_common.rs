@@ -119,7 +119,7 @@ pub fn on_press(state: &mut State) {
             &state.switcher_cards,
             x,
             y,
-            (state.output_size.0 as f32, state.output_size.1 as f32),
+            state.output_size_f(),
         );
         match hit {
             switcher::CardHit::Card(idx) => {
@@ -172,41 +172,18 @@ pub fn on_release(state: &mut State) {
     if let Some((start_x, start_y)) = state.bar_drag_start.take() {
         let dx = x - start_x;
         let dy = start_y - y; // positive = swiped up
-        let w = state.output_size.0 as f32;
-        let h = state.output_size.1 as f32;
+        let (w, h) = state.output_size_f();
 
         if dy > h * 0.08 {
             // Swiped up from bar → raise most recent app.
             if let Some(tid) = state.history.previous() {
-                if let Some(Some(tl)) = state.toplevels.get(tid) {
-                    let app_id = tl.app_id.clone();
-                    state.last_origin = ZoomOrigin::icon((w / 2.0, h / 2.0));
-                    state.history.push_foreground(tid);
-                    transition(
-                        &mut state.ui,
-                        UiEvent::RaiseApp {
-                            toplevel: tid,
-                            app_id,
-                        },
-                    );
-                }
+                state.raise_toplevel_centered(tid);
             }
         } else if dx.abs() > w * 0.15 {
             // Horizontal swipe on bar → quick-switch.
             let dir = if dx < 0.0 { 1 } else { -1 };
             if let Some(tid) = state.history.quick_switch(dir) {
-                if let Some(Some(tl)) = state.toplevels.get(tid) {
-                    let app_id = tl.app_id.clone();
-                    state.last_origin = ZoomOrigin::icon((w / 2.0, h / 2.0));
-                    state.history.push_foreground(tid);
-                    transition(
-                        &mut state.ui,
-                        UiEvent::RaiseApp {
-                            toplevel: tid,
-                            app_id,
-                        },
-                    );
-                }
+                state.raise_toplevel_centered(tid);
             }
         }
     }
@@ -272,7 +249,7 @@ pub fn on_release(state: &mut State) {
                         &state.switcher_cards,
                         x,
                         y,
-                        (state.output_size.0 as f32, state.output_size.1 as f32),
+                        state.output_size_f(),
                     );
                     if let switcher::CardHit::Card(idx) = hit {
                         // `idx` indexes the z-sorted render array; resolve it to
@@ -362,7 +339,7 @@ pub fn on_release(state: &mut State) {
             }
             _ => {
                 let last_origin = state.last_origin;
-                let size = (state.output_size.0 as f32, state.output_size.1 as f32);
+                let size = state.output_size_f();
                 transition(&mut state.ui, UiEvent::GrabRelease);
                 // Settling toward Home zooms back to the launcher icon; toward
                 // the switcher it settles into the front-card slot so the shrink

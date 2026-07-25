@@ -82,35 +82,33 @@ use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
 
-/// Frame budget (~90 Hz).
-#[allow(dead_code)]
-const FRAME_BUDGET: Duration = Duration::from_micros(11_111);
+/// `$HOME`, or `/tmp` as a last resort so path construction never panics.
+fn home_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+}
 
-/// Whether to emit the per-second perf log line. Set via `SPRINGCHICK_PERF`;
-/// the DRM backend additionally forces it on at startup.
-fn perf_enabled() -> bool {
-    std::env::var("SPRINGCHICK_PERF").is_ok()
+/// `$XDG_CONFIG_HOME`, else `~/.config`.
+fn config_home() -> PathBuf {
+    std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home_dir().join(".config"))
+}
+
+/// `$XDG_DATA_HOME`, else `~/.local/share`.
+fn data_home() -> PathBuf {
+    std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home_dir().join(".local/share"))
 }
 
 /// Config file path.
 fn config_path() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join(".config")
-        });
-    base.join("springchick/state.toml")
+    config_home().join("springchick/state.toml")
 }
 
 /// Scan .desktop files from standard locations.
 fn scan_apps() -> Vec<AppEntry> {
-    let data_home = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join(".local/share")
-        });
+    let data_home = data_home();
 
     let dirs = [
         PathBuf::from("/usr/share/applications"),
@@ -146,6 +144,19 @@ fn scan_apps() -> Vec<AppEntry> {
 struct AppToplevel {
     surface: ToplevelSurface,
     app_id: String,
+}
+
+/// Backend-agnostic render snapshot produced by [`State::advance_frame`]. Holds
+/// everything both backends feed into [`render::DrawCtx`]; each backend adds
+/// only its own output transform, Skia flip, and framebuffer binding.
+pub(crate) struct FramePrep {
+    pub scene: scene::Scene,
+    pub app_surface: Option<WlSurface>,
+    pub frame_time: u32,
+    pub osd_view: Option<(f32, bool, f32)>,
+    pub bar_alpha: f32,
+    pub layers_below: layer_shell::RenderList,
+    pub layers_above: layer_shell::RenderList,
 }
 
 /// Main compositor state.
@@ -453,7 +464,7 @@ impl State {
     /// Recompute layer-surface geometry + reserved area. If the area apps may
     /// use changed, resize the toplevels to fit around it (e.g. above an OSK).
     fn recompute_layers(&mut self) {
-        let (ow, oh) = (self.output_size.0 as f32, self.output_size.1 as f32);
+        let (ow, oh) = self.output_size_f();
         let before = self.layers.usable;
         let after = self.layers.recompute(ow, oh);
         if after != before {
@@ -479,7 +490,8 @@ impl State {
     /// Bar fade target: 0 when a Top/Overlay layer surface (the OSK) covers the
     /// bar, else 1.
     fn bar_alpha_target(&self) -> f32 {
-        let bar = sc_layout::bar_rect(self.output_size.0 as f32, self.output_size.1 as f32);
+        let (w, h) = self.output_size_f();
+        let bar = sc_layout::bar_rect(w, h);
         if self.layers.top_overlaps(bar) {
             0.0
         } else {
@@ -546,6 +558,91 @@ impl State {
             tl.surface.send_close();
         }
         self.history.remove(id);
+    }
+
+    /// Output size as floats — shorthand for the `(w, h)` pair every geometry
+    /// call needs.
+    fn output_size_f(&self) -> (f32, f32) {
+        (self.output_size.0 as f32, self.output_size.1 as f32)
+    }
+
+    /// Raise `tid` to the foreground with a screen-centered zoom origin,
+    /// recording it as the most-recent app. Backs the bar swipe-up and the bar
+    /// horizontal quick-switch, which differ only in which toplevel they pick.
+    pub(crate) fn raise_toplevel_centered(&mut self, tid: ToplevelId) {
+        let Some(Some(tl)) = self.toplevels.get(tid) else {
+            return;
+        };
+        let app_id = tl.app_id.clone();
+        let (w, h) = self.output_size_f();
+        self.last_origin = ZoomOrigin::icon((w / 2.0, h / 2.0));
+        self.history.push_foreground(tid);
+        transition(
+            &mut self.ui,
+            UiEvent::RaiseApp {
+                toplevel: tid,
+                app_id,
+            },
+        );
+    }
+
+    /// Advance the shell by one frame and produce the render snapshot: tick the
+    /// springs, apply any resulting effect, refresh `page_count`, compute the
+    /// scene, and gather the app surface, OSD, bar fade, and layer lists. Shared
+    /// by the winit and DRM backends, which differ only in how they present the
+    /// resulting frame.
+    fn advance_frame(&mut self, dt: f32) -> FramePrep {
+        let effect = transition(&mut self.ui, UiEvent::Tick { dt });
+        match effect {
+            ui_state::Effect::CloseToplevel { toplevel } => {
+                self.close_toplevel(toplevel);
+            }
+            ui_state::Effect::EnterSwitcher => {
+                let cards = self.history.mru_list();
+                info!(target: "springchick::debug", "Effect::EnterSwitcher mru_list={:?}", cards);
+                transition(&mut self.ui, UiEvent::EnterSwitcher { cards });
+            }
+            _ => {}
+        }
+
+        // Animations that settle to home reset page_count to 1; restore from the model.
+        if let UiState::Home { page_count, .. } = &mut self.ui {
+            *page_count = self.model.pages.len().max(1);
+        }
+
+        let scene = compute_scene(&self.ui, self.output_size);
+        self.switcher_cards = scene.cards.clone();
+        let disc = std::mem::discriminant(&self.ui);
+        if self.last_log_state != Some(disc) {
+            self.last_log_state = Some(disc);
+            info!(target: "springchick::debug", "state changed to {:?} cards={}", self.ui, scene.cards.len());
+        }
+
+        let app_surface = scene.window.as_ref().and_then(|(tid, _)| {
+            self.toplevels
+                .get(*tid)
+                .and_then(|slot| slot.as_ref())
+                .map(|tl| tl.surface.wl_surface().clone())
+        });
+
+        let frame_time = self.start_time.elapsed().as_millis() as u32;
+        let osd_now = std::time::Instant::now();
+        let osd_view = self
+            .osd
+            .is_active(osd_now)
+            .then(|| (self.osd.level, self.osd.muted, self.osd.alpha(osd_now)));
+        let bar_alpha = self.tick_bar_alpha();
+        let (layers_below, layers_above) = self.layers.render_lists();
+
+        FramePrep {
+            scene,
+            app_surface,
+            frame_time,
+            osd_view,
+            bar_alpha,
+            layers_below,
+            layers_above,
+        }
     }
 }
 
@@ -668,27 +765,27 @@ impl ServerDndGrabHandler for State {
 
 impl OutputHandler for State {}
 
+/// Force a toplevel to server-side decorations (= no CSD) and configure it.
+/// Every xdg-decoration request resolves the same way, regardless of what the
+/// client asked for.
+fn force_server_side_decoration(toplevel: &ToplevelSurface) {
+    toplevel.with_pending_state(|state| {
+        state.decoration_mode = Some(DecorationMode::ServerSide);
+    });
+    toplevel.send_configure();
+}
+
 impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
-        // Always request server-side decorations (= no CSD).
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(DecorationMode::ServerSide);
-        });
-        toplevel.send_configure();
+        force_server_side_decoration(&toplevel);
     }
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(DecorationMode::ServerSide);
-        });
-        toplevel.send_configure();
+        force_server_side_decoration(&toplevel);
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(DecorationMode::ServerSide);
-        });
-        toplevel.send_configure();
+        force_server_side_decoration(&toplevel);
     }
 }
 
@@ -971,60 +1068,17 @@ fn render_frame(
     let damage = Rectangle::from_size(size);
     let frame_start = std::time::Instant::now();
 
-    // Tick animations.
-    let dt = 1.0 / 90.0;
-    let effect = transition(&mut state.ui, UiEvent::Tick { dt });
-    match effect {
-        ui_state::Effect::CloseToplevel { toplevel } => {
-            state.close_toplevel(toplevel);
-        }
-        ui_state::Effect::EnterSwitcher => {
-            let cards = state.history.mru_list();
-            info!(target: "springchick::debug", "Effect::EnterSwitcher mru_list={:?}", cards);
-            transition(&mut state.ui, UiEvent::EnterSwitcher { cards });
-        }
-        _ => {}
-    }
+    // Fixed 90 Hz step for the dev backend.
+    let prep = state.advance_frame(1.0 / 90.0);
 
     keybinds::poll(state);
     state.sync_keyboard_focus();
 
-    // Animations that settle to home reset page_count to 1; restore from the model.
-    if let UiState::Home { page_count, .. } = &mut state.ui {
-        *page_count = state.model.pages.len().max(1);
-    }
-
-    // Compute scene from current state.
-    let scene = compute_scene(&state.ui, state.output_size);
-    state.switcher_cards = scene.cards.clone();
-    let disc = std::mem::discriminant(&state.ui);
-    if state.last_log_state != Some(disc) {
-        state.last_log_state = Some(disc);
-        info!(target: "springchick::debug", "state changed to {:?} cards={}", state.ui, scene.cards.len());
-    }
-
-    // Resolve the app surface for compositing.
-    let app_surface: Option<WlSurface> = scene.window.as_ref().and_then(|(tid, _)| {
-        state
-            .toplevels
-            .get(*tid)
-            .and_then(|slot| slot.as_ref())
-            .map(|tl| tl.surface.wl_surface().clone())
-    });
-
-    let frame_time = state.start_time.elapsed().as_millis() as u32;
-    let osd_now = std::time::Instant::now();
-    let osd_view = state
-        .osd
-        .is_active(osd_now)
-        .then(|| (state.osd.level, state.osd.muted, state.osd.alpha(osd_now)));
-    let bar_alpha = state.tick_bar_alpha();
-    let (layers_below, layers_above) = state.layers.render_lists();
     let (renderer, mut framebuffer) = backend.bind()?;
     {
         let mut ctx = render::DrawCtx {
-            scene: &scene,
-            app_surface: app_surface.as_ref(),
+            scene: &prep.scene,
+            app_surface: prep.app_surface.as_ref(),
             skia: &mut state.skia,
             model: &state.model,
             icon_cache: &state.icon_cache,
@@ -1032,11 +1086,11 @@ fn render_frame(
             toplevels: &state.toplevels,
             transform: Transform::Flipped180,
             skia_flip_y: false,
-            frame_time,
-            osd: osd_view,
-            layers_below: &layers_below,
-            layers_above: &layers_above,
-            bar_alpha,
+            frame_time: prep.frame_time,
+            osd: prep.osd_view,
+            layers_below: &prep.layers_below,
+            layers_above: &prep.layers_above,
+            bar_alpha: prep.bar_alpha,
         };
         render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }

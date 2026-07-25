@@ -28,7 +28,8 @@ fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64)
     }
     // 2. The focused fullscreen app, except the bottom bar zone (home gesture).
     if let crate::ui_state::UiState::App { toplevel, .. } = &state.ui {
-        let bar = sc_layout::bar_rect(state.output_size.0 as f32, state.output_size.1 as f32);
+        let (w, h) = state.output_size_f();
+        let bar = sc_layout::bar_rect(w, h);
         if !bar.contains(x, y) {
             if let Some(Some(tl)) = state.toplevels.get(*toplevel) {
                 return Some((tl.surface.wl_surface().clone(), (0.0, 0.0)));

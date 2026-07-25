@@ -329,46 +329,11 @@ impl App {
         }
         let frame_start = Instant::now();
 
-        // Tick springs.
+        // Variable step, clamped so a long stall can't fling the springs.
         let dt = self.last_frame.elapsed().as_secs_f32().min(1.0 / 30.0);
         self.last_frame = Instant::now();
-        let effect =
-            crate::ui_state::transition(&mut self.state.ui, crate::ui_state::UiEvent::Tick { dt });
-        match effect {
-            crate::ui_state::Effect::CloseToplevel { toplevel } => {
-                self.state.close_toplevel(toplevel);
-            }
-            crate::ui_state::Effect::EnterSwitcher => {
-                let cards = self.state.history.mru_list();
-                crate::ui_state::transition(
-                    &mut self.state.ui,
-                    crate::ui_state::UiEvent::EnterSwitcher { cards },
-                );
-            }
-            _ => {}
-        }
-        if let crate::ui_state::UiState::Home { page_count, .. } = &mut self.state.ui {
-            *page_count = self.state.model.pages.len().max(1);
-        }
+        let prep = self.state.advance_frame(dt);
 
-        let scene = crate::scene::compute_scene(&self.state.ui, self.state.output_size);
-        self.state.switcher_cards = scene.cards.clone();
-        let app_surface = scene.window.as_ref().and_then(|(tid, _)| {
-            self.state
-                .toplevels
-                .get(*tid)
-                .and_then(|slot| slot.as_ref())
-                .map(|tl| tl.surface.wl_surface().clone())
-        });
-        let frame_time = self.state.start_time.elapsed().as_millis() as u32;
-        let osd_now = Instant::now();
-        let osd_view = self.state.osd.is_active(osd_now).then(|| {
-            (
-                self.state.osd.level,
-                self.state.osd.muted,
-                self.state.osd.alpha(osd_now),
-            )
-        });
         let size = self.drm.output_size;
         let damage = Rectangle::from_size(size);
 
@@ -388,12 +353,10 @@ impl App {
             }
         };
 
-        let bar_alpha = self.state.tick_bar_alpha();
-        let (layers_below, layers_above) = self.state.layers.render_lists();
         {
             let mut ctx = crate::render::DrawCtx {
-                scene: &scene,
-                app_surface: app_surface.as_ref(),
+                scene: &prep.scene,
+                app_surface: prep.app_surface.as_ref(),
                 skia: &mut self.state.skia,
                 model: &self.state.model,
                 icon_cache: &self.state.icon_cache,
@@ -401,11 +364,11 @@ impl App {
                 toplevels: &self.state.toplevels,
                 transform: self.drm.transform,
                 skia_flip_y: true,
-                frame_time,
-                osd: osd_view,
-                layers_below: &layers_below,
-                layers_above: &layers_above,
-                bar_alpha,
+                frame_time: prep.frame_time,
+                osd: prep.osd_view,
+                layers_below: &prep.layers_below,
+                layers_above: &prep.layers_above,
+                bar_alpha: prep.bar_alpha,
             };
             if let Err(e) =
                 crate::render::draw_scene(&mut self.drm.renderer, &mut framebuffer, size, &mut ctx)
