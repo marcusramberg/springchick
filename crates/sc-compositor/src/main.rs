@@ -207,6 +207,12 @@ struct State {
     last_origin: ZoomOrigin,
     /// Actual output size (may differ from FP5 constants in nested dev mode).
     output_size: (i32, i32),
+    /// The advertised output. Retained so surfaces can `enter` it (which is how
+    /// clients learn the scale factor).
+    output: Output,
+    /// Output scale (`[main].dpi`). Client buffers are `logical * dpi`, so xdg
+    /// configure sizes are physical/dpi.
+    dpi: i32,
 
     // Rendering
     skia: SkiaGl,
@@ -284,10 +290,11 @@ impl State {
             size: (FP5_WIDTH, FP5_HEIGHT).into(),
             refresh: 90_000, // 90 Hz in mHz
         };
+        let dpi = keybinds::load_dpi().max(1) as i32;
         output.change_current_state(
             Some(mode),
             None,
-            Some(smithay::output::Scale::Integer(keybinds::load_dpi() as i32)),
+            Some(smithay::output::Scale::Integer(dpi)),
             None,
         );
         output.set_preferred(mode);
@@ -351,6 +358,8 @@ impl State {
             history: AppHistory::new(),
             last_origin: ZoomOrigin::icon((FP5_WIDTH as f32 / 2.0, FP5_HEIGHT as f32 / 2.0)),
             output_size: (FP5_WIDTH, FP5_HEIGHT),
+            output,
+            dpi,
             skia: SkiaGl::new(),
             wayland_socket,
             last_pointer_pos: None,
@@ -425,6 +434,10 @@ impl State {
             format!("unknown_{}", self.toplevels.len())
         };
 
+        // Enter the output so the client receives its scale factor (`[main].dpi`)
+        // and renders a HiDPI buffer instead of 1:1.
+        self.output.enter(surface.wl_surface());
+
         let id = self.toplevels.len();
         self.toplevels.push(Some(AppToplevel {
             surface,
@@ -475,9 +488,10 @@ impl State {
     /// Send every app toplevel a configure at the current usable size, so apps
     /// render within the area not covered by exclusive-zone layer surfaces.
     fn reconfigure_toplevels(&mut self) {
+        // Logical size: client scales its buffer up by `dpi`.
         let size = (
-            self.layers.usable.w.round() as i32,
-            self.layers.usable.h.round() as i32,
+            (self.layers.usable.w.round() as i32) / self.dpi,
+            (self.layers.usable.h.round() as i32) / self.dpi,
         );
         for slot in self.toplevels.iter().flatten() {
             slot.surface.with_pending_state(|state| {
@@ -680,8 +694,9 @@ impl XdgShellHandler for State {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         // Size to the usable area (output minus any exclusive-zone reservations),
         // so an app that opens while an OSK is up already fits above it.
-        let w = self.layers.usable.w.round() as i32;
-        let h = self.layers.usable.h.round() as i32;
+        // xdg sizes are logical; the client scales its buffer up by `dpi`.
+        let w = (self.layers.usable.w.round() as i32) / self.dpi;
+        let h = (self.layers.usable.h.round() as i32) / self.dpi;
         surface.with_pending_state(|state| {
             state.size = Some((w, h).into());
             state.decoration_mode = Some(DecorationMode::ServerSide);
@@ -811,6 +826,9 @@ impl smithay::wayland::shell::wlr_layer::WlrLayerShellHandler for State {
         namespace: String,
     ) {
         info!(%namespace, ?layer, "new layer surface");
+        // Enter the output so the OSK/layer client renders at the output scale
+        // too, matching the app windows.
+        self.output.enter(surface.wl_surface());
         self.layers.add(surface, layer);
         // Geometry + the initial configure happen on the next commit, once the
         // client's anchor/size/exclusive-zone state has arrived.
