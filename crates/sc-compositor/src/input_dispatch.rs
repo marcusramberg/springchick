@@ -20,8 +20,15 @@ fn normalize(x: f32, y: f32, width: f32, height: f32) -> Pt {
 pub enum DownAction {
     /// Emit this UiEvent.
     Event(UiEvent),
-    /// Launch/raise an app by id (with zoom origin).
-    LaunchApp { app_id: String, origin: ZoomOrigin },
+    /// Finger went down on an app icon. Track it as a pending launch: a release
+    /// with little movement launches; movement past the tap threshold cancels it
+    /// and the gesture becomes a page swipe instead.
+    PressIcon {
+        app_id: String,
+        origin: ZoomOrigin,
+        start_x: f32,
+        start_y: f32,
+    },
     /// Start tracking a page drag from this x position.
     StartPageDrag { start_x: f32 },
     /// Start tracking a bar drag (for app switching from Home).
@@ -49,18 +56,22 @@ pub fn on_press(
                     let slot = &layout.grid[index];
                     let cx = slot.icon_rect.center_x();
                     let cy = slot.icon_rect.center_y();
-                    DownAction::LaunchApp {
+                    DownAction::PressIcon {
                         app_id,
                         origin: ZoomOrigin::icon((cx, cy)),
+                        start_x: x,
+                        start_y: y,
                     }
                 }
                 Hit::DockIcon { app_id, index } => {
                     let slot = &layout.dock[index];
                     let cx = slot.icon_rect.center_x();
                     let cy = slot.icon_rect.center_y();
-                    DownAction::LaunchApp {
+                    DownAction::PressIcon {
                         app_id,
                         origin: ZoomOrigin::icon((cx, cy)),
+                        start_x: x,
+                        start_y: y,
                     }
                 }
                 Hit::Bar => DownAction::StartBarDrag {
@@ -112,5 +123,47 @@ pub fn on_move(
             None
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sc_shell_model::ShellModel;
+
+    fn model() -> ShellModel {
+        let mut m = ShellModel::default();
+        for i in 0..6 {
+            m.place(format!("app{i}"));
+        }
+        m
+    }
+
+    /// Pressing an icon must NOT launch immediately — it arms a pending tap so a
+    /// swipe that starts on the icon can still flip pages. Launch happens on
+    /// release (in input_common), not here.
+    #[test]
+    fn press_on_icon_arms_pending_not_launch() {
+        let m = model();
+        let out = (1224, 2700);
+        let layout = sc_layout::compute(out.0 as f32, out.1 as f32, 0, &m);
+        let slot = &layout.grid[0];
+        let (cx, cy) = (slot.icon_rect.center_x(), slot.icon_rect.center_y());
+
+        let action = on_press(&UiState::home(0, 1), cx, cy, &m, out);
+        match action {
+            DownAction::PressIcon { app_id, .. } => assert_eq!(app_id, "app0"),
+            other => panic!("expected PressIcon, got {other:?}"),
+        }
+    }
+
+    /// Pressing empty grid space starts a page drag straight away.
+    #[test]
+    fn press_on_empty_starts_page_drag() {
+        let m = model();
+        let out = (1224, 2700);
+        // Top-left corner of the status-bar padding — no icon there.
+        let action = on_press(&UiState::home(0, 1), 5.0, 5.0, &m, out);
+        assert!(matches!(action, DownAction::StartPageDrag { .. }));
     }
 }

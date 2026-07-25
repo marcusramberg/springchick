@@ -66,6 +66,8 @@ pub struct DrawCtx<'a> {
     pub layers_above: &'a [(WlSurface, (i32, i32))],
     /// Home-bar opacity (faded out when the OSK covers it).
     pub bar_alpha: f32,
+    /// App id of the icon currently pressed on Home (draws a press highlight).
+    pub pressed_app: Option<&'a str>,
 }
 
 /// Render a layer surface's tree at `origin` in its own pass. Used for both the
@@ -188,6 +190,7 @@ pub fn draw_scene(
             ctx.icon_cache,
             ctx.app_catalog,
             ctx.skia_flip_y,
+            ctx.pressed_app,
         );
     }
 

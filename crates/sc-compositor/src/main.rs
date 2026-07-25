@@ -229,6 +229,9 @@ struct State {
     page_drag_start: Option<f32>,
     /// Bar drag tracking from Home state: (start_x, start_y).
     bar_drag_start: Option<(f32, f32)>,
+    /// App icon held on Home, pending tap-to-launch (also drives the press
+    /// highlight). Cleared if the finger moves into a page swipe.
+    pending_launch: Option<input_common::PendingLaunch>,
     /// Switcher deck drag state.
     switcher_drag: input_common::SwitcherDrag,
     /// Switcher card rects for hit-testing during drag.
@@ -372,6 +375,7 @@ impl State {
             pointer_down: false,
             page_drag_start: None,
             bar_drag_start: None,
+            pending_launch: None,
             switcher_drag: input_common::SwitcherDrag::None,
             switcher_cards: Vec::new(),
             active_gesture: None,
@@ -1109,6 +1113,7 @@ fn render_frame(
             layers_below: &prep.layers_below,
             layers_above: &prep.layers_above,
             bar_alpha: prep.bar_alpha,
+            pressed_app: state.pending_launch.as_ref().map(|p| p.app_id.as_str()),
         };
         render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }
