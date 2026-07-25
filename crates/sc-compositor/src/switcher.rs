@@ -140,7 +140,7 @@ pub fn hit_test(rects: &[CardRect], x: f32, y: f32, size: (f32, f32)) -> CardHit
         let cw = w * r.scale;
         let ch = h * r.scale;
         let inside = (x - r.center_x).abs() <= cw / 2.0 && (y - r.center_y).abs() <= ch / 2.0;
-        if inside && best.map_or(true, |b| r.z > rects[b].z) {
+        if inside && best.is_none_or(|b| r.z > rects[b].z) {
             best = Some(i);
         }
     }
