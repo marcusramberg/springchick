@@ -1,37 +1,61 @@
-# /etc default config + NixOS module support
+# config.toml + /etc default config + NixOS module support
 
 ## Problem
 
-Keybindings config today (`crates/sc-keys/src/config.rs`, `crates/sc-compositor/src/keybinds.rs`) loads from `SPRINGCHICK_KEYBINDS` env var or `$XDG_CONFIG_HOME/springchick/keybindings.toml`, falling back to a compiled-in `DEFAULT_TOML`. There is no system-wide config tier, and the NixOS module (`nix/module.nix`) only exposes `enable`/`package` — no way for a system config to ship or override keybindings declaratively.
+Keybindings config today lives in a dedicated `keybindings.toml`, loaded by `crates/sc-compositor/src/keybinds.rs` from `SPRINGCHICK_KEYBINDS` env var or `$XDG_CONFIG_HOME/springchick/keybindings.toml`, falling back to a compiled-in `DEFAULT_TOML` (`crates/sc-keys/src/config.rs`). There is no system-wide config tier, and the NixOS module (`nix/module.nix`) only exposes `enable`/`package` — no way for a system config to ship or override settings declaratively.
+
+Separately: springchick is early enough in development that the config file is still free to restructure. Keybinds will not be the only configurable thing (display, gestures, etc. are likely future sections), so the file is renamed to `config.toml` with keybinds under a `[keybinds]` table now, before any real users depend on the flat shape.
 
 ## Design
 
-### Rust: add `/etc` as a lookup tier
+### Rust: `config.toml` with a `[keybinds]` table
 
-`SPRINGCHICK_KEYBINDS` keeps its current semantics unchanged: if set, it is the *only* path tried — no fallthrough to XDG or `/etc` if that file is missing or unreadable, straight to `Config::defaults()`, exactly like today. This preserves an explicit override's "this is the file, full stop" contract.
+`crates/sc-keys/src/config.rs` — the existing `RawConfig`/`convert`/`Config` keybinds schema is unchanged in content, just nested one level. Add a top-level wrapper:
 
-When `SPRINGCHICK_KEYBINDS` is unset, `load_config()` now tries, in order:
+```rust
+#[derive(Deserialize, Default)]
+struct RawConfigFile {
+    keybinds: Option<RawConfig>,
+}
+```
 
-1. `$XDG_CONFIG_HOME/springchick/keybindings.toml` (or `~/.config/...` via `$HOME`)
-2. `/etc/springchick/keybindings.toml`
-3. `Config::defaults()` (built-in `DEFAULT_TOML`)
+`Config::parse`/`Config::parse_or_defaults` deserialize `RawConfigFile` first, then operate on `.keybinds.unwrap_or_default()` (`RawConfig` needs `#[derive(Default)]`, i.e. `long_press_ms: None, binding: vec![]`). A file with no `[keybinds]` table at all still parses cleanly to `Config::defaults()`-equivalent empty bindings — same "never fatal" contract as today.
 
-First of these that exists and is readable wins. A file that exists but fails to parse still falls back to `Config::defaults()` via `Config::parse_or_defaults`, same behavior as today — a config typo must never block compositor startup.
+`DEFAULT_TOML` gains the wrapping table:
 
-Refactor `config_path() -> Option<PathBuf>` (keybinds.rs:45) into two pieces so the new tier is unit-testable without racing on real process env vars (Rust tests run multithreaded in-process, so mutating `std::env` from a test would race other tests):
+```toml
+[keybinds]
+long_press_ms = 800
 
-- `env_override(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf>` — resolves `SPRINGCHICK_KEYBINDS` only, taking an injectable env lookup.
-- `candidate_paths(env: impl Fn(&str) -> Option<String>) -> Vec<PathBuf>` — resolves the XDG and `/etc` tiers in order, same injectable signature.
+[[keybinds.binding]]
+key = "XF86AudioRaiseVolume"
+press = "short"
+action = "volume-up"
 
-`load_config()` calls `env_override` first (short-circuit, no fallthrough); if `None`, iterates `candidate_paths()`, tries each with `std::fs::read_to_string`, and falls back to `Config::defaults()` if none exist. Tests pass a closure over a local `HashMap` instead of touching real env vars, and can point `/etc`-tier assertions at literal `PathBuf::from("/etc/springchick/keybindings.toml")` without needing a real file — feasibility of the fallback logic is what's tested, not actual disk I/O for that tier.
+# ...rest of existing bindings, each under [[keybinds.binding]]...
+```
 
-If both `XDG_CONFIG_HOME` and `HOME` are unset, `candidate_paths` simply omits the XDG entry, returning only `/etc/springchick/keybindings.toml` — same absence-handling as today's `config_path`, just no longer short-circuiting to `None`.
+All existing unit tests in `config.rs` update their inline TOML fixtures to the nested `[keybinds]` shape (mechanical; no test logic changes).
 
-Update the doc comment currently at keybinds.rs:43-44 (documents only the two existing tiers) to describe the new three/four-tier order.
+### Rust: lookup tiers, pointed at the new filename
 
-No changes to `sc-keys/src/config.rs` parsing/validation logic, `resolve_keysym`, or `Keys::load`.
+`crates/sc-compositor/src/keybinds.rs`:
 
-### NixOS module: `programs.springchick.keybindings`
+- File renamed `keybindings.toml` → `config.toml` throughout (doc comments, path construction, `/etc` path).
+- Env var renamed `SPRINGCHICK_KEYBINDS` → `SPRINGCHICK_CONFIG` (early dev, no back-compat needed).
+- Lookup order (unchanged from the prior /etc-support design, just retargeted):
+  - `SPRINGCHICK_CONFIG` env var: strict override via a separate `env_override` function — if set, it is the only path tried; a missing/unreadable file at that path falls straight to `Config::defaults()`, no fallthrough to XDG or `/etc`. Matches today's `SPRINGCHICK_KEYBINDS` semantics.
+  - If unset, `candidate_paths(env: impl Fn(&str) -> Option<String>) -> Vec<PathBuf>` yields, in order:
+    1. `$XDG_CONFIG_HOME/springchick/config.toml` (or `~/.config/...` via `$HOME`)
+    2. `/etc/springchick/config.toml`
+  - First candidate that exists and is readable wins; none existing falls back to `Config::defaults()`. A file that exists but fails to parse still falls back to `Config::defaults()` via `Config::parse_or_defaults`.
+  - If both `XDG_CONFIG_HOME` and `HOME` are unset, `candidate_paths` omits the XDG entry, returning only `/etc/springchick/config.toml` — same absence-handling as today, just no longer short-circuiting to `None`.
+- Both `env_override` and `candidate_paths` take an injectable `env: impl Fn(&str) -> Option<String>` closure rather than reading `std::env` directly, so tests exercise the ordering via a local `HashMap` instead of mutating real process env vars (avoids races with other tests in the same multithreaded test binary).
+- Doc comment above the old `config_path` (keybinds.rs:43-44) rewritten to describe the new tiers and filename.
+
+No changes to `resolve_keysym` or `Keys::load`.
+
+### NixOS module: `programs.springchick.config`
 
 `nix/module.nix` gains:
 
@@ -39,14 +63,14 @@ No changes to `sc-keys/src/config.rs` parsing/validation logic, `resolve_keysym`
 options.programs.springchick = {
   # ...existing enable/package...
 
-  keybindings = lib.mkOption {
+  config = lib.mkOption {
     type = lib.types.nullOr lib.types.lines;
     default = null;
     description = ''
-      Raw TOML written to /etc/springchick/keybindings.toml. See
-      crates/sc-keys/src/config.rs for the file schema. Null (default)
-      leaves the compositor's built-in defaults in place and does not
-      touch /etc.
+      Raw TOML written to /etc/springchick/config.toml. See
+      crates/sc-keys/src/config.rs for the [keybinds] table schema.
+      Null (default) leaves the compositor's built-in defaults in
+      place and does not touch /etc.
     '';
   };
 };
@@ -54,24 +78,25 @@ options.programs.springchick = {
 config = lib.mkIf cfg.enable {
   # ...existing environment.systemPackages, sessionPackages, hardware/polkit defaults...
 
-  environment.etc."springchick/keybindings.toml" = lib.mkIf (cfg.keybindings != null) {
-    text = cfg.keybindings;
+  environment.etc."springchick/config.toml" = lib.mkIf (cfg.config != null) {
+    text = cfg.config;
   };
 };
 ```
 
-Raw TOML text, not a structured submodule — avoids duplicating the binding schema (key/mods/press/action) in Nix, which would drift from the Rust source as `sc-keys::config` evolves. Per-user `$XDG_CONFIG_HOME` override keeps working unmodified; `/etc` only matters when no user config is present.
+Named `config` (not `keybindings`) since the file is now general-purpose — avoids a second rename when future sections (display, gestures, ...) are added. Raw TOML text, not a structured submodule — avoids duplicating the schema in Nix, which would drift from the Rust source as `sc-keys::config` evolves. Per-user `$XDG_CONFIG_HOME` override keeps working unmodified; `/etc` only matters when no user config is present.
 
 `nix/package.nix` is unaffected.
 
 ## Testing
 
-- Existing `sc-keys::config` and `sc-compositor::keybinds` unit tests are unaffected.
+- Existing `sc-keys::config` and `sc-compositor::keybinds` unit tests are unaffected in intent, updated in fixture shape (nested `[keybinds]` table).
 - Add tests in `keybinds.rs` against `candidate_paths`/`env_override` using injected closures (a local `HashMap`, no real env var or filesystem mutation): env override present → single-element result and no fallthrough; env override absent → XDG-then-`/etc` ordering.
 - `nix flake check` continues to build the module; no new Nix-level test (module is a thin `environment.etc` passthrough).
 
 ## Out of scope
 
 - Structured/typed Nix option mirroring the binding schema.
-- `/etc` support for any config file other than `keybindings.toml` (none currently exist).
-- Validating `cfg.keybindings` TOML at Nix eval time.
+- Any config sections beyond `[keybinds]` (display, gestures, etc.) — the wrapper struct just needs to tolerate their future addition without a breaking change.
+- Validating `cfg.config` TOML at Nix eval time.
+- Back-compat shim for `SPRINGCHICK_KEYBINDS` or `keybindings.toml` — pre-1.0, no deployed users depend on the old names.
