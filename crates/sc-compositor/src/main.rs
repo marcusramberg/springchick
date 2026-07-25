@@ -21,7 +21,6 @@ pub mod ui_state;
 mod virtual_keyboard;
 
 use app_history::AppHistory;
-use backend::{FP5_HEIGHT, FP5_WIDTH};
 use launcher::spawn_app;
 use scene::compute_scene;
 use skia_gl::SkiaGl;
@@ -209,7 +208,8 @@ struct State {
     history: AppHistory,
     /// Last zoom origin (cached when launching).
     last_origin: ZoomOrigin,
-    /// Actual output size (may differ from FP5 constants in nested dev mode).
+    /// Actual output size in physical pixels (from the backend: DRM mode or
+    /// winit window size). Set at construction; drives layout and app sizing.
     output_size: (i32, i32),
     /// The advertised output. Retained so surfaces can `enter` it (which is how
     /// clients learn the scale factor).
@@ -256,8 +256,9 @@ struct State {
 }
 
 impl State {
-    fn new(display: &Display<Self>, wayland_socket: String) -> Self {
+    fn new(display: &Display<Self>, wayland_socket: String, output_size: (i32, i32)) -> Self {
         let dh = display.handle();
+        let (out_w, out_h) = output_size;
 
         // v6 so clients like wvkbd that bind wl_compositor@6 can connect.
         let compositor_state = CompositorState::new_v6::<Self>(&dh);
@@ -291,7 +292,7 @@ impl State {
             },
         );
         let mode = OutputMode {
-            size: (FP5_WIDTH, FP5_HEIGHT).into(),
+            size: (out_w, out_h).into(),
             refresh: 90_000, // 90 Hz in mHz
         };
         let dpi = keybinds::load_dpi().max(1) as i32;
@@ -348,7 +349,7 @@ impl State {
             blank: blank::Blank::new(),
             osd: osd::Osd::new(),
             layer_shell_state,
-            layers: layer_shell::LayerShell::new(FP5_WIDTH as f32, FP5_HEIGHT as f32),
+            layers: layer_shell::LayerShell::new(out_w as f32, out_h as f32),
             touch,
             touch_grab: None,
             input_scale: 1.0,
@@ -361,8 +362,8 @@ impl State {
             toplevels: Vec::new(),
             children: Vec::new(),
             history: AppHistory::new(),
-            last_origin: ZoomOrigin::icon((FP5_WIDTH as f32 / 2.0, FP5_HEIGHT as f32 / 2.0)),
-            output_size: (FP5_WIDTH, FP5_HEIGHT),
+            last_origin: ZoomOrigin::icon((out_w as f32 / 2.0, out_h as f32 / 2.0)),
+            output_size,
             output,
             dpi,
             skia: SkiaGl::new(),
@@ -480,26 +481,6 @@ impl State {
 
     /// Close a toplevel by id (remove from vec, notify UI state).
     /// Recompute layer-surface geometry + reserved area. If the area apps may
-    /// Adopt the real output size once a backend knows it (winit window size /
-    /// DRM mode). The `State` is built with the FP5 defaults; this reseeds the
-    /// layer layout and re-advertises the output mode so app sizing and client
-    /// geometry track the actual panel resolution, not FP5. Call once at
-    /// startup, before any client maps.
-    fn set_output_size(&mut self, w: i32, h: i32) {
-        self.output_size = (w, h);
-        // Reseed the layout to the real panel (no layer surfaces exist yet).
-        self.layers = layer_shell::LayerShell::new(w as f32, h as f32);
-        // Re-advertise the mode so clients see the real geometry (the scale is
-        // already set from [main].dpi and is preserved by passing None).
-        let mode = OutputMode {
-            size: (w, h).into(),
-            refresh: 90_000,
-        };
-        self.output.change_current_state(Some(mode), None, None, None);
-        self.output.set_preferred(mode);
-        self.recompute_layers();
-    }
-
     /// use changed, resize the toplevels to fit around it (e.g. above an OSK).
     fn recompute_layers(&mut self) {
         let (ow, oh) = self.output_size_f();
@@ -958,18 +939,12 @@ fn accept_client(display: &Display<State>, listener: &ListeningSocket) {
 }
 
 fn run_winit() {
-    info!(
-        width = FP5_WIDTH,
-        height = FP5_HEIGHT,
-        "starting winit dev backend"
-    );
+    let (win_w, win_h) = backend::dev_window_size();
+    info!(width = win_w, height = win_h, "starting winit dev backend");
 
     let attributes = WinitWindow::default_attributes()
         .with_title("springchick")
-        .with_inner_size(LogicalSize::new(
-            f64::from(FP5_WIDTH),
-            f64::from(FP5_HEIGHT),
-        ))
+        .with_inner_size(LogicalSize::new(f64::from(win_w), f64::from(win_h)))
         .with_visible(true);
 
     let (mut gfx_backend, mut winit_evt) =
@@ -986,12 +961,11 @@ fn run_winit() {
     // Dev backend: own env only, don't disturb the host session's user services.
     publish_wayland_display(&socket_name, false);
 
-    let mut state = State::new(&display, socket_name.clone());
-
-    // Update output size from actual backend window dimensions.
+    // Build State with the actual backend window size (the host compositor may
+    // have clamped our requested dev-window size).
     let actual_size = gfx_backend.window_size();
-    state.set_output_size(actual_size.w, actual_size.h);
     info!(w = actual_size.w, h = actual_size.h, "actual output size");
+    let mut state = State::new(&display, socket_name.clone(), (actual_size.w, actual_size.h));
 
     // Optional debug input socket (dev/test harness). Inert unless env is set.
     let debug_chan = match std::env::var("SPRINGCHICK_DEBUG_SOCK") {

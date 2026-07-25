@@ -140,8 +140,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Session backend: publish to systemd/dbus so user services (e.g. wvkbd)
     // can reach our socket.
     crate::publish_wayland_display(&socket_name, true);
-    let mut state = State::new(&display, socket_name);
-    state.set_output_size(output_size.w, output_size.h);
+    let mut state = State::new(&display, socket_name, (output_size.w, output_size.h));
     state.perf_log = true; // perf logging is the point of this backend
 
     // Look up the connector's DPMS property so power-short can truly blank the

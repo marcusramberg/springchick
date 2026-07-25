@@ -1,7 +1,22 @@
-/// FP5 logical output geometry. The winit dev window is forced to match so layout
-/// and animation are pixel-identical to the device.
-pub const FP5_WIDTH: i32 = 1224;
-pub const FP5_HEIGHT: i32 = 2700;
+/// Default size of the winit dev window, in logical pixels (a phone-ish aspect;
+/// the real output size comes from the backend at runtime, and the host
+/// compositor may clamp this anyway). Override with `SPRINGCHICK_WINIT_SIZE=WxH`.
+pub const DEV_WINDOW_WIDTH: i32 = 1224;
+pub const DEV_WINDOW_HEIGHT: i32 = 2700;
+
+/// Parse `SPRINGCHICK_WINIT_SIZE` (`WxH`) into a size, falling back to the
+/// dev-window default. Kept pure for unit testing.
+pub fn dev_window_size() -> (i32, i32) {
+    parse_dev_window_size(std::env::var("SPRINGCHICK_WINIT_SIZE").as_deref().ok())
+}
+
+fn parse_dev_window_size(value: Option<&str>) -> (i32, i32) {
+    value
+        .and_then(|s| s.split_once(['x', 'X']))
+        .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
+        .filter(|&(w, h): &(i32, i32)| w > 0 && h > 0)
+        .unwrap_or((DEV_WINDOW_WIDTH, DEV_WINDOW_HEIGHT))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -29,6 +44,25 @@ impl BackendKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_window_size_parses_or_falls_back() {
+        assert_eq!(parse_dev_window_size(Some("720x1440")), (720, 1440));
+        assert_eq!(parse_dev_window_size(Some("1080X2340")), (1080, 2340));
+        // Bad input falls back to the default.
+        assert_eq!(
+            parse_dev_window_size(Some("garbage")),
+            (DEV_WINDOW_WIDTH, DEV_WINDOW_HEIGHT)
+        );
+        assert_eq!(
+            parse_dev_window_size(Some("0x100")),
+            (DEV_WINDOW_WIDTH, DEV_WINDOW_HEIGHT)
+        );
+        assert_eq!(
+            parse_dev_window_size(None),
+            (DEV_WINDOW_WIDTH, DEV_WINDOW_HEIGHT)
+        );
+    }
 
     #[test]
     fn from_value_selects_drm_only_for_drm() {
