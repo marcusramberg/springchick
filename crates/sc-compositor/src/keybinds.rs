@@ -9,7 +9,7 @@ use sc_keys::{Action, Config, KeyBindings, ModMask, PressOutcome, PressTracker};
 use smithay::backend::input::{KeyState, Keycode};
 use smithay::input::keyboard::{xkb, FilterResult, ModifiersState};
 use smithay::utils::SERIAL_COUNTER;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Duration;
 use std::time::Instant;
@@ -56,11 +56,30 @@ fn candidate_paths(env: impl Fn(&str) -> Option<String>) -> Vec<PathBuf> {
         .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".config")))
         .map(|base| base.join("springchick/config.toml"));
 
-    xdg.into_iter()
-        .chain(std::iter::once(PathBuf::from(
-            "/etc/springchick/config.toml",
-        )))
-        .collect()
+    let mut paths = Vec::new();
+    if let Some(path) = xdg {
+        paths.push(path);
+    }
+    paths.push(PathBuf::from("/etc/springchick/config.toml"));
+    paths
+}
+
+/// Try to read and parse one candidate path. `None` means "this tier failed" —
+/// callers decide what that means (fall back to defaults immediately for the
+/// env override, or try the next candidate for the lookup tiers). A missing
+/// file is silent; any other read error is a warning either way.
+fn try_read(path: &Path) -> Option<Config> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            info!(path = %path.display(), "loading config");
+            Some(Config::parse_or_defaults(&text))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            warn!(%e, path = %path.display(), "cannot read config");
+            None
+        }
+    }
 }
 
 /// Read the config file, falling back to the shipped defaults. A missing file is
@@ -69,30 +88,12 @@ fn load_config() -> Config {
     let real_env = |k: &str| std::env::var(k).ok();
 
     if let Some(path) = env_override(real_env) {
-        return match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                info!(path = %path.display(), "loading config");
-                Config::parse_or_defaults(&text)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::defaults(),
-            Err(e) => {
-                warn!(%e, path = %path.display(), "cannot read config; using defaults");
-                Config::defaults()
-            }
-        };
+        return try_read(&path).unwrap_or_else(Config::defaults);
     }
 
     for path in candidate_paths(real_env) {
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                info!(path = %path.display(), "loading config");
-                return Config::parse_or_defaults(&text);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                warn!(%e, path = %path.display(), "cannot read config; trying next");
-                continue;
-            }
+        if let Some(config) = try_read(&path) {
+            return config;
         }
     }
     Config::defaults()
