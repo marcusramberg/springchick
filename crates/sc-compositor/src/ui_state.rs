@@ -497,8 +497,8 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             let mut entry = Spring::new(0.0);
             // Snappy launch so the fan unfolds immediately (no perceived delay
             // from a slow spring ease-in). Near-critical damping keeps it clean.
-            entry.stiffness = 520.0;
-            entry.damping = 42.0;
+            entry.stiffness = 900.0;
+            entry.damping = 54.0;
             entry.retarget(1.0);
             *state = UiState::Switcher {
                 cards,
