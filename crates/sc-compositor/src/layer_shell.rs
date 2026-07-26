@@ -168,12 +168,17 @@ impl LayerShell {
 
     /// The topmost hit-testable (Top/Overlay) surface containing the point, if
     /// any. Overlay is above Top; within a layer, later-created is on top.
-    pub fn hit_test(&self, x: f32, y: f32) -> Option<&MappedLayer> {
+    /// A surface only matches if the point also lies inside its input region
+    /// (an always-mapped, fully-transparent overlay sets an empty input region
+    /// while "closed" so touches fall through to what's underneath). `dpi` is
+    /// the fractional scale the layer surfaces render at, used to map the
+    /// physical point into surface-local logical space for the region test.
+    pub fn hit_test(&self, x: f32, y: f32, dpi: f32) -> Option<&MappedLayer> {
         for layer in [Layer::Overlay, Layer::Top] {
             // `.last()` gives the topmost (latest-created) match within the layer.
             if let Some(m) = self
                 .on_layer(layer)
-                .filter(|m| m.rect.contains(x, y))
+                .filter(|m| m.rect.contains(x, y) && accepts_input(&m.surface, x, y, m.rect, dpi))
                 .last()
             {
                 return Some(m);
@@ -186,6 +191,26 @@ impl LayerShell {
 /// Axis-aligned rectangle overlap (touching edges do not count).
 fn rects_overlap(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+/// Whether the surface's input region accepts the physical point `(x, y)`.
+/// `rect` is the surface's physical on-screen rect; the client's input region is
+/// in surface-local logical px (the surface renders at fractional scale `dpi`).
+/// A surface with no input region set is sensitive everywhere.
+fn accepts_input(surface: &LayerSurface, x: f32, y: f32, rect: Rect, dpi: f32) -> bool {
+    let local_x = ((x - rect.x) / dpi).round() as i32;
+    let local_y = ((y - rect.y) / dpi).round() as i32;
+    smithay::wayland::compositor::with_states(surface.wl_surface(), |states| {
+        match &states
+            .cached_state
+            .get::<smithay::wayland::compositor::SurfaceAttributes>()
+            .current()
+            .input_region
+        {
+            Some(region) => region.contains((local_x, local_y)),
+            None => true,
+        }
+    })
 }
 
 /// Read a layer surface's current (committed) cached state.
