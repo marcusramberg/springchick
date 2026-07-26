@@ -16,17 +16,20 @@ use smithay::utils::{Point, SERIAL_COUNTER};
 
 /// Resolve which client surface (if any) should receive input at output-pixel
 /// `(x, y)`, returning it with its origin in global space and its coordinate
-/// scale. The scale (1.0 for scale-1 layer surfaces, `dpi` for scaled app
-/// surfaces) is what physical input coords are divided by to reach the surface's
-/// logical space. Checks Top/Overlay layer surfaces (the OSK); everything else
+/// scale. The scale (`dpi` — OSK layer surfaces render at fractional scale
+/// `dpi`, app surfaces at output scale `dpi`) is what physical input coords are
+/// divided by to reach the surface's logical space. Checks Top/Overlay layer
+/// surfaces (the OSK); everything else
 /// falls through to the gesture funnel by returning `None`.
 fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64), f64)> {
-    // 1. Top/Overlay layer surfaces (the OSK) win. They render at scale 1.
+    // 1. Top/Overlay layer surfaces (the OSK) win. They render at fractional
+    //    scale `dpi`, so their logical coord space is physical/dpi — map input by
+    //    /dpi. The rect origin is physical, so surface-local = (input-origin)/dpi.
     if let Some(m) = state.layers.hit_test(x, y) {
         return Some((
             m.surface.wl_surface().clone(),
             (m.rect.x as f64, m.rect.y as f64),
-            1.0,
+            state.dpi as f64,
         ));
     }
     // 2. The focused fullscreen app, except the bottom bar zone (home gesture).

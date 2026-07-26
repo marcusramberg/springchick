@@ -58,9 +58,13 @@ use smithay::backend::renderer::ImportDma;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
-    CompositorClientState, CompositorHandler, CompositorState,
+    with_states, CompositorClientState, CompositorHandler, CompositorState,
 };
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
+use smithay::wayland::fractional_scale::{
+    with_fractional_scale, FractionalScaleHandler, FractionalScaleManagerState,
+};
+use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
     DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
@@ -207,6 +211,13 @@ struct State {
     osd: osd::Osd,
     /// wlr-layer-shell protocol state.
     layer_shell_state: smithay::wayland::shell::wlr_layer::WlrLayerShellState,
+    /// `wp_fractional_scale` + `wp_viewporter`: how HiDPI-unaware clients (layer
+    /// surfaces like wvkbd, and apps) learn to render at `dpi`. Held only to keep
+    /// the globals advertised for the compositor's lifetime.
+    #[allow(dead_code)]
+    fractional_scale_manager_state: FractionalScaleManagerState,
+    #[allow(dead_code)]
+    viewporter_state: ViewporterState,
     /// Tracked layer surfaces + reserved-area bookkeeping.
     layers: layer_shell::LayerShell,
     /// Seat touch handle, for forwarding taps to layer surfaces.
@@ -214,8 +225,9 @@ struct State {
     /// Which layer surface (if any) currently owns the touch sequence.
     touch_grab: Option<WlSurface>,
     /// Coordinate scale of the surface currently receiving forwarded input
-    /// (1.0 for scale-1 layer surfaces, `dpi` for scaled app surfaces). Physical
-    /// input coords are divided by this to reach the surface's logical space.
+    /// (`dpi` — OSK layer surfaces render at fractional scale `dpi`, apps at
+    /// output scale `dpi`). Physical input coords are divided by this to reach
+    /// the surface's logical space.
     input_scale: f64,
     /// Whether the pointer press is currently held on a client surface.
     pointer_grab: bool,
@@ -308,6 +320,12 @@ impl State {
 
         let layer_shell_state =
             smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<Self>(&dh);
+        // Fractional scale + viewporter: HiDPI-unaware clients (wvkbd and other
+        // layer surfaces, and apps) render at `[main].dpi` by being told a
+        // fractional scale rather than an integer output scale (which wvkbd
+        // ignores). See `FractionalScaleHandler` below.
+        let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
+        let viewporter_state = ViewporterState::new::<Self>(&dh);
         // Virtual keyboard (on-screen keyboards like wvkbd). smithay's built-in
         // handler works now that we're on smithay-git + xkbcommon 0.9, which
         // fixed the keymap-size off-by-one that used to truncate wvkbd's uploaded
@@ -390,6 +408,8 @@ impl State {
             last_present: None,
             osd: osd::Osd::new(),
             layer_shell_state,
+            fractional_scale_manager_state,
+            viewporter_state,
             layers: layer_shell::LayerShell::new(out_w as f32, out_h as f32),
             touch,
             touch_grab: None,
@@ -539,7 +559,7 @@ impl State {
     fn recompute_layers(&mut self) {
         let (ow, oh) = self.output_size_f();
         let before = self.layers.usable;
-        let after = self.layers.recompute(ow, oh);
+        let after = self.layers.recompute(ow, oh, self.dpi);
         if after != before {
             self.reconfigure_toplevels();
         }
@@ -862,6 +882,19 @@ impl WaylandDndGrabHandler for State {}
 
 impl OutputHandler for State {}
 
+impl FractionalScaleHandler for State {
+    /// A client bound `wp_fractional_scale` for a surface: tell it to render at
+    /// `dpi`. Constant here (single output), so one send at creation suffices.
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        let scale = self.dpi as f64;
+        with_states(&surface, |states| {
+            with_fractional_scale(states, |fractional| {
+                fractional.set_preferred_scale(scale);
+            });
+        });
+    }
+}
+
 /// Force a toplevel to server-side decorations (= no CSD) and configure it.
 /// Every xdg-decoration request resolves the same way, regardless of what the
 /// client asked for.
@@ -896,6 +929,8 @@ delegate_output!(State);
 delegate_xdg_decoration!(State);
 smithay::delegate_layer_shell!(State);
 smithay::delegate_virtual_keyboard_manager!(State);
+smithay::delegate_fractional_scale!(State);
+smithay::delegate_viewporter!(State);
 
 impl smithay::wayland::shell::wlr_layer::WlrLayerShellHandler for State {
     fn shell_state(&mut self) -> &mut smithay::wayland::shell::wlr_layer::WlrLayerShellState {
