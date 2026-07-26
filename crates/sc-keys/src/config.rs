@@ -65,6 +65,9 @@ pub struct Binding {
 pub struct Config {
     pub long_press_ms: u64,
     pub dpi: u32,
+    /// Seconds of no input before the panel idle-blanks. `0` disables idle
+    /// blanking (the power button still blanks on demand).
+    pub idle_blank_secs: u64,
     pub bindings: Vec<Binding>,
 }
 
@@ -75,6 +78,10 @@ pub const DEFAULT_LONG_PRESS_MS: u64 = 800;
 /// Output scale when `[main]` does not say otherwise: the FP5 panel is dense
 /// enough that 1:1 client rendering (the old M4 behavior) is illegibly small.
 pub const DEFAULT_DPI: u32 = 3;
+
+/// Idle-blank timeout when `[main]` does not say otherwise: 10 minutes. `0` in
+/// the config disables idle blanking entirely.
+pub const DEFAULT_IDLE_BLANK_SECS: u64 = 600;
 
 /// Shipped defaults, mirroring the user's niri bindings. Defined as TOML so the
 /// documented example and the built-in behavior cannot drift apart.
@@ -139,6 +146,7 @@ struct RawConfigFile {
 #[derive(Deserialize, Default)]
 struct RawMain {
     dpi: Option<u32>,
+    idle_blank_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -168,17 +176,21 @@ impl Config {
                 return Config {
                     long_press_ms: DEFAULT_LONG_PRESS_MS,
                     dpi: DEFAULT_DPI,
+                    idle_blank_secs: DEFAULT_IDLE_BLANK_SECS,
                     bindings: Vec::new(),
                 };
             }
         };
-        let dpi = file.main.and_then(|m| m.dpi).unwrap_or(DEFAULT_DPI);
+        let main = file.main.unwrap_or_default();
+        let dpi = main.dpi.unwrap_or(DEFAULT_DPI);
+        let idle_blank_secs = main.idle_blank_secs.unwrap_or(DEFAULT_IDLE_BLANK_SECS);
         let raw = file.keybinds.unwrap_or_default();
 
         let bindings = raw.binding.into_iter().filter_map(convert).collect();
         Config {
             long_press_ms: raw.long_press_ms.unwrap_or(DEFAULT_LONG_PRESS_MS),
             dpi,
+            idle_blank_secs,
             bindings,
         }
     }
@@ -362,6 +374,31 @@ mod tests {
     fn dpi_is_read_from_main_section() {
         let cfg = Config::parse("[main]\ndpi = 2\n");
         assert_eq!(cfg.dpi, 2);
+    }
+
+    #[test]
+    fn idle_blank_defaults_to_600_when_main_section_absent() {
+        let cfg = Config::parse("[keybinds]\nlong_press_ms = 800\n");
+        assert_eq!(cfg.idle_blank_secs, 600);
+    }
+
+    #[test]
+    fn idle_blank_is_read_from_main_section() {
+        let cfg = Config::parse("[main]\nidle_blank_secs = 120\n");
+        assert_eq!(cfg.idle_blank_secs, 120);
+    }
+
+    #[test]
+    fn idle_blank_zero_is_kept_as_disabled() {
+        let cfg = Config::parse("[main]\nidle_blank_secs = 0\n");
+        assert_eq!(cfg.idle_blank_secs, 0);
+    }
+
+    #[test]
+    fn dpi_and_idle_blank_read_together_from_main() {
+        let cfg = Config::parse("[main]\ndpi = 2\nidle_blank_secs = 90\n");
+        assert_eq!(cfg.dpi, 2);
+        assert_eq!(cfg.idle_blank_secs, 90);
     }
 
     #[test]

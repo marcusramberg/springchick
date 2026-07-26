@@ -49,7 +49,10 @@ string (`null` by default — leaves it unmanaged).
 
 ```toml
 [main]
-dpi = 3   # optional; output scale advertised to clients. Defaults to 3.
+dpi = 3               # optional; output scale advertised to clients. Defaults to 3.
+idle_blank_secs = 600 # optional; blank the panel after this many seconds of no
+                      # input. Defaults to 600 (10 min). Set 0 to disable. The
+                      # power button still blanks/wakes on demand.
 ```
 
 The FP5 panel (1224×2700) is dense enough that 1:1 client rendering looks tiny, so the

@@ -205,6 +205,9 @@ struct State {
     keys: keybinds::Keys,
     /// Panel blanking (acted on by the DRM backend; inert under winit).
     blank: blank::Blank,
+    /// Idle-blank countdown. Reset by input in the DRM loop; when it elapses the
+    /// loop flips `blank`. Inert under winit (which never polls it).
+    idle: blank::Idle,
     /// Set when a client commit or input changed on-screen state, so the
     /// vblank-driven DRM loop re-primes a page-flip on the next wake. Inert
     /// under winit (which renders every loop iteration).
@@ -421,6 +424,7 @@ impl State {
             focused_surface: None,
             keys: keybinds::Keys::load(),
             blank: blank::Blank::new(),
+            idle: blank::Idle::new(keybinds::load_idle_blank_secs(), std::time::Instant::now()),
             needs_render: false,
             last_present: None,
             osd: osd::Osd::new(),
