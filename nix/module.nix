@@ -43,6 +43,72 @@ in
     # greeters (greetd's regreet/gtkgreet, GDM, …) list springchick as a session.
     services.displayManager.sessionPackages = [ cfg.package ];
 
+    # The compositor runs as a Type=notify user service rather than being exec'd
+    # straight from the greeter. This is the niri model and the only correct way
+    # to satisfy the graphical-session.target contract: the service
+    # BindsTo=+Before= that target, so when the compositor sends sd_notify READY
+    # the target is pulled active. graphical-session.target is RefuseManualStart,
+    # so nothing may start it by hand — the binding is the sanctioned path. Once
+    # active, xdg-desktop-portal-*, the OSK and anything else gating on a live
+    # graphical session can finally start. nix/springchick-session drives this:
+    # import-environment → start this service → force springchick-shutdown.target.
+    systemd.user.services.springchick = {
+      description = "springchick Wayland compositor";
+      documentation = [ "https://github.com/marcusramberg/springchick" ];
+      # Deliberately not WantedBy any target: it is started on demand by
+      # springchick-session, never pulled up automatically at login.
+      bindsTo = [ "graphical-session.target" ];
+      before = [
+        "graphical-session.target"
+        "xdg-desktop-autostart.target"
+      ];
+      after = [ "graphical-session-pre.target" ];
+      wants = [
+        "graphical-session-pre.target"
+        "xdg-desktop-autostart.target"
+      ];
+      # NixOS defaults this to true, which pins a stripped Environment=PATH=
+      # (per-unit, highest precedence) onto the service and shadows the full
+      # login PATH that springchick-session imports into the user manager.
+      # With it off the compositor — and every app/shortcut it spawns —
+      # inherits that imported login PATH. Same fix as niri.service upstream.
+      enableDefaultPath = false;
+      environment = {
+        # Device backend (DRM/libseat), previously set on the session wrapper.
+        SPRINGCHICK_BACKEND = "drm";
+        XDG_SESSION_TYPE = "wayland";
+      };
+      serviceConfig = {
+        Type = "notify";
+        NotifyAccess = "main";
+        Slice = "session.slice";
+        ExecStart = "${cfg.package}/bin/springchick";
+        # If the compositor dies the session is over; do not respawn it.
+        Restart = "no";
+        # Compositor holds the DRM master + input; give it room to shut down.
+        TimeoutStopSec = "10s";
+      };
+    };
+
+    # Force-teardown target. springchick-session starts this after the
+    # compositor exits; conflicting with graphical-session.target(-pre) stops
+    # the whole session tree irreversibly, mirroring niri-shutdown.target.
+    systemd.user.targets.springchick-shutdown = {
+      description = "Shutdown running springchick session";
+      unitConfig = {
+        DefaultDependencies = false;
+        StopWhenUnneeded = true;
+      };
+      conflicts = [
+        "graphical-session.target"
+        "graphical-session-pre.target"
+      ];
+      after = [
+        "graphical-session.target"
+        "graphical-session-pre.target"
+      ];
+    };
+
     environment.etc."springchick/config.toml" = lib.mkIf (cfg.config != null) {
       text = cfg.config;
     };

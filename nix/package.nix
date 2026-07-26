@@ -118,11 +118,15 @@ rustPlatform.buildRustPackage {
       --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}" \
       --prefix PATH : "${lib.makeBinPath [ xwayland ]}"
 
-    # Session entry point: the device backend (DRM/libseat) rather than the
-    # winit dev window, which is what a display manager must launch.
-    makeWrapper $out/bin/springchick $out/bin/springchick-session \
-      --set SPRINGCHICK_BACKEND drm \
-      --set XDG_SESSION_TYPE wayland
+    # Session entry point launched by the display manager. It does not exec the
+    # compositor directly: it starts springchick.service (Type=notify) so that
+    # graphical-session.target is pulled active via the service's BindsTo, which
+    # is the only legal way to raise that RefuseManualStart target. See
+    # nix/springchick-session and the systemd.user units in nix/module.nix. The
+    # DRM backend / XDG_SESSION_TYPE now live on the service, not here.
+    install -Dm555 ${./springchick-session} $out/bin/springchick-session
+    substituteInPlace $out/bin/springchick-session \
+      --replace-fail '@springchick@' "$out/bin/springchick"
 
     install -Dm444 ${./springchick.desktop} \
       $out/share/wayland-sessions/springchick.desktop

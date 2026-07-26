@@ -232,6 +232,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Kick off the first frame.
     app.render();
 
+    // Tell systemd we're up: DRM output live, first frame on screen, wayland
+    // socket accepting. springchick.service is Type=notify and
+    // BindsTo+Before graphical-session.target, so this READY is what pulls
+    // that target active (it has RefuseManualStart=yes and cannot be started
+    // by hand). Downstream user services that gate on an active graphical
+    // session — xdg-desktop-portal-*, the OSK — only come up after this.
+    // No-ops when NOTIFY_SOCKET is unset (bare VT launch), so it is harmless
+    // outside the service.
+    if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+        warn!(%e, "sd_notify READY failed");
+    }
+
     // The 2ms timeout wakes the loop to accept + dispatch wayland clients even
     // when no DRM/input event fires.
     event_loop.run(Some(Duration::from_millis(2)), &mut app, |app| {
