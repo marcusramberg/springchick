@@ -70,6 +70,9 @@ use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
     DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
 };
+use smithay::wayland::selection::ext_data_control::{
+    DataControlHandler, DataControlState,
+};
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
@@ -188,6 +191,8 @@ struct State {
     #[allow(dead_code)] // Must stay alive to keep the dmabuf global registered.
     dmabuf_global: Option<DmabufGlobal>,
     data_device_state: DataDeviceState,
+    /// ext-data-control clipboard-manager protocol state.
+    data_control_state: DataControlState,
     seat_state: SeatState<Self>,
     #[allow(dead_code)] // Must stay alive to keep the wl_seat global registered.
     seat: Seat<Self>,
@@ -312,6 +317,9 @@ impl State {
         // renderer's importable formats are known.
         let dmabuf_state = DmabufState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
+        // ext_data_control: clipboard managers (wl-clipboard, dms, ...). No
+        // primary selection wired, so pass None.
+        let data_control_state = DataControlState::new::<Self, _>(&dh, None, |_client| true);
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&dh, "springchick");
         // 200ms delay / 25Hz repeat: xkb defaults, forwarded to clients.
@@ -406,6 +414,7 @@ impl State {
             dmabuf_state,
             dmabuf_global: None,
             data_device_state,
+            data_control_state,
             seat_state,
             seat,
             keyboard,
@@ -885,6 +894,12 @@ impl DataDeviceHandler for State {
     }
 }
 
+impl DataControlHandler for State {
+    fn data_control_state(&mut self) -> &mut DataControlState {
+        &mut self.data_control_state
+    }
+}
+
 // Phone shell: no server-initiated DnD. The default `dnd_requested` cancels the
 // source, which is what we want.
 impl WaylandDndGrabHandler for State {}
@@ -934,6 +949,7 @@ delegate_xdg_shell!(State);
 delegate_seat!(State);
 delegate_shm!(State);
 delegate_data_device!(State);
+smithay::delegate_ext_data_control!(State);
 delegate_output!(State);
 delegate_xdg_decoration!(State);
 smithay::delegate_layer_shell!(State);
