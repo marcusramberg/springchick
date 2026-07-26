@@ -25,7 +25,7 @@ fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64)
     // 1. Top/Overlay layer surfaces (the OSK) win. They render at fractional
     //    scale `dpi`, so their logical coord space is physical/dpi — map input by
     //    /dpi. The rect origin is physical, so surface-local = (input-origin)/dpi.
-    if let Some(m) = state.layers.hit_test(x, y, state.dpi as f32) {
+    if let Some(m) = state.layers.hit_test(x, y) {
         return Some((
             m.surface.wl_surface().clone(),
             (m.rect.x as f64, m.rect.y as f64),

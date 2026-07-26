@@ -7,9 +7,23 @@
 
 use sc_layout::layer::{self, Anchor as LAnchor, Edge, Margins as LMargins, Reservation};
 use sc_layout::Rect;
+use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::wayland::shell::wlr_layer::{
     Anchor, ExclusiveZone, Layer, LayerSurface, LayerSurfaceCachedState,
 };
+
+/// Whether a layer surface is currently mapped (has committed a buffer).
+///
+/// On unmap, smithay's `wlr_layer` pre-commit hook resets the surface's cached
+/// state to `Default` (empty anchor, zero size). If we then reconfigure it —
+/// e.g. because a commit triggered `recompute` — we'd send a `(0,0)` configure
+/// with no anchors; the client commits that back and smithay kills it with
+/// "width 0 requested without setting left and right anchors". So we only
+/// arrange and configure mapped surfaces, matching smithay's `LayerMap`.
+fn is_mapped(surface: &LayerSurface) -> bool {
+    with_renderer_surface_state(surface.wl_surface(), |state| state.buffer().is_some())
+        .unwrap_or(false)
+}
 
 /// `(surface, origin)` pairs to composite, in bottom-to-top order.
 pub type RenderList = Vec<(
@@ -82,6 +96,9 @@ impl LayerShell {
         //    The client's exclusive zone is logical → scale to physical.
         let mut reservations = Vec::new();
         for m in &self.surfaces {
+            if !is_mapped(&m.surface) {
+                continue;
+            }
             let cs = cached_state(&m.surface);
             if let Some(mut res) = reservation(&cs) {
                 res.size *= scale;
@@ -92,6 +109,12 @@ impl LayerShell {
 
         // 2. Each surface's rect (against the full output) + a configure.
         for m in &mut self.surfaces {
+            // Skip unmapped surfaces: their cached state was reset to Default on
+            // unmap, so configuring them sends a bogus `(0,0)`/no-anchor state
+            // that the client commits back and gets killed for. See `is_mapped`.
+            if !is_mapped(&m.surface) {
+                continue;
+            }
             let cs = cached_state(&m.surface);
             let anchor = to_anchor(cs.anchor);
             let mut margins = to_margins(cs.margin);
@@ -168,17 +191,12 @@ impl LayerShell {
 
     /// The topmost hit-testable (Top/Overlay) surface containing the point, if
     /// any. Overlay is above Top; within a layer, later-created is on top.
-    /// A surface only matches if the point also lies inside its input region
-    /// (an always-mapped, fully-transparent overlay sets an empty input region
-    /// while "closed" so touches fall through to what's underneath). `dpi` is
-    /// the fractional scale the layer surfaces render at, used to map the
-    /// physical point into surface-local logical space for the region test.
-    pub fn hit_test(&self, x: f32, y: f32, dpi: f32) -> Option<&MappedLayer> {
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<&MappedLayer> {
         for layer in [Layer::Overlay, Layer::Top] {
             // `.last()` gives the topmost (latest-created) match within the layer.
             if let Some(m) = self
                 .on_layer(layer)
-                .filter(|m| m.rect.contains(x, y) && accepts_input(&m.surface, x, y, m.rect, dpi))
+                .filter(|m| m.rect.contains(x, y))
                 .last()
             {
                 return Some(m);
@@ -191,26 +209,6 @@ impl LayerShell {
 /// Axis-aligned rectangle overlap (touching edges do not count).
 fn rects_overlap(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
-}
-
-/// Whether the surface's input region accepts the physical point `(x, y)`.
-/// `rect` is the surface's physical on-screen rect; the client's input region is
-/// in surface-local logical px (the surface renders at fractional scale `dpi`).
-/// A surface with no input region set is sensitive everywhere.
-fn accepts_input(surface: &LayerSurface, x: f32, y: f32, rect: Rect, dpi: f32) -> bool {
-    let local_x = ((x - rect.x) / dpi).round() as i32;
-    let local_y = ((y - rect.y) / dpi).round() as i32;
-    smithay::wayland::compositor::with_states(surface.wl_surface(), |states| {
-        match &states
-            .cached_state
-            .get::<smithay::wayland::compositor::SurfaceAttributes>()
-            .current()
-            .input_region
-        {
-            Some(region) => region.contains((local_x, local_y)),
-            None => true,
-        }
-    })
 }
 
 /// Read a layer surface's current (committed) cached state.
