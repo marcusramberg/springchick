@@ -1269,7 +1269,7 @@ fn render_frame(
     // Record + periodically log frame timing.
     state.stats.record_frame(frame_start.elapsed());
     if state.perf_log && state.last_perf_log.elapsed() >= Duration::from_secs(1) {
-        info!(target: "springchick::perf", "{}", state.stats.format_line());
+        debug!(target: "springchick::perf", "{}", state.stats.format_line());
         state.last_perf_log = std::time::Instant::now();
     }
 
