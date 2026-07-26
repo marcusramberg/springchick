@@ -601,12 +601,14 @@ impl State {
         }
     }
 
-    /// Bar fade target: 0 when a Top/Overlay layer surface (the OSK) covers the
-    /// bar, else 1.
+    /// Bar fade target: 0 when a Top/Overlay layer surface covers the pill,
+    /// else 1. The OSK is lifted above the pill's strip (see `shift_docked`),
+    /// so it no longer fades the bar; only a surface actually over the pill
+    /// (e.g. a fullscreen overlay) does.
     fn bar_alpha_target(&self) -> f32 {
         let (w, h) = self.output_size_f();
-        let bar = sc_layout::bar_rect(w, h);
-        if self.layers.top_overlaps(bar, self.dpi) {
+        let pill = sc_layout::pill_rect(w, h);
+        if self.layers.top_overlaps(pill, self.dpi) {
             0.0
         } else {
             1.0
