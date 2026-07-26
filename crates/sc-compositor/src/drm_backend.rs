@@ -54,6 +54,11 @@ struct Drm {
     /// driver exposes one. `None` means blanking falls back to freezing.
     connector: connector::Handle,
     dpms_prop: Option<property::Handle>,
+    /// The CRTC driving the connector, for gamma-LUT programming.
+    crtc: crtc::Handle,
+    /// The CRTC gamma table captured at startup, restored when a gamma-control
+    /// client releases the output. `None` if the CRTC has no gamma LUT.
+    orig_gamma: Option<[Vec<u16>; 3]>,
 }
 
 /// DPMS levels, per `drm_mode.h`. Off (3) disables the pipe and powers the
@@ -153,6 +158,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         warn!("connector exposes no DPMS property; blanking will freeze, not power off");
     }
 
+    // wlr-gamma-control: advertise the real CRTC LUT size and snapshot the
+    // current ramp so we can restore it when a client releases control.
+    let gamma_size = device_fd
+        .get_crtc(crtc_handle)
+        .map(|info| info.gamma_length())
+        .unwrap_or(0);
+    let orig_gamma = capture_gamma(&device_fd, crtc_handle, gamma_size);
+    if gamma_size > 0 {
+        state.gamma.size = gamma_size;
+    } else {
+        warn!("CRTC exposes no gamma LUT; gamma-control uploads will be ignored");
+    }
+
     let drm = Drm {
         _session: session,
         _device: drm_device,
@@ -169,6 +187,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         device_fd: device_fd.clone(),
         connector: connector_handle,
         dpms_prop,
+        crtc: crtc_handle,
+        orig_gamma,
     };
 
     let mut app = App {
@@ -254,6 +274,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         crate::keybinds::poll(&mut app.state);
         app.state.sync_keyboard_focus();
         app.apply_blanking();
+        app.apply_gamma();
         // The OSD fades over time with no other event driving frames; keep
         // rendering while it is visible. `render` early-returns on pending_flip,
         // so this tracks vblank cadence rather than the 2ms wake.
@@ -339,6 +360,28 @@ impl App {
             self.drm.gbm_surface.reset_buffers();
             self.drm.pending_flip = false;
             self.render();
+        }
+    }
+
+    /// Program any pending gamma-control update into the CRTC LUT. A `Set`
+    /// applies the client's ramps; a `Reset` (control released) restores the
+    /// ramp captured at startup.
+    fn apply_gamma(&mut self) {
+        let Some(update) = self.state.gamma.take_pending() else {
+            return;
+        };
+        let crtc = self.drm.crtc;
+        let res = match &update {
+            crate::gamma_control::GammaUpdate::Set([r, g, b]) => {
+                self.drm.device_fd.set_gamma(crtc, r, g, b)
+            }
+            crate::gamma_control::GammaUpdate::Reset => match &self.drm.orig_gamma {
+                Some([r, g, b]) => self.drm.device_fd.set_gamma(crtc, r, g, b),
+                None => Ok(()),
+            },
+        };
+        if let Err(e) = res {
+            warn!("set_gamma failed: {e}");
         }
     }
 
@@ -447,6 +490,28 @@ impl App {
         if self.state.perf_log && self.state.last_perf_log.elapsed() >= Duration::from_secs(1) {
             info!(target: "springchick::perf", "{}", self.state.stats.format_line());
             self.state.last_perf_log = Instant::now();
+        }
+    }
+}
+
+/// Snapshot the CRTC's current gamma ramp so it can be restored when a
+/// gamma-control client releases the output. Returns `None` if the CRTC has no
+/// LUT or the read fails.
+fn capture_gamma(
+    device: &DrmDeviceFd,
+    crtc: crtc::Handle,
+    size: u32,
+) -> Option<[Vec<u16>; 3]> {
+    if size == 0 {
+        return None;
+    }
+    let n = size as usize;
+    let (mut r, mut g, mut b) = (vec![0u16; n], vec![0u16; n], vec![0u16; n]);
+    match device.get_gamma(crtc, &mut r, &mut g, &mut b) {
+        Ok(()) => Some([r, g, b]),
+        Err(e) => {
+            warn!("read original gamma failed: {e}");
+            None
         }
     }
 }

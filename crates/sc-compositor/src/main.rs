@@ -6,6 +6,7 @@ mod blank;
 mod debug_input;
 mod drm_backend;
 mod frame_stats;
+mod gamma_control;
 mod input_common;
 mod input_dispatch;
 mod keybinds;
@@ -254,6 +255,8 @@ struct State {
     /// Output scale (`[main].dpi`). Client buffers are `logical * dpi`, so xdg
     /// configure sizes are physical/dpi.
     dpi: i32,
+    /// wlr-gamma-control state (night-light / color-temperature clients).
+    gamma: gamma_control::GammaControl,
 
     // Rendering
     skia: SkiaGl,
@@ -360,6 +363,11 @@ impl State {
         output.set_preferred(mode);
         output.create_global::<Self>(&dh);
 
+        // wlr-gamma-control: advertise the manager global. 256 is a mock LUT
+        // size for the winit backend; the DRM backend overrides it with the
+        // real CRTC gamma_length before clients connect.
+        let gamma = gamma_control::GammaControl::new(&dh, 256);
+
         // Load shell model + app catalog.
         let model = config_state::load(&config_path()).unwrap_or_default();
         let apps = scan_apps();
@@ -427,6 +435,7 @@ impl State {
             output_size,
             output,
             dpi,
+            gamma,
             skia: SkiaGl::new(),
             wayland_socket,
             last_pointer_pos: None,
