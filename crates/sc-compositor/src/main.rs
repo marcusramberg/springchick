@@ -53,10 +53,15 @@ use smithay::reexports::winit::dpi::LogicalSize;
 use smithay::reexports::winit::platform::pump_events::PumpStatus;
 use smithay::reexports::winit::window::Window as WinitWindow;
 use smithay::utils::{Rectangle, Serial, Transform, SERIAL_COUNTER};
+use smithay::backend::allocator::dmabuf::Dmabuf;
+use smithay::backend::allocator::Format as DrmFormat;
+use smithay::backend::renderer::ImportDma;
+use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     CompositorClientState, CompositorHandler, CompositorState,
 };
+use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
@@ -173,6 +178,12 @@ struct State {
     #[allow(dead_code)] // Must stay alive to keep the global registered.
     xdg_decoration_state: XdgDecorationState,
     shm_state: ShmState,
+    /// zwp_linux_dmabuf: lets GL clients (GTK4, etc.) share buffers zero-copy
+    /// instead of falling back to slow shm software upload. The global is
+    /// created by the backend once its renderer's importable formats are known.
+    dmabuf_state: DmabufState,
+    #[allow(dead_code)] // Must stay alive to keep the dmabuf global registered.
+    dmabuf_global: Option<DmabufGlobal>,
     data_device_state: DataDeviceState,
     seat_state: SeatState<Self>,
     #[allow(dead_code)] // Must stay alive to keep the wl_seat global registered.
@@ -284,6 +295,9 @@ impl State {
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
+        // Global created later by the backend via `init_dmabuf_global`, once the
+        // renderer's importable formats are known.
+        let dmabuf_state = DmabufState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&dh, "springchick");
@@ -359,6 +373,8 @@ impl State {
             xdg_shell_state,
             xdg_decoration_state,
             shm_state,
+            dmabuf_state,
+            dmabuf_global: None,
             data_device_state,
             seat_state,
             seat,
@@ -407,6 +423,18 @@ impl State {
             last_perf_log: std::time::Instant::now(),
             running: true,
         }
+    }
+
+    /// Advertise `zwp_linux_dmabuf` with the formats the backend's renderer can
+    /// import. Called once per backend after the renderer exists, so GL clients
+    /// negotiate zero-copy buffers instead of falling back to shm.
+    fn init_dmabuf_global(
+        &mut self,
+        dh: &DisplayHandle,
+        formats: impl IntoIterator<Item = DrmFormat>,
+    ) {
+        let global = self.dmabuf_state.create_global::<Self>(dh, formats);
+        self.dmabuf_global = Some(global);
     }
 
     fn handle_return_home(&mut self) {
@@ -796,6 +824,24 @@ impl BufferHandler for State {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
 }
 
+impl DmabufHandler for State {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        _dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        // The advertised formats come straight from the backend renderer's
+        // importable set, so accept optimistically; the shared render path
+        // imports the buffer lazily when it first composites the surface.
+        let _ = notifier.successful::<State>();
+    }
+}
+
 impl SelectionHandler for State {
     type SelectionUserData = ();
 }
@@ -838,6 +884,7 @@ impl XdgDecorationHandler for State {
 }
 
 delegate_compositor!(State);
+smithay::delegate_dmabuf!(State);
 delegate_xdg_shell!(State);
 delegate_seat!(State);
 delegate_shm!(State);
@@ -993,6 +1040,7 @@ fn run_winit() {
     let actual_size = gfx_backend.window_size();
     info!(w = actual_size.w, h = actual_size.h, "actual output size");
     let mut state = State::new(&display, socket_name.clone(), (actual_size.w, actual_size.h));
+    state.init_dmabuf_global(&display.handle(), gfx_backend.renderer().dmabuf_formats());
 
     // Optional debug input socket (dev/test harness). Inert unless env is set.
     let debug_chan = match std::env::var("SPRINGCHICK_DEBUG_SOCK") {

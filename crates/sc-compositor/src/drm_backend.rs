@@ -142,6 +142,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     crate::publish_wayland_display(&socket_name, true);
     let mut state = State::new(&display, socket_name, (output_size.w, output_size.h));
     state.perf_log = true; // perf logging is the point of this backend
+    // Advertise zwp_linux_dmabuf so GL clients (GTK4, etc.) share buffers
+    // zero-copy instead of falling back to slow shm software upload.
+    state.init_dmabuf_global(&display.handle(), renderer.dmabuf_formats());
 
     // Look up the connector's DPMS property so power-short can truly blank the
     // panel (disabling scanout) rather than freezing the last frame.
