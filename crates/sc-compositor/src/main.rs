@@ -993,7 +993,14 @@ struct ClientState {
 
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+    fn disconnected(&self, client_id: ClientId, reason: DisconnectReason) {
+        match reason {
+            DisconnectReason::ConnectionClosed => {
+                debug!(?client_id, "client disconnected (connection closed)")
+            }
+            other => warn!(?client_id, ?other, "client disconnected"),
+        }
+    }
 }
 
 // --- Main entry ---
