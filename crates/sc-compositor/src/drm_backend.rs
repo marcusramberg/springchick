@@ -273,6 +273,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // screen.
         crate::keybinds::poll(&mut app.state);
         app.state.sync_keyboard_focus();
+        // Idle-blank once the timeout elapses. Reuses the power-button DPMS-off
+        // path; a power-button press wakes it and resets the countdown (input
+        // routes through handle_input → idle.activity).
+        if app.state.idle.should_blank(Instant::now()) && !app.state.blank.is_blanked() {
+            app.state.blank.toggle();
+        }
         app.apply_blanking();
         app.apply_gamma();
         // The OSD fades over time with no other event driving frames; keep
@@ -309,6 +315,8 @@ impl App {
         // Any input may change on-screen state (or the app it's forwarded to
         // will commit in response). Prime a render for the next loop wake.
         self.state.needs_render = true;
+        // Any input is activity: restart the idle-blank countdown.
+        self.state.idle.activity(Instant::now());
         let (w, h) = (self.drm.output_size.w, self.drm.output_size.h);
         match event {
             InputEvent::TouchDown { event } => {

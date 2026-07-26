@@ -53,9 +53,47 @@ impl Blank {
     }
 }
 
+/// Idle-blank policy: how long since the last input, and whether that has
+/// crossed the configured timeout. Pure and clock-free — the caller passes the
+/// current `Instant`, so tests drive it with synthetic time. Acting on the
+/// result (flipping [`Blank`]) is the backend's job.
+#[derive(Clone, Copy, Debug)]
+pub struct Idle {
+    /// `None` disables idle blanking (config `idle_blank_secs = 0`).
+    timeout: Option<std::time::Duration>,
+    last_activity: std::time::Instant,
+}
+
+impl Idle {
+    /// `secs == 0` disables idle blanking. `now` seeds the activity clock so a
+    /// freshly built `Idle` does not fire until a full timeout has elapsed.
+    pub fn new(secs: u64, now: std::time::Instant) -> Self {
+        Idle {
+            timeout: (secs > 0).then(|| std::time::Duration::from_secs(secs)),
+            last_activity: now,
+        }
+    }
+
+    /// Record that input arrived, resetting the idle countdown.
+    pub fn activity(&mut self, now: std::time::Instant) {
+        self.last_activity = now;
+    }
+
+    /// Whether the idle timeout has elapsed since the last activity. Always
+    /// `false` when disabled. The caller must still check the panel isn't
+    /// already blanked before acting.
+    pub fn should_blank(&self, now: std::time::Instant) -> bool {
+        match self.timeout {
+            Some(timeout) => now.duration_since(self.last_activity) >= timeout,
+            None => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn a_bound_key_wakes_the_screen_instead_of_firing() {
@@ -78,5 +116,32 @@ mod tests {
         b.on_key_press();
         assert_eq!(b.take_change(), Some(false));
         assert_eq!(b.take_change(), None);
+    }
+
+    #[test]
+    fn idle_fires_only_after_the_timeout_elapses() {
+        let t0 = Instant::now();
+        let idle = Idle::new(600, t0);
+        assert!(!idle.should_blank(t0 + Duration::from_secs(599)));
+        assert!(idle.should_blank(t0 + Duration::from_secs(600)));
+        assert!(idle.should_blank(t0 + Duration::from_secs(601)));
+    }
+
+    #[test]
+    fn activity_resets_the_idle_countdown() {
+        let t0 = Instant::now();
+        let mut idle = Idle::new(600, t0);
+        idle.activity(t0 + Duration::from_secs(500));
+        // 590s since t0, but only 90s since the activity: not yet.
+        assert!(!idle.should_blank(t0 + Duration::from_secs(590)));
+        // 500 + 600 = 1100s: timeout since the activity has now elapsed.
+        assert!(idle.should_blank(t0 + Duration::from_secs(1100)));
+    }
+
+    #[test]
+    fn zero_timeout_disables_idle_blanking() {
+        let t0 = Instant::now();
+        let idle = Idle::new(0, t0);
+        assert!(!idle.should_blank(t0 + Duration::from_secs(100_000)));
     }
 }

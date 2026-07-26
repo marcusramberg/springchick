@@ -50,6 +50,12 @@ pub fn load_dpi() -> u32 {
     load_config().dpi
 }
 
+/// Seconds of inactivity before the panel idle-blanks (`[main].idle_blank_secs`;
+/// `0` disables). Reads the same config file as [`Keys::load`].
+pub fn load_idle_blank_secs() -> u64 {
+    load_config().idle_blank_secs
+}
+
 /// Config lookup: `SPRINGCHICK_CONFIG` is a strict override — if set, it is the
 /// only path tried, with no fallthrough to XDG or `/etc` if that file is
 /// missing. Otherwise, in order: `$XDG_CONFIG_HOME/springchick/config.toml`
