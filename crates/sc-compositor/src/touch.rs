@@ -25,12 +25,8 @@ fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64)
     // 1. Top/Overlay layer surfaces (the OSK) win. They render at fractional
     //    scale `dpi`, so their logical coord space is physical/dpi — map input by
     //    /dpi. The rect origin is physical, so surface-local = (input-origin)/dpi.
-    if let Some(m) = state.layers.hit_test(x, y) {
-        return Some((
-            m.surface.wl_surface().clone(),
-            (m.rect.x as f64, m.rect.y as f64),
-            state.dpi as f64,
-        ));
+    if let Some((surface, (ox, oy))) = state.layers.hit_test(x, y, state.dpi) {
+        return Some((surface, (ox as f64, oy as f64), state.dpi as f64));
     }
     // 2. The focused fullscreen app, except the bottom bar zone (home gesture).
     //    App surfaces render at `dpi`, so input maps into logical space by /dpi.
@@ -41,7 +37,8 @@ fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64)
         let bar = sc_layout::bar_rect(w, h);
         if !bar.contains(x, y) {
             if let Some(Some(tl)) = state.toplevels.get(*toplevel) {
-                let origin = (state.layers.usable.x as f64, state.layers.usable.y as f64);
+                let u = state.layers.usable(state.dpi);
+                let origin = (u.x as f64, u.y as f64);
                 return Some((tl.surface.wl_surface().clone(), origin, state.dpi as f64));
             }
         }

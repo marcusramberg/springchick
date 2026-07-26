@@ -427,7 +427,7 @@ impl State {
             layer_shell_state,
             fractional_scale_manager_state,
             viewporter_state,
-            layers: layer_shell::LayerShell::new(out_w as f32, out_h as f32),
+            layers: layer_shell::LayerShell::new(output.clone(), out_w as f32, out_h as f32),
             touch,
             touch_grab: None,
             input_scale: 1.0,
@@ -575,10 +575,7 @@ impl State {
     /// Recompute layer-surface geometry + reserved area. If the area apps may
     /// use changed, resize the toplevels to fit around it (e.g. above an OSK).
     fn recompute_layers(&mut self) {
-        let (ow, oh) = self.output_size_f();
-        let before = self.layers.usable;
-        let after = self.layers.recompute(ow, oh, self.dpi);
-        if after != before {
+        if self.layers.usable_changed(self.dpi).is_some() {
             self.reconfigure_toplevels();
         }
     }
@@ -587,9 +584,10 @@ impl State {
     /// render within the area not covered by exclusive-zone layer surfaces.
     fn reconfigure_toplevels(&mut self) {
         // Logical size: client scales its buffer up by `dpi`.
+        let usable = self.layers.usable(self.dpi);
         let size = (
-            (self.layers.usable.w.round() as i32) / self.dpi,
-            (self.layers.usable.h.round() as i32) / self.dpi,
+            (usable.w.round() as i32) / self.dpi,
+            (usable.h.round() as i32) / self.dpi,
         );
         for slot in self.toplevels.iter().flatten() {
             slot.surface.with_pending_state(|state| {
@@ -604,7 +602,7 @@ impl State {
     fn bar_alpha_target(&self) -> f32 {
         let (w, h) = self.output_size_f();
         let bar = sc_layout::bar_rect(w, h);
-        if self.layers.top_overlaps(bar) {
+        if self.layers.top_overlaps(bar, self.dpi) {
             0.0
         } else {
             1.0
@@ -744,7 +742,7 @@ impl State {
             .is_active(osd_now)
             .then(|| (self.osd.level, self.osd.muted, self.osd.alpha(osd_now)));
         let bar_alpha = self.tick_bar_alpha();
-        let (layers_below, layers_above) = self.layers.render_lists();
+        let (layers_below, layers_above) = self.layers.render_lists(self.dpi);
 
         FramePrep {
             scene,
@@ -778,12 +776,9 @@ impl CompositorHandler for State {
         self.needs_render = true;
 
         // A layer surface committing may change its geometry or reserved area.
-        if self
-            .layers
-            .surfaces
-            .iter()
-            .any(|m| m.surface.wl_surface() == surface)
-        {
+        // `handle_commit` arranges the map (map/unmap + configures); we then
+        // resize apps if the usable area changed.
+        if self.layers.handle_commit(surface) {
             self.recompute_layers();
         }
     }
@@ -798,8 +793,9 @@ impl XdgShellHandler for State {
         // Size to the usable area (output minus any exclusive-zone reservations),
         // so an app that opens while an OSK is up already fits above it.
         // xdg sizes are logical; the client scales its buffer up by `dpi`.
-        let w = (self.layers.usable.w.round() as i32) / self.dpi;
-        let h = (self.layers.usable.h.round() as i32) / self.dpi;
+        let usable = self.layers.usable(self.dpi);
+        let w = (usable.w.round() as i32) / self.dpi;
+        let h = (usable.h.round() as i32) / self.dpi;
         surface.with_pending_state(|state| {
             state.size = Some((w, h).into());
             state.decoration_mode = Some(DecorationMode::ServerSide);
@@ -970,16 +966,13 @@ impl smithay::wayland::shell::wlr_layer::WlrLayerShellHandler for State {
         namespace: String,
     ) {
         info!(%namespace, ?layer, "new layer surface");
-        // Note: layer surfaces (OSK) deliberately do NOT enter the output, so
-        // they stay at scale 1. Their geometry (layer_rect) is computed in
-        // physical px; entering the output would make them render at 1/dpi.
-        self.layers.add(surface, layer);
-        // Geometry + the initial configure happen on the next commit, once the
-        // client's anchor/size/exclusive-zone state has arrived.
+        // smithay's LayerMap tracks geometry + reservations and sends the
+        // initial configure on the surface's first commit.
+        self.layers.new_surface(surface, namespace);
     }
 
     fn layer_destroyed(&mut self, surface: smithay::wayland::shell::wlr_layer::LayerSurface) {
-        if self.layers.remove(&surface) {
+        if self.layers.destroyed(&surface) {
             self.recompute_layers();
         }
     }
@@ -1248,10 +1241,10 @@ fn render_frame(
             app_catalog: &state.app_catalog,
             toplevels: &state.toplevels,
             app_scale: state.dpi as f64,
-            app_origin: (
-                state.layers.usable.x.round() as i32,
-                state.layers.usable.y.round() as i32,
-            ),
+            app_origin: {
+                let u = state.layers.usable(state.dpi);
+                (u.x.round() as i32, u.y.round() as i32)
+            },
             transform: Transform::Flipped180,
             skia_flip_y: false,
             frame_time: prep.frame_time,
