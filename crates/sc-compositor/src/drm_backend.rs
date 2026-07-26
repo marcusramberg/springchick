@@ -441,10 +441,10 @@ impl App {
                 app_catalog: &self.state.app_catalog,
                 toplevels: &self.state.toplevels,
                 app_scale: self.state.dpi as f64,
-                app_origin: (
-                    self.state.layers.usable.x.round() as i32,
-                    self.state.layers.usable.y.round() as i32,
-                ),
+                app_origin: {
+                    let u = self.state.layers.usable(self.state.dpi);
+                    (u.x.round() as i32, u.y.round() as i32)
+                },
                 transform: self.drm.transform,
                 skia_flip_y: true,
                 frame_time: prep.frame_time,

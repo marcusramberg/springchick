@@ -1,54 +1,70 @@
-//! wlr-layer-shell: protocol state, geometry, and app-area reservation.
+//! wlr-layer-shell geometry + app-area reservation, backed by smithay's
+//! [`LayerMap`].
 //!
-//! The pure geometry lives in `sc_layout::layer`; this module translates the
-//! smithay protocol state into those plain inputs, tracks mapped surfaces, sends
-//! configures, and reports the usable area back so the app windows can be sized
-//! around reserved space (e.g. an on-screen keyboard).
+//! We used to hand-roll surface tracking, geometry and configures. That missed
+//! the map/unmap lifecycle smithay's `LayerMap` gets right: configuring a
+//! surface mid-unmap (after smithay resets its cached anchor/size to Default)
+//! sent a `(0,0)`/no-anchor configure that the client committed back, tripping
+//! the `width 0 requested without setting left and right anchors` protocol
+//! error and killing the whole client. `LayerMap::arrange` only ever configures
+//! *mapped* surfaces, so it can't happen.
+//!
+//! ## Coordinate spaces
+//!
+//! `LayerMap` works in **logical** coordinates at the output scale. Our output
+//! scale is `Scale::Integer(dpi)`, so logical = physical / `dpi`. The rest of
+//! the compositor (render origins, touch hit-testing, the Skia home bar) works
+//! in **physical** px, so every geometry we read back from the map is scaled up
+//! by `dpi` here. Layer clients render at fractional scale `dpi` (advertised via
+//! `wp_fractional_scale`), so the logical configures the map sends them line up
+//! with the physical buffers they produce.
 
-use sc_layout::layer::{self, Anchor as LAnchor, Edge, Margins as LMargins, Reservation};
 use sc_layout::Rect;
 use smithay::backend::renderer::utils::with_renderer_surface_state;
+use smithay::desktop::{layer_map_for_output, LayerSurface, WindowSurfaceType};
+use smithay::output::Output;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::{Logical, Rectangle};
+use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::wlr_layer::{
-    Anchor, ExclusiveZone, Layer, LayerSurface, LayerSurfaceCachedState,
+    Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData,
 };
+use std::collections::HashSet;
 
-/// Whether a layer surface is currently mapped (has committed a buffer).
-///
-/// On unmap, smithay's `wlr_layer` pre-commit hook resets the surface's cached
-/// state to `Default` (empty anchor, zero size). If we then reconfigure it —
-/// e.g. because a commit triggered `recompute` — we'd send a `(0,0)` configure
-/// with no anchors; the client commits that back and smithay kills it with
-/// "width 0 requested without setting left and right anchors". So we only
-/// arrange and configure mapped surfaces, matching smithay's `LayerMap`.
-fn is_mapped(surface: &LayerSurface) -> bool {
-    with_renderer_surface_state(surface.wl_surface(), |state| state.buffer().is_some())
-        .unwrap_or(false)
+/// `(surface, physical origin)` pairs to composite, in bottom-to-top order.
+pub type RenderList = Vec<(WlSurface, (i32, i32))>;
+
+/// Whether a layer surface's `wl_surface` is currently mapped (has a buffer).
+fn is_mapped(surface: &WlSurface) -> bool {
+    with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
 }
 
-/// `(surface, origin)` pairs to composite, in bottom-to-top order.
-pub type RenderList = Vec<(
-    smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
-    (i32, i32),
-)>;
-
-/// A layer surface we are tracking, with its last computed on-screen rect.
-pub struct MappedLayer {
-    pub surface: LayerSurface,
-    pub layer: Layer,
-    pub rect: Rect,
+/// Scale a logical rectangle up to a physical [`Rect`].
+fn to_physical(r: Rectangle<i32, Logical>, dpi: i32) -> Rect {
+    Rect {
+        x: (r.loc.x * dpi) as f32,
+        y: (r.loc.y * dpi) as f32,
+        w: (r.size.w * dpi) as f32,
+        h: (r.size.h * dpi) as f32,
+    }
 }
 
-/// All tracked layer surfaces plus the last usable area handed to app windows.
+/// Owns the per-output [`LayerMap`] handle and the not-yet-mapped surface set.
 pub struct LayerShell {
-    pub surfaces: Vec<MappedLayer>,
-    pub usable: Rect,
+    output: Output,
+    /// Surfaces created but not yet mapped (no buffer committed). Drives the
+    /// initial configure and the map/unmap transitions, mirroring niri.
+    unmapped: HashSet<WlSurface>,
+    /// Last physical usable area handed to apps; compared to detect changes.
+    last_usable: Rect,
 }
 
 impl LayerShell {
-    pub fn new(output_w: f32, output_h: f32) -> Self {
+    pub fn new(output: Output, output_w: f32, output_h: f32) -> Self {
         LayerShell {
-            surfaces: Vec::new(),
-            usable: Rect {
+            output,
+            unmapped: HashSet::new(),
+            last_usable: Rect {
                 x: 0.0,
                 y: 0.0,
                 w: output_w,
@@ -57,119 +73,107 @@ impl LayerShell {
         }
     }
 
-    /// Track a newly created layer surface (rect filled in on the next commit).
-    pub fn add(&mut self, surface: LayerSurface, layer: Layer) {
-        self.surfaces.push(MappedLayer {
-            surface,
-            layer,
-            rect: Rect {
-                x: 0.0,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-            },
-        });
+    /// Recompute the usable area after an arrange. Returns `Some(new)` if it
+    /// changed since the last call (so the caller resizes app toplevels).
+    pub fn usable_changed(&mut self, dpi: i32) -> Option<Rect> {
+        let now = self.usable(dpi);
+        (now != self.last_usable).then(|| {
+            self.last_usable = now;
+            now
+        })
     }
 
-    /// Drop a destroyed layer surface. Returns true if it was tracked.
-    pub fn remove(&mut self, surface: &LayerSurface) -> bool {
-        let before = self.surfaces.len();
-        self.surfaces.retain(|m| &m.surface != surface);
-        self.surfaces.len() != before
+    /// A new layer surface was created. Track it as unmapped and register it
+    /// with the map; geometry + initial configure follow on its first commit.
+    pub fn new_surface(&mut self, surface: WlrLayerSurface, namespace: String) {
+        self.unmapped.insert(surface.wl_surface().clone());
+        let mut map = layer_map_for_output(&self.output);
+        // Only fails if already mapped, which a fresh surface never is.
+        let _ = map.map_layer(&LayerSurface::new(surface, namespace));
     }
 
-    /// Recompute every surface's geometry and the usable area from the clients'
-    /// current cached state, sending a configure to any surface whose size
-    /// changed. Returns the new usable area (compare against the old to decide
-    /// whether app windows need reconfiguring).
-    ///
-    /// `output_w`/`output_h` and the stored rects are in **physical** px. Layer
-    /// clients are told a fractional scale of `dpi` (via `wp_fractional_scale`),
-    /// so the sizes they request (`cs.size`, margins, exclusive zone) and the
-    /// size we configure are **logical**: we scale requests up by `dpi` for the
-    /// internal physical geometry and divide the configured size back down. The
-    /// returned `usable` area stays physical (app sizing divides it by `dpi`).
-    pub fn recompute(&mut self, output_w: f32, output_h: f32, dpi: i32) -> Rect {
-        let scale = dpi as f32;
+    /// A layer surface was destroyed. Returns true if it was mapped (so the
+    /// caller recomputes the app area).
+    pub fn destroyed(&mut self, surface: &WlrLayerSurface) -> bool {
+        self.unmapped.remove(surface.wl_surface());
+        let mut map = layer_map_for_output(&self.output);
+        let Some(layer) = map
+            .layers()
+            .find(|l| l.layer_surface() == surface)
+            .cloned()
+        else {
+            return false;
+        };
+        map.unmap_layer(&layer);
+        true
+    }
 
-        // 1. Reservations from surfaces with a valid single-edge exclusive zone.
-        //    The client's exclusive zone is logical → scale to physical.
-        let mut reservations = Vec::new();
-        for m in &self.surfaces {
-            if !is_mapped(&m.surface) {
-                continue;
-            }
-            let cs = cached_state(&m.surface);
-            if let Some(mut res) = reservation(&cs) {
-                res.size *= scale;
-                reservations.push(res);
-            }
+    /// Handle a `wl_surface` commit. Returns true if it belonged to a layer
+    /// surface (so the caller recomputes the app area / redraws). Arranges the
+    /// map and drives the map/unmap transition, mirroring niri's flow.
+    pub fn handle_commit(&mut self, surface: &WlSurface) -> bool {
+        let mut map = layer_map_for_output(&self.output);
+        if map
+            .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+            .is_none()
+        {
+            return false;
         }
-        let usable = layer::usable_area(output_w, output_h, &reservations);
 
-        // 2. Each surface's rect (against the full output) + a configure.
-        for m in &mut self.surfaces {
-            // Skip unmapped surfaces: their cached state was reset to Default on
-            // unmap, so configuring them sends a bogus `(0,0)`/no-anchor state
-            // that the client commits back and gets killed for. See `is_mapped`.
-            if !is_mapped(&m.surface) {
-                continue;
-            }
-            let cs = cached_state(&m.surface);
-            let anchor = to_anchor(cs.anchor);
-            let mut margins = to_margins(cs.margin);
-            margins.top *= scale;
-            margins.bottom *= scale;
-            margins.left *= scale;
-            margins.right *= scale;
-            let rect = layer::layer_rect(
-                output_w,
-                output_h,
-                anchor,
-                cs.size.w as f32 * scale,
-                cs.size.h as f32 * scale,
-                margins,
-            );
-            m.rect = rect;
-            m.layer = cs.layer;
+        // Arrange before the initial configure so the client's requested size is
+        // respected. `arrange` only configures mapped surfaces.
+        map.arrange();
+        let layer = map
+            .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+            .unwrap()
+            .clone();
 
-            // Configure carries logical size (the client renders at fractional
-            // scale `dpi`), so divide the physical rect back down.
-            let w = (rect.w / scale).round() as i32;
-            let h = (rect.h / scale).round() as i32;
-            let changed = m.surface.with_pending_state(|state| {
-                let new = Some((w, h).into());
-                let changed = state.size != new;
-                state.size = new;
-                changed
+        if is_mapped(surface) {
+            self.unmapped.remove(surface);
+        } else if !self.unmapped.contains(surface) {
+            // Was mapped, now unmapped via a null commit: it must redo the
+            // initial configure sequence before mapping again.
+            self.unmapped.insert(surface.clone());
+        } else {
+            // Still unmapped. If we haven't sent the initial configure, do so;
+            // otherwise `arrange` already sent any needed configure.
+            let initial_sent = with_states(surface, |states| {
+                states
+                    .data_map
+                    .get::<LayerSurfaceData>()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .initial_configure_sent
             });
-            if changed {
-                m.surface.send_configure();
+            if !initial_sent {
+                layer.layer_surface().send_configure();
             }
         }
-
-        self.usable = usable;
-        usable
+        true
     }
 
-    /// Mapped surfaces on the given layer, in tracking order (creation order),
-    /// which is the intra-layer stacking order.
-    pub fn on_layer(&self, layer: Layer) -> impl Iterator<Item = &MappedLayer> {
-        self.surfaces.iter().filter(move |m| m.layer == layer)
+    /// Physical usable area (the output minus exclusive-zone reservations).
+    pub fn usable(&self, dpi: i32) -> Rect {
+        let zone = layer_map_for_output(&self.output).non_exclusive_zone();
+        to_physical(zone, dpi)
     }
 
-    /// `(surface, origin)` pairs for the render pass, split into those drawn
-    /// below the app (background, bottom) and above it (top, overlay), each in
-    /// bottom-to-top order.
-    pub fn render_lists(&self) -> (RenderList, RenderList) {
+    /// `(surface, physical origin)` pairs for the render pass, split into those
+    /// drawn below the app (background, bottom) and above it (top, overlay),
+    /// each in bottom-to-top order.
+    pub fn render_lists(&self, dpi: i32) -> (RenderList, RenderList) {
+        let map = layer_map_for_output(&self.output);
         let collect = |layers: &[Layer]| {
             let mut v = Vec::new();
-            for &layer in layers {
-                for m in self.on_layer(layer) {
-                    v.push((
-                        m.surface.wl_surface().clone(),
-                        (m.rect.x.round() as i32, m.rect.y.round() as i32),
-                    ));
+            for &wanted in layers {
+                for layer in map.layers().filter(|l| l.layer() == wanted) {
+                    if let Some(geo) = map.layer_geometry(layer) {
+                        v.push((
+                            layer.wl_surface().clone(),
+                            (geo.loc.x * dpi, geo.loc.y * dpi),
+                        ));
+                    }
                 }
             }
             v
@@ -180,141 +184,45 @@ impl LayerShell {
         )
     }
 
-    /// Whether any Top/Overlay surface overlaps `rect` — used to hide the
-    /// home-bar when the on-screen keyboard covers it, independent of whether
-    /// the keyboard reserved an exclusive zone.
-    pub fn top_overlaps(&self, rect: Rect) -> bool {
-        self.surfaces
-            .iter()
-            .any(|m| matches!(m.layer, Layer::Top | Layer::Overlay) && rects_overlap(m.rect, rect))
+    /// Whether any Top/Overlay surface overlaps `rect` (physical) — used to hide
+    /// the home bar when the on-screen keyboard covers it.
+    pub fn top_overlaps(&self, rect: Rect, dpi: i32) -> bool {
+        let map = layer_map_for_output(&self.output);
+        // Collect first so the `layers()` borrow ends before `layer_geometry`.
+        let tops: Vec<LayerSurface> = map
+            .layers()
+            .filter(|l| matches!(l.layer(), Layer::Top | Layer::Overlay))
+            .cloned()
+            .collect();
+        tops.iter().any(|l| {
+            map.layer_geometry(l)
+                .is_some_and(|g| rects_overlap(to_physical(g, dpi), rect))
+        })
     }
 
-    /// The topmost hit-testable (Top/Overlay) surface containing the point, if
-    /// any. Overlay is above Top; within a layer, later-created is on top.
-    pub fn hit_test(&self, x: f32, y: f32) -> Option<&MappedLayer> {
-        for layer in [Layer::Overlay, Layer::Top] {
-            // `.last()` gives the topmost (latest-created) match within the layer.
-            if let Some(m) = self
-                .on_layer(layer)
-                .filter(|m| m.rect.contains(x, y))
-                .last()
-            {
-                return Some(m);
+    /// The topmost hit-testable (Top/Overlay) surface containing the physical
+    /// point, with its physical origin. Overlay is above Top; within a layer,
+    /// later-created is on top.
+    pub fn hit_test(&self, x: f32, y: f32, dpi: i32) -> Option<(WlSurface, (i32, i32))> {
+        let map = layer_map_for_output(&self.output);
+        for wanted in [Layer::Overlay, Layer::Top] {
+            // Collect (ending the `layers()` borrow), then `.rev()` on insertion
+            // order gives the topmost (latest-created) match within the layer.
+            let candidates: Vec<LayerSurface> =
+                map.layers().filter(|l| l.layer() == wanted).cloned().collect();
+            for layer in candidates.iter().rev() {
+                if let Some(geo) = map.layer_geometry(layer) {
+                    let rect = to_physical(geo, dpi);
+                    if rect.contains(x, y) {
+                        return Some((layer.wl_surface().clone(), (rect.x as i32, rect.y as i32)));
+                    }
+                }
             }
         }
         None
     }
 }
 
-/// Axis-aligned rectangle overlap (touching edges do not count).
 fn rects_overlap(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
-}
-
-/// Read a layer surface's current (committed) cached state.
-fn cached_state(surface: &LayerSurface) -> LayerSurfaceCachedState {
-    smithay::wayland::compositor::with_states(surface.wl_surface(), |states| {
-        *states
-            .cached_state
-            .get::<LayerSurfaceCachedState>()
-            .current()
-    })
-}
-
-/// Translate a surface's anchor + exclusive zone into a screen-edge
-/// reservation, or `None` when it should not reserve (neutral / don't-care /
-/// multi-edge). A zone is only meaningful anchored to a single edge, optionally
-/// plus its two perpendicular edges.
-fn reservation(cs: &LayerSurfaceCachedState) -> Option<Reservation> {
-    let ExclusiveZone::Exclusive(size) = cs.exclusive_zone else {
-        return None;
-    };
-    let a = cs.anchor;
-    let edge = single_edge(a)?;
-    Some(Reservation {
-        edge,
-        size: size as f32,
-    })
-}
-
-/// The one edge a surface reserves against, if its anchors permit reservation.
-fn single_edge(a: Anchor) -> Option<Edge> {
-    let (t, b, l, r) = (
-        a.contains(Anchor::TOP),
-        a.contains(Anchor::BOTTOM),
-        a.contains(Anchor::LEFT),
-        a.contains(Anchor::RIGHT),
-    );
-    match (t, b, l, r) {
-        // Vertical edge, spanning or not the horizontal axis.
-        (true, false, _, _) if l == r => Some(Edge::Top),
-        (false, true, _, _) if l == r => Some(Edge::Bottom),
-        // Horizontal edge, spanning or not the vertical axis.
-        (_, _, true, false) if t == b => Some(Edge::Left),
-        (_, _, false, true) if t == b => Some(Edge::Right),
-        _ => None,
-    }
-}
-
-fn to_anchor(a: Anchor) -> LAnchor {
-    LAnchor {
-        top: a.contains(Anchor::TOP),
-        bottom: a.contains(Anchor::BOTTOM),
-        left: a.contains(Anchor::LEFT),
-        right: a.contains(Anchor::RIGHT),
-    }
-}
-
-fn to_margins(m: smithay::wayland::shell::wlr_layer::Margins) -> LMargins {
-    LMargins {
-        top: m.top as f32,
-        bottom: m.bottom as f32,
-        left: m.left as f32,
-        right: m.right as f32,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use smithay::wayland::shell::wlr_layer::Anchor;
-
-    #[test]
-    fn bottom_full_width_reserves_the_bottom_edge() {
-        // wvkbd anchors bottom+left+right — a valid single-edge reservation.
-        let a = Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT;
-        assert_eq!(single_edge(a), Some(Edge::Bottom));
-    }
-
-    #[test]
-    fn top_bar_reserves_the_top_edge() {
-        let a = Anchor::TOP | Anchor::LEFT | Anchor::RIGHT;
-        assert_eq!(single_edge(a), Some(Edge::Top));
-    }
-
-    #[test]
-    fn left_bar_reserves_the_left_edge() {
-        let a = Anchor::LEFT | Anchor::TOP | Anchor::BOTTOM;
-        assert_eq!(single_edge(a), Some(Edge::Left));
-    }
-
-    #[test]
-    fn opposite_edges_do_not_reserve() {
-        // Anchored top+bottom (a full-height strip) has no single edge.
-        let a = Anchor::TOP | Anchor::BOTTOM;
-        assert_eq!(single_edge(a), None);
-    }
-
-    #[test]
-    fn all_edges_do_not_reserve() {
-        let a = Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT;
-        assert_eq!(single_edge(a), None);
-    }
-
-    #[test]
-    fn corner_anchor_does_not_reserve() {
-        // Only two perpendicular edges (a corner) is ambiguous — no reservation.
-        let a = Anchor::BOTTOM | Anchor::RIGHT;
-        assert_eq!(single_edge(a), None);
-    }
 }
