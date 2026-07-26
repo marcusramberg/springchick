@@ -1248,6 +1248,10 @@ fn render_frame(
             app_catalog: &state.app_catalog,
             toplevels: &state.toplevels,
             app_scale: state.dpi as f64,
+            app_origin: (
+                state.layers.usable.x.round() as i32,
+                state.layers.usable.y.round() as i32,
+            ),
             transform: Transform::Flipped180,
             skia_flip_y: false,
             frame_time: prep.frame_time,

@@ -50,6 +50,10 @@ pub struct DrawCtx<'a> {
     /// logical size and render an oversized buffer, so their render elements are
     /// generated at this scale to land back at physical size.
     pub app_scale: f64,
+    /// Physical top-left where the fullscreen app surface is drawn: the origin
+    /// of the usable area (output minus top/left exclusive-zone reservations,
+    /// e.g. a top bar). Zero for bottom/right-only reservations.
+    pub app_origin: (i32, i32),
     /// Output transform (winit = Flipped180; DRM = connector transform).
     pub transform: Transform,
     /// Mirror the Skia home/bar vertically — the DRM/GBM scanout buffer has the
@@ -130,7 +134,7 @@ pub fn draw_scene(
         render_elements_from_surface_tree(
             renderer,
             wl_surface,
-            (0, 0),
+            if is_fullscreen { ctx.app_origin } else { (0, 0) },
             ctx.app_scale,
             1.0,
             Kind::Unspecified,
