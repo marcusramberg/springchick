@@ -68,12 +68,23 @@ impl LayerShell {
     /// current cached state, sending a configure to any surface whose size
     /// changed. Returns the new usable area (compare against the old to decide
     /// whether app windows need reconfiguring).
-    pub fn recompute(&mut self, output_w: f32, output_h: f32) -> Rect {
+    ///
+    /// `output_w`/`output_h` and the stored rects are in **physical** px. Layer
+    /// clients are told a fractional scale of `dpi` (via `wp_fractional_scale`),
+    /// so the sizes they request (`cs.size`, margins, exclusive zone) and the
+    /// size we configure are **logical**: we scale requests up by `dpi` for the
+    /// internal physical geometry and divide the configured size back down. The
+    /// returned `usable` area stays physical (app sizing divides it by `dpi`).
+    pub fn recompute(&mut self, output_w: f32, output_h: f32, dpi: i32) -> Rect {
+        let scale = dpi as f32;
+
         // 1. Reservations from surfaces with a valid single-edge exclusive zone.
+        //    The client's exclusive zone is logical → scale to physical.
         let mut reservations = Vec::new();
         for m in &self.surfaces {
             let cs = cached_state(&m.surface);
-            if let Some(res) = reservation(&cs) {
+            if let Some(mut res) = reservation(&cs) {
+                res.size *= scale;
                 reservations.push(res);
             }
         }
@@ -83,20 +94,26 @@ impl LayerShell {
         for m in &mut self.surfaces {
             let cs = cached_state(&m.surface);
             let anchor = to_anchor(cs.anchor);
-            let margins = to_margins(cs.margin);
+            let mut margins = to_margins(cs.margin);
+            margins.top *= scale;
+            margins.bottom *= scale;
+            margins.left *= scale;
+            margins.right *= scale;
             let rect = layer::layer_rect(
                 output_w,
                 output_h,
                 anchor,
-                cs.size.w as f32,
-                cs.size.h as f32,
+                cs.size.w as f32 * scale,
+                cs.size.h as f32 * scale,
                 margins,
             );
             m.rect = rect;
             m.layer = cs.layer;
 
-            let w = rect.w.round() as i32;
-            let h = rect.h.round() as i32;
+            // Configure carries logical size (the client renders at fractional
+            // scale `dpi`), so divide the physical rect back down.
+            let w = (rect.w / scale).round() as i32;
+            let h = (rect.h / scale).round() as i32;
             let changed = m.surface.with_pending_state(|state| {
                 let new = Some((w, h).into());
                 let changed = state.size != new;

@@ -88,9 +88,13 @@ fn draw_layer(
     transform: Transform,
     surface: &WlSurface,
     origin: (i32, i32),
+    scale: f64,
 ) -> Result<(), SwapBuffersError> {
+    // `origin` is physical; `scale` (= output `dpi`) scales the surface's logical
+    // geometry to physical. Layer clients render at fractional scale `dpi`, so
+    // their buffer is physical-sized and lands 1:1 — same model as app surfaces.
     let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-        render_elements_from_surface_tree(renderer, surface, origin, 1.0, 1.0, Kind::Unspecified);
+        render_elements_from_surface_tree(renderer, surface, origin, scale, 1.0, Kind::Unspecified);
     if elements.is_empty() {
         return Ok(());
     }
@@ -98,7 +102,7 @@ fn draw_layer(
     let mut frame = renderer
         .render(framebuffer, size, transform)
         .map_err(SwapBuffersError::from)?;
-    if let Err(e) = draw_render_elements(&mut frame, 1.0, &elements, &[damage]) {
+    if let Err(e) = draw_render_elements(&mut frame, scale, &elements, &[damage]) {
         warn!(?e, "failed to draw layer surface");
     }
     let _sync = frame.finish().map_err(SwapBuffersError::from)?;
@@ -145,7 +149,7 @@ pub fn draw_scene(
                 renderer,
                 surface,
                 *origin,
-                1.0,
+                ctx.app_scale,
                 1.0,
                 Kind::Unspecified,
             )
@@ -198,7 +202,7 @@ pub fn draw_scene(
 
         // Background/bottom layer surfaces sit behind the app.
         for elements in &below_elements {
-            if let Err(e) = draw_render_elements(&mut frame, 1.0, elements, &[damage]) {
+            if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, elements, &[damage]) {
                 warn!(?e, "failed to draw background layer surface");
             }
         }
@@ -333,7 +337,15 @@ pub fn draw_scene(
     // Top/overlay layer surfaces (e.g. the on-screen keyboard) sit above the
     // app but below springchick's own chrome.
     for (surface, origin) in ctx.layers_above {
-        draw_layer(renderer, framebuffer, size, ctx.transform, surface, *origin)?;
+        draw_layer(
+            renderer,
+            framebuffer,
+            size,
+            ctx.transform,
+            surface,
+            *origin,
+            ctx.app_scale,
+        )?;
     }
 
     // Always draw the bar on top.
