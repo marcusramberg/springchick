@@ -78,6 +78,8 @@ pub enum Hit {
 const TOP_PAD: f32 = 0.04;
 /// Bottom bar height fraction.
 const BAR_HEIGHT: f32 = 0.03;
+/// Home-pill height (logical px), centered in the bottom bar band.
+pub const PILL_HEIGHT: f32 = 8.0;
 /// Dock height fraction (including internal padding).
 const DOCK_HEIGHT: f32 = 0.10;
 /// Dots area height fraction.
@@ -98,6 +100,13 @@ pub fn bar_rect(width: f32, height: f32) -> Rect {
         w: width,
         h: height * BAR_HEIGHT,
     }
+}
+
+/// Bottom exclusive zone the home gesture bar reserves from apps: twice the
+/// pill's offset from the screen bottom, i.e. the empty gap below + above the
+/// centered pill (`bar_height - pill_height`). Same unit as `height`.
+pub fn gesture_exclusive_zone(height: f32) -> f32 {
+    (height * BAR_HEIGHT - PILL_HEIGHT).max(0.0)
 }
 
 pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layout {

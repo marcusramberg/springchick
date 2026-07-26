@@ -558,7 +558,7 @@ fn draw_dots(canvas: &skia_safe::Canvas, layout: &Layout, current_page: usize) {
 fn draw_bar(canvas: &skia_safe::Canvas, layout: &Layout, alpha: f32) {
     let bar = &layout.bar_rect;
     let pill_w = bar.w * 0.35;
-    let pill_h = 8.0_f32;
+    let pill_h = sc_layout::PILL_HEIGHT;
     let pill_x = bar.x + (bar.w - pill_w) / 2.0;
     let pill_y = bar.y + (bar.h - pill_h) / 2.0;
 

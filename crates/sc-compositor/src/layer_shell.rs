@@ -57,6 +57,8 @@ pub struct LayerShell {
     unmapped: HashSet<WlSurface>,
     /// Last physical usable area handed to apps; compared to detect changes.
     last_usable: Rect,
+    /// Physical output height, for the home-bar bottom exclusive zone.
+    output_h: f32,
 }
 
 impl LayerShell {
@@ -70,6 +72,7 @@ impl LayerShell {
                 w: output_w,
                 h: output_h,
             },
+            output_h,
         }
     }
 
@@ -156,7 +159,12 @@ impl LayerShell {
     /// Physical usable area (the output minus exclusive-zone reservations).
     pub fn usable(&self, dpi: i32) -> Rect {
         let zone = layer_map_for_output(&self.output).non_exclusive_zone();
-        to_physical(zone, dpi)
+        let mut r = to_physical(zone, dpi);
+        // Reserve the home gesture bar's zone off the bottom (physical px, so
+        // it matches the pill draw_bar renders at physical framebuffer size).
+        let reserved = sc_layout::gesture_exclusive_zone(self.output_h);
+        r.h = (r.h - reserved).max(0.0);
+        r
     }
 
     /// `(surface, physical origin)` pairs for the render pass, split into those
