@@ -162,8 +162,26 @@ impl LayerShell {
         let mut r = to_physical(zone, dpi);
         // Reserve the home gesture bar's zone off the bottom (physical px, so
         // it matches the pill draw_bar renders at physical framebuffer size).
-        let reserved = sc_layout::gesture_exclusive_zone(self.output_h);
-        r.h = (r.h - reserved).max(0.0);
+        // Always reserved: bottom-docked layer surfaces (the OSK) are lifted by
+        // the same amount (see `shift_docked`), so the pill's strip stays clear
+        // beneath them rather than the gap landing above the keyboard.
+        r.h = (r.h - self.gesture_zone()).max(0.0);
+        r
+    }
+
+    /// Physical height of the home gesture bar's bottom reservation.
+    fn gesture_zone(&self) -> f32 {
+        sc_layout::gesture_exclusive_zone(self.output_h)
+    }
+
+    /// Lift a physical layer rect docked to the screen bottom (the OSK, bottom
+    /// bars) up by the gesture zone, so the home pill's strip stays clear
+    /// beneath it. Fullscreen surfaces (reaching the top edge too) are left be.
+    fn shift_docked(&self, mut r: Rect) -> Rect {
+        let docked = r.y + r.h >= self.output_h - 1.0 && r.y > 1.0;
+        if docked {
+            r.y -= self.gesture_zone();
+        }
         r
     }
 
@@ -177,10 +195,8 @@ impl LayerShell {
             for &wanted in layers {
                 for layer in map.layers().filter(|l| l.layer() == wanted) {
                     if let Some(geo) = map.layer_geometry(layer) {
-                        v.push((
-                            layer.wl_surface().clone(),
-                            (geo.loc.x * dpi, geo.loc.y * dpi),
-                        ));
+                        let r = self.shift_docked(to_physical(geo, dpi));
+                        v.push((layer.wl_surface().clone(), (r.x as i32, r.y as i32)));
                     }
                 }
             }
@@ -204,7 +220,7 @@ impl LayerShell {
             .collect();
         tops.iter().any(|l| {
             map.layer_geometry(l)
-                .is_some_and(|g| rects_overlap(to_physical(g, dpi), rect))
+                .is_some_and(|g| rects_overlap(self.shift_docked(to_physical(g, dpi)), rect))
         })
     }
 
@@ -220,7 +236,7 @@ impl LayerShell {
                 map.layers().filter(|l| l.layer() == wanted).cloned().collect();
             for layer in candidates.iter().rev() {
                 if let Some(geo) = map.layer_geometry(layer) {
-                    let rect = to_physical(geo, dpi);
+                    let rect = self.shift_docked(to_physical(geo, dpi));
                     if rect.contains(x, y) {
                         return Some((layer.wl_surface().clone(), (rect.x as i32, rect.y as i32)));
                     }

@@ -556,18 +556,15 @@ fn draw_dots(canvas: &skia_safe::Canvas, layout: &Layout, current_page: usize) {
 }
 
 fn draw_bar(canvas: &skia_safe::Canvas, layout: &Layout, alpha: f32) {
-    let bar = &layout.bar_rect;
-    let pill_w = bar.w * 0.35;
-    let pill_h = sc_layout::PILL_HEIGHT;
-    let pill_x = bar.x + (bar.w - pill_w) / 2.0;
-    let pill_y = bar.y + (bar.h - pill_h) / 2.0;
+    let pill = sc_layout::pill_in_bar(layout.bar_rect);
 
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     let a = (180.0 * alpha.clamp(0.0, 1.0)).round() as u8;
     paint.set_color(Color::from_argb(a, 255, 255, 255));
 
-    let rect = Rect::new(pill_x, pill_y, pill_x + pill_w, pill_y + pill_h);
-    let rrect = RRect::new_rect_xy(rect, pill_h / 2.0, pill_h / 2.0);
+    let rect = Rect::new(pill.x, pill.y, pill.x + pill.w, pill.y + pill.h);
+    let radius = pill.h / 2.0;
+    let rrect = RRect::new_rect_xy(rect, radius, radius);
     canvas.draw_rrect(rrect, &paint);
 }
