@@ -17,7 +17,10 @@ sc-layout = { path = "../sc-layout" }
 sc-icons = { path = "../sc-icons" }
 sc-keys = { path = "../sc-keys" }
 
-smithay = { git = "https://github.com/Smithay/smithay.git", rev = "ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef", default-features = false, features = [
+# Fork of smithay@ff5fa7d (needed for xkbcommon 0.9 → wvkbd keymap fix) with a
+# one-commit fix for the layer-surface destroy crash (Smithay#1979): panel close
+# (destroy role → nil buffer → commit) tripped a bogus width-0 protocol error.
+smithay = { git = "https://code.bas.es/marcus/smithay.git", rev = "ed8f054605ff13496a1a3ded7a5153c913195f91", default-features = false, features = [
   "backend_winit",
   "backend_egl",
   "renderer_gl",
