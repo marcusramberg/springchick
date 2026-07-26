@@ -34,12 +34,15 @@ fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64)
     }
     // 2. The focused fullscreen app, except the bottom bar zone (home gesture).
     //    App surfaces render at `dpi`, so input maps into logical space by /dpi.
+    //    The app is drawn at the usable-area origin (below a top bar / right of
+    //    a left bar), so its input origin must match, not (0, 0).
     if let crate::ui_state::UiState::App { toplevel, .. } = &state.ui {
         let (w, h) = state.output_size_f();
         let bar = sc_layout::bar_rect(w, h);
         if !bar.contains(x, y) {
             if let Some(Some(tl)) = state.toplevels.get(*toplevel) {
-                return Some((tl.surface.wl_surface().clone(), (0.0, 0.0), state.dpi as f64));
+                let origin = (state.layers.usable.x as f64, state.layers.usable.y as f64);
+                return Some((tl.surface.wl_surface().clone(), origin, state.dpi as f64));
             }
         }
     }
