@@ -71,7 +71,14 @@ rustPlatform.buildRustPackage {
   pname = "springchick";
   inherit version src;
 
-  cargoLock.lockFile = ../Cargo.lock;
+  cargoLock = {
+    lockFile = ../Cargo.lock;
+    # smithay is pinned to a git rev (for xkbcommon 0.9 → wvkbd keymap fix);
+    # git deps must be vendored with an explicit hash.
+    outputHashes = {
+      "smithay-0.7.0" = "sha256-TV/GTfSvgfVwIFUGoASU7xm38opIBLjLMf1HeNTW07U=";
+    };
+  };
 
   nativeBuildInputs = [
     pkg-config
