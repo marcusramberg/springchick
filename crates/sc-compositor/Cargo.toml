@@ -42,5 +42,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 skia-safe = { version = "0.99", features = ["gl"] }
 calloop = "0.14"
 
+# Type=notify readiness handshake with the systemd user service that runs us
+# (springchick.service). Pure-Rust, no libsystemd link. No-ops when
+# NOTIFY_SOCKET is unset (bare VT launch), so it is safe in every backend.
+sd-notify = "0.4"
+
 [dev-dependencies]
 tempfile = "3"

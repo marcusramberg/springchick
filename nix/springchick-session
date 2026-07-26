@@ -1,0 +1,55 @@
+#!/bin/sh
+# springchick session entry point — launched by the display manager (greetd)
+# via share/wayland-sessions/springchick.desktop.
+#
+# Mirrors niri-session: instead of exec'ing the compositor directly, run it as
+# the Type=notify user service springchick.service. That service is
+# BindsTo=+Before=graphical-session.target, so when the compositor signals
+# READY the target is pulled active. graphical-session.target has
+# RefuseManualStart=yes and cannot be started by hand, which is why the
+# compositor must NOT try to start it itself — the service binding is the only
+# legal path. Without this the target stays dead and every user service gating
+# on an active graphical session (xdg-desktop-portal-*, the on-screen keyboard)
+# fails with "Current graphical user session is inactive".
+
+set -eu
+
+# No systemd (unusual on our NixOS target): fall back to a direct launch so the
+# device is at least usable, accepting that graphical-session.target stays down.
+if ! command -v systemctl >/dev/null 2>&1; then
+    echo 'springchick-session: systemctl not found; launching compositor directly' >&2
+    export SPRINGCHICK_BACKEND=drm XDG_SESSION_TYPE=wayland
+    exec @springchick@
+fi
+
+# Refuse to stack a second session on top of a running one.
+if systemctl --user -q is-active springchick.service; then
+    echo 'A springchick session is already running.' >&2
+    exit 1
+fi
+
+# Clear any failed state left by a previous session so units can start clean.
+systemctl --user reset-failed
+
+# Push the login/PAM environment (XDG_*, DBUS_SESSION_BUS_ADDRESS, seat vars, …)
+# into the systemd user manager so the service and everything it pulls in
+# inherit it.
+systemctl --user import-environment
+
+# The dbus activation environment is independent from systemd's; sync it too so
+# legacy dbus-activated services (not using SystemdService=) see the same vars.
+if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment --all
+fi
+
+# Start the compositor and block until it exits (--wait). The compositor is the
+# whole session, so this call is the session lifetime.
+systemctl --user --wait start springchick.service
+
+# Compositor gone: tear the session down. springchick-shutdown.target conflicts
+# with graphical-session.target(-pre) and stops them irreversibly, cleaning up
+# every unit that was part of the session.
+systemctl --user start --job-mode=replace-irreversibly springchick-shutdown.target
+
+# Drop the vars we imported so the next session starts from a clean slate.
+systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP
