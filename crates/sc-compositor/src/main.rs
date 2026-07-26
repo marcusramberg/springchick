@@ -18,7 +18,6 @@ mod skia_gl;
 mod switcher;
 mod touch;
 pub mod ui_state;
-mod virtual_keyboard;
 
 use app_history::AppHistory;
 use launcher::spawn_app;
@@ -64,7 +63,7 @@ use smithay::wayland::compositor::{
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
-    ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+    DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
 };
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::shell::xdg::{
@@ -78,7 +77,6 @@ use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 
 use std::collections::HashMap;
-use std::os::unix::io::OwnedFd;
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::Arc;
@@ -310,9 +308,14 @@ impl State {
 
         let layer_shell_state =
             smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<Self>(&dh);
-        // Custom virtual-keyboard handling (see virtual_keyboard.rs for why we
-        // don't use smithay's).
-        virtual_keyboard::init(&dh);
+        // Virtual keyboard (on-screen keyboards like wvkbd). smithay's built-in
+        // handler works now that we're on smithay-git + xkbcommon 0.9, which
+        // fixed the keymap-size off-by-one that used to truncate wvkbd's uploaded
+        // keymap (xkbcommon 0.8 did `new_from_buffer(.., size - 1, ..)`).
+        smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState::new::<Self, _>(
+            &dh,
+            |_client| true,
+        );
 
         // Advertise an output so clients know the display geometry.
         let output = Output::new(
@@ -322,6 +325,7 @@ impl State {
                 subpixel: Subpixel::Unknown,
                 make: "springchick".into(),
                 model: "dev".into(),
+                serial_number: "0".into(),
             },
         );
         let mode = OutputMode {
@@ -847,15 +851,14 @@ impl SelectionHandler for State {
 }
 
 impl DataDeviceHandler for State {
-    fn data_device_state(&self) -> &DataDeviceState {
-        &self.data_device_state
+    fn data_device_state(&mut self) -> &mut DataDeviceState {
+        &mut self.data_device_state
     }
 }
 
-impl ClientDndGrabHandler for State {}
-impl ServerDndGrabHandler for State {
-    fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
-}
+// Phone shell: no server-initiated DnD. The default `dnd_requested` cancels the
+// source, which is what we want.
+impl WaylandDndGrabHandler for State {}
 
 impl OutputHandler for State {}
 
@@ -892,6 +895,7 @@ delegate_data_device!(State);
 delegate_output!(State);
 delegate_xdg_decoration!(State);
 smithay::delegate_layer_shell!(State);
+smithay::delegate_virtual_keyboard_manager!(State);
 
 impl smithay::wayland::shell::wlr_layer::WlrLayerShellHandler for State {
     fn shell_state(&mut self) -> &mut smithay::wayland::shell::wlr_layer::WlrLayerShellState {
