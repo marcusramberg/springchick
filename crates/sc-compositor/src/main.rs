@@ -255,6 +255,12 @@ struct State {
     /// physical release that follows must be swallowed rather than driving the
     /// gesture funnel (it has no matching press left).
     swallow_release: bool,
+    /// wl_surfaces of popups that issued an `xdg_popup.grab()`. Only these are
+    /// modal — they capture touch and dismiss on an outside press. Non-grab
+    /// popups (wvkbd's input-enabling hack popup, app tooltips/comboboxes) are
+    /// tracked and rendered but must NOT steal or dismiss touch, else they break
+    /// OSK and toplevel input. Cleared per-popup in `popup_destroyed`.
+    popup_grabs: std::collections::HashSet<WlSurface>,
     /// Home-bar opacity, faded to 0 when a bottom exclusive-zone surface (the
     /// on-screen keyboard) covers it.
     bar_alpha: f32,
@@ -453,6 +459,7 @@ impl State {
             input_scale: 1.0,
             pointer_grab: false,
             swallow_release: false,
+            popup_grabs: std::collections::HashSet::new(),
             bar_alpha: 1.0,
             ui,
             model,
@@ -731,12 +738,33 @@ impl State {
         out
     }
 
-    /// Every open popup (app- and layer-rooted), root→leaf. Used by touch
-    /// routing to hit-test and dismiss.
+    /// Popups eligible for touch capture/dismiss: only chains that contain a
+    /// popup which issued an `xdg_popup.grab()` (menus, dropdowns — e.g.
+    /// Firefox). Non-grab popups (wvkbd's hack popup, tooltips) are excluded so
+    /// they never steal touch from the OSK or the toplevel app. Ordered
+    /// root→leaf within each kept chain.
     pub(crate) fn active_popups(&self) -> Vec<PopupRect> {
-        let mut v = self.app_popups();
-        v.extend(self.layer_popups());
-        v
+        if self.popup_grabs.is_empty() {
+            return Vec::new();
+        }
+        let has_grab = |chain: &[PopupRect]| {
+            chain
+                .iter()
+                .any(|(kind, _, _)| self.popup_grabs.contains(kind.wl_surface()))
+        };
+        let mut out = Vec::new();
+        let app = self.app_popups();
+        if has_grab(&app) {
+            out.extend(app);
+        }
+        let (below, above) = self.layers.render_lists(self.dpi);
+        for (surface, origin) in below.iter().chain(above.iter()) {
+            let chain = self.popup_chain(surface, *origin);
+            if has_grab(&chain) {
+                out.extend(chain);
+            }
+        }
+        out
     }
 
     fn close_toplevel(&mut self, id: ToplevelId) {
@@ -938,7 +966,11 @@ impl XdgShellHandler for State {
         self.needs_render = true;
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {
+    fn grab(&mut self, surface: PopupSurface, _seat: WlSeat, _serial: Serial) {
+        // Mark this popup modal: only grabbing popups capture touch and dismiss
+        // on an outside press (see `active_popups`). Without this, non-grab
+        // popups (wvkbd's hack popup, tooltips) would swallow every tap.
+        self.popup_grabs.insert(surface.wl_surface().clone());
         // The client established a popup grab (menus, e.g. Firefox, do this on
         // press while the finger is still down). We dismiss manually from touch
         // routing rather than through the seat grab stack, but we must cancel the
@@ -988,9 +1020,10 @@ impl XdgShellHandler for State {
         self.needs_render = true;
     }
 
-    fn popup_destroyed(&mut self, _surface: PopupSurface) {
+    fn popup_destroyed(&mut self, surface: PopupSurface) {
         // smithay has already removed it from `known_popups`; drop our render of
-        // it on the next frame.
+        // it on the next frame and forget any grab it held.
+        self.popup_grabs.remove(surface.wl_surface());
         self.needs_render = true;
     }
 }
