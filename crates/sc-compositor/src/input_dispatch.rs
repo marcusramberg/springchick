@@ -15,6 +15,32 @@ fn normalize(x: f32, y: f32, width: f32, height: f32) -> Pt {
     }
 }
 
+/// Where a dragged icon originated from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum IconSource {
+    Grid,
+    Dock,
+}
+
+/// What a drop at a given point means, given the icon's origin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DropAction {
+    Pin,
+    Unpin,
+    SnapBack,
+}
+
+/// Decide what a drop at (x,y) means given where the dragged icon came from.
+/// A `Pin` may still fail at the model layer (full dock); the caller maps that to snap-back.
+pub fn resolve_drop(x: f32, y: f32, layout: &sc_layout::Layout, source: IconSource) -> DropAction {
+    let over_dock = layout.dock_zone.contains(x, y);
+    match (source, over_dock) {
+        (IconSource::Grid, true) => DropAction::Pin,
+        (IconSource::Dock, false) => DropAction::Unpin,
+        _ => DropAction::SnapBack,
+    }
+}
+
 /// Result of processing a pointer/touch down event.
 #[derive(Clone, Debug)]
 pub enum DownAction {
@@ -28,6 +54,7 @@ pub enum DownAction {
         origin: ZoomOrigin,
         start_x: f32,
         start_y: f32,
+        source: IconSource,
     },
     /// Start tracking a page drag from this x position.
     StartPageDrag { start_x: f32 },
@@ -61,6 +88,7 @@ pub fn on_press(
                         origin: ZoomOrigin::icon((cx, cy)),
                         start_x: x,
                         start_y: y,
+                        source: IconSource::Grid,
                     }
                 }
                 Hit::DockIcon { app_id, index } => {
@@ -72,6 +100,7 @@ pub fn on_press(
                         origin: ZoomOrigin::icon((cx, cy)),
                         start_x: x,
                         start_y: y,
+                        source: IconSource::Dock,
                     }
                 }
                 Hit::Bar => DownAction::StartBarDrag {
@@ -79,6 +108,7 @@ pub fn on_press(
                     start_y: y,
                 },
                 Hit::Miss => DownAction::StartPageDrag { start_x: x },
+                Hit::RemoveBadge { .. } | Hit::DoneButton => DownAction::None,
             }
         }
         UiState::App { .. } => {
@@ -152,7 +182,9 @@ mod tests {
 
         let action = on_press(&UiState::home(0, 1), cx, cy, &m, out);
         match action {
-            DownAction::PressIcon { app_id, .. } => assert_eq!(app_id, "app0"),
+            DownAction::PressIcon {
+                app_id, source: _, ..
+            } => assert_eq!(app_id, "app0"),
             other => panic!("expected PressIcon, got {other:?}"),
         }
     }
@@ -165,5 +197,32 @@ mod tests {
         // Top-left corner of the status-bar padding — no icon there.
         let action = on_press(&UiState::home(0, 1), 5.0, 5.0, &m, out);
         assert!(matches!(action, DownAction::StartPageDrag { .. }));
+    }
+
+    #[test]
+    fn resolve_drop_grid_over_dock_is_pin() {
+        let mut m = ShellModel::default();
+        for i in 0..3 {
+            m.place(format!("app{i}"));
+        }
+        let l = sc_layout::compute(1224.0, 2700.0, 0, &m);
+        let (x, y) = (l.dock_zone.center_x(), l.dock_zone.center_y());
+        assert_eq!(resolve_drop(x, y, &l, IconSource::Grid), DropAction::Pin);
+    }
+
+    #[test]
+    fn resolve_drop_dock_over_grid_is_unpin() {
+        let mut m = ShellModel::default();
+        m.place("a".into());
+        let l = sc_layout::compute(1224.0, 2700.0, 0, &m);
+        assert_eq!(resolve_drop(612.0, 300.0, &l, IconSource::Dock), DropAction::Unpin);
+    }
+
+    #[test]
+    fn resolve_drop_grid_over_grid_is_snapback() {
+        let mut m = ShellModel::default();
+        m.place("a".into());
+        let l = sc_layout::compute(1224.0, 2700.0, 0, &m);
+        assert_eq!(resolve_drop(612.0, 300.0, &l, IconSource::Grid), DropAction::SnapBack);
     }
 }

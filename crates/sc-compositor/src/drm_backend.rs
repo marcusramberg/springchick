@@ -467,6 +467,34 @@ impl App {
                     .pending_launch
                     .as_ref()
                     .map(|p| p.app_id.as_str()),
+                arrange: self.state.arrange.as_ref().map(|a| {
+                    let drag_app = a.drag.as_ref().map(|d| d.app_id.as_str());
+                    let drag_pos = a.drag.as_ref().map(|d| d.cur);
+                    let over_dock = a
+                        .drag
+                        .as_ref()
+                        .map(|d| {
+                            let (w, h) = (
+                                self.state.output_size.0 as f32,
+                                self.state.output_size.1 as f32,
+                            );
+                            let page = if let crate::ui_state::UiState::Home { page, .. } =
+                                &self.state.ui
+                            {
+                                *page
+                            } else {
+                                0
+                            };
+                            let layout = sc_layout::compute(w, h, page, &self.state.model);
+                            layout.dock_zone.contains(d.cur.0, d.cur.1)
+                        })
+                        .unwrap_or(false);
+                    crate::render::ArrangeView {
+                        drag_app,
+                        drag_pos,
+                        over_dock,
+                    }
+                }),
                 report_partial_damage: report_partial,
                 last_present: &mut self.state.last_present,
             };

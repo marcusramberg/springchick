@@ -36,6 +36,18 @@ use tracing::warn;
 /// Background clear color.
 pub const CLEAR_COLOR: Color32F = Color32F::new(0.06, 0.10, 0.14, 1.0);
 
+/// Render-only view of arrange-mode drag state, threaded through `DrawCtx`
+/// the same way `pressed_app` is: `main.rs`/`drm_backend.rs` derive it from
+/// live compositor state (`State::arrange`), and `draw_home` only reads it.
+pub struct ArrangeView<'a> {
+    /// App id currently being dragged, if any.
+    pub drag_app: Option<&'a str>,
+    /// Live finger/pointer position for the dragged icon (output pixels).
+    pub drag_pos: Option<(f32, f32)>,
+    /// Whether the drag position is currently over the dock drop zone.
+    pub over_dock: bool,
+}
+
 /// Everything the shared draw needs beyond the renderer + framebuffer.
 pub struct DrawCtx<'a> {
     pub scene: &'a Scene,
@@ -79,6 +91,9 @@ pub struct DrawCtx<'a> {
     pub bar_alpha: f32,
     /// App id of the icon currently pressed on Home (draws a press highlight).
     pub pressed_app: Option<&'a str>,
+    /// Arrange-mode view (badges/Done/drag ghost). `None` when arrange mode
+    /// is inactive.
+    pub arrange: Option<ArrangeView<'a>>,
     /// When true, the frame is a "quiet fullscreen app" (nothing but the app
     /// surface can have changed) and `draw_scene` may return a narrowed KMS
     /// page-flip damage hint instead of the full rect. The backend computes
@@ -247,6 +262,7 @@ pub fn draw_scene(
             ctx.app_catalog,
             ctx.skia_flip_y,
             ctx.pressed_app,
+            ctx.arrange.as_ref(),
         );
     }
 
