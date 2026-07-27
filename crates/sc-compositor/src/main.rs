@@ -415,8 +415,9 @@ impl State {
         let now = unix_now();
         let mut catalog_ids: Vec<String> = app_catalog.keys().cloned().collect();
         catalog_ids.sort(); // deterministic seeding + first-run alpha order
+        let first_run = model.frecency.apps.is_empty();
         for id in &catalog_ids {
-            model.frecency.seed(id, now);
+            model.frecency.seed(id, now, first_run);
         }
         model.frecency.prune(&catalog_ids);
         model.recompute_pages(&catalog_ids, now);
