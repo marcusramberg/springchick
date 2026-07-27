@@ -68,6 +68,13 @@ pub struct DrawCtx<'a> {
     pub layers_below: &'a [(WlSurface, (i32, i32))],
     /// Layer-shell surfaces above the app (top/overlay): `(surface, origin)`.
     pub layers_above: &'a [(WlSurface, (i32, i32))],
+    /// xdg_popups whose root is the fullscreen app, ordered root→leaf. Each is a
+    /// popup surface + its clamped physical origin. Drawn above the app, below
+    /// the top/overlay layers.
+    pub app_popups: &'a [(WlSurface, (i32, i32))],
+    /// xdg_popups whose root is a top/overlay layer surface (e.g. an OSK menu),
+    /// ordered root→leaf. Drawn above the layers, below springchick chrome.
+    pub layer_popups: &'a [(WlSurface, (i32, i32))],
     /// Home-bar opacity (faded out when the OSK covers it).
     pub bar_alpha: f32,
     /// App id of the icon currently pressed on Home (draws a press highlight).
@@ -338,9 +345,38 @@ pub fn draw_scene(
         }
     }
 
+    // App-parented popups (menus, dropdowns) sit above the app but below the
+    // top/overlay layers. Each popup surface renders like a layer surface: its
+    // tree at a physical origin, scaled by dpi. Ordered root→leaf so submenus
+    // draw over their parents.
+    for (surface, origin) in ctx.app_popups {
+        draw_layer(
+            renderer,
+            framebuffer,
+            size,
+            ctx.transform,
+            surface,
+            *origin,
+            ctx.app_scale,
+        )?;
+    }
+
     // Top/overlay layer surfaces (e.g. the on-screen keyboard) sit above the
     // app but below springchick's own chrome.
     for (surface, origin) in ctx.layers_above {
+        draw_layer(
+            renderer,
+            framebuffer,
+            size,
+            ctx.transform,
+            surface,
+            *origin,
+            ctx.app_scale,
+        )?;
+    }
+
+    // Popups parented to a top/overlay layer surface sit just above it.
+    for (surface, origin) in ctx.layer_popups {
         draw_layer(
             renderer,
             framebuffer,
@@ -376,6 +412,10 @@ pub fn draw_scene(
     }
     // Layer surfaces (e.g. wvkbd) throttle to frame callbacks too.
     for (surface, _) in ctx.layers_below.iter().chain(ctx.layers_above) {
+        send_frames_surface_tree(surface, ctx.frame_time);
+    }
+    // Popups throttle to frame callbacks like any client surface.
+    for (surface, _) in ctx.app_popups.iter().chain(ctx.layer_popups) {
         send_frames_surface_tree(surface, ctx.frame_time);
     }
 

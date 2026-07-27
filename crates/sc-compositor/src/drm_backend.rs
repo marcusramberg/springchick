@@ -459,6 +459,8 @@ impl App {
                 osd: prep.osd_view,
                 layers_below: &prep.layers_below,
                 layers_above: &prep.layers_above,
+                app_popups: &prep.app_popups,
+                layer_popups: &prep.layer_popups,
                 bar_alpha: prep.bar_alpha,
                 pressed_app: self
                     .state
