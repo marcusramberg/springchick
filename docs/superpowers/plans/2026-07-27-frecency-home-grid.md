@@ -334,7 +334,7 @@ fn unix_now() -> u64 {
 Replace the block at `main.rs:405-419` (the `existing`/`for id ... model.place` loop) with:
 
 ```rust
-        // Seed any catalog apps not yet tracked, then derive the grid order.
+        // Seed new catalog apps, drop stats for uninstalled ones, derive order.
         let mut model = model;
         let now = unix_now();
         let mut catalog_ids: Vec<String> = app_catalog.keys().cloned().collect();
@@ -342,6 +342,7 @@ Replace the block at `main.rs:405-419` (the `existing`/`for id ... model.place` 
         for id in &catalog_ids {
             model.frecency.seed(id, now);
         }
+        model.frecency.prune(&catalog_ids);
         model.recompute_pages(&catalog_ids, now);
 ```
 
@@ -381,7 +382,7 @@ git commit -m "feat(compositor): seed frecency + derive grid pages at startup"
 
         // Record usage for frecency, re-derive grid order, persist.
         let now = unix_now();
-        self.model.frecency.record_launch(&app_id.to_string(), now);
+        self.model.frecency.record_launch(app_id, now); // app_id is &str
         let mut catalog_ids: Vec<String> = self.app_catalog.keys().cloned().collect();
         catalog_ids.sort();
         self.model.recompute_pages(&catalog_ids, now);

@@ -237,6 +237,16 @@ mod tests {
     }
 
     #[test]
+    fn prune_drops_apps_missing_from_catalog() {
+        let mut s = FrecencyStore::default();
+        s.record_launch("a", 0);
+        s.seed("b", 0);
+        s.prune(&["a".to_string()]);
+        assert!(s.apps.contains_key("a"));
+        assert!(!s.apps.contains_key("b"));
+    }
+
+    #[test]
     fn launch_promotes_app_to_front_of_grid() {
         let mut m = ShellModel::default();
         let catalog = ["a", "b", "c"].map(String::from).to_vec();
