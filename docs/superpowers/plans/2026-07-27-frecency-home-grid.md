@@ -28,6 +28,15 @@ Design note: `pages` stays a field on `ShellModel` so every existing reader (`re
 - Modify: `crates/sc-shell-model/src/lib.rs`
 - Test: same file (`#[cfg(test)] mod tests`)
 
+- [ ] **Step 0: Add the `toml` dev-dependency**
+
+`crates/sc-shell-model/Cargo.toml` has **no `[dev-dependencies]` section today**. The `pages_not_serialized_frecency_is` test needs `toml`. Add, pinning to the same version `sc-config` uses (check `crates/sc-config/Cargo.toml`):
+
+```toml
+[dev-dependencies]
+toml = "<match sc-config>"
+```
+
 - [ ] **Step 1: Write failing tests**
 
 Add to the `tests` module in `crates/sc-shell-model/src/lib.rs`:
