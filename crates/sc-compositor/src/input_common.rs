@@ -55,11 +55,27 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
 
     if state.pointer_down {
         // Arrange-mode drag: track the finger directly, no launch/swipe logic.
-        if let Some(arrange) = &mut state.arrange {
-            if let Some(drag) = &mut arrange.drag {
+        if state.arrange.as_ref().and_then(|a| a.drag.as_ref()).is_some() {
+            let (w, h) = state.output_size_f();
+            let page = if let UiState::Home { page, .. } = &state.ui { *page } else { 0 };
+            let layout = sc_layout::compute(w, h, page, &state.model);
+            let over_dock = layout.dock_zone.contains(x, y);
+            let hover = if over_dock {
+                None
+            } else {
+                let app = state.arrange.as_ref().unwrap().drag.as_ref().unwrap().app_id.clone();
+                // Fill count on this page with the dragged app removed, so the
+                // nearest index maps against the hole-removed order.
+                let live_len = state.model.pages.get(page)
+                    .map_or(0, |p| p.iter().filter(|a| **a != app).count());
+                let idx = sc_layout::nearest_grid_index(w, h, x, y).min(live_len);
+                Some((page, idx))
+            };
+            if let Some(drag) = state.arrange.as_mut().unwrap().drag.as_mut() {
                 drag.cur = (x, y);
-                return;
+                drag.hover = hover;
             }
+            return;
         }
 
         // Card drag: dominant-up closes that card, otherwise horizontal scroll.
@@ -162,8 +178,13 @@ pub fn on_press(state: &mut State) {
                 state.model.hide(&app_id);
                 state.after_arrange_edit();
             }
-            sc_layout::Hit::DoneButton | sc_layout::Hit::Miss | sc_layout::Hit::Bar => {
+            sc_layout::Hit::DoneButton | sc_layout::Hit::Bar => {
                 state.arrange = None;
+            }
+            sc_layout::Hit::Miss => {
+                // Empty-area press in arrange: arm a page drag. A swipe pages
+                // (resolved in on_release); a still tap exits.
+                state.page_drag_start = Some(x);
             }
             sc_layout::Hit::GridIcon { app_id, .. } => {
                 if let Some(a) = &mut state.arrange {
@@ -171,6 +192,8 @@ pub fn on_press(state: &mut State) {
                         app_id,
                         source: input_dispatch::IconSource::Grid,
                         cur: (x, y),
+                        hover: None,
+                        edge_since: None,
                     });
                 }
             }
@@ -180,6 +203,8 @@ pub fn on_press(state: &mut State) {
                         app_id,
                         source: input_dispatch::IconSource::Dock,
                         cur: (x, y),
+                        hover: None,
+                        edge_since: None,
                     });
                 }
             }
@@ -267,27 +292,83 @@ pub fn on_release(state: &mut State) {
 
     // Arrange-mode release: resolve the drag (if any) to pin/unpin/snap-back,
     // then stay in arrange mode (only Done/empty-tap exits it).
-    if let Some(arrange) = &mut state.arrange {
-        if let Some(drag) = arrange.drag.take() {
+    if state.arrange.is_some() {
+        // Take the drag out (if any) without holding a &mut borrow across the
+        // body below.
+        let drag = state.arrange.as_mut().and_then(|a| a.drag.take());
+        if let Some(drag) = drag {
             let (w, h) = state.output_size_f();
             let page = if let UiState::Home { page, .. } = &state.ui {
                 *page
             } else {
                 0
             };
+            let page_len = state.model.pages.get(page).map_or(0, |p| p.len());
             let layout = sc_layout::compute(w, h, page, &state.model);
-            match input_dispatch::resolve_drop(drag.cur.0, drag.cur.1, &layout, drag.source) {
-                input_dispatch::DropAction::Pin => {
-                    if state.model.pin(&drag.app_id) {
-                        state.after_arrange_edit();
-                    }
+            let edited = match input_dispatch::resolve_drop(
+                drag.cur.0,
+                drag.cur.1,
+                &layout,
+                drag.source,
+                page,
+                page_len,
+                w,
+                h,
+            ) {
+                input_dispatch::DropAction::Pin => state.model.pin(&drag.app_id),
+                input_dispatch::DropAction::Reorder { page, index } => {
+                    // `page` is the current Home page (edge-dwell flips update
+                    // it); use it, not `drag.hover.page` which the flip does not
+                    // refresh. `hover.index` is computed against the working
+                    // (hole-removed) order, so prefer it to avoid a slot skew.
+                    let ix = drag.hover.map_or(index, |h| h.1);
+                    state.model.move_to(&drag.app_id, page, ix);
+                    true
                 }
-                input_dispatch::DropAction::Unpin => {
-                    state.model.unpin(&drag.app_id);
-                    state.after_arrange_edit();
-                }
-                input_dispatch::DropAction::SnapBack => {}
+                input_dispatch::DropAction::SnapBack => false,
+            };
+            if edited {
+                state.after_arrange_edit();
+            } else {
+                // No model edit, but a drag may have created a trailing empty
+                // page via edge-dwell flip — drop it (no save needed). Also
+                // re-seed the dock so a snapped-back dock icon (dropped from
+                // dock_anim during the lift) springs back into place.
+                state.model.repack();
+                state.reflow_grid();
+                state.reflow_dock();
             }
+            return;
+        }
+        // No icon drag: empty-area release. A swipe commits a page flip and
+        // stays in arrange; a still tap exits.
+        if let Some(start_x) = state.page_drag_start.take() {
+            let dx = x - start_x;
+            let w = state.output_size.0 as f32;
+            if dx.abs() > w * 0.15 {
+                let page_delta = -dx / w; // positive = swiping to next page
+                if let UiState::Home {
+                    page,
+                    page_spring,
+                    page_count,
+                    ..
+                } = &mut state.ui
+                {
+                    let target_page = if page_delta > 0.3 && *page + 1 < *page_count {
+                        *page + 1
+                    } else if page_delta < -0.3 && *page > 0 {
+                        *page - 1
+                    } else {
+                        *page
+                    };
+                    *page = target_page;
+                    page_spring.retarget(target_page as f32);
+                }
+            } else {
+                state.arrange = None; // still tap -> exit
+            }
+        } else {
+            state.arrange = None;
         }
         return;
     }

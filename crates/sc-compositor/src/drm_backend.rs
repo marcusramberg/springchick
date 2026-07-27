@@ -439,6 +439,29 @@ impl App {
             }
         };
 
+        // Screen-space animated grid centers: global spring position minus the
+        // current page scroll, so the grid pass in draw_home can render
+        // sliding icons without knowing about pages itself.
+        let page_scroll = if let crate::ui_state::UiState::Home { page_spring, .. } = &self.state.ui
+        {
+            page_spring.value
+        } else {
+            0.0
+        };
+        let gp_w = self.state.output_size.0 as f32;
+        let grid_positions: std::collections::HashMap<String, (f32, f32)> = self
+            .state
+            .grid_anim
+            .iter()
+            .map(|(app, (sx, sy))| (app.clone(), (sx.value - page_scroll * gp_w, sy.value)))
+            .collect();
+        let dock_positions: std::collections::HashMap<String, (f32, f32)> = self
+            .state
+            .dock_anim
+            .iter()
+            .map(|(a, (sx, sy))| (a.clone(), (sx.value, sy.value)))
+            .collect();
+
         let flip_damage = {
             let mut ctx = crate::render::DrawCtx {
                 scene: &prep.scene,
@@ -497,6 +520,8 @@ impl App {
                 }),
                 report_partial_damage: report_partial,
                 last_present: &mut self.state.last_present,
+                grid_positions: &grid_positions,
+                dock_positions: &dock_positions,
             };
             match crate::render::draw_scene(
                 &mut self.drm.renderer,
