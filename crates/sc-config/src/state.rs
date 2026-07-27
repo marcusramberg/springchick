@@ -75,6 +75,19 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_hidden_and_dock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+        let mut m = ShellModel::default();
+        m.pin("org.gnome.Console");
+        m.hide("org.gnome.Maps");
+        save(&m, &path).unwrap();
+        let back = load(&path).unwrap();
+        assert_eq!(m.dock, back.dock);
+        assert_eq!(m.hidden, back.hidden);
+    }
+
+    #[test]
     fn legacy_file_loads_dock_defaults_frecency() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.toml");
