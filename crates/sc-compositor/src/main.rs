@@ -193,6 +193,34 @@ pub(crate) struct FramePrep {
 /// ordered root→leaf.
 type PopupRect = (PopupKind, (i32, i32), (i32, i32));
 
+/// Hold duration (milliseconds) an icon press must survive before arrange
+/// mode engages.
+const HOLD_MS: u128 = 500;
+
+/// A finger held on an icon on Home, waiting to see if it becomes a
+/// long-press (arrange mode). Cancelled if the finger moves past the tap
+/// slop (becomes a swipe) or releases before `HOLD_MS`.
+struct IconPress {
+    app_id: String,
+    source: input_dispatch::IconSource,
+    start: (f32, f32),
+    at: std::time::Instant,
+}
+
+/// An icon currently being dragged in arrange mode.
+struct DragItem {
+    app_id: String,
+    source: input_dispatch::IconSource,
+    cur: (f32, f32),
+}
+
+/// Arrange-mode state: icons wiggle, badges/Done button are live, and an
+/// icon may be mid-drag toward the dock (pin) or grid (unpin).
+#[derive(Default)]
+struct ArrangeState {
+    drag: Option<DragItem>,
+}
+
 /// Main compositor state.
 struct State {
     compositor_state: CompositorState,
@@ -305,6 +333,13 @@ struct State {
     /// App icon held on Home, pending tap-to-launch (also drives the press
     /// highlight). Cleared if the finger moves into a page swipe.
     pending_launch: Option<input_common::PendingLaunch>,
+    /// Finger held on an icon, waiting to see if it becomes a long-press
+    /// (arrange mode) or a tap/swipe. Cleared once arrange mode engages, the
+    /// gesture becomes a swipe, or the finger releases.
+    icon_press: Option<IconPress>,
+    /// Arrange-mode state (icon reorder/pin/unpin/hide). `None` outside
+    /// arrange mode.
+    arrange: Option<ArrangeState>,
     /// Switcher deck drag state.
     switcher_drag: input_common::SwitcherDrag,
     /// Switcher card rects for hit-testing during drag.
@@ -480,6 +515,8 @@ impl State {
             page_drag_start: None,
             bar_drag_start: None,
             pending_launch: None,
+            icon_press: None,
+            arrange: None,
             switcher_drag: input_common::SwitcherDrag::None,
             switcher_cards: Vec::new(),
             active_gesture: None,
@@ -516,18 +553,26 @@ impl State {
         );
     }
 
+    /// Re-derive grid order from the current model state and persist it.
+    /// Shared by launch (frecency-driven reorder) and arrange-mode edits
+    /// (pin/unpin/hide).
+    fn after_arrange_edit(&mut self) {
+        let now = unix_now();
+        let mut catalog_ids: Vec<String> = self.app_catalog.keys().cloned().collect();
+        catalog_ids.sort();
+        self.model.recompute_pages(&catalog_ids, now);
+        if let Err(e) = config_state::save(&self.model, &config_path()) {
+            warn!(%e, "failed to save shell model after arrange edit");
+        }
+    }
+
     fn launch_or_raise(&mut self, app_id: &str, origin: ZoomOrigin) {
         self.last_origin = origin;
 
         // Record usage for frecency, re-derive grid order, persist.
         let now = unix_now();
         self.model.frecency.record_launch(app_id, now);
-        let mut catalog_ids: Vec<String> = self.app_catalog.keys().cloned().collect();
-        catalog_ids.sort();
-        self.model.recompute_pages(&catalog_ids, now);
-        if let Err(e) = config_state::save(&self.model, &config_path()) {
-            warn!(%e, "failed to save shell model after launch");
-        }
+        self.after_arrange_edit();
 
         // Check if already running — raise it (no zoom, instant).
         for (idx, slot) in self.toplevels.iter().enumerate() {
@@ -819,6 +864,25 @@ impl State {
     /// by the winit and DRM backends, which differ only in how they present the
     /// resulting frame.
     fn advance_frame(&mut self, dt: f32) -> FramePrep {
+        // Long-press hold: an icon held past HOLD_MS without moving into a
+        // swipe or launch engages arrange mode, picking up the same icon as
+        // the initial drag item so the finger doesn't need to move first.
+        if self.arrange.is_none() && self.pointer_down {
+            if let Some(p) = &self.icon_press {
+                if p.at.elapsed().as_millis() >= HOLD_MS {
+                    let drag = DragItem {
+                        app_id: p.app_id.clone(),
+                        source: p.source,
+                        cur: p.start,
+                    };
+                    self.arrange = Some(ArrangeState { drag: Some(drag) });
+                    self.pending_launch = None;
+                    self.page_drag_start = None;
+                    self.icon_press = None;
+                }
+            }
+        }
+
         let effect = transition(&mut self.ui, UiEvent::Tick { dt });
         match effect {
             ui_state::Effect::CloseToplevel { toplevel } => {
