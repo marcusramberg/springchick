@@ -3,7 +3,14 @@
 # Linux wayland host (niri, sway, …), headlessly screenshottable via grim.
 #
 # Subcommands:
-#   up                 Build + launch the compositor nested in the host session.
+#   build              Compile sc-compositor WITHOUT launching. Do this first: a
+#                      cold build can take several minutes and easily exceed an
+#                      agent's command timeout. Run it in the background or with a
+#                      long timeout, so the fast `up` never carries the build cost.
+#   up                 Launch the compositor nested in the host session (builds
+#                      first if needed — see `build`). BLOCKS until the frame loop
+#                      is up. On a cold/unbuilt tree this can exceed the command
+#                      timeout; a timeout here does NOT mean failure — see below.
 #                      Refuses if an instance/socket already exists.
 #   client [CMD...]    Launch a foot wayland client INSIDE springchick. Default
 #                      command fills the terminal with a test pattern. Tracks PID.
@@ -27,6 +34,12 @@ mkdir -p "$STATE"
 
 repo_root() { git -C "$(dirname "$0")" rev-parse --show-toplevel; }
 
+cmd_build() {
+  local root; root=$(repo_root)
+  echo "building sc-compositor (cold builds take minutes — run backgrounded or with a long timeout)…"
+  ( cd "$root" && nix develop --command cargo build -p sc-compositor )
+}
+
 cmd_up() {
   if [ -e "${RUNTIME}/springchick-0" ]; then
     echo "refuse: ${RUNTIME}/springchick-0 exists — an instance is already running." >&2
@@ -34,6 +47,8 @@ cmd_up() {
     return 1
   fi
   local root; root=$(repo_root)
+  # `cargo run` compiles first if the tree isn't built — on a cold tree this
+  # blocks well past a typical command timeout. Run `$0 build` first (see top).
   echo "launching compositor (host WAYLAND_DISPLAY=${HOST_WL})…"
   ( cd "$root" && \
     WAYLAND_DISPLAY="$HOST_WL" SPRINGCHICK_DEBUG_SOCK="$SOCK" SPRINGCHICK_BACKEND=winit \
@@ -52,6 +67,10 @@ cmd_up() {
   done
   echo "timeout waiting for 'entering frame loop'. tail:" >&2
   tail -20 "$LOG" >&2
+  echo "note: if the log ends mid-build, the compositor is still compiling — the" >&2
+  echo "      launch is fine, just slow. Run '$0 build' first next time. Check" >&2
+  echo "      'ls ${RUNTIME}/springchick-0' + 'grep \"entering frame loop\" ${LOG}'" >&2
+  echo "      before assuming failure, then proceed to send/shot." >&2
   return 1
 }
 
@@ -101,10 +120,11 @@ cmd_down() {
 }
 
 case "${1:-}" in
+  build)  shift; cmd_build "$@" ;;
   up)     shift; cmd_up "$@" ;;
   client) shift; cmd_client "$@" ;;
   send)   shift; cmd_send "$@" ;;
   shot)   shift; cmd_shot "$@" ;;
   down)   shift; cmd_down "$@" ;;
-  *) echo "usage: $0 {up|client [CMD...]|send \"tap X Y\"|shot FILE|down}" >&2; exit 1 ;;
+  *) echo "usage: $0 {build|up|client [CMD...]|send \"tap X Y\"|shot FILE|down}" >&2; exit 1 ;;
 esac

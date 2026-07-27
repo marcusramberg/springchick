@@ -27,12 +27,29 @@ All paths below are relative to the repo root.
 nix develop --command true
 
 D=.claude/skills/run-springchick/driver.sh
-$D up                      # build + launch nested compositor, wait for frame loop
+$D build                   # compile ONLY — do this first (see warning below)
+$D up                      # launch nested compositor, wait for frame loop
 $D client                  # map a foot client filled with a test pattern (prints PID)
 $D send "settle 1000"      # drive input over the debug socket; prints "ok"
 $D shot /tmp/sc.png        # grim the host output; then Read /tmp/sc.png
 $D down                    # kill compositor + every client it launched, by PID
 ```
+
+**`up` blocks and a cold build overruns the command timeout.** `up` waits
+synchronously for the frame loop, and if the tree isn't built it compiles first —
+a cold compile alone can exceed the ~5-min Bash-tool ceiling. `nix develop
+--command true` only warms the devshell, NOT the crate build, so the first `up`
+after any code change still pays the full compile cost.
+
+- **Do this:** run `$D build` first, in the background (`run_in_background: true`)
+  or with a long timeout; then `$D up` launches an already-built binary and returns
+  fast, well under timeout.
+- **If `$D up` times out anyway:** it usually still came up — the driver's wait
+  just outran the tool clock. Do NOT assume failure. Check
+  `ls /run/user/$(id -u)/springchick-0` and
+  `grep "entering frame loop" /tmp/sc-driver/compositor.log`; if both are present,
+  it's running — go straight to `send`/`shot`. (If the log ends mid-compile, it's
+  still building; wait and re-check.)
 
 `up` prints the compositor PID, the `springchick-0` socket path, and the
 `actual output size` line (e.g. `w=1901 h=2088` — niri clamps the window, so
