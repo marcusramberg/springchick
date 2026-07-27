@@ -517,6 +517,17 @@ impl State {
 
     fn launch_or_raise(&mut self, app_id: &str, origin: ZoomOrigin) {
         self.last_origin = origin;
+
+        // Record usage for frecency, re-derive grid order, persist.
+        let now = unix_now();
+        self.model.frecency.record_launch(app_id, now);
+        let mut catalog_ids: Vec<String> = self.app_catalog.keys().cloned().collect();
+        catalog_ids.sort();
+        self.model.recompute_pages(&catalog_ids, now);
+        if let Err(e) = config_state::save(&self.model, &config_path()) {
+            warn!(%e, "failed to save shell model after launch");
+        }
+
         // Check if already running — raise it (no zoom, instant).
         for (idx, slot) in self.toplevels.iter().enumerate() {
             if let Some(tl) = slot {
