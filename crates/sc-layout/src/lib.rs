@@ -42,6 +42,8 @@ pub struct IconSlot {
     pub icon_rect: Rect,
     /// Bounding rect for the label below the icon.
     pub label_rect: Rect,
+    /// Remove-badge rect (arrange mode), centered on the icon's top-left corner.
+    pub badge_rect: Rect,
 }
 
 /// Full layout for one frame of the home screen.
@@ -57,6 +59,10 @@ pub struct Layout {
     pub bar_rect: Rect,
     /// Total page count.
     pub page_count: usize,
+    /// Dock band zone (full-width strip behind the dock icons).
+    pub dock_zone: Rect,
+    /// Arrange-mode "Done" button tap target.
+    pub done_button: Rect,
 }
 
 /// Result of hit-testing a point against the layout.
@@ -68,6 +74,10 @@ pub enum Hit {
     DockIcon { app_id: String, index: usize },
     /// Tapped the bottom bar zone.
     Bar,
+    /// Tapped a remove-badge on an icon (arrange mode).
+    RemoveBadge { app_id: String },
+    /// Tapped the arrange-mode "Done" button.
+    DoneButton,
     /// Missed everything.
     Miss,
 }
@@ -158,6 +168,16 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
     let icon_size = cell_w * ICON_SIZE_FRAC;
     let label_h = cell_h * LABEL_HEIGHT_FRAC;
 
+    let badge = |ir: Rect| {
+        let s = ir.w * 0.34;
+        Rect {
+            x: ir.x - s / 2.0,
+            y: ir.y - s / 2.0,
+            w: s,
+            h: s,
+        }
+    };
+
     // Grid icons
     let grid = if let Some(apps) = model.pages.get(clamped_page) {
         apps.iter()
@@ -169,20 +189,22 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
                 let cell_y = grid_top + row as f32 * cell_h;
                 let icon_x = cell_x + (cell_w - icon_size) / 2.0;
                 let icon_y = cell_y + (cell_h - icon_size - label_h) / 2.0;
+                let icon_rect = Rect {
+                    x: icon_x,
+                    y: icon_y,
+                    w: icon_size,
+                    h: icon_size,
+                };
                 IconSlot {
                     app_id: app_id.clone(),
-                    icon_rect: Rect {
-                        x: icon_x,
-                        y: icon_y,
-                        w: icon_size,
-                        h: icon_size,
-                    },
+                    icon_rect,
                     label_rect: Rect {
                         x: cell_x,
                         y: icon_y + icon_size,
                         w: cell_w,
                         h: label_h,
                     },
+                    badge_rect: badge(icon_rect),
                 }
             })
             .collect()
@@ -202,23 +224,41 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
             let cell_x = grid_left + i as f32 * dock_cell_w;
             let icon_x = cell_x + (dock_cell_w - dock_icon_size) / 2.0;
             let icon_y = dock_top + (height * DOCK_HEIGHT - dock_icon_size - dock_label_h) / 2.0;
+            let icon_rect = Rect {
+                x: icon_x,
+                y: icon_y,
+                w: dock_icon_size,
+                h: dock_icon_size,
+            };
             IconSlot {
                 app_id: app_id.clone(),
-                icon_rect: Rect {
-                    x: icon_x,
-                    y: icon_y,
-                    w: dock_icon_size,
-                    h: dock_icon_size,
-                },
+                icon_rect,
                 label_rect: Rect {
                     x: cell_x,
                     y: icon_y + dock_icon_size,
                     w: dock_cell_w,
                     h: dock_label_h,
                 },
+                badge_rect: badge(icon_rect),
             }
         })
         .collect();
+
+    let dock_zone = Rect {
+        x: 0.0,
+        y: dock_top,
+        w: width,
+        h: height * DOCK_HEIGHT,
+    };
+    // Sits entirely within the top-padding band (above `grid_top`) so it never
+    // overlaps grid icon hit-targets in normal (non-arrange) hit-testing.
+    let done_side = width * 0.12;
+    let done_button = Rect {
+        x: width * (1.0 - H_MARGIN) - done_side,
+        y: 0.0,
+        w: done_side,
+        h: height * TOP_PAD,
+    };
 
     Layout {
         grid,
@@ -226,6 +266,8 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
         dots_rect,
         bar_rect,
         page_count,
+        dock_zone,
+        done_button,
     }
 }
 
@@ -257,6 +299,22 @@ pub fn hit_test(layout: &Layout, x: f32, y: f32) -> Hit {
     }
 
     Hit::Miss
+}
+
+/// Hit-test in arrange mode. Checks Done + remove-badges (which overlap icons)
+/// BEFORE falling through to normal icon/bar/miss testing.
+pub fn hit_test_arrange(layout: &Layout, x: f32, y: f32) -> Hit {
+    if layout.done_button.contains(x, y) {
+        return Hit::DoneButton;
+    }
+    for s in layout.grid.iter().chain(layout.dock.iter()) {
+        if s.badge_rect.contains(x, y) {
+            return Hit::RemoveBadge {
+                app_id: s.app_id.clone(),
+            };
+        }
+    }
+    hit_test(layout, x, y)
 }
 
 #[cfg(test)]
@@ -386,5 +444,55 @@ mod tests {
         // Should clamp to last page
         assert_eq!(l.grid.len(), 1);
         assert_eq!(l.grid[0].app_id, "x");
+    }
+
+    #[test]
+    fn badge_rect_at_icon_top_left() {
+        let m = sample_model();
+        let l = compute(1224.0, 2700.0, 0, &m);
+        let s = &l.grid[0];
+        assert!((s.badge_rect.center_x() - s.icon_rect.x).abs() < s.icon_rect.w);
+        assert!((s.badge_rect.center_y() - s.icon_rect.y).abs() < s.icon_rect.h);
+        assert!(s.badge_rect.w > 0.0 && s.badge_rect.h > 0.0);
+    }
+
+    #[test]
+    fn dock_zone_spans_dock_band() {
+        let m = sample_model();
+        let l = compute(1224.0, 2700.0, 0, &m);
+        let d = &l.dock[0];
+        assert!(l.dock_zone.contains(d.icon_rect.center_x(), d.icon_rect.center_y()));
+        assert!(!l.dock_zone.contains(612.0, 100.0));
+    }
+
+    #[test]
+    fn done_button_nonempty_outside_grid() {
+        let m = sample_model();
+        let l = compute(1224.0, 2700.0, 0, &m);
+        assert!(l.done_button.w > 0.0 && l.done_button.h > 0.0);
+        for s in &l.grid {
+            assert!(!l.done_button.contains(s.icon_rect.center_x(), s.icon_rect.center_y()));
+        }
+    }
+
+    #[test]
+    fn arrange_hit_prefers_badge_then_done_then_icon() {
+        let m = sample_model();
+        let l = compute(1224.0, 2700.0, 0, &m);
+        let s = &l.grid[0];
+        let hit = hit_test_arrange(&l, s.badge_rect.center_x(), s.badge_rect.center_y());
+        assert!(matches!(hit, Hit::RemoveBadge { .. }));
+        let hit = hit_test_arrange(&l, l.done_button.center_x(), l.done_button.center_y());
+        assert_eq!(hit, Hit::DoneButton);
+        let far_x = s.icon_rect.x + s.icon_rect.w * 0.9;
+        let far_y = s.icon_rect.y + s.icon_rect.h * 0.9;
+        assert!(matches!(hit_test_arrange(&l, far_x, far_y), Hit::GridIcon { .. }));
+    }
+
+    #[test]
+    fn normal_hit_test_ignores_badge_and_done() {
+        let m = sample_model();
+        let l = compute(1224.0, 2700.0, 0, &m);
+        assert_eq!(hit_test(&l, l.done_button.center_x(), l.done_button.center_y()), Hit::Miss);
     }
 }
