@@ -134,6 +134,14 @@ fn config_path() -> PathBuf {
     config_home().join("springchick/state.toml")
 }
 
+/// Current unix time in whole seconds (monotonic-enough for frecency).
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Scan .desktop files from standard locations.
 fn scan_apps() -> Vec<AppEntry> {
     let mut entries = Vec::new();
@@ -402,20 +410,16 @@ impl State {
         let app_catalog: HashMap<String, AppEntry> =
             apps.into_iter().map(|e| (e.id.clone(), e)).collect();
 
-        // Place any apps from catalog that aren't already in the model.
+        // Seed new catalog apps, drop stats for uninstalled ones, derive order.
         let mut model = model;
-        let existing: std::collections::HashSet<String> = model
-            .pages
-            .iter()
-            .flatten()
-            .chain(model.dock.iter())
-            .cloned()
-            .collect();
-        for id in app_catalog.keys() {
-            if !existing.contains(id) {
-                model.place(id.clone());
-            }
+        let now = unix_now();
+        let mut catalog_ids: Vec<String> = app_catalog.keys().cloned().collect();
+        catalog_ids.sort(); // deterministic seeding + first-run alpha order
+        for id in &catalog_ids {
+            model.frecency.seed(id, now);
         }
+        model.frecency.prune(&catalog_ids);
+        model.recompute_pages(&catalog_ids, now);
 
         // Pre-resolve icons.
         let mut icon_cache = HashMap::new();
