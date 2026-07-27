@@ -33,8 +33,8 @@ pub fn eff(stat: &AppStat, now: u64) -> f64 {
 
 impl FrecencyStore {
     /// Record an app launch: decay the stored score to `now`, then add 1.
-    pub fn record_launch(&mut self, app: &AppId, now: u64) {
-        let s = self.apps.entry(app.clone()).or_default();
+    pub fn record_launch(&mut self, app: &str, now: u64) {
+        let s = self.apps.entry(app.to_owned()).or_default();
         let elapsed = now.saturating_sub(s.last_launch) as f64;
         s.score = s.score * 0.5_f64.powf(elapsed / HALF_LIFE_SECS) + 1.0;
         s.last_launch = now;
@@ -42,7 +42,7 @@ impl FrecencyStore {
 
     /// Insert an app not yet in the store. First-ever run (store empty) -> zero.
     /// Later install (store non-empty) -> seed 1.0 at `now` so it surfaces.
-    pub fn seed(&mut self, app: &AppId, now: u64) {
+    pub fn seed(&mut self, app: &str, now: u64) {
         if self.apps.contains_key(app) {
             return;
         }
@@ -51,7 +51,12 @@ impl FrecencyStore {
         } else {
             AppStat { score: 1.0, last_launch: now }
         };
-        self.apps.insert(app.clone(), stat);
+        self.apps.insert(app.to_owned(), stat);
+    }
+
+    /// Drop stats for apps no longer in the catalog.
+    pub fn prune(&mut self, catalog_ids: &[AppId]) {
+        self.apps.retain(|id, _| catalog_ids.contains(id));
     }
 }
 
@@ -164,7 +169,7 @@ mod tests {
     #[test]
     fn record_launch_on_fresh_app_scores_one() {
         let mut s = FrecencyStore::default();
-        s.record_launch(&"a".to_string(), 1000);
+        s.record_launch("a", 1000);
         let stat = &s.apps["a"];
         assert!((stat.score - 1.0).abs() < 1e-9);
         assert_eq!(stat.last_launch, 1000);
@@ -173,20 +178,20 @@ mod tests {
     #[test]
     fn record_launch_decays_before_incrementing() {
         let mut s = FrecencyStore::default();
-        s.record_launch(&"a".to_string(), 0);
-        s.record_launch(&"a".to_string(), HALF_LIFE_SECS as u64);
+        s.record_launch("a", 0);
+        s.record_launch("a", HALF_LIFE_SECS as u64);
         assert!((s.apps["a"].score - 1.5).abs() < 1e-6);
     }
 
     #[test]
     fn seed_first_run_is_zero_later_install_is_one() {
         let mut empty = FrecencyStore::default();
-        empty.seed(&"a".to_string(), 5000);
+        empty.seed("a", 5000);
         assert_eq!(empty.apps["a"], AppStat { score: 0.0, last_launch: 0 });
 
         let mut populated = FrecencyStore::default();
-        populated.record_launch(&"x".to_string(), 100);
-        populated.seed(&"b".to_string(), 5000);
+        populated.record_launch("x", 100);
+        populated.seed("b", 5000);
         assert_eq!(populated.apps["b"], AppStat { score: 1.0, last_launch: 5000 });
     }
 
@@ -194,9 +199,9 @@ mod tests {
     fn recompute_pages_orders_by_frecency_excluding_dock() {
         let mut m = ShellModel::default();
         m.dock = vec!["docked".into()];
-        m.frecency.record_launch(&"low".to_string(), 0);
-        m.frecency.record_launch(&"high".to_string(), 0);
-        m.frecency.record_launch(&"high".to_string(), 0);
+        m.frecency.record_launch("low", 0);
+        m.frecency.record_launch("high", 0);
+        m.frecency.record_launch("high", 0);
         let catalog = ["high", "low", "docked", "zzz"].map(String::from).to_vec();
         m.recompute_pages(&catalog, 0);
         assert_eq!(m.pages[0][0], "high");
@@ -226,7 +231,7 @@ mod tests {
     #[test]
     fn pages_not_serialized_frecency_is() {
         let mut m = ShellModel::default();
-        m.frecency.record_launch(&"a".to_string(), 42);
+        m.frecency.record_launch("a", 42);
         m.pages = vec![vec!["a".into()]];
         let s = toml::to_string_pretty(&m).unwrap();
         assert!(!s.contains("pages"));
@@ -251,7 +256,7 @@ mod tests {
         let mut m = ShellModel::default();
         let catalog = ["a", "b", "c"].map(String::from).to_vec();
         m.recompute_pages(&catalog, 0);
-        m.frecency.record_launch(&"c".to_string(), 10);
+        m.frecency.record_launch("c", 10);
         m.recompute_pages(&catalog, 10);
         assert_eq!(m.pages[0][0], "c");
     }
