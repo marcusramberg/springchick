@@ -37,7 +37,7 @@ mod tests {
         save(&m, &path).unwrap();
         let back = load(&path).unwrap();
         assert_eq!(m.dock, back.dock);
-        assert!(back.pages.is_empty()); // pages are not persisted
+        assert_eq!(m.pages, back.pages); // pages are the persisted manual order
     }
 
     #[test]
@@ -98,7 +98,7 @@ mod tests {
         .unwrap();
         let m = load(&path).unwrap();
         assert_eq!(m.dock, vec!["org.gnome.Console".to_string()]);
-        assert!(m.frecency.apps.is_empty());
-        assert!(m.pages.is_empty()); // legacy pages ignored (skipped field)
+        assert!(m.frecency.apps.is_empty()); // frecency absent -> defaults empty
+        assert_eq!(m.pages, vec![vec!["org.gnome.Maps".to_string()]]); // pages now persisted + loaded
     }
 }

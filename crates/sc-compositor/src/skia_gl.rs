@@ -154,22 +154,23 @@ impl SkiaGl {
         Some(image)
     }
 
-    /// Draw the home screen (grid + dock + dots + bar).
-    /// Draw the home screen. `page_offset` is a fractional pixel offset for smooth swiping
-    /// (0 = page aligned, negative = swiping left to next page).
+    /// Draw the home screen (grid + dock + dots + bar). Grid icons are drawn
+    /// from `grid_positions` (animated screen-space centers), so paging and
+    /// reflow both play out as icon motion rather than a page-offset scroll.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_home(
         &mut self,
         width: i32,
         height: i32,
         page: usize,
-        page_offset: f32,
         model: &ShellModel,
         icon_cache: &HashMap<String, IconPixels>,
         app_catalog: &HashMap<String, AppEntry>,
         flip_y: bool,
         pressed_app: Option<&str>,
         arrange: Option<&ArrangeView>,
+        grid_positions: &HashMap<String, (f32, f32)>,
+        dock_positions: &HashMap<String, (f32, f32)>,
     ) {
         if width <= 0 || height <= 0 {
             return;
@@ -237,48 +238,28 @@ impl SkiaGl {
             canvas.scale((1.0, -1.0));
         }
 
-        let page_count = model.pages.len().max(1);
-
-        // Draw current page and adjacent page(s) for smooth swiping.
-        // page_offset: negative = swiping left (toward next page)
-        let pages_to_draw: Vec<(usize, f32)> = {
-            let mut pages = vec![(page, page_offset)];
-            // If offset is negative (swiping left), draw next page to the right.
-            if page_offset < 0.0 && page + 1 < page_count {
-                pages.push((page + 1, page_offset + width as f32));
-            }
-            // If offset is positive (swiping right), draw prev page to the left.
-            if page_offset > 0.0 && page > 0 {
-                pages.push((page - 1, page_offset - width as f32));
-            }
-            pages
-        };
-
-        for (pg, offset_x) in &pages_to_draw {
-            let layout = sc_layout::compute(width as f32, height as f32, *pg, model);
-
-            canvas.save();
-            canvas.translate((*offset_x, 0.0));
-
-            // Draw grid icons.
-            for slot in &layout.grid {
-                draw_icon_slot(
-                    canvas,
-                    slot,
-                    &self.icon_images,
-                    &self.font,
-                    app_catalog,
-                    pressed_app == Some(slot.app_id.as_str()),
-                );
-            }
-
-            canvas.restore();
+        // Grid icons: build the animated slot set once, in deterministic model
+        // (page, slot) order — see `visible_grid_slots`. Reused below for arrange
+        // badges so they track the sliding icons instead of the static layout.
+        let anim_slots =
+            visible_grid_slots(model, grid_positions, width as f32, height as f32);
+        for slot in &anim_slots {
+            draw_icon_slot(
+                canvas,
+                slot,
+                &self.icon_images,
+                &self.font,
+                app_catalog,
+                pressed_app == Some(slot.app_id.as_str()),
+            );
         }
 
         // Dock and dots don't scroll with pages.
         let current_layout = sc_layout::compute(width as f32, height as f32, page, model);
 
-        for slot in &current_layout.dock {
+        let dock_slots =
+            visible_dock_slots(&current_layout, dock_positions, width as f32, height as f32);
+        for slot in &dock_slots {
             draw_icon_slot(
                 canvas,
                 slot,
@@ -298,7 +279,7 @@ impl SkiaGl {
         // Arrange mode: remove-badges, Done button, dock drop highlight, and
         // the lifted (dragged) icon on top of everything else.
         if let Some(view) = arrange {
-            for slot in current_layout.grid.iter().chain(current_layout.dock.iter()) {
+            for slot in anim_slots.iter().chain(dock_slots.iter()) {
                 draw_remove_badge(canvas, slot);
             }
             draw_done_button(canvas, &current_layout, &self.font);
@@ -671,4 +652,103 @@ fn draw_drag_ghost(
     let (cx, cy) = pos;
     let dst = Rect::new(cx - size / 2.0, cy - size / 2.0, cx + size / 2.0, cy + size / 2.0);
     canvas.draw_image_rect(image, None, dst, &Paint::default());
+}
+
+/// Grid icon slots to draw, at their animated screen positions, in deterministic
+/// model (page, slot) order.
+///
+/// Iterating `grid_positions` (a `HashMap` rebuilt every frame with a fresh random
+/// seed) would draw in a different z-order each frame, making overlapping
+/// labels/icons z-fight and shimmer. Walking `model.pages` fixes the order to the
+/// stable page/slot layout the old per-page renderer used. Off-screen icons are
+/// culled.
+pub(crate) fn visible_grid_slots(
+    model: &ShellModel,
+    grid_positions: &HashMap<String, (f32, f32)>,
+    width: f32,
+    height: f32,
+) -> Vec<IconSlot> {
+    let mut out = Vec::new();
+    for page in &model.pages {
+        for app in page {
+            if let Some((sx, sy)) = grid_positions.get(app) {
+                if *sx < -width * 0.3 || *sx > width * 1.3 {
+                    continue;
+                }
+                out.push(sc_layout::slot_at_center(app.clone(), *sx, *sy, width, height));
+            }
+        }
+    }
+    out
+}
+
+/// Dock icon slots positioned from animated `dock_positions` (falling back to
+/// the static layout center for a not-yet-seeded app), so the dock reflows.
+pub(crate) fn visible_dock_slots(
+    layout: &sc_layout::Layout,
+    dock_positions: &HashMap<String, (f32, f32)>,
+    width: f32,
+    height: f32,
+) -> Vec<sc_layout::IconSlot> {
+    // Skip apps absent from `dock_positions` (mirrors `visible_grid_slots`): a
+    // dock icon being dragged is dropped from `dock_anim`, so it renders only as
+    // the ghost, not doubled in its dock cell.
+    layout
+        .dock
+        .iter()
+        .filter_map(|slot| {
+            dock_positions
+                .get(&slot.app_id)
+                .map(|&(cx, cy)| sc_layout::slot_at_center(slot.app_id.clone(), cx, cy, width, height))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sc_shell_model::ShellModel;
+    use std::collections::HashMap;
+
+    fn on_screen_positions(apps: &[&str]) -> HashMap<String, (f32, f32)> {
+        // Insert in a different order than `apps` so a HashMap-order bug would
+        // surface; values are all comfortably on-screen at 1224x2700.
+        let mut gp = HashMap::new();
+        for (i, a) in apps.iter().enumerate().rev() {
+            gp.insert((*a).to_string(), (100.0 + i as f32 * 50.0, 400.0));
+        }
+        gp
+    }
+
+    #[test]
+    fn visible_grid_slots_follow_model_order_deterministically() {
+        let m = ShellModel {
+            pages: vec![vec!["a".into(), "b".into(), "c".into()]],
+            ..Default::default()
+        };
+        // Rebuild the map many times (fresh RandomState each) and confirm the
+        // draw order is always the model order, never the HashMap's.
+        for _ in 0..25 {
+            let gp = on_screen_positions(&["a", "b", "c"]);
+            let order: Vec<String> = visible_grid_slots(&m, &gp, 1224.0, 2700.0)
+                .iter()
+                .map(|s| s.app_id.clone())
+                .collect();
+            assert_eq!(order, vec!["a", "b", "c"]);
+        }
+    }
+
+    #[test]
+    fn visible_grid_slots_culls_offscreen() {
+        let m = ShellModel {
+            pages: vec![vec!["on".into(), "off".into()]],
+            ..Default::default()
+        };
+        let mut gp = HashMap::new();
+        gp.insert("on".to_string(), (600.0, 400.0));
+        gp.insert("off".to_string(), (1224.0 * 2.0, 400.0)); // far right, culled
+        let slots = visible_grid_slots(&m, &gp, 1224.0, 2700.0);
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].app_id, "on");
+    }
 }

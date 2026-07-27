@@ -26,18 +26,33 @@ pub enum IconSource {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DropAction {
     Pin,
-    Unpin,
+    Reorder { page: usize, index: usize },
     SnapBack,
 }
 
 /// Decide what a drop at (x,y) means given where the dragged icon came from.
 /// A `Pin` may still fail at the model layer (full dock); the caller maps that to snap-back.
-pub fn resolve_drop(x: f32, y: f32, layout: &sc_layout::Layout, source: IconSource) -> DropAction {
+/// `page` is the visible Home page and `page_len` its filled icon count; `(w, h)` is
+/// the output size (Layout has no size fields), used for nearest-slot mapping.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_drop(
+    x: f32,
+    y: f32,
+    layout: &sc_layout::Layout,
+    source: IconSource,
+    page: usize,
+    page_len: usize,
+    w: f32,
+    h: f32,
+) -> DropAction {
     let over_dock = layout.dock_zone.contains(x, y);
     match (source, over_dock) {
-        (IconSource::Grid, true) => DropAction::Pin,
-        (IconSource::Dock, false) => DropAction::Unpin,
-        _ => DropAction::SnapBack,
+        (IconSource::Grid, true) => DropAction::Pin,        // grid -> dock: pin
+        (IconSource::Dock, true) => DropAction::SnapBack,   // dock -> dock: no-op
+        (_, false) => {                                     // any -> grid: reorder
+            let idx = sc_layout::nearest_grid_index(w, h, x, y).min(page_len);
+            DropAction::Reorder { page, index: idx }
+        }
     }
 }
 
@@ -201,28 +216,49 @@ mod tests {
 
     #[test]
     fn resolve_drop_grid_over_dock_is_pin() {
+        let (w, h) = (1224.0, 2700.0);
         let mut m = ShellModel::default();
         for i in 0..3 {
             m.place(format!("app{i}"));
         }
-        let l = sc_layout::compute(1224.0, 2700.0, 0, &m);
+        let l = sc_layout::compute(w, h, 0, &m);
         let (x, y) = (l.dock_zone.center_x(), l.dock_zone.center_y());
-        assert_eq!(resolve_drop(x, y, &l, IconSource::Grid), DropAction::Pin);
+        assert_eq!(
+            resolve_drop(x, y, &l, IconSource::Grid, 0, 0, w, h),
+            DropAction::Pin
+        );
     }
 
     #[test]
-    fn resolve_drop_dock_over_grid_is_unpin() {
-        let mut m = ShellModel::default();
-        m.place("a".into());
-        let l = sc_layout::compute(1224.0, 2700.0, 0, &m);
-        assert_eq!(resolve_drop(612.0, 300.0, &l, IconSource::Dock), DropAction::Unpin);
+    fn resolve_drop_dock_over_grid_is_reorder() {
+        let (w, h) = (1224.0, 2700.0);
+        let l = sc_layout::compute(w, h, 0, &ShellModel::default());
+        let p = sc_layout::global_slot_pos(0, 1, w, h);
+        assert_eq!(
+            resolve_drop(p.0, p.1, &l, IconSource::Dock, 0, 3, w, h),
+            DropAction::Reorder { page: 0, index: 1 },
+        );
     }
 
     #[test]
-    fn resolve_drop_grid_over_grid_is_snapback() {
-        let mut m = ShellModel::default();
-        m.place("a".into());
-        let l = sc_layout::compute(1224.0, 2700.0, 0, &m);
-        assert_eq!(resolve_drop(612.0, 300.0, &l, IconSource::Grid), DropAction::SnapBack);
+    fn resolve_drop_grid_over_grid_is_reorder() {
+        let (w, h) = (1224.0, 2700.0);
+        let l = sc_layout::compute(w, h, 0, &ShellModel::default());
+        let p = sc_layout::global_slot_pos(0, 2, w, h);
+        assert_eq!(
+            resolve_drop(p.0, p.1, &l, IconSource::Grid, 0, 5, w, h),
+            DropAction::Reorder { page: 0, index: 2 },
+        );
+    }
+
+    #[test]
+    fn resolve_drop_reorder_clamps_to_page_len() {
+        let (w, h) = (1224.0, 2700.0);
+        let l = sc_layout::compute(w, h, 0, &ShellModel::default());
+        let p = sc_layout::global_slot_pos(0, 10, w, h);
+        assert_eq!(
+            resolve_drop(p.0, p.1, &l, IconSource::Grid, 0, 3, w, h),
+            DropAction::Reorder { page: 0, index: 3 },
+        );
     }
 }

@@ -21,6 +21,7 @@ pub struct AppStat {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct FrecencyStore {
+    #[serde(default)]
     pub apps: HashMap<AppId, AppStat>,
 }
 
@@ -62,9 +63,10 @@ impl FrecencyStore {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ShellModel {
-    /// Runtime-derived grid view. Recomputed from catalog + frecency; never
-    /// persisted (see `recompute_pages`).
-    #[serde(skip)]
+    /// Grid view of apps, in manual (persisted) order. This is the source of
+    /// truth for on-screen grid order. Seeded alphabetically from the catalog
+    /// by `reconcile` on first run; reordered only by manual drag.
+    #[serde(default)]
     pub pages: Vec<Vec<AppId>>,
     pub dock: Vec<AppId>, // len <= DOCK_CAP
     #[serde(default)]
@@ -74,20 +76,26 @@ pub struct ShellModel {
 }
 
 impl ShellModel {
-    /// Rebuild `pages` from the catalog ordered by frecency at `now`,
-    /// excluding docked apps, chunked into PAGE_CAP-sized pages.
-    pub fn recompute_pages(&mut self, catalog_ids: &[AppId], now: u64) {
-        let mut ids: Vec<AppId> = catalog_ids
-            .iter()
-            .filter(|id| !self.dock.contains(id) && !self.hidden.contains(id))
-            .cloned()
-            .collect();
-        ids.sort_by(|a, b| {
-            let ea = self.frecency.apps.get(a).map_or(0.0, |s| eff(s, now));
-            let eb = self.frecency.apps.get(b).map_or(0.0, |s| eff(s, now));
-            eb.total_cmp(&ea).then_with(|| a.cmp(b))
-        });
-        self.pages = ids.chunks(PAGE_CAP).map(|c| c.to_vec()).collect();
+    /// Keep `pages` in sync with the installed catalog without reordering
+    /// existing slots. Appends catalog ids not yet in pages/dock/hidden (via
+    /// `place`), seeds their frecency, and prunes ids no longer installed.
+    /// `now`/`first_run` mirror the old startup seed loop (score 0 on a
+    /// first-run empty store, 1.0 for a later install).
+    pub fn reconcile(&mut self, catalog_ids: &[AppId], now: u64, first_run: bool) {
+        self.pages.iter_mut().for_each(|p| p.retain(|a| catalog_ids.contains(a)));
+        self.pages.retain(|p| !p.is_empty());
+        self.dock.retain(|a| catalog_ids.contains(a));
+        self.hidden.retain(|a| catalog_ids.contains(a));
+        self.frecency.prune(catalog_ids);
+        for id in catalog_ids {
+            let known = self.pages.iter().any(|p| p.contains(id))
+                || self.dock.contains(id)
+                || self.hidden.contains(id);
+            if !known {
+                self.place(id.clone());
+            }
+            self.frecency.seed(id, now, first_run);
+        }
     }
 
     /// Append an app to the first page with room, creating a page if needed.
@@ -108,23 +116,17 @@ impl ShellModel {
         self.pages.retain(|p| !p.is_empty());
     }
 
-    /// Move an app to (page, index), shifting others. Used by drag-rearrange.
+    /// Move `app` to the grid slot addressed by (page, index), treated as a
+    /// global position `page*PAGE_CAP + index` in the flattened order. Removes
+    /// `app` from pages/dock/hidden first, inserts, then repacks. Used by drag
+    /// reorder (grid- and dock-sourced).
     pub fn move_to(&mut self, app: &str, page: usize, index: usize) {
-        self.delete_keep_pages(app);
-        while self.pages.len() <= page {
-            self.pages.push(Vec::new());
-        }
-        let p = &mut self.pages[page];
-        let idx = index.min(p.len());
-        p.insert(idx, app.to_string());
-    }
-
-    // delete without collapsing empty pages (internal helper for moves)
-    fn delete_keep_pages(&mut self, app: &str) {
-        for page in &mut self.pages {
-            page.retain(|a| a != app);
-        }
+        let mut flat: Vec<AppId> = self.flat().into_iter().filter(|a| a != app).collect();
         self.dock.retain(|a| a != app);
+        self.hidden.retain(|a| a != app);
+        let gi = page.saturating_mul(PAGE_CAP).saturating_add(index).min(flat.len());
+        flat.insert(gi, app.to_string());
+        self.pages = flat.chunks(PAGE_CAP).map(|c| c.to_vec()).collect();
     }
 
     /// Pin `app` to the dock. Returns false if already docked or dock is full.
@@ -132,25 +134,57 @@ impl ShellModel {
         if self.dock.iter().any(|a| a == app) || self.dock.len() >= DOCK_CAP {
             return false;
         }
+        self.remove_from_pages(app);
+        self.repack();
         self.dock.push(app.to_owned());
         true
     }
 
-    /// Remove `app` from the dock, if present.
+    /// Remove `app` from the dock, if present, restoring it to the home grid.
     pub fn unpin(&mut self, app: &str) {
-        self.dock.retain(|a| a != app);
+        if self.dock.iter().any(|a| a == app) {
+            self.dock.retain(|a| a != app);
+            self.place(app.to_owned());
+        }
     }
 
     /// Hide `app` from the home grid.
     pub fn hide(&mut self, app: &str) {
         if !self.hidden.iter().any(|a| a == app) {
+            self.remove_from_pages(app);
+            self.repack();
             self.hidden.push(app.to_owned());
         }
     }
 
     /// Unhide `app`, restoring it to the home grid.
     pub fn unhide(&mut self, app: &str) {
-        self.hidden.retain(|a| a != app);
+        if self.hidden.iter().any(|a| a == app) {
+            self.hidden.retain(|a| a != app);
+            self.place(app.to_owned());
+        }
+    }
+
+    /// Remove `app` from all pages, dropping any pages left empty.
+    fn remove_from_pages(&mut self, app: &str) {
+        for page in &mut self.pages {
+            page.retain(|a| a != app);
+        }
+        self.pages.retain(|p| !p.is_empty());
+    }
+
+    /// Flattened grid order (all pages concatenated).
+    fn flat(&self) -> Vec<AppId> {
+        self.pages.iter().flatten().cloned().collect()
+    }
+
+    /// Re-chunk the flattened order into PAGE_CAP-sized pages, dropping empty
+    /// tail pages. The single packing invariant: every page but the last is
+    /// full. A dense re-chunk can leave neither an interior hole nor an
+    /// overflow, so this handles both backfill and overflow cascade.
+    pub fn repack(&mut self) {
+        let flat = self.flat();
+        self.pages = flat.chunks(PAGE_CAP).map(|c| c.to_vec()).collect();
     }
 }
 
@@ -185,6 +219,29 @@ mod tests {
         }
         m.move_to("c", 0, 0);
         assert_eq!(m.pages[0], vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn move_to_cross_page_lands_at_global_index() {
+        // PAGE_CAP-1 on page0 + "x" on page1 = PAGE_CAP total -> repacks to one full page.
+        let mut m = ShellModel {
+            pages: vec![(0..PAGE_CAP - 1).map(|i| format!("a{i:02}")).collect(), vec!["x".into()]],
+            ..Default::default()
+        };
+        m.move_to("x", 0, 2); // global index 2
+        assert_eq!(m.pages[0][2], "x");
+        assert_eq!(m.pages[0].len(), PAGE_CAP);
+        assert_eq!(m.pages.len(), 1);
+    }
+
+    #[test]
+    fn move_to_from_dock_removes_from_dock() {
+        let mut m = ShellModel::default();
+        m.place("a".into());
+        m.dock.push("d".into());
+        m.move_to("d", 0, 0); // dock -> grid
+        assert!(m.dock.is_empty());
+        assert_eq!(m.pages[0], vec!["d", "a"]);
     }
 
     #[test]
@@ -236,49 +293,21 @@ mod tests {
     }
 
     #[test]
-    fn recompute_pages_orders_by_frecency_excluding_dock() {
+    fn pages_round_trip_through_serde() {
         let mut m = ShellModel::default();
-        m.dock = vec!["docked".into()];
-        m.frecency.record_launch("low", 0);
-        m.frecency.record_launch("high", 0);
-        m.frecency.record_launch("high", 0);
-        let catalog = ["high", "low", "docked", "zzz"].map(String::from).to_vec();
-        m.recompute_pages(&catalog, 0);
-        assert_eq!(m.pages[0][0], "high");
-        assert_eq!(m.pages[0][1], "low");
-        assert_eq!(m.pages[0][2], "zzz");
-        assert!(!m.pages.iter().flatten().any(|a| a == "docked"));
-    }
-
-    #[test]
-    fn recompute_pages_all_zero_is_alphabetical() {
-        let mut m = ShellModel::default();
-        let catalog = ["c", "a", "b"].map(String::from).to_vec();
-        m.recompute_pages(&catalog, 0);
-        assert_eq!(m.pages[0], vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn recompute_pages_chunks_into_pages() {
-        let mut m = ShellModel::default();
-        let catalog: Vec<String> = (0..(PAGE_CAP + 3)).map(|i| format!("app{i:03}")).collect();
-        m.recompute_pages(&catalog, 0);
-        assert_eq!(m.pages.len(), 2);
-        assert_eq!(m.pages[0].len(), PAGE_CAP);
-        assert_eq!(m.pages[1].len(), 3);
-    }
-
-    #[test]
-    fn pages_not_serialized_frecency_is() {
-        let mut m = ShellModel::default();
-        m.frecency.record_launch("a", 42);
-        m.pages = vec![vec!["a".into()]];
-        let s = toml::to_string_pretty(&m).unwrap();
-        assert!(!s.contains("pages"));
-        assert!(s.contains("frecency") || s.contains("[frecency"));
+        m.place("a".into());
+        m.place("b".into());
+        let s = toml::to_string(&m).unwrap();
         let back: ShellModel = toml::from_str(&s).unwrap();
-        assert!(back.pages.is_empty());
-        assert_eq!(back.frecency.apps["a"].last_launch, 42);
+        assert_eq!(back.pages, m.pages);
+    }
+
+    #[test]
+    fn old_file_without_pages_loads_empty() {
+        // A config written before pages were persisted: only dock + frecency.
+        let s = "dock = []\n[frecency]\n";
+        let m: ShellModel = toml::from_str(s).unwrap();
+        assert!(m.pages.is_empty());
     }
 
     #[test]
@@ -319,6 +348,30 @@ mod tests {
     }
 
     #[test]
+    fn pin_removes_from_pages_unpin_restores() {
+        let mut m = ShellModel::default();
+        m.place("a".into());
+        assert!(m.pin("a"));
+        assert!(!m.pages.iter().any(|p| p.contains(&"a".to_string())));
+        assert!(m.dock.contains(&"a".to_string()));
+        m.unpin("a");
+        assert!(!m.dock.contains(&"a".to_string()));
+        assert!(m.pages.iter().any(|p| p.contains(&"a".to_string())));
+    }
+
+    #[test]
+    fn hide_removes_from_pages_unhide_restores() {
+        let mut m = ShellModel::default();
+        m.place("a".into());
+        m.hide("a");
+        assert!(!m.pages.iter().any(|p| p.contains(&"a".to_string())));
+        assert!(m.hidden.contains(&"a".to_string()));
+        m.unhide("a");
+        assert!(!m.hidden.contains(&"a".to_string()));
+        assert!(m.pages.iter().any(|p| p.contains(&"a".to_string())));
+    }
+
+    #[test]
     fn hide_unhide_toggle_hidden_set() {
         let mut m = ShellModel::default();
         m.hide("a");
@@ -327,17 +380,6 @@ mod tests {
         assert_eq!(m.hidden, vec!["a"]);
         m.unhide("a");
         assert!(m.hidden.is_empty());
-    }
-
-    #[test]
-    fn recompute_pages_excludes_hidden_and_dock() {
-        let mut m = ShellModel::default();
-        m.pin("docked");
-        m.hide("gone");
-        let catalog = ["docked", "gone", "shown"].map(String::from).to_vec();
-        m.recompute_pages(&catalog, 0);
-        let flat: Vec<&String> = m.pages.iter().flatten().collect();
-        assert_eq!(flat, vec!["shown"]);
     }
 
     #[test]
@@ -352,12 +394,85 @@ mod tests {
     }
 
     #[test]
-    fn launch_promotes_app_to_front_of_grid() {
+    fn reconcile_appends_new_catalog_ids_in_order() {
         let mut m = ShellModel::default();
-        let catalog = ["a", "b", "c"].map(String::from).to_vec();
-        m.recompute_pages(&catalog, 0);
-        m.frecency.record_launch("c", 10);
-        m.recompute_pages(&catalog, 10);
-        assert_eq!(m.pages[0][0], "c");
+        m.place("b".into());
+        m.reconcile(&["a".into(), "b".into(), "c".into()], 0, false);
+        assert_eq!(m.pages[0], vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn reconcile_prunes_uninstalled_from_pages_dock_hidden() {
+        let mut m = ShellModel::default();
+        m.place("gone".into());
+        m.place("keep".into());
+        m.dock.push("dgone".into());
+        m.hidden.push("hgone".into());
+        m.reconcile(&["keep".into()], 0, false);
+        assert_eq!(m.pages, vec![vec!["keep".to_string()]]);
+        assert!(m.dock.is_empty());
+        assert!(m.hidden.is_empty());
+    }
+
+    #[test]
+    fn reconcile_seeds_frecency_for_new_apps() {
+        let mut m = ShellModel::default();
+        m.frecency.apps.insert("existing".into(), AppStat { score: 5.0, last_launch: 0 });
+        m.reconcile(&["existing".into(), "new".into()], 100, false);
+        assert_eq!(m.frecency.apps["new"].score, 1.0);
+        assert_eq!(m.frecency.apps["new"].last_launch, 100);
+    }
+
+    #[test]
+    fn reconcile_does_not_move_already_placed() {
+        let mut m = ShellModel::default();
+        for n in ["a", "b", "c"] { m.place(n.into()); }
+        m.move_to("c", 0, 0); // user order: c, a, b
+        m.reconcile(&["a".into(), "b".into(), "c".into()], 0, false);
+        assert_eq!(m.pages[0], vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn repack_backfills_interior_hole() {
+        let mut m = ShellModel {
+            pages: vec![
+                (0..PAGE_CAP).map(|i| format!("a{i:02}")).collect(),
+                vec!["tail".into()],
+            ],
+            ..Default::default()
+        };
+        m.pages[0].remove(5); // interior hole -> page0 now 23
+        m.repack();
+        assert_eq!(m.pages[0].len(), PAGE_CAP); // backfilled from page1
+        assert_eq!(m.pages[0][23], "tail");
+        assert_eq!(m.pages.len(), 1); // page1 emptied + dropped
+    }
+
+    #[test]
+    fn pin_backfills_grid_across_pages() {
+        // 25 grid apps -> page0 full (24), page1 has 1. Pin one from page0.
+        let mut m = ShellModel {
+            pages: vec![
+                (0..PAGE_CAP).map(|i| format!("a{i:02}")).collect(),
+                vec!["tail".into()],
+            ],
+            ..Default::default()
+        };
+        assert!(m.pin("a05"));
+        assert!(m.dock.contains(&"a05".to_string()));
+        assert_eq!(m.pages[0].len(), PAGE_CAP); // tail pulled back, no interior hole
+        assert_eq!(m.pages.len(), 1);
+    }
+
+    #[test]
+    fn repack_cascades_overflow_and_drops_empty_tail() {
+        let mut m = ShellModel {
+            pages: vec![(0..=PAGE_CAP).map(|i| format!("a{i}")).collect(), vec![], vec![]],
+            ..Default::default()
+        };
+        m.repack();
+        assert_eq!(m.pages[0].len(), PAGE_CAP);
+        assert_eq!(m.pages[1], vec![format!("a{PAGE_CAP}")]);
+        assert_eq!(m.pages.len(), 2);
     }
 }

@@ -94,8 +94,6 @@ pub struct Scene {
     pub show_home: bool,
     /// Home screen page (for rendering).
     pub home_page: usize,
-    /// Horizontal pixel offset for page swiping (0 = aligned).
-    pub page_offset: f32,
     /// Switcher deck cards (empty for non-switcher states), sorted ascending z.
     pub cards: Vec<switcher::CardRect>,
 }
@@ -115,26 +113,16 @@ impl Scene {
 pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
     let (w, h) = (output_size.0 as f32, output_size.1 as f32);
     match state {
-        UiState::Home {
-            page, page_spring, ..
-        } => {
-            // page_spring.value is the fractional page position.
-            // offset = difference from integer page × screen width.
-            let fractional = page_spring.value - *page as f32;
-            let page_offset = -fractional * output_size.0 as f32;
-            Scene {
-                window: None,
-                show_home: true,
-                home_page: *page,
-                page_offset,
-                cards: Vec::new(),
-            }
-        }
+        UiState::Home { page, .. } => Scene {
+            window: None,
+            show_home: true,
+            home_page: *page,
+            cards: Vec::new(),
+        },
         UiState::App { toplevel, .. } => Scene {
             window: Some((*toplevel, WindowTransform::fullscreen(w, h))),
             show_home: false,
             home_page: 0,
-            page_offset: 0.0,
             cards: Vec::new(),
         },
         UiState::AppOpening {
@@ -149,7 +137,6 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
             )),
             show_home: true,
             home_page: 0,
-            page_offset: 0.0,
             cards: Vec::new(),
         },
         UiState::AppClosing {
@@ -164,7 +151,6 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
             )),
             show_home: true,
             home_page: 0,
-            page_offset: 0.0,
             cards: Vec::new(),
         },
         UiState::Grabbing {
@@ -175,8 +161,7 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
                 window: Some((*toplevel, WindowTransform::from_tracker(tracker, w, h))),
                 show_home: up > 0.05,
                 home_page: 0,
-                page_offset: 0.0,
-                cards: Vec::new(),
+                    cards: Vec::new(),
             }
         }
         UiState::Settling {
@@ -210,8 +195,7 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
                 window: Some((*toplevel, transform)),
                 show_home: !matches!(target, NavTarget::BackToApp),
                 home_page: 0,
-                page_offset: 0.0,
-                cards: Vec::new(),
+                    cards: Vec::new(),
             }
         }
         UiState::Switcher {
@@ -229,8 +213,7 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32)) -> Scene {
                 window: None,
                 show_home: true,
                 home_page: 0,
-                page_offset: 0.0,
-                cards: card_rects,
+                    cards: card_rects,
             }
         }
     }

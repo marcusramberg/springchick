@@ -389,8 +389,14 @@ fn check_settle(state: &mut State) {
 
 /// Compositor idle: no springs animating, no gesture, pointer up.
 fn idle(state: &State) -> bool {
+    // Grid-reflow springs live on `State`, not `UiState`, so `needs_animation`
+    // can't see them — include them here so `settle` waits out a reflow.
+    let grid_settled = state
+        .grid_anim
+        .values()
+        .all(|(x, y)| x.is_settled() && y.is_settled());
     is_idle(
-        state.ui.needs_animation(),
+        state.ui.needs_animation() || !grid_settled,
         state.active_gesture.is_some()
             || state.active_key.is_some()
             || state.active_touch.is_some(),
