@@ -50,7 +50,7 @@ use smithay::reexports::wayland_server::protocol::wl_buffer;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::desktop::{PopupKind, PopupManager};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::{Client, Display, ListeningSocket};
+use smithay::reexports::wayland_server::{Client, Display, ListeningSocket, Resource};
 use smithay::reexports::winit::dpi::LogicalSize;
 use smithay::reexports::winit::platform::pump_events::PumpStatus;
 use smithay::reexports::winit::window::Window as WinitWindow;
@@ -943,6 +943,14 @@ impl XdgShellHandler for State {
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        let parent = surface.get_parent_surface().map(|s| s.id());
+        info!(
+            target: "springchick::popup",
+            popup = ?surface.wl_surface().id(),
+            ?parent,
+            geo = ?positioner.get_geometry(),
+            "new_popup"
+        );
         // Send the initial configure. wvkbd (and other layer-shell OSKs) create
         // an xdg_popup child and ignore ALL input until that popup is
         // configured, so without this the on-screen keyboard never registers a
@@ -962,10 +970,20 @@ impl XdgShellHandler for State {
     }
 
     fn grab(&mut self, surface: PopupSurface, _seat: WlSeat, _serial: Serial) {
-        // Mark this popup modal: only grabbing popups capture touch and dismiss
-        // on an outside press (see `active_popups`). Without this, non-grab
-        // popups (wvkbd's hack popup, tooltips) would swallow every tap.
         self.popup_grabs.insert(surface.wl_surface().clone());
+        let active = self.active_popups().len();
+        info!(
+            target: "springchick::popup",
+            popup = ?surface.wl_surface().id(),
+            touch_grab = ?self.touch_grab.as_ref().map(|s| s.id()),
+            pointer_grab = self.pointer_grab,
+            active_popups = active,
+            "popup grab"
+        );
+        // Marked modal above: only grabbing popups capture touch and dismiss on
+        // an outside press (see `active_popups`). Non-grab popups (wvkbd's hack
+        // popup, tooltips) never enter that set, so they can't swallow taps.
+        //
         // A client opens a popup grab from within an in-flight press (menus —
         // e.g. Firefox — grab on the button's press/release that opened them).
         // Do NOT cancel or retarget that sequence: per wl_touch/xdg-shell grab
@@ -995,6 +1013,11 @@ impl XdgShellHandler for State {
     }
 
     fn popup_destroyed(&mut self, surface: PopupSurface) {
+        info!(
+            target: "springchick::popup",
+            popup = ?surface.wl_surface().id(),
+            "popup destroyed"
+        );
         // smithay has already removed it from `known_popups`; drop our render of
         // it on the next frame and forget any grab it held.
         self.popup_grabs.remove(surface.wl_surface());

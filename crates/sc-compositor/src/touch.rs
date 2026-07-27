@@ -12,6 +12,7 @@ use smithay::backend::input::TouchSlot;
 use smithay::input::pointer::{ButtonEvent, MotionEvent as PointerMotionEvent};
 use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Point, SERIAL_COUNTER};
 
 /// Resolve which client surface (if any) should receive input at output-pixel
@@ -99,7 +100,17 @@ fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
     let hit = popups
         .iter()
         .rposition(|(_, origin, size)| rect_contains(*origin, *size, x, y));
-    for i in crate::popups::popups_to_dismiss(popups.len(), hit) {
+    let dismiss = crate::popups::popups_to_dismiss(popups.len(), hit);
+    tracing::info!(
+        target: "springchick::popup",
+        n = popups.len(),
+        ?hit,
+        at = ?(x, y),
+        rects = ?popups.iter().map(|(_, o, s)| (*o, *s)).collect::<Vec<_>>(),
+        dismissing = ?dismiss,
+        "popup_press"
+    );
+    for i in dismiss {
         if let smithay::desktop::PopupKind::Xdg(popup) = &popups[i].0 {
             popup.send_popup_done();
         }
@@ -204,6 +215,12 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
         PopupPress::None => surface_under(state, x, y),
     };
     if let Some((surface, origin, scale)) = target {
+        tracing::info!(
+            target: "springchick::popup",
+            routed_to = ?surface.id(),
+            at = ?(x, y),
+            "touch down routed"
+        );
         state.touch_grab = Some(surface.clone());
         state.input_scale = scale;
         let touch = state.touch.clone();
@@ -242,7 +259,8 @@ pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
 
 /// A finger lifted.
 pub fn up(state: &mut State, slot: TouchSlot, time: u32) {
-    if state.touch_grab.take().is_some() {
+    if let Some(s) = state.touch_grab.take() {
+        tracing::info!(target: "springchick::popup", up_to = ?s.id(), "touch up delivered");
         let touch = state.touch.clone();
         let event = UpEvent {
             slot,
