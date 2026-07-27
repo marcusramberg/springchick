@@ -49,6 +49,15 @@ Computed from the same cell geometry `compute` uses (COLS/ROWS/margins/TOP_PAD),
 just offset by `page * width` in x. Dock/dots/bar are unaffected (they don't
 scroll or reflow).
 
+Also add, so the renderer can build a slot at an animated center with the same
+icon/label/badge geometry `compute` produces (single-sourced):
+
+```rust
+/// An IconSlot whose icon/label/badge rects are centered at (cx, cy), using the
+/// same sizes `compute` derives for grid slots at the given output size.
+pub fn slot_at_center(app_id: String, cx: f32, cy: f32, width: f32, height: f32) -> IconSlot;
+```
+
 ### 2. `sc-compositor` state
 
 On `State`:
@@ -103,13 +112,20 @@ origin.
 Replace the per-page grid loop in `draw_home` with a per-app pass:
 - For each app in the current grid (or each `grid_anim` entry), read its animated
   global `(gx, gy)`, convert to screen `(gx - page_scroll * width, gy)`, cull if
-  outside the viewport (with a margin), and draw the icon+label there.
+  outside the viewport (with a margin), and draw it there.
+- **Build a synthetic `IconSlot` at the animated center** (icon_rect, label_rect,
+  and badge_rect all offset to `(gx - page_scroll*width, gy)`, using
+  `sc_layout` for the icon/label/badge *sizes*). The grid icon, its label, **and
+  its arrange-mode remove-badge** are all drawn from this one animated slot — so a
+  badge never detaches from a sliding icon during an arrange reflow. Provide a
+  small `sc_layout` helper (e.g. `slot_at_center(cx, cy, width, height) ->
+  IconSlot`) so the rect geometry stays single-sourced with `compute`.
 - The renderer needs the animated positions: thread a
   `grid_positions: &HashMap<AppId,(f32,f32)>` (screen-space, prebuilt at the
   `DrawCtx` construction site from `state.grid_anim` + `page_scroll`) into
-  `draw_home`, mirroring how `pressed_app`/`arrange` are threaded. Icons still use
-  `sc_layout` for size; only their center comes from the animated map.
-- Dock, dots, bar, arrange badges/Done/drag-ghost: unchanged.
+  `draw_home`, mirroring how `pressed_app`/`arrange` are threaded.
+- **Dock** icons + their arrange badges: **unchanged/static** (the dock does not
+  reflow). Dots, bar, Done button, drag-ghost: unchanged.
 - Fallback: if an app has no `grid_anim` entry yet (should not happen after
   `reflow_grid` seeds on first frame), draw at its static layout position.
 
