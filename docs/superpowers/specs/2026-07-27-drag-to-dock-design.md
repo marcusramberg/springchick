@@ -62,10 +62,12 @@ threading an `edit` field through `UiState::Home`'s many constructors.
   - `dock_zone: Rect` — the full dock band, used as the pin drop target.
   - `done_button: Rect` — Done affordance (e.g. top-right of the status area),
     shown only in arrange mode.
-- New `Hit` variants: `RemoveBadge { app_id: String }` and `DoneButton`. `hit_test`
-  checks these **only when arrange mode is active** — the caller passes a flag, or
-  a separate `hit_test_arrange` is used, so normal-mode hit-testing is unchanged.
-  (Badge/Done rects are ignored by the normal `hit_test`.)
+- New `Hit` variants: `RemoveBadge { app_id: String }` and `DoneButton`. Add a
+  **separate `hit_test_arrange(layout, x, y) -> Hit`** (same signature style as
+  `hit_test`) rather than a flag, so normal-mode `hit_test` stays untouched and
+  keeps ignoring the badge/Done rects. `badge_rect` overlaps the top-left of
+  `icon_rect`, so `hit_test_arrange` **must check `RemoveBadge` and `DoneButton`
+  before** falling through to `GridIcon`/`DockIcon`, or the badge is unhittable.
 - Drop-target resolution during a drag uses `dock_zone.contains(finger)` directly,
   not `Hit`.
 
@@ -91,7 +93,11 @@ struct DragItem { app_id: String, source: IconSource, cur: (f32, f32) }
 
 - **Press, not arranging:** on a grid/dock icon, in addition to arming
   `pending_launch` + `page_drag_start` (unchanged), record
-  `icon_press = Some(IconPress { … , at: Instant::now() })`.
+  `icon_press = Some(IconPress { … , at: Instant::now() })`. `DownAction::PressIcon`
+  currently does **not** distinguish grid vs dock (`input_dispatch.rs` emits the
+  same variant for both `Hit::GridIcon`/`Hit::DockIcon`), so add a `source:
+  IconSource` field to `PressIcon` (plan must touch the `DownAction` enum) and thread
+  it into `IconPress`.
 - **Frame tick / `advance_frame`:** if `icon_press` is held longer than `HOLD_MS`
   and the finger is still down within slop and `arrange.is_none()`, enter arrange
   mode: `arrange = Some(ArrangeState { drag: Some(DragItem { … , source }) })`,
