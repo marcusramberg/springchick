@@ -94,6 +94,10 @@ pub struct DrawCtx<'a> {
     /// Arrange-mode view (badges/Done/drag ghost). `None` when arrange mode
     /// is inactive.
     pub arrange: Option<ArrangeView<'a>>,
+    /// Screen-space animated center `(x, y)` for each grid app, driven by
+    /// `State.grid_anim` springs. Used to render the grid so icons slide to
+    /// their reflow targets instead of snapping.
+    pub grid_positions: &'a HashMap<String, (f32, f32)>,
     /// When true, the frame is a "quiet fullscreen app" (nothing but the app
     /// surface can have changed) and `draw_scene` may return a narrowed KMS
     /// page-flip damage hint instead of the full rect. The backend computes
@@ -256,13 +260,13 @@ pub fn draw_scene(
             size.w,
             size.h,
             scene.home_page,
-            scene.page_offset,
             ctx.model,
             ctx.icon_cache,
             ctx.app_catalog,
             ctx.skia_flip_y,
             ctx.pressed_app,
             ctx.arrange.as_ref(),
+            ctx.grid_positions,
         );
     }
 

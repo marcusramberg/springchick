@@ -154,22 +154,22 @@ impl SkiaGl {
         Some(image)
     }
 
-    /// Draw the home screen (grid + dock + dots + bar).
-    /// Draw the home screen. `page_offset` is a fractional pixel offset for smooth swiping
-    /// (0 = page aligned, negative = swiping left to next page).
+    /// Draw the home screen (grid + dock + dots + bar). Grid icons are drawn
+    /// from `grid_positions` (animated screen-space centers), so paging and
+    /// reflow both play out as icon motion rather than a page-offset scroll.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_home(
         &mut self,
         width: i32,
         height: i32,
         page: usize,
-        page_offset: f32,
         model: &ShellModel,
         icon_cache: &HashMap<String, IconPixels>,
         app_catalog: &HashMap<String, AppEntry>,
         flip_y: bool,
         pressed_app: Option<&str>,
         arrange: Option<&ArrangeView>,
+        grid_positions: &HashMap<String, (f32, f32)>,
     ) {
         if width <= 0 || height <= 0 {
             return;
@@ -237,42 +237,32 @@ impl SkiaGl {
             canvas.scale((1.0, -1.0));
         }
 
-        let page_count = model.pages.len().max(1);
-
-        // Draw current page and adjacent page(s) for smooth swiping.
-        // page_offset: negative = swiping left (toward next page)
-        let pages_to_draw: Vec<(usize, f32)> = {
-            let mut pages = vec![(page, page_offset)];
-            // If offset is negative (swiping left), draw next page to the right.
-            if page_offset < 0.0 && page + 1 < page_count {
-                pages.push((page + 1, page_offset + width as f32));
+        // Grid icons: build the animated slot set once from `grid_positions`
+        // (screen-space centers already account for paging/reflow motion),
+        // culling anything well off-screen. Reused below for arrange badges
+        // so they track the sliding icons instead of the static layout.
+        let mut anim_slots: Vec<sc_layout::IconSlot> = Vec::new();
+        for (app, (sx, sy)) in grid_positions {
+            if *sx < -(width as f32) * 0.3 || *sx > width as f32 * 1.3 {
+                continue;
             }
-            // If offset is positive (swiping right), draw prev page to the left.
-            if page_offset > 0.0 && page > 0 {
-                pages.push((page - 1, page_offset - width as f32));
-            }
-            pages
-        };
-
-        for (pg, offset_x) in &pages_to_draw {
-            let layout = sc_layout::compute(width as f32, height as f32, *pg, model);
-
-            canvas.save();
-            canvas.translate((*offset_x, 0.0));
-
-            // Draw grid icons.
-            for slot in &layout.grid {
-                draw_icon_slot(
-                    canvas,
-                    slot,
-                    &self.icon_images,
-                    &self.font,
-                    app_catalog,
-                    pressed_app == Some(slot.app_id.as_str()),
-                );
-            }
-
-            canvas.restore();
+            anim_slots.push(sc_layout::slot_at_center(
+                app.clone(),
+                *sx,
+                *sy,
+                width as f32,
+                height as f32,
+            ));
+        }
+        for slot in &anim_slots {
+            draw_icon_slot(
+                canvas,
+                slot,
+                &self.icon_images,
+                &self.font,
+                app_catalog,
+                pressed_app == Some(slot.app_id.as_str()),
+            );
         }
 
         // Dock and dots don't scroll with pages.
@@ -298,7 +288,7 @@ impl SkiaGl {
         // Arrange mode: remove-badges, Done button, dock drop highlight, and
         // the lifted (dragged) icon on top of everything else.
         if let Some(view) = arrange {
-            for slot in current_layout.grid.iter().chain(current_layout.dock.iter()) {
+            for slot in anim_slots.iter().chain(current_layout.dock.iter()) {
                 draw_remove_badge(canvas, slot);
             }
             draw_done_button(canvas, &current_layout, &self.font);

@@ -1555,6 +1555,20 @@ fn render_frame(
     state.sync_keyboard_focus();
 
     let (renderer, mut framebuffer) = backend.bind()?;
+    // Screen-space animated grid centers: global spring position minus the
+    // current page scroll, so the grid pass in draw_home can render sliding
+    // icons without knowing about pages itself.
+    let page_scroll = if let UiState::Home { page_spring, .. } = &state.ui {
+        page_spring.value
+    } else {
+        0.0
+    };
+    let gp_w = state.output_size.0 as f32;
+    let grid_positions: std::collections::HashMap<String, (f32, f32)> = state
+        .grid_anim
+        .iter()
+        .map(|(app, (sx, sy))| (app.clone(), (sx.value - page_scroll * gp_w, sy.value)))
+        .collect();
     {
         let mut ctx = render::DrawCtx {
             scene: &prep.scene,
@@ -1605,6 +1619,7 @@ fn render_frame(
             // winit dev backend submits full damage; no partial hint.
             report_partial_damage: false,
             last_present: &mut state.last_present,
+            grid_positions: &grid_positions,
         };
         render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }
