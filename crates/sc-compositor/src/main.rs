@@ -667,13 +667,18 @@ impl State {
     /// to call every frame; the comparison keeps it from re-sending focus.
     fn sync_keyboard_focus(&mut self) {
         let app = self.app_focus_surface();
-        // A popup grab redirects keyboard focus to the top (leaf) of the app's
-        // popup chain while it's open, and restores it to the app when the chain
-        // closes (both fall out of recomputing `want` every frame).
+        // Only a *grabbing* popup takes keyboard focus — a real menu that
+        // requested the grab and drives keyboard nav from it. Redirecting focus
+        // to a NON-grab popup makes clients (Firefox) read the toplevel's
+        // wl_keyboard.leave as "app deactivated" and instantly roll the popup
+        // back up. So focus the topmost grabbing popup in the app's chain if any,
+        // else keep focus on the app itself. Both fall out of recomputing `want`
+        // every frame, so focus restores to the app when the grab chain closes.
         let want = app
             .as_ref()
             .and_then(|s| {
                 PopupManager::popups_for_surface(s)
+                    .filter(|(kind, _)| self.popup_grabs.contains(kind.wl_surface()))
                     .last()
                     .map(|(kind, _)| kind.wl_surface().clone())
             })
@@ -733,33 +738,20 @@ impl State {
         out
     }
 
-    /// Popups eligible for touch capture/dismiss: only chains that contain a
-    /// popup which issued an `xdg_popup.grab()` (menus, dropdowns — e.g.
-    /// Firefox). Non-grab popups (wvkbd's hack popup, tooltips) are excluded so
-    /// they never steal touch from the OSK or the toplevel app. Ordered
-    /// root→leaf within each kept chain.
+    /// Every open popup (app- and layer-rooted), root→leaf. Used by touch
+    /// routing to hit-test and (for grabbing popups only) dismiss. A tap is
+    /// routed into whichever popup it lands on regardless of grab; only a
+    /// *grabbing* popup swallows an outside tap and dismisses — see
+    /// `touch::popup_press`, which consults `popup_grabs` per popup.
     pub(crate) fn active_popups(&self) -> Vec<PopupRect> {
-        if self.popup_grabs.is_empty() {
-            return Vec::new();
-        }
-        let has_grab = |chain: &[PopupRect]| {
-            chain
-                .iter()
-                .any(|(kind, _, _)| self.popup_grabs.contains(kind.wl_surface()))
-        };
-        let mut out = Vec::new();
-        let app = self.app_popups();
-        if has_grab(&app) {
-            out.extend(app);
-        }
-        let (below, above) = self.layers.render_lists(self.dpi);
-        for (surface, origin) in below.iter().chain(above.iter()) {
-            let chain = self.popup_chain(surface, *origin);
-            if has_grab(&chain) {
-                out.extend(chain);
-            }
-        }
-        out
+        let mut v = self.app_popups();
+        v.extend(self.layer_popups());
+        v
+    }
+
+    /// Whether `surface` is a popup that issued an `xdg_popup.grab()` (modal).
+    pub(crate) fn popup_has_grab(&self, surface: &WlSurface) -> bool {
+        self.popup_grabs.contains(surface)
     }
 
     fn close_toplevel(&mut self, id: ToplevelId) {

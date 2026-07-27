@@ -79,43 +79,64 @@ fn popup_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64), 
 
 /// What a press should do with respect to open popups.
 enum PopupPress {
-    /// No popups open — fall through to normal surface routing.
+    /// Nothing to do here — no popup was hit and no *grabbing* popup is open, so
+    /// the tap falls through to normal surface routing. A non-grab popup that
+    /// wasn't hit (e.g. a Firefox menu, tapped outside) leaves itself open and
+    /// lets the underlying app receive the tap; the client dismisses on its own.
     None,
-    /// The tap landed outside every popup: the chain was dismissed and the tap
-    /// must be swallowed (popup grab semantics).
+    /// The tap landed outside a *grabbing* (modal) popup chain: the chain was
+    /// dismissed and the tap must be swallowed (popup grab semantics).
     Consumed,
-    /// The tap hit a popup; route input into it. Any submenus above it were
-    /// dismissed first.
+    /// The tap hit a popup; route input into it. Grabbing submenus above the hit
+    /// popup were dismissed first.
     Route(WlSurface, (f64, f64), f64),
 }
 
-/// Resolve a press against open popups: dismiss the chain (fully on an
-/// outside-tap, or just the descendants of the popup that was hit) and decide
-/// whether to route into a popup or swallow the tap.
+/// Resolve a press against open popups.
+///
+/// Hit-testing considers every open popup so a tap always reaches the menu item
+/// under it. Dismissal, though, is modal-only: only popups that issued an
+/// `xdg_popup.grab()` swallow an outside tap and get `popup_done`. Non-grab
+/// popups (wvkbd's input-hack popup, Firefox's non-grab menus, tooltips) never
+/// steal or dismiss a tap they weren't hit by — that outside tap flows through
+/// to the app, matching what the client expects.
 fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
     let popups = state.active_popups();
     if popups.is_empty() {
         return PopupPress::None;
     }
+    // Snapshot grab status per popup before we mutate `state`.
+    let grabs: Vec<bool> = popups
+        .iter()
+        .map(|(kind, _, _)| state.popup_has_grab(kind.wl_surface()))
+        .collect();
     let hit = popups
         .iter()
         .rposition(|(_, origin, size)| rect_contains(*origin, *size, x, y));
-    let dismiss = crate::popups::popups_to_dismiss(popups.len(), hit);
+    // Which popups to close: the set `popups_to_dismiss` would close for this
+    // hit (whole chain on a miss, descendants of the hit popup otherwise),
+    // restricted to grabbing popups — non-grab popups are never force-closed.
+    let dismiss: Vec<usize> = crate::popups::popups_to_dismiss(popups.len(), hit)
+        .into_iter()
+        .filter(|&i| grabs[i])
+        .collect();
     tracing::info!(
         target: "springchick::popup",
         n = popups.len(),
         ?hit,
         at = ?(x, y),
-        rects = ?popups.iter().map(|(_, o, s)| (*o, *s)).collect::<Vec<_>>(),
+        grabs = ?grabs,
         dismissing = ?dismiss,
         "popup_press"
     );
-    for i in dismiss {
+    for &i in &dismiss {
         if let smithay::desktop::PopupKind::Xdg(popup) = &popups[i].0 {
             popup.send_popup_done();
         }
     }
-    state.needs_render = true;
+    if !dismiss.is_empty() {
+        state.needs_render = true;
+    }
     match hit {
         Some(i) => {
             let (kind, origin, _) = &popups[i];
@@ -125,6 +146,9 @@ fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
                 state.dpi as f64,
             )
         }
+        // Missed every popup. Only a modal (grabbing) popup consumes the tap;
+        // if nothing grabbing was open, `dismiss` is empty and we fall through.
+        None if dismiss.is_empty() => PopupPress::None,
         None => PopupPress::Consumed,
     }
 }
