@@ -177,6 +177,7 @@ pub fn on_press(state: &mut State) {
             origin,
             start_x,
             start_y,
+            source: _,
         } => {
             // Arm a launch, but also start a page drag from the same point so a
             // swipe that begins on an icon still flips pages. Whichever the
