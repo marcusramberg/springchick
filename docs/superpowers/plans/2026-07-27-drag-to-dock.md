@@ -410,7 +410,10 @@ icon tracks the finger — the winit/DRM loops already `advance_frame` continuou
     travel exceeds `ICON_TAP_SLOP`.
 
 - [ ] **Step 5: Press while arranging.** At the very top of `on_press`, before the
-switcher/dispatch logic, if `state.arrange.is_some()`:
+switcher/dispatch logic, if `state.arrange.is_some()`. Note: bind `(w, h)` from
+`state.output_size_f()` and `page` by matching `state.ui` as
+`UiState::Home { page, .. }` (default 0 otherwise) before the snippet — they are not
+pre-bound:
 
 ```rust
 let (x, y) = /* last_pointer_pos guard as existing */;
@@ -451,8 +454,14 @@ return; // stay in arrange mode
 
 **Files:** Modify: `crates/sc-compositor/src/skia_gl.rs`, `crates/sc-compositor/src/render.rs` (thread arrange snapshot into `draw_home`)
 
-- [ ] **Step 1: Thread arrange info into `draw_home`.** Add a parameter, e.g.
-`arrange: Option<ArrangeView<'_>>` where `ArrangeView { drag_app: Option<&str>, drag_pos: Option<(f32,f32)>, over_dock: bool }` (a small render-only view built at the `render.rs` call site from `state.arrange`). When `None`, draw exactly as today.
+- [ ] **Step 1: Thread arrange info into `draw_home` via `DrawCtx`.** `render.rs`'s
+`draw_scene` receives a `DrawCtx`, not `state` — mirror how `pressed_app` is threaded
+today: (a) add a field `arrange: Option<ArrangeView<'_>>` to `DrawCtx` (`render.rs:~40`)
+where `ArrangeView { drag_app: Option<&str>, drag_pos: Option<(f32,f32)>, over_dock: bool }`;
+(b) populate it in `main.rs` where `DrawCtx` is constructed (~line 1434, alongside
+`pressed_app` built from `state.pending_launch`) from `state.arrange` — `over_dock`
+computed via `resolve_drop`/`dock_zone.contains(drag.cur)`; (c) read it off `ctx` and
+pass into `draw_home` as a new parameter. When `None`, draw exactly as today.
 
 - [ ] **Step 2: Draw badges + Done + lifted icon.** When `arrange` is `Some`:
   - For each grid and dock `IconSlot`, draw a filled circle with a '-' glyph at
