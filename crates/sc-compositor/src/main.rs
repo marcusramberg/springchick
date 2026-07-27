@@ -353,6 +353,11 @@ struct State {
     pending_settle: Option<(std::sync::mpsc::SyncSender<String>, std::time::Instant)>,
     /// Last logged UI state discriminant (to avoid spam).
     last_log_state: Option<std::mem::Discriminant<UiState>>,
+    /// Per-app grid-reflow springs (x, y), keyed by app id. Drives icons
+    /// sliding to their new slot when the grid order changes (launch reorder,
+    /// arrange-mode edits). Seeded lazily on first `advance_frame` and kept in
+    /// sync with `model.pages` by `reflow_grid`.
+    grid_anim: std::collections::HashMap<String, (sc_anim::Spring, sc_anim::Spring)>,
 
     // Timing
     start_time: std::time::Instant,
@@ -364,6 +369,34 @@ struct State {
 
     // Control
     running: bool,
+}
+
+/// Global-space target (x, y) for every app currently on the grid (dock and
+/// hidden apps excluded — they aren't in `model.pages`), keyed by app id.
+/// Pure so it's cheap to unit-test independent of `State`.
+fn reflow_targets(model: &ShellModel, width: f32, height: f32) -> std::collections::HashMap<String, (f32, f32)> {
+    let mut out = std::collections::HashMap::new();
+    for (page, apps) in model.pages.iter().enumerate() {
+        for (index, app) in apps.iter().enumerate() {
+            out.insert(app.clone(), sc_layout::global_slot_pos(page, index, width, height));
+        }
+    }
+    out
+}
+
+/// The zoom origin an app should open from, based on where it actually
+/// landed in the grid (its page's icon slot) rather than where it was
+/// tapped. `None` if the app isn't on the grid (e.g. docked).
+fn landed_origin(model: &ShellModel, app_id: &str, w: f32, h: f32) -> Option<ZoomOrigin> {
+    for (pg, apps) in model.pages.iter().enumerate() {
+        if let Some(ix) = apps.iter().position(|a| a == app_id) {
+            let l = sc_layout::compute(w, h, pg, model);
+            if let Some(slot) = l.grid.get(ix) {
+                return Some(ZoomOrigin::icon((slot.icon_rect.center_x(), slot.icon_rect.center_y())));
+            }
+        }
+    }
+    None
 }
 
 impl State {
@@ -524,6 +557,7 @@ impl State {
             active_touch: None,
             pending_settle: None,
             last_log_state: None,
+            grid_anim: std::collections::HashMap::new(),
             start_time: std::time::Instant::now(),
             stats: frame_stats::FrameStats::new(std::time::Duration::from_micros(11_111)),
             perf_log: false, // disabled for debugging
@@ -564,15 +598,54 @@ impl State {
         if let Err(e) = config_state::save(&self.model, &config_path()) {
             warn!(%e, "failed to save shell model after arrange edit");
         }
+        self.reflow_grid();
+    }
+
+    /// Re-target the grid-reflow springs to each app's current slot position,
+    /// seeding new entries and dropping ones no longer on the grid (docked,
+    /// hidden). Called after any change to `model.pages`.
+    fn reflow_grid(&mut self) {
+        let (w, h) = self.output_size_f();
+        let targets = reflow_targets(&self.model, w, h);
+        for (app, (tx, ty)) in &targets {
+            match self.grid_anim.get_mut(app) {
+                Some((sx, sy)) => {
+                    sx.retarget(*tx);
+                    sy.retarget(*ty);
+                }
+                None => {
+                    self.grid_anim
+                        .insert(app.clone(), (sc_anim::Spring::new(*tx), sc_anim::Spring::new(*ty)));
+                }
+            }
+        }
+        self.grid_anim.retain(|app, _| targets.contains_key(app));
     }
 
     fn launch_or_raise(&mut self, app_id: &str, origin: ZoomOrigin) {
         self.last_origin = origin;
 
-        // Record usage for frecency, re-derive grid order, persist.
+        // Record usage for frecency, re-derive grid order, persist (also
+        // reflows grid_anim to the new slot layout — see after_arrange_edit).
         let now = unix_now();
         self.model.frecency.record_launch(app_id, now);
         self.after_arrange_edit();
+
+        // Follow the launched/raised app to its landed page and origin, so
+        // the zoom-open reads the icon's *new* slot rather than the tap
+        // location (which may be on a different page after reorder).
+        let (w, h) = self.output_size_f();
+        if let Some(o) = landed_origin(&self.model, app_id, w, h) {
+            self.last_origin = o;
+            if let Some(pg) = self.model.pages.iter().position(|apps| apps.iter().any(|a| a == app_id)) {
+                let page_count = self.model.pages.len().max(1);
+                if let UiState::Home { page, page_spring, page_count: pc, .. } = &mut self.ui {
+                    *page = pg;
+                    *pc = page_count;
+                    page_spring.retarget(pg as f32);
+                }
+            }
+        }
 
         // Check if already running — raise it (no zoom, instant).
         for (idx, slot) in self.toplevels.iter().enumerate() {
@@ -881,6 +954,16 @@ impl State {
                     self.icon_press = None;
                 }
             }
+        }
+
+        // Lazy-seed the grid-reflow springs on first use so they snap to the
+        // current order instead of animating in from (0,0).
+        if self.grid_anim.is_empty() {
+            self.reflow_grid();
+        }
+        for (sx, sy) in self.grid_anim.values_mut() {
+            sx.step(dt);
+            sy.step(dt);
         }
 
         let effect = transition(&mut self.ui, UiEvent::Tick { dt });
@@ -1537,4 +1620,38 @@ fn render_frame(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reflow_targets_maps_pages_and_excludes_dock() {
+        let mut m = ShellModel::default();
+        for i in 0..25 {
+            m.frecency.record_launch(&format!("app{i:02}"), 0);
+        }
+        let catalog: Vec<String> = (0..25).map(|i| format!("app{i:02}")).collect();
+        m.recompute_pages(&catalog, 0);
+        let t = reflow_targets(&m, 1224.0, 2700.0);
+        assert_eq!(t.len(), 25);
+        let page1_app = &m.pages[1][0];
+        assert!(t[page1_app].0 > 1224.0);
+        let page0_app = &m.pages[0][0];
+        assert!(t[page0_app].0 < 1224.0);
+    }
+
+    #[test]
+    fn landed_origin_some_for_grid_none_for_absent() {
+        let mut m = ShellModel::default();
+        for i in 0..25 {
+            m.frecency.record_launch(&format!("app{i:02}"), 0);
+        }
+        let catalog: Vec<String> = (0..25).map(|i| format!("app{i:02}")).collect();
+        m.recompute_pages(&catalog, 0);
+        let on_grid = &m.pages[1][0].clone();
+        assert!(landed_origin(&m, on_grid, 1224.0, 2700.0).is_some());
+        assert!(landed_origin(&m, "not-in-grid", 1224.0, 2700.0).is_none());
+    }
 }
