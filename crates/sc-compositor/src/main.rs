@@ -13,6 +13,7 @@ mod keybinds;
 mod launcher;
 mod layer_shell;
 mod osd;
+mod popups;
 mod render;
 pub mod scene;
 mod skia_gl;
@@ -47,6 +48,7 @@ use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_buffer;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
+use smithay::desktop::{PopupKind, PopupManager};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Display, ListeningSocket};
 use smithay::reexports::winit::dpi::LogicalSize;
@@ -175,12 +177,21 @@ pub(crate) struct FramePrep {
     pub bar_alpha: f32,
     pub layers_below: layer_shell::RenderList,
     pub layers_above: layer_shell::RenderList,
+    pub app_popups: layer_shell::RenderList,
+    pub layer_popups: layer_shell::RenderList,
 }
+
+/// A popup and its clamped physical geometry: `(kind, origin, size)`. Chains are
+/// ordered root→leaf.
+type PopupRect = (PopupKind, (i32, i32), (i32, i32));
 
 /// Main compositor state.
 struct State {
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
+    /// Tracks xdg_popup trees (their lifecycle + geometry) so we can render,
+    /// hit-test, and dismiss menus/dropdowns. Populated in `new_popup`.
+    popups: PopupManager,
     #[allow(dead_code)] // Must stay alive to keep the global registered.
     xdg_decoration_state: XdgDecorationState,
     shm_state: ShmState,
@@ -240,6 +251,12 @@ struct State {
     input_scale: f64,
     /// Whether the pointer press is currently held on a client surface.
     pointer_grab: bool,
+    /// wl_surfaces of popups that issued an `xdg_popup.grab()`. Only these are
+    /// modal — they capture touch and dismiss on an outside press. Non-grab
+    /// popups (wvkbd's input-enabling hack popup, app tooltips/comboboxes) are
+    /// tracked and rendered but must NOT steal or dismiss touch, else they break
+    /// OSK and toplevel input. Cleared per-popup in `popup_destroyed`.
+    popup_grabs: std::collections::HashSet<WlSurface>,
     /// Home-bar opacity, faded to 0 when a bottom exclusive-zone surface (the
     /// on-screen keyboard) covers it.
     bar_alpha: f32,
@@ -412,6 +429,7 @@ impl State {
         State {
             compositor_state,
             xdg_shell_state,
+            popups: PopupManager::default(),
             xdg_decoration_state,
             shm_state,
             dmabuf_state,
@@ -436,6 +454,7 @@ impl State {
             touch_grab: None,
             input_scale: 1.0,
             pointer_grab: false,
+            popup_grabs: std::collections::HashSet::new(),
             bar_alpha: 1.0,
             ui,
             model,
@@ -647,16 +666,92 @@ impl State {
     /// Push `desired_focus` into the seat keyboard when it changed. Cheap enough
     /// to call every frame; the comparison keeps it from re-sending focus.
     fn sync_keyboard_focus(&mut self) {
-        let want = ui_state::desired_focus(&self.ui)
-            .and_then(|tid| self.toplevels.get(tid))
-            .and_then(|slot| slot.as_ref())
-            .map(|tl| tl.surface.wl_surface().clone());
+        let app = self.app_focus_surface();
+        // Only a *grabbing* popup takes keyboard focus — a real menu that
+        // requested the grab and drives keyboard nav from it. Redirecting focus
+        // to a NON-grab popup makes clients (Firefox) read the toplevel's
+        // wl_keyboard.leave as "app deactivated" and instantly roll the popup
+        // back up. So focus the topmost grabbing popup in the app's chain if any,
+        // else keep focus on the app itself. Both fall out of recomputing `want`
+        // every frame, so focus restores to the app when the grab chain closes.
+        let want = app
+            .as_ref()
+            .and_then(|s| {
+                PopupManager::popups_for_surface(s)
+                    .filter(|(kind, _)| self.popup_grabs.contains(kind.wl_surface()))
+                    .last()
+                    .map(|(kind, _)| kind.wl_surface().clone())
+            })
+            .or(app);
         if want == self.focused_surface {
             return;
         }
         self.focused_surface = want.clone();
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, want, SERIAL_COUNTER.next_serial());
+    }
+
+    /// The wl_surface of the currently focused foreground app, if any.
+    fn app_focus_surface(&self) -> Option<WlSurface> {
+        ui_state::desired_focus(&self.ui)
+            .and_then(|tid| self.toplevels.get(tid))
+            .and_then(|slot| slot.as_ref())
+            .map(|tl| tl.surface.wl_surface().clone())
+    }
+
+    /// Popups rooted at `root`, ordered root→leaf, as `(kind, phys_origin,
+    /// phys_size)`. The origin is clamped so each popup stays fully on-screen.
+    /// `root_origin` is where the root surface's `(0, 0)` is drawn, physical.
+    fn popup_chain(
+        &self,
+        root: &WlSurface,
+        root_origin: (i32, i32),
+    ) -> Vec<PopupRect> {
+        let dpi = self.dpi;
+        PopupManager::popups_for_surface(root)
+            .map(|(kind, loc)| {
+                let geo = kind.geometry();
+                let size = (geo.size.w * dpi, geo.size.h * dpi);
+                let origin = (root_origin.0 + loc.x * dpi, root_origin.1 + loc.y * dpi);
+                let clamped = popups::clamp_origin(origin, size, self.output_size);
+                (kind, clamped, size)
+            })
+            .collect()
+    }
+
+    /// Popups parented to the fullscreen app (menus, dropdowns), root→leaf.
+    fn app_popups(&self) -> Vec<PopupRect> {
+        let usable = self.layers.usable(self.dpi);
+        let origin = (usable.x.round() as i32, usable.y.round() as i32);
+        self.app_focus_surface()
+            .map(|s| self.popup_chain(&s, origin))
+            .unwrap_or_default()
+    }
+
+    /// Popups parented to a top/overlay layer surface (e.g. an OSK menu).
+    fn layer_popups(&self) -> Vec<PopupRect> {
+        let mut out = Vec::new();
+        let (below, above) = self.layers.render_lists(self.dpi);
+        for (surface, origin) in below.iter().chain(above.iter()) {
+            out.extend(self.popup_chain(surface, *origin));
+        }
+        out
+    }
+
+    /// Every open popup (app- and layer-rooted), root→leaf. Used by touch
+    /// routing to hit-test and (for grabbing popups only) dismiss. A tap is
+    /// routed into whichever popup it lands on regardless of grab; only a
+    /// *grabbing* popup swallows an outside tap and dismisses — see
+    /// `touch::popup_press`, which consults `popup_grabs` per popup.
+    pub(crate) fn active_popups(&self) -> Vec<PopupRect> {
+        let mut v = self.app_popups();
+        v.extend(self.layer_popups());
+        v
+    }
+
+    /// Whether `surface` is a popup that issued an `xdg_popup.grab()` (modal).
+    pub(crate) fn popup_has_grab(&self, surface: &WlSurface) -> bool {
+        self.popup_grabs.contains(surface)
     }
 
     fn close_toplevel(&mut self, id: ToplevelId) {
@@ -749,6 +844,23 @@ impl State {
             .then(|| (self.osd.level, self.osd.muted, self.osd.alpha(osd_now)));
         let bar_alpha = self.tick_bar_alpha();
         let (layers_below, layers_above) = self.layers.render_lists(self.dpi);
+        // `origin` is the popup's on-screen geometry top-left (used for clamp and
+        // hit-test). The buffer is drawn from its (0,0), which sits `geometry.loc`
+        // above-left of the geometry rect (client-side shadow/margin), so shift
+        // the render origin back by it — matching smithay's own popup placement.
+        let dpi = self.dpi;
+        let to_render_list = |chain: Vec<PopupRect>| {
+            chain
+                .into_iter()
+                .map(|(kind, origin, _)| {
+                    let gloc = kind.geometry().loc;
+                    let render_origin = (origin.0 - gloc.x * dpi, origin.1 - gloc.y * dpi);
+                    (kind.wl_surface().clone(), render_origin)
+                })
+                .collect::<layer_shell::RenderList>()
+        };
+        let app_popups = to_render_list(self.app_popups());
+        let layer_popups = to_render_list(self.layer_popups());
 
         FramePrep {
             scene,
@@ -758,6 +870,8 @@ impl State {
             bar_alpha,
             layers_below,
             layers_above,
+            app_popups,
+            layer_popups,
         }
     }
 }
@@ -780,6 +894,10 @@ impl CompositorHandler for State {
         // this, an app committing while the screen is otherwise idle never
         // gets its frame callback (only sent during a render), so it stalls.
         self.needs_render = true;
+
+        // Advance popup configure/geometry state (initial configure, acks,
+        // reposition) for any tracked popup in this surface's tree.
+        self.popups.commit(surface);
 
         // A layer surface committing may change its geometry or reserved area.
         // `handle_commit` arranges the map (map/unmap + configures); we then
@@ -827,16 +945,53 @@ impl XdgShellHandler for State {
         if let Err(e) = surface.send_configure() {
             warn!(?e, "failed to configure popup");
         }
+        // Track the popup so it gets rendered, hit-tested, and dismissed. Its
+        // configure/commit lifecycle and geometry are then advanced in `commit`.
+        if let Err(e) = self.popups.track_popup(PopupKind::Xdg(surface)) {
+            warn!(?e, "failed to track popup");
+        }
+        self.needs_render = true;
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
+    fn grab(&mut self, surface: PopupSurface, _seat: WlSeat, _serial: Serial) {
+        self.popup_grabs.insert(surface.wl_surface().clone());
+        // Marked modal above: only grabbing popups capture touch and dismiss on
+        // an outside press (see `active_popups`). Non-grab popups (wvkbd's hack
+        // popup, tooltips) never enter that set, so they can't swallow taps.
+        //
+        // A client opens a popup grab from within an in-flight press (menus —
+        // e.g. Firefox — grab on the button's press/release that opened them).
+        // Do NOT cancel or retarget that sequence: per wl_touch/xdg-shell grab
+        // semantics the originating press belongs to the surface that received
+        // its `down`, and its matching `up` must be delivered there as normal.
+        // The client owns the grab and won't treat that release as an
+        // outside-dismiss. Cancelling it (as we used to) made Firefox read the
+        // gesture as aborted and flicker the menu closed the instant it opened.
+        // We dismiss manually on the *next* outside press (see `popup_press`),
+        // never off the opening sequence's release.
+    }
 
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+        });
+        surface.send_repositioned(token);
+        if let Err(e) = surface.send_configure() {
+            warn!(?e, "failed to configure repositioned popup");
+        }
+        self.needs_render = true;
+    }
+
+    fn popup_destroyed(&mut self, surface: PopupSurface) {
+        // smithay has already removed it from `known_popups`; drop our render of
+        // it on the next frame and forget any grab it held.
+        self.popup_grabs.remove(surface.wl_surface());
+        self.needs_render = true;
     }
 }
 
@@ -1257,6 +1412,8 @@ fn render_frame(
             osd: prep.osd_view,
             layers_below: &prep.layers_below,
             layers_above: &prep.layers_above,
+            app_popups: &prep.app_popups,
+            layer_popups: &prep.layer_popups,
             bar_alpha: prep.bar_alpha,
             pressed_app: state.pending_launch.as_ref().map(|p| p.app_id.as_str()),
             // winit dev backend submits full damage; no partial hint.
