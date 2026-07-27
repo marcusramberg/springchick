@@ -237,23 +237,11 @@ impl SkiaGl {
             canvas.scale((1.0, -1.0));
         }
 
-        // Grid icons: build the animated slot set once from `grid_positions`
-        // (screen-space centers already account for paging/reflow motion),
-        // culling anything well off-screen. Reused below for arrange badges
-        // so they track the sliding icons instead of the static layout.
-        let mut anim_slots: Vec<sc_layout::IconSlot> = Vec::new();
-        for (app, (sx, sy)) in grid_positions {
-            if *sx < -(width as f32) * 0.3 || *sx > width as f32 * 1.3 {
-                continue;
-            }
-            anim_slots.push(sc_layout::slot_at_center(
-                app.clone(),
-                *sx,
-                *sy,
-                width as f32,
-                height as f32,
-            ));
-        }
+        // Grid icons: build the animated slot set once, in deterministic model
+        // (page, slot) order — see `visible_grid_slots`. Reused below for arrange
+        // badges so they track the sliding icons instead of the static layout.
+        let anim_slots =
+            visible_grid_slots(model, grid_positions, width as f32, height as f32);
         for slot in &anim_slots {
             draw_icon_slot(
                 canvas,
@@ -661,4 +649,77 @@ fn draw_drag_ghost(
     let (cx, cy) = pos;
     let dst = Rect::new(cx - size / 2.0, cy - size / 2.0, cx + size / 2.0, cy + size / 2.0);
     canvas.draw_image_rect(image, None, dst, &Paint::default());
+}
+
+/// Grid icon slots to draw, at their animated screen positions, in deterministic
+/// model (page, slot) order.
+///
+/// Iterating `grid_positions` (a `HashMap` rebuilt every frame with a fresh random
+/// seed) would draw in a different z-order each frame, making overlapping
+/// labels/icons z-fight and shimmer. Walking `model.pages` fixes the order to the
+/// stable page/slot layout the old per-page renderer used. Off-screen icons are
+/// culled.
+pub(crate) fn visible_grid_slots(
+    model: &ShellModel,
+    grid_positions: &HashMap<String, (f32, f32)>,
+    width: f32,
+    height: f32,
+) -> Vec<IconSlot> {
+    let mut out = Vec::new();
+    for page in &model.pages {
+        for app in page {
+            if let Some((sx, sy)) = grid_positions.get(app) {
+                if *sx < -width * 0.3 || *sx > width * 1.3 {
+                    continue;
+                }
+                out.push(sc_layout::slot_at_center(app.clone(), *sx, *sy, width, height));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sc_shell_model::ShellModel;
+    use std::collections::HashMap;
+
+    fn on_screen_positions(apps: &[&str]) -> HashMap<String, (f32, f32)> {
+        // Insert in a different order than `apps` so a HashMap-order bug would
+        // surface; values are all comfortably on-screen at 1224x2700.
+        let mut gp = HashMap::new();
+        for (i, a) in apps.iter().enumerate().rev() {
+            gp.insert((*a).to_string(), (100.0 + i as f32 * 50.0, 400.0));
+        }
+        gp
+    }
+
+    #[test]
+    fn visible_grid_slots_follow_model_order_deterministically() {
+        let mut m = ShellModel::default();
+        m.pages = vec![vec!["a".into(), "b".into(), "c".into()]];
+        // Rebuild the map many times (fresh RandomState each) and confirm the
+        // draw order is always the model order, never the HashMap's.
+        for _ in 0..25 {
+            let gp = on_screen_positions(&["a", "b", "c"]);
+            let order: Vec<String> = visible_grid_slots(&m, &gp, 1224.0, 2700.0)
+                .iter()
+                .map(|s| s.app_id.clone())
+                .collect();
+            assert_eq!(order, vec!["a", "b", "c"]);
+        }
+    }
+
+    #[test]
+    fn visible_grid_slots_culls_offscreen() {
+        let mut m = ShellModel::default();
+        m.pages = vec![vec!["on".into(), "off".into()]];
+        let mut gp = HashMap::new();
+        gp.insert("on".to_string(), (600.0, 400.0));
+        gp.insert("off".to_string(), (1224.0 * 2.0, 400.0)); // far right, culled
+        let slots = visible_grid_slots(&m, &gp, 1224.0, 2700.0);
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].app_id, "on");
+    }
 }
