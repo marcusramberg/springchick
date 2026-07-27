@@ -81,6 +81,11 @@ fn record_launch(&mut self, app: &AppId, now: u64) {
 Note: an app whose `last_launch == 0` (never launched, first-run seed) has
 `eff == score == 0`.
 
+`eff`, `record_launch`, `FrecencyStore`, `AppStat`, and the seeding entry point
+are all `pub` (used by both `sc-shell-model` unit tests and page-derivation code
+in `main.rs`). "Launch" here means `launch_or_raise` firing for an app —
+**raising an already-running app counts as usage** and records too.
+
 ## Seeding new apps
 
 During catalog scan, for each catalog `id` not already present in the store:
@@ -93,6 +98,11 @@ During catalog scan, for each catalog `id` not already present in the store:
 
 The store's own emptiness distinguishes first-run from later-install — no extra
 "seen" flag needed.
+
+Docked apps are seeded and recorded into the store too (seeding iterates all
+catalog ids; raising a docked app records a launch). Harmless and intended — they
+are simply filtered out at page derivation, so their score just never affects grid
+order.
 
 ## Page derivation
 
@@ -118,7 +128,9 @@ a deterministic alphabetical grid.
 `state.toml` schema change:
 
 - `ShellModel` keeps `dock: Vec<AppId>`.
-- `ShellModel` gains `frecency: FrecencyStore`.
+- `ShellModel` gains `frecency: FrecencyStore`, annotated `#[serde(default)]` so a
+  legacy `state.toml` with no `frecency` key loads (toml errors on a missing field
+  otherwise) instead of silently resetting.
 - `ShellModel.pages` is **removed** from the persisted struct. Runtime page layout
   lives outside the persisted model (computed view).
 
