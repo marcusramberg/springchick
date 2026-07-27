@@ -69,6 +69,8 @@ pub struct ShellModel {
     pub dock: Vec<AppId>, // len <= DOCK_CAP
     #[serde(default)]
     pub frecency: FrecencyStore,
+    #[serde(default)]
+    pub hidden: Vec<AppId>,
 }
 
 impl ShellModel {
@@ -77,7 +79,7 @@ impl ShellModel {
     pub fn recompute_pages(&mut self, catalog_ids: &[AppId], now: u64) {
         let mut ids: Vec<AppId> = catalog_ids
             .iter()
-            .filter(|id| !self.dock.contains(id))
+            .filter(|id| !self.dock.contains(id) && !self.hidden.contains(id))
             .cloned()
             .collect();
         ids.sort_by(|a, b| {
@@ -123,6 +125,32 @@ impl ShellModel {
             page.retain(|a| a != app);
         }
         self.dock.retain(|a| a != app);
+    }
+
+    /// Pin `app` to the dock. Returns false if already docked or dock is full.
+    pub fn pin(&mut self, app: &str) -> bool {
+        if self.dock.iter().any(|a| a == app) || self.dock.len() >= DOCK_CAP {
+            return false;
+        }
+        self.dock.push(app.to_owned());
+        true
+    }
+
+    /// Remove `app` from the dock, if present.
+    pub fn unpin(&mut self, app: &str) {
+        self.dock.retain(|a| a != app);
+    }
+
+    /// Hide `app` from the home grid.
+    pub fn hide(&mut self, app: &str) {
+        if !self.hidden.iter().any(|a| a == app) {
+            self.hidden.push(app.to_owned());
+        }
+    }
+
+    /// Unhide `app`, restoring it to the home grid.
+    pub fn unhide(&mut self, app: &str) {
+        self.hidden.retain(|a| a != app);
     }
 }
 
@@ -261,6 +289,66 @@ mod tests {
         s.prune(&["a".to_string()]);
         assert!(s.apps.contains_key("a"));
         assert!(!s.apps.contains_key("b"));
+    }
+
+    #[test]
+    fn pin_adds_to_dock_under_cap() {
+        let mut m = ShellModel::default();
+        assert!(m.pin("a"));
+        assert_eq!(m.dock, vec!["a"]);
+    }
+
+    #[test]
+    fn pin_fails_when_full_or_duplicate() {
+        let mut m = ShellModel::default();
+        for i in 0..DOCK_CAP { assert!(m.pin(&format!("d{i}"))); }
+        assert!(!m.pin("overflow"));
+        assert_eq!(m.dock.len(), DOCK_CAP);
+        let mut m2 = ShellModel::default();
+        assert!(m2.pin("a"));
+        assert!(!m2.pin("a"));
+        assert_eq!(m2.dock, vec!["a"]);
+    }
+
+    #[test]
+    fn unpin_removes_from_dock() {
+        let mut m = ShellModel::default();
+        m.pin("a");
+        m.unpin("a");
+        assert!(m.dock.is_empty());
+    }
+
+    #[test]
+    fn hide_unhide_toggle_hidden_set() {
+        let mut m = ShellModel::default();
+        m.hide("a");
+        assert_eq!(m.hidden, vec!["a"]);
+        m.hide("a");
+        assert_eq!(m.hidden, vec!["a"]);
+        m.unhide("a");
+        assert!(m.hidden.is_empty());
+    }
+
+    #[test]
+    fn recompute_pages_excludes_hidden_and_dock() {
+        let mut m = ShellModel::default();
+        m.pin("docked");
+        m.hide("gone");
+        let catalog = ["docked", "gone", "shown"].map(String::from).to_vec();
+        m.recompute_pages(&catalog, 0);
+        let flat: Vec<&String> = m.pages.iter().flatten().collect();
+        assert_eq!(flat, vec!["shown"]);
+    }
+
+    #[test]
+    fn hidden_serialized_with_default() {
+        let mut m = ShellModel::default();
+        m.hide("a");
+        let s = toml::to_string_pretty(&m).unwrap();
+        let back: ShellModel = toml::from_str(&s).unwrap();
+        assert_eq!(back.hidden, vec!["a"]);
+        let legacy: ShellModel = toml::from_str("dock = []\n").unwrap();
+        assert!(legacy.hidden.is_empty());
     }
 
     #[test]

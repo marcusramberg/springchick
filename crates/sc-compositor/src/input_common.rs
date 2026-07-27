@@ -7,7 +7,7 @@
 use crate::input_dispatch::{self, DownAction};
 use crate::switcher;
 use crate::ui_state::{transition, ToplevelId, UiEvent, UiState, ZoomOrigin};
-use crate::State;
+use crate::{DragItem, IconPress, State};
 use tracing::info;
 
 /// Upward travel (fraction of screen height) that drives close_progress from 0
@@ -54,6 +54,14 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
     state.last_pointer_pos = Some((x, y));
 
     if state.pointer_down {
+        // Arrange-mode drag: track the finger directly, no launch/swipe logic.
+        if let Some(arrange) = &mut state.arrange {
+            if let Some(drag) = &mut arrange.drag {
+                drag.cur = (x, y);
+                return;
+            }
+        }
+
         // Card drag: dominant-up closes that card, otherwise horizontal scroll.
         if let SwitcherDrag::OnCard {
             start_x,
@@ -92,6 +100,8 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
             let dy = y - p.start_y;
             if (dx * dx + dy * dy).sqrt() > ICON_TAP_SLOP {
                 state.pending_launch = None;
+                // The gesture became a swipe — cancel the long-press hold too.
+                state.icon_press = None;
             }
         }
 
@@ -137,6 +147,46 @@ pub fn on_press(state: &mut State) {
     };
     state.pointer_down = true;
 
+    // Arrange-mode input: badges, Done button, and picking up a new drag all
+    // take priority over the normal Home hit-testing below.
+    if state.arrange.is_some() {
+        let (w, h) = state.output_size_f();
+        let page = if let UiState::Home { page, .. } = &state.ui {
+            *page
+        } else {
+            0
+        };
+        let layout = sc_layout::compute(w, h, page, &state.model);
+        match sc_layout::hit_test_arrange(&layout, x, y) {
+            sc_layout::Hit::RemoveBadge { app_id } => {
+                state.model.hide(&app_id);
+                state.after_arrange_edit();
+            }
+            sc_layout::Hit::DoneButton | sc_layout::Hit::Miss | sc_layout::Hit::Bar => {
+                state.arrange = None;
+            }
+            sc_layout::Hit::GridIcon { app_id, .. } => {
+                if let Some(a) = &mut state.arrange {
+                    a.drag = Some(DragItem {
+                        app_id,
+                        source: input_dispatch::IconSource::Grid,
+                        cur: (x, y),
+                    });
+                }
+            }
+            sc_layout::Hit::DockIcon { app_id, .. } => {
+                if let Some(a) = &mut state.arrange {
+                    a.drag = Some(DragItem {
+                        app_id,
+                        source: input_dispatch::IconSource::Dock,
+                        cur: (x, y),
+                    });
+                }
+            }
+        }
+        return;
+    }
+
     // Switcher deck input.
     if matches!(state.ui, UiState::Switcher { .. }) {
         let hit = switcher::hit_test(
@@ -177,17 +227,26 @@ pub fn on_press(state: &mut State) {
             origin,
             start_x,
             start_y,
+            source,
         } => {
             // Arm a launch, but also start a page drag from the same point so a
             // swipe that begins on an icon still flips pages. Whichever the
             // release resolves to (tap vs swipe) wins.
             state.pending_launch = Some(PendingLaunch {
-                app_id,
+                app_id: app_id.clone(),
                 origin,
                 start_x,
                 start_y,
             });
             state.page_drag_start = Some(start_x);
+            // Also arm the long-press hold that, if the finger stays put long
+            // enough, engages arrange mode (see `advance_frame`).
+            state.icon_press = Some(IconPress {
+                app_id,
+                source,
+                start: (start_x, start_y),
+                at: std::time::Instant::now(),
+            });
         }
         DownAction::StartPageDrag { start_x } => {
             state.page_drag_start = Some(start_x);
@@ -206,13 +265,42 @@ pub fn on_release(state: &mut State) {
     };
     state.pointer_down = false;
 
+    // Arrange-mode release: resolve the drag (if any) to pin/unpin/snap-back,
+    // then stay in arrange mode (only Done/empty-tap exits it).
+    if let Some(arrange) = &mut state.arrange {
+        if let Some(drag) = arrange.drag.take() {
+            let (w, h) = state.output_size_f();
+            let page = if let UiState::Home { page, .. } = &state.ui {
+                *page
+            } else {
+                0
+            };
+            let layout = sc_layout::compute(w, h, page, &state.model);
+            match input_dispatch::resolve_drop(drag.cur.0, drag.cur.1, &layout, drag.source) {
+                input_dispatch::DropAction::Pin => {
+                    if state.model.pin(&drag.app_id) {
+                        state.after_arrange_edit();
+                    }
+                }
+                input_dispatch::DropAction::Unpin => {
+                    state.model.unpin(&drag.app_id);
+                    state.after_arrange_edit();
+                }
+                input_dispatch::DropAction::SnapBack => {}
+            }
+        }
+        return;
+    }
+
     // Icon tap: the pending launch survived (finger never passed the tap slop),
     // so this was a tap, not a swipe. Launch and drop the page drag.
     if let Some(p) = state.pending_launch.take() {
         state.page_drag_start = None;
+        state.icon_press = None;
         state.launch_or_raise(&p.app_id, p.origin);
         return;
     }
+    state.icon_press = None;
 
     // Bar drag from Home: classify swipe direction.
     if let Some((start_x, start_y)) = state.bar_drag_start.take() {

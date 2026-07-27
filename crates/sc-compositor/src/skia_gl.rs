@@ -4,6 +4,7 @@
 //! caches the Skia `Surface` + `BackendRenderTarget` keyed on (fboid, width, height),
 //! recreating only on change.
 
+use crate::render::ArrangeView;
 use sc_config::AppEntry;
 use sc_icons::IconPixels;
 use sc_layout::{self, IconSlot, Layout};
@@ -168,6 +169,7 @@ impl SkiaGl {
         app_catalog: &HashMap<String, AppEntry>,
         flip_y: bool,
         pressed_app: Option<&str>,
+        arrange: Option<&ArrangeView>,
     ) {
         if width <= 0 || height <= 0 {
             return;
@@ -292,6 +294,23 @@ impl SkiaGl {
 
         // Draw bar.
         draw_bar(canvas, &current_layout, 1.0);
+
+        // Arrange mode: remove-badges, Done button, dock drop highlight, and
+        // the lifted (dragged) icon on top of everything else.
+        if let Some(view) = arrange {
+            for slot in current_layout.grid.iter().chain(current_layout.dock.iter()) {
+                draw_remove_badge(canvas, slot);
+            }
+            draw_done_button(canvas, &current_layout, &self.font);
+
+            if view.over_dock {
+                draw_dock_highlight(canvas, &current_layout);
+            }
+
+            if let (Some(app_id), Some(pos)) = (view.drag_app, view.drag_pos) {
+                draw_drag_ghost(canvas, app_id, pos, &current_layout, &self.icon_images);
+            }
+        }
 
         canvas.restore();
 
@@ -567,4 +586,89 @@ fn draw_bar(canvas: &skia_safe::Canvas, layout: &Layout, alpha: f32) {
     let radius = pill.h / 2.0;
     let rrect = RRect::new_rect_xy(rect, radius, radius);
     canvas.draw_rrect(rrect, &paint);
+}
+
+/// Arrange-mode "remove" badge: a filled red circle with a white '-' glyph,
+/// drawn at the slot's precomputed `badge_rect`.
+fn draw_remove_badge(canvas: &skia_safe::Canvas, slot: &IconSlot) {
+    let r = &slot.badge_rect;
+    let cx = r.center_x();
+    let cy = r.center_y();
+    let radius = r.w.min(r.h) / 2.0;
+
+    let mut fill = Paint::default();
+    fill.set_anti_alias(true);
+    fill.set_color(Color::from_argb(255, 220, 50, 50));
+    canvas.draw_circle((cx, cy), radius, &fill);
+
+    let mut stroke = Paint::default();
+    stroke.set_anti_alias(true);
+    stroke.set_color(Color::WHITE);
+    stroke.set_stroke_width((radius * 0.22).max(1.5));
+    let half = radius * 0.5;
+    canvas.draw_line((cx - half, cy), (cx + half, cy), &stroke);
+}
+
+/// Arrange-mode "Done" button: a translucent rounded rect with centered text.
+fn draw_done_button(canvas: &skia_safe::Canvas, layout: &Layout, font: &Option<Font>) {
+    let r = &layout.done_button;
+    let rect = Rect::new(r.x, r.y, r.x + r.w, r.y + r.h);
+    let radius = (r.h * 0.4).max(4.0);
+
+    let mut fill = Paint::default();
+    fill.set_anti_alias(true);
+    fill.set_color(Color::from_argb(200, 40, 120, 220));
+    let rrect = RRect::new_rect_xy(rect, radius, radius);
+    canvas.draw_rrect(rrect, &fill);
+
+    if let Some(f) = font {
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(Color::WHITE);
+        if let Some(blob) = TextBlob::new("Done", f) {
+            let text_width = f.measure_str("Done", None).0;
+            let x = r.x + (r.w - text_width) / 2.0;
+            let y = r.y + r.h * 0.7;
+            canvas.draw_text_blob(&blob, (x, y), &paint);
+        }
+    }
+}
+
+/// Highlight the dock zone as a drop target while a dragged icon hovers over
+/// it (semi-transparent fill).
+fn draw_dock_highlight(canvas: &skia_safe::Canvas, layout: &Layout) {
+    let z = &layout.dock_zone;
+    let rect = Rect::new(z.x, z.y, z.x + z.w, z.y + z.h);
+
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(Color::from_argb(70, 255, 255, 255));
+    canvas.draw_rect(rect, &paint);
+}
+
+/// The lifted (dragged) icon, drawn last so it floats above everything else.
+/// Looked up in `layout` (grid + dock) for its natural icon size, scaled up
+/// ~1.2x, centered on the live drag position. Silently skipped if the icon
+/// isn't in the upload cache yet — never worth a panic mid-drag.
+fn draw_drag_ghost(
+    canvas: &skia_safe::Canvas,
+    app_id: &str,
+    pos: (f32, f32),
+    layout: &Layout,
+    icon_images: &HashMap<String, Image>,
+) {
+    let Some(image) = icon_images.get(app_id) else {
+        return;
+    };
+    let base_size = layout
+        .grid
+        .iter()
+        .chain(layout.dock.iter())
+        .find(|s| s.app_id == app_id)
+        .map(|s| s.icon_rect.w)
+        .unwrap_or(64.0);
+    let size = base_size * 1.2;
+    let (cx, cy) = pos;
+    let dst = Rect::new(cx - size / 2.0, cy - size / 2.0, cx + size / 2.0, cy + size / 2.0);
+    canvas.draw_image_rect(image, None, dst, &Paint::default());
 }
