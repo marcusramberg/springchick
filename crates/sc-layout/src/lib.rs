@@ -136,6 +136,101 @@ pub fn pill_rect(width: f32, height: f32) -> Rect {
     pill_in_bar(bar_rect(width, height))
 }
 
+/// Shared grid-cell geometry, derived once from output dimensions.
+struct GridMetrics {
+    grid_left: f32,
+    grid_top: f32,
+    cell_w: f32,
+    cell_h: f32,
+    icon_size: f32,
+    label_h: f32,
+}
+
+/// Compute the shared grid-cell metrics for the given output size. Single
+/// source for the numbers used both by `compute` and the standalone
+/// positioning helpers (`global_slot_pos`, `slot_at_center`).
+fn grid_metrics(width: f32, height: f32) -> GridMetrics {
+    let dock_top = height * (1.0 - BAR_HEIGHT) - height * DOCK_HEIGHT;
+    let dots_top = dock_top - height * DOTS_HEIGHT;
+
+    let grid_top = height * TOP_PAD;
+    let grid_bottom = dots_top;
+    let grid_height = grid_bottom - grid_top;
+
+    let usable_width = width * (1.0 - 2.0 * H_MARGIN);
+    let grid_left = width * H_MARGIN;
+
+    let cell_w = usable_width / COLS as f32;
+    let cell_h = grid_height / ROWS as f32;
+    let icon_size = cell_w * ICON_SIZE_FRAC;
+    let label_h = cell_h * LABEL_HEIGHT_FRAC;
+
+    GridMetrics {
+        grid_left,
+        grid_top,
+        cell_w,
+        cell_h,
+        icon_size,
+        label_h,
+    }
+}
+
+/// Remove-badge rect for a given icon rect, centered on its top-left corner.
+/// Single source shared by `compute` and `slot_at_center`.
+fn badge_of(ir: Rect) -> Rect {
+    let s = ir.w * 0.34;
+    Rect {
+        x: ir.x - s / 2.0,
+        y: ir.y - s / 2.0,
+        w: s,
+        h: s,
+    }
+}
+
+/// The screen-space center `(x, y)` of the grid slot at `index` on `page`,
+/// for an output of the given size. `page` offsets the position by a full
+/// `width` per page, matching how pages are laid out edge-to-edge for the
+/// reflow/paging animation.
+pub fn global_slot_pos(page: usize, index: usize, width: f32, height: f32) -> (f32, f32) {
+    let gm = grid_metrics(width, height);
+    let col = index % COLS;
+    let row = index / COLS;
+    let cell_x = gm.grid_left + col as f32 * gm.cell_w;
+    let cell_y = gm.grid_top + row as f32 * gm.cell_h;
+    let icon_x = cell_x + (gm.cell_w - gm.icon_size) / 2.0;
+    let icon_y = cell_y + (gm.cell_h - gm.icon_size - gm.label_h) / 2.0;
+    (
+        icon_x + gm.icon_size / 2.0 + page as f32 * width,
+        icon_y + gm.icon_size / 2.0,
+    )
+}
+
+/// Build a standalone `IconSlot` for `app_id` whose icon is centered at
+/// `(cx, cy)`, using the same icon/label sizing as the grid for an output of
+/// the given size. Used by the reflow animation to place icons in-flight
+/// between grid slots.
+pub fn slot_at_center(app_id: String, cx: f32, cy: f32, width: f32, height: f32) -> IconSlot {
+    let gm = grid_metrics(width, height);
+    let icon_rect = Rect {
+        x: cx - gm.icon_size / 2.0,
+        y: cy - gm.icon_size / 2.0,
+        w: gm.icon_size,
+        h: gm.icon_size,
+    };
+    let label_rect = Rect {
+        x: cx - gm.cell_w / 2.0,
+        y: icon_rect.y + gm.icon_size,
+        w: gm.cell_w,
+        h: gm.label_h,
+    };
+    IconSlot {
+        app_id,
+        icon_rect,
+        label_rect,
+        badge_rect: badge_of(icon_rect),
+    }
+}
+
 pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layout {
     let page_count = model.pages.len().max(1);
     let clamped_page = page.min(page_count.saturating_sub(1));
@@ -156,27 +251,14 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
         h: height * DOTS_HEIGHT,
     };
 
-    let grid_top = height * TOP_PAD;
-    let grid_bottom = dots_top;
-    let grid_height = grid_bottom - grid_top;
-
+    let gm = grid_metrics(width, height);
+    let grid_top = gm.grid_top;
     let usable_width = width * (1.0 - 2.0 * H_MARGIN);
-    let grid_left = width * H_MARGIN;
-
-    let cell_w = usable_width / COLS as f32;
-    let cell_h = grid_height / ROWS as f32;
-    let icon_size = cell_w * ICON_SIZE_FRAC;
-    let label_h = cell_h * LABEL_HEIGHT_FRAC;
-
-    let badge = |ir: Rect| {
-        let s = ir.w * 0.34;
-        Rect {
-            x: ir.x - s / 2.0,
-            y: ir.y - s / 2.0,
-            w: s,
-            h: s,
-        }
-    };
+    let grid_left = gm.grid_left;
+    let cell_w = gm.cell_w;
+    let cell_h = gm.cell_h;
+    let icon_size = gm.icon_size;
+    let label_h = gm.label_h;
 
     // Grid icons
     let grid = if let Some(apps) = model.pages.get(clamped_page) {
@@ -204,7 +286,7 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
                         w: cell_w,
                         h: label_h,
                     },
-                    badge_rect: badge(icon_rect),
+                    badge_rect: badge_of(icon_rect),
                 }
             })
             .collect()
@@ -239,7 +321,7 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
                     w: dock_cell_w,
                     h: dock_label_h,
                 },
-                badge_rect: badge(icon_rect),
+                badge_rect: badge_of(icon_rect),
             }
         })
         .collect();
@@ -494,5 +576,42 @@ mod tests {
         let m = sample_model();
         let l = compute(1224.0, 2700.0, 0, &m);
         assert_eq!(hit_test(&l, l.done_button.center_x(), l.done_button.center_y()), Hit::Miss);
+    }
+
+    #[test]
+    fn global_slot_pos_matches_compute_first_slot() {
+        let m = sample_model();
+        let l = compute(1224.0, 2700.0, 0, &m);
+        let (gx, gy) = global_slot_pos(0, 0, 1224.0, 2700.0);
+        assert!((gx - l.grid[0].icon_rect.center_x()).abs() < 0.01);
+        assert!((gy - l.grid[0].icon_rect.center_y()).abs() < 0.01);
+    }
+
+    #[test]
+    fn global_slot_pos_page1_offset_by_width() {
+        let (x0, y0) = global_slot_pos(0, 0, 1224.0, 2700.0);
+        let (x1, y1) = global_slot_pos(1, 0, 1224.0, 2700.0);
+        assert!((x1 - (x0 + 1224.0)).abs() < 0.01);
+        assert!((y1 - y0).abs() < 0.01);
+    }
+
+    #[test]
+    fn global_slot_pos_advances_by_cell_within_page() {
+        let (x0, _) = global_slot_pos(0, 0, 1224.0, 2700.0);
+        let (x1, _) = global_slot_pos(0, 1, 1224.0, 2700.0);
+        assert!(x1 > x0);
+    }
+
+    #[test]
+    fn slot_at_center_places_icon_and_badge() {
+        let s = slot_at_center("x".into(), 500.0, 600.0, 1224.0, 2700.0);
+        assert_eq!(s.app_id, "x");
+        assert!((s.icon_rect.center_x() - 500.0).abs() < 0.01);
+        assert!((s.icon_rect.center_y() - 600.0).abs() < 0.01);
+        let m = sample_model();
+        let l = compute(1224.0, 2700.0, 0, &m);
+        assert!((s.icon_rect.w - l.grid[0].icon_rect.w).abs() < 0.01);
+        assert!(s.badge_rect.w > 0.0);
+        assert!((s.badge_rect.center_x() - s.icon_rect.x).abs() < s.icon_rect.w);
     }
 }
