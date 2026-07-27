@@ -40,13 +40,13 @@ impl FrecencyStore {
         s.last_launch = now;
     }
 
-    /// Insert an app not yet in the store. First-ever run (store empty) -> zero.
-    /// Later install (store non-empty) -> seed 1.0 at `now` so it surfaces.
-    pub fn seed(&mut self, app: &str, now: u64) {
+    /// Insert an app not yet in the store. `first_run` true (store was empty at
+    /// bootstrap) -> score 0. Later install -> seed 1.0 at `now` so it surfaces.
+    pub fn seed(&mut self, app: &str, now: u64, first_run: bool) {
         if self.apps.contains_key(app) {
             return;
         }
-        let stat = if self.apps.is_empty() {
+        let stat = if first_run {
             AppStat { score: 0.0, last_launch: 0 }
         } else {
             AppStat { score: 1.0, last_launch: now }
@@ -186,13 +186,25 @@ mod tests {
     #[test]
     fn seed_first_run_is_zero_later_install_is_one() {
         let mut empty = FrecencyStore::default();
-        empty.seed("a", 5000);
+        empty.seed("a", 5000, true);
         assert_eq!(empty.apps["a"], AppStat { score: 0.0, last_launch: 0 });
 
         let mut populated = FrecencyStore::default();
         populated.record_launch("x", 100);
-        populated.seed("b", 5000);
+        populated.seed("b", 5000, false);
         assert_eq!(populated.apps["b"], AppStat { score: 1.0, last_launch: 5000 });
+    }
+
+    #[test]
+    fn seed_whole_catalog_first_run_all_zero() {
+        let mut s = FrecencyStore::default();
+        let first_run = s.apps.is_empty();
+        for id in ["a", "b", "c"] {
+            s.seed(id, 5000, first_run);
+        }
+        for id in ["a", "b", "c"] {
+            assert_eq!(s.apps[id], AppStat { score: 0.0, last_launch: 0 });
+        }
     }
 
     #[test]
@@ -245,7 +257,7 @@ mod tests {
     fn prune_drops_apps_missing_from_catalog() {
         let mut s = FrecencyStore::default();
         s.record_launch("a", 0);
-        s.seed("b", 0);
+        s.seed("b", 0, false);
         s.prune(&["a".to_string()]);
         assert!(s.apps.contains_key("a"));
         assert!(!s.apps.contains_key("b"));

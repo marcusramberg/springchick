@@ -6,7 +6,12 @@ pub fn save(model: &ShellModel, path: &Path) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, s)
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("state.toml")
+    ));
+    std::fs::write(&tmp, s)?;
+    std::fs::rename(&tmp, path)
 }
 
 pub fn load(path: &Path) -> std::io::Result<ShellModel> {
@@ -54,6 +59,19 @@ mod tests {
         assert_eq!(m.dock, back.dock);
         assert_eq!(m.frecency, back.frecency);
         assert!(back.pages.is_empty()); // pages are not persisted
+    }
+
+    #[test]
+    fn save_is_atomic_and_leaves_final_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("springchick/state.toml");
+        let mut m = ShellModel::default();
+        m.dock.push("org.gnome.Console".into());
+        save(&m, &path).unwrap();
+        assert!(path.exists());
+        assert!(!path.with_file_name("state.toml.tmp").exists()); // tmp cleaned by rename
+        let back = load(&path).unwrap();
+        assert_eq!(m.dock, back.dock);
     }
 
     #[test]
