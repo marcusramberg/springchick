@@ -1496,6 +1496,29 @@ fn render_frame(
             layer_popups: &prep.layer_popups,
             bar_alpha: prep.bar_alpha,
             pressed_app: state.pending_launch.as_ref().map(|p| p.app_id.as_str()),
+            arrange: state.arrange.as_ref().map(|a| {
+                let drag_app = a.drag.as_ref().map(|d| d.app_id.as_str());
+                let drag_pos = a.drag.as_ref().map(|d| d.cur);
+                let over_dock = a
+                    .drag
+                    .as_ref()
+                    .map(|d| {
+                        let (w, h) = (state.output_size.0 as f32, state.output_size.1 as f32);
+                        let page = if let UiState::Home { page, .. } = &state.ui {
+                            *page
+                        } else {
+                            0
+                        };
+                        let layout = sc_layout::compute(w, h, page, &state.model);
+                        layout.dock_zone.contains(d.cur.0, d.cur.1)
+                    })
+                    .unwrap_or(false);
+                render::ArrangeView {
+                    drag_app,
+                    drag_pos,
+                    over_dock,
+                }
+            }),
             // winit dev backend submits full damage; no partial hint.
             report_partial_damage: false,
             last_present: &mut state.last_present,
