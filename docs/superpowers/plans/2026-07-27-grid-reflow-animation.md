@@ -146,10 +146,21 @@ fn reflow_targets_maps_pages_and_excludes_dock() {
     ```
     Also lazily seed on first use: if `self.grid_anim.is_empty()`, call `self.reflow_grid()` before stepping (seeds snapped from the current order). The dev/DRM loops render continuously, so unsettled springs animate without extra scheduling.
   - **Wire arrange edits**: in `after_arrange_edit`, after `recompute_pages`, call `self.reflow_grid();` (before/after save, doesn't matter).
-  - **Launch follow + origin** in `launch_or_raise`: after `record_launch` + `recompute_pages`:
+  - **Reflow call — exactly once.** First check whether `launch_or_raise` already
+    routes its recompute+save through `after_arrange_edit` (the drag-to-dock work
+    factored that trio into a shared helper). If it does, and you added
+    `self.reflow_grid()` inside `after_arrange_edit`, then the launch path already
+    reflows — do NOT add a second explicit `reflow_grid()` call. If `launch_or_raise`
+    still recomputes inline (its own `record_launch`/`recompute_pages`/`save`), add a
+    single `self.reflow_grid();` right after its `recompute_pages`. Net: reflow_grid
+    runs exactly once per launch.
+  - **Launch follow + origin** in `launch_or_raise`: after the recompute+reflow,
+    scroll to the launched app's landed page and set the zoom origin from that slot.
+    **Important:** the zoom-open (fired later from `register_toplevel`'s `AppMapped`)
+    reads `self.last_origin` — the `origin` parameter has already been consumed by the
+    `self.last_origin = origin;` line at the top of the fn. So you MUST assign
+    `self.last_origin`, not a local:
     ```rust
-    self.reflow_grid();
-    // Follow: scroll to the launched app's new page, and set the zoom origin to its landed slot.
     let (w, h) = self.output_size_f();
     let mut landed: Option<(usize, usize)> = None; // (page, index)
     for (pg, apps) in self.model.pages.iter().enumerate() {
@@ -161,14 +172,23 @@ fn reflow_targets_maps_pages_and_excludes_dock() {
             *page_count = self.model.pages.len().max(1);
             page_spring.retarget(pg as f32);
         }
-        // origin = landed slot's on-screen center on its own page
         let l = sc_layout::compute(w, h, pg, &self.model);
         if let Some(slot) = l.grid.get(ix) {
-            origin = ZoomOrigin::icon((slot.icon_rect.center_x(), slot.icon_rect.center_y()));
+            // Override the tapped-icon origin with the landed slot's on-screen center.
+            self.last_origin = ZoomOrigin::icon((slot.icon_rect.center_x(), slot.icon_rect.center_y()));
         }
     }
     ```
-    Note: `origin` is the local variable already passed to the zoom transition; adjust to the file's actual flow (the parameter is `origin: ZoomOrigin` — rebind it as `let mut origin = origin;` at the top of the fn, or set `self.last_origin` which the launch path uses). Follow the existing `self.last_origin = origin;` usage: set `self.last_origin` to the landed-slot origin instead of the tapped one. Only override when the app is on the grid; if `landed` is `None` (app is docked), keep the tapped origin.
+    Only override when the app is on the grid; if `landed` is `None` (app is docked),
+    leave `self.last_origin` at the tapped origin already set at the top of the fn.
+
+- [ ] **Step 3b: Add a launch-origin test.** Because a wrong-but-plausible zoom
+  origin is hard to catch in a screenshot, add a thin test asserting the landed-slot
+  origin logic. If `launch_or_raise` is too `State`-heavy to construct in a unit test,
+  instead extract the landed-slot lookup + origin computation into a small pure
+  helper `fn landed_origin(model, app_id, w, h) -> Option<ZoomOrigin>` and test THAT:
+  an app on page 1 returns `Some` with the page-1 slot center; a docked app returns
+  `None`. Call the helper from `launch_or_raise`.
 
 - [ ] **Step 4:** `nix develop --command cargo test -p sc-compositor` → PASS. `nix develop --command cargo build -p sc-compositor` → clean.
 
