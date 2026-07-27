@@ -192,10 +192,6 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
             state.pointer_grab = false;
             return;
         }
-        // A popup grab cancelled this press mid-flight; drop its release.
-        if std::mem::take(&mut state.swallow_release) {
-            return;
-        }
         input_common::on_release(state);
     }
 }
@@ -255,10 +251,6 @@ pub fn up(state: &mut State, slot: TouchSlot, time: u32) {
         };
         touch.up(state, &event);
         touch.frame(state);
-        return;
-    }
-    // A popup grab cancelled this sequence mid-flight; drop its release.
-    if std::mem::take(&mut state.swallow_release) {
         return;
     }
     input_common::on_release(state);

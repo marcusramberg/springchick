@@ -251,10 +251,6 @@ struct State {
     input_scale: f64,
     /// Whether the pointer press is currently held on a client surface.
     pointer_grab: bool,
-    /// Set when a popup grab cancelled an in-flight touch/pointer sequence: the
-    /// physical release that follows must be swallowed rather than driving the
-    /// gesture funnel (it has no matching press left).
-    swallow_release: bool,
     /// wl_surfaces of popups that issued an `xdg_popup.grab()`. Only these are
     /// modal — they capture touch and dismiss on an outside press. Non-grab
     /// popups (wvkbd's input-enabling hack popup, app tooltips/comboboxes) are
@@ -458,7 +454,6 @@ impl State {
             touch_grab: None,
             input_scale: 1.0,
             pointer_grab: false,
-            swallow_release: false,
             popup_grabs: std::collections::HashSet::new(),
             bar_alpha: 1.0,
             ui,
@@ -971,37 +966,16 @@ impl XdgShellHandler for State {
         // on an outside press (see `active_popups`). Without this, non-grab
         // popups (wvkbd's hack popup, tooltips) would swallow every tap.
         self.popup_grabs.insert(surface.wl_surface().clone());
-        // The client established a popup grab (menus, e.g. Firefox, do this on
-        // press while the finger is still down). We dismiss manually from touch
-        // routing rather than through the seat grab stack, but we must cancel the
-        // in-flight implicit touch/pointer sequence on the parent surface:
-        // otherwise its release lands on the parent, the client reads it as an
-        // interaction outside the popup, and instantly dismisses. Cancelling
-        // tells the client we took that input for the grab. The trailing physical
-        // release is then swallowed (`swallow_release`) — it has no press left.
-        if self.touch_grab.take().is_some() {
-            let touch = self.touch.clone();
-            touch.cancel(self);
-            touch.frame(self);
-            self.swallow_release = true;
-        }
-        if self.pointer_grab {
-            self.pointer_grab = false;
-            // Send wl_pointer.leave to the parent so it stops treating the button
-            // as held on itself.
-            let ptr = self.seat.get_pointer().unwrap();
-            ptr.motion(
-                self,
-                None,
-                &smithay::input::pointer::MotionEvent {
-                    location: (0.0, 0.0).into(),
-                    serial: SERIAL_COUNTER.next_serial(),
-                    time: 0,
-                },
-            );
-            ptr.frame(self);
-            self.swallow_release = true;
-        }
+        // A client opens a popup grab from within an in-flight press (menus —
+        // e.g. Firefox — grab on the button's press/release that opened them).
+        // Do NOT cancel or retarget that sequence: per wl_touch/xdg-shell grab
+        // semantics the originating press belongs to the surface that received
+        // its `down`, and its matching `up` must be delivered there as normal.
+        // The client owns the grab and won't treat that release as an
+        // outside-dismiss. Cancelling it (as we used to) made Firefox read the
+        // gesture as aborted and flicker the menu closed the instant it opened.
+        // We dismiss manually on the *next* outside press (see `popup_press`),
+        // never off the opening sequence's release.
     }
 
     fn reposition_request(
