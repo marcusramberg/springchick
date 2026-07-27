@@ -187,10 +187,11 @@ fn badge_of(ir: Rect) -> Rect {
     }
 }
 
-/// The screen-space center `(x, y)` of the grid slot at `index` on `page`,
+/// The global-space center `(x, y)` of the grid slot at `index` on `page`,
 /// for an output of the given size. `page` offsets the position by a full
-/// `width` per page, matching how pages are laid out edge-to-edge for the
-/// reflow/paging animation.
+/// `width` per page (so it is NOT screen-space — subtract `page_scroll * width`
+/// to get the on-screen position), matching how pages are laid out edge-to-edge
+/// for the reflow/paging animation.
 pub fn global_slot_pos(page: usize, index: usize, width: f32, height: f32) -> (f32, f32) {
     let gm = grid_metrics(width, height);
     let col = index % COLS;

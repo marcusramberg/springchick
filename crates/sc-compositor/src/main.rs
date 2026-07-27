@@ -631,18 +631,32 @@ impl State {
         self.model.frecency.record_launch(app_id, now);
         self.after_arrange_edit();
 
-        // Follow the launched/raised app to its landed page and origin, so
-        // the zoom-open reads the icon's *new* slot rather than the tap
-        // location (which may be on a different page after reorder).
+        // Follow the launched app to its landed page and origin, so the
+        // zoom-open reads the icon's *new* slot rather than the tap location
+        // (which may be on a different page after reorder). Launch-only: a raise
+        // transitions away from Home and does not zoom, so following/retargeting
+        // page state there would be pointless churn.
+        let already_running = self
+            .toplevels
+            .iter()
+            .flatten()
+            .any(|tl| tl.app_id == app_id);
         let (w, h) = self.output_size_f();
-        if let Some(o) = landed_origin(&self.model, app_id, w, h) {
-            self.last_origin = o;
-            if let Some(pg) = self.model.pages.iter().position(|apps| apps.iter().any(|a| a == app_id)) {
-                let page_count = self.model.pages.len().max(1);
-                if let UiState::Home { page, page_spring, page_count: pc, .. } = &mut self.ui {
-                    *page = pg;
-                    *pc = page_count;
-                    page_spring.retarget(pg as f32);
+        if !already_running {
+            if let Some(o) = landed_origin(&self.model, app_id, w, h) {
+                self.last_origin = o;
+                if let Some(pg) = self
+                    .model
+                    .pages
+                    .iter()
+                    .position(|apps| apps.iter().any(|a| a == app_id))
+                {
+                    let page_count = self.model.pages.len().max(1);
+                    if let UiState::Home { page, page_spring, page_count: pc, .. } = &mut self.ui {
+                        *page = pg;
+                        *pc = page_count;
+                        page_spring.retarget(pg as f32);
+                    }
                 }
             }
         }
