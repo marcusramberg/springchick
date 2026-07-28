@@ -410,7 +410,10 @@ git commit -m "feat(layout): nearest_grid_index for drop-slot resolution"
 
 **Files:**
 - Modify: `crates/sc-compositor/src/input_dispatch.rs` (~26-42)
+- Modify: `crates/sc-compositor/src/input_common.rs` (~279 — the only production caller; must be updated in THIS task or the bin won't compile for the test run)
 - Test: same file (replace `resolve_drop_grid_over_grid_is_snapback`)
+
+> **Note:** Phase A already left `sc-compositor` un-buildable (recompute_pages). If executing C1 before Phase D, its `cargo test -p sc-compositor` runs will still fail to compile for that reason — run C1's tests *after* D2, or temporarily land D1+D2 first. The point of this task's caller update is that it does not add a *new* break.
 
 - [ ] **Step 1: Write the failing tests** (delete `resolve_drop_grid_over_grid_is_snapback`)
 
@@ -484,7 +487,28 @@ pub fn resolve_drop(
 }
 ```
 
-`Layout` has no `width`/`height` fields (verified), so `(w, h)` are explicit args. Update the two Pin/Unpin tests' calls to pass `, 0, 0, w, h` and the Reorder tests to pass `, w, h`.
+`Layout` has no `width`/`height` fields (verified), so `(w, h)` are explicit args. Update the two Pin/Unpin tests' calls to pass `, 0, 0, w, h` (add `let (w, h) = (1224.0, 2700.0);` bindings — those tests inline the literals in `compute(...)` and have no `w`/`h` locals) and the Reorder tests as shown.
+
+- [ ] **Step 3b: Update the production caller (same task, keeps the bin compiling)**
+
+`resolve_drop`'s only non-test caller is `input_common.rs:279` (arrange release), still passing 4 args. Thread the new args and add a **stub** `Reorder` arm (real `move_to` wiring lands in E1):
+```rust
+            let page = if let UiState::Home { page, .. } = &state.ui { *page } else { 0 };
+            let page_len = state.model.pages.get(page).map_or(0, |p| p.len());
+            let layout = sc_layout::compute(w, h, page, &state.model);
+            match input_dispatch::resolve_drop(drag.cur.0, drag.cur.1, &layout, drag.source, page, page_len, w, h) {
+                input_dispatch::DropAction::Pin => {
+                    if state.model.pin(&drag.app_id) { state.after_arrange_edit(); }
+                }
+                input_dispatch::DropAction::Unpin => {
+                    state.model.unpin(&drag.app_id);
+                    state.after_arrange_edit();
+                }
+                input_dispatch::DropAction::Reorder { .. } => {} // wired in E1
+                input_dispatch::DropAction::SnapBack => {}
+            }
+```
+(E1 replaces the stub arm; it does not re-thread the args.)
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -504,10 +528,22 @@ git commit -m "feat(input): DropAction::Reorder + page-aware resolve_drop"
 
 Not unit-testable in isolation; verified by compile + existing tests + a `run-springchick` smoke test at the end of the phase.
 
-### Task D1: Startup uses `reconcile`
+> **Phase A→D build gap:** deleting `recompute_pages` in A2 leaves `sc-compositor` un-buildable (it still calls it at startup, in `after_arrange_edit`, and in a test) until D1+D2 land. Phase A only runs `cargo test -p sc-shell-model`, so this is expected — do NOT run a workspace build between the A and D commits. The crate builds green again at the end of D2.
+
+### Task D1: Startup uses `reconcile` + fix stale compositor test
 
 **Files:**
-- Modify: `crates/sc-compositor/src/main.rs` (~481-491)
+- Modify: `crates/sc-compositor/src/main.rs` (~481-491 startup; ~1658 test `reflow_targets_maps_pages_and_excludes_dock`)
+
+- [ ] **Step 0: Rewrite the stale test that calls `recompute_pages`**
+
+`reflow_targets_maps_pages_and_excludes_dock` (main.rs:1658) calls `m.recompute_pages(&catalog, 0)`, deleted in A2. It only needs `m.pages` populated — set it directly instead:
+```rust
+        // (replacing the recompute_pages call)
+        m.pages = vec![vec!["a".into(), "b".into()]];
+        m.dock = vec!["docked".into()];
+```
+Keep the rest of the test's assertions (targets map the two grid apps, exclude the docked one). Adjust expected app ids to whatever the test asserts on.
 
 - [ ] **Step 1: Replace the seed/prune/recompute block**
 
@@ -644,27 +680,14 @@ Gets a working reorder before the live-animation polish, so the model path is pr
 **Files:**
 - Modify: `crates/sc-compositor/src/input_common.rs` (~270-292 arrange release)
 
-- [ ] **Step 1: Extend the drop match**
+- [ ] **Step 1: Fill the stubbed `Reorder` arm**
 
-In the `if let Some(arrange) = &mut state.arrange { if let Some(drag) = arrange.drag.take() { ... } }` block, compute `page_len` and add the `Reorder` arm:
+C1 Step 3b already threaded `page`/`page_len`/`w`/`h` into the `resolve_drop` call and left `Reorder { .. } => {}`. Replace only that arm:
 ```rust
-            let page = if let UiState::Home { page, .. } = &state.ui { *page } else { 0 };
-            let page_len = state.model.pages.get(page).map_or(0, |p| p.len());
-            let layout = sc_layout::compute(w, h, page, &state.model);
-            match input_dispatch::resolve_drop(drag.cur.0, drag.cur.1, &layout, drag.source, page, page_len, w, h) {
-                input_dispatch::DropAction::Pin => {
-                    if state.model.pin(&drag.app_id) { state.after_arrange_edit(); }
-                }
-                input_dispatch::DropAction::Unpin => {
-                    state.model.unpin(&drag.app_id);
-                    state.after_arrange_edit();
-                }
                 input_dispatch::DropAction::Reorder { page, index } => {
                     state.model.move_to(&drag.app_id, page, index);
                     state.after_arrange_edit();
                 }
-                input_dispatch::DropAction::SnapBack => {}
-            }
 ```
 
 - [ ] **Step 2: Build**
@@ -705,7 +728,7 @@ struct DragItem {
     hover: Option<(usize, usize)>,
 }
 ```
-Update the two `DragItem { ... }` constructions in `input_common.rs` (~170, ~179) to add `hover: None`.
+Update **all three** `DragItem { ... }` constructions to add `hover: None`: `input_common.rs:170`, `input_common.rs:179`, and `main.rs:960` (the long-press auto-pickup in `advance_frame`). Missing any one is a compile error.
 
 - [ ] **Step 2: Update `hover` in `on_motion`**
 
@@ -852,7 +875,7 @@ git commit -m "feat(compositor): live reflow working-order gap during drag"
 
 **Files:**
 - Modify: `crates/sc-compositor/src/input_common.rs` (arrange release)
-- Verify: `crates/sc-compositor/src/render.rs` `draw_home` skips apps absent from `grid_positions`
+- Verify (no change): `crates/sc-compositor/src/skia_gl.rs` `visible_grid_slots`/`draw_home` skip apps absent from `grid_positions`
 
 - [ ] **Step 1: Prefer `hover` on drop**
 
@@ -897,7 +920,7 @@ git commit -m "feat(compositor): commit reorder at live hover slot"
     /// None when not in an edge zone.
     edge_since: Option<(std::time::Instant, EdgeSide)>,
 ```
-with `enum EdgeSide { Left, Right }`. Initialize `edge_since: None` in both constructors.
+with `enum EdgeSide { Left, Right }`. Initialize `edge_since: None` in **all three** `DragItem` constructors (`input_common.rs:170`, `input_common.rs:179`, `main.rs:960`).
 
 - [ ] **Step 2: In `advance_frame`, flip on dwell**
 
