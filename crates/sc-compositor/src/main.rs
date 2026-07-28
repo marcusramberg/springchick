@@ -484,11 +484,7 @@ impl State {
         let mut catalog_ids: Vec<String> = app_catalog.keys().cloned().collect();
         catalog_ids.sort(); // deterministic seeding + first-run alpha order
         let first_run = model.frecency.apps.is_empty();
-        for id in &catalog_ids {
-            model.frecency.seed(id, now, first_run);
-        }
-        model.frecency.prune(&catalog_ids);
-        model.recompute_pages(&catalog_ids, now);
+        model.reconcile(&catalog_ids, now, first_run);
 
         // Pre-resolve icons.
         let mut icon_cache = HashMap::new();
@@ -590,11 +586,10 @@ impl State {
     /// Re-derive grid order from the current model state and persist it.
     /// Shared by launch (frecency-driven reorder) and arrange-mode edits
     /// (pin/unpin/hide).
+    /// Persist + reflow after a manual grid/dock edit (pin/unpin/hide/reorder).
+    /// No frecency recompute — grid order is now manual.
     fn after_arrange_edit(&mut self) {
-        let now = unix_now();
-        let mut catalog_ids: Vec<String> = self.app_catalog.keys().cloned().collect();
-        catalog_ids.sort();
-        self.model.recompute_pages(&catalog_ids, now);
+        self.model.normalize_pages();
         if let Err(e) = config_state::save(&self.model, &config_path()) {
             warn!(%e, "failed to save shell model after arrange edit");
         }
@@ -1658,11 +1653,7 @@ mod tests {
     #[test]
     fn reflow_targets_maps_pages_and_excludes_dock() {
         let mut m = ShellModel::default();
-        for i in 0..25 {
-            m.frecency.record_launch(&format!("app{i:02}"), 0);
-        }
-        let catalog: Vec<String> = (0..25).map(|i| format!("app{i:02}")).collect();
-        m.recompute_pages(&catalog, 0);
+        for i in 0..25 { m.place(format!("app{i:02}")); } // 24 on page 0, 1 on page 1
         let t = reflow_targets(&m, 1224.0, 2700.0);
         assert_eq!(t.len(), 25);
         let page1_app = &m.pages[1][0];
@@ -1674,11 +1665,7 @@ mod tests {
     #[test]
     fn landed_origin_some_for_grid_none_for_absent() {
         let mut m = ShellModel::default();
-        for i in 0..25 {
-            m.frecency.record_launch(&format!("app{i:02}"), 0);
-        }
-        let catalog: Vec<String> = (0..25).map(|i| format!("app{i:02}")).collect();
-        m.recompute_pages(&catalog, 0);
+        for i in 0..25 { m.place(format!("app{i:02}")); } // 24 on page 0, 1 on page 1
         let on_grid = &m.pages[1][0].clone();
         assert!(landed_origin(&m, on_grid, 1224.0, 2700.0).is_some());
         assert!(landed_origin(&m, "not-in-grid", 1224.0, 2700.0).is_none());
