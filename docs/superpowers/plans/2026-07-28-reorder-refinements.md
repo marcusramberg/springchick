@@ -20,6 +20,7 @@
 - `crates/sc-compositor/src/input_dispatch.rs` — dock-over-grid → `DropAction::Reorder`; test replacement.
 - `crates/sc-compositor/src/skia_gl.rs` — `draw_home` gains `dock_positions`; add `visible_dock_slots`.
 - `crates/sc-compositor/src/render.rs` — thread `dock_positions` through `DrawCtx`/`draw_scene`.
+- `crates/sc-compositor/src/drm_backend.rs` — the second `DrawCtx` construction; add its `dock_positions` local + field (else "missing field" build error).
 
 > **Phase A→B build gap:** deleting `normalize_pages` in A leaves `sc-compositor` un-buildable (two callers) until B. Phase A runs only `cargo +nightly test -p sc-shell-model`; do not workspace-build between the A and B commits. Crate builds again at the end of B.
 
@@ -103,14 +104,16 @@ git commit -m "feat(shell-model): repack (chunked flat order) replaces normalize
 ```rust
 #[test]
 fn move_to_cross_page_lands_at_global_index() {
+    // PAGE_CAP-1 on page0 + "x" on page1 = PAGE_CAP total, so after the move it
+    // repacks to exactly one full page.
     let mut m = ShellModel {
-        pages: vec![(0..PAGE_CAP).map(|i| format!("a{i:02}")).collect(), vec!["x".into()]],
+        pages: vec![(0..PAGE_CAP - 1).map(|i| format!("a{i:02}")).collect(), vec!["x".into()]],
         ..Default::default()
     };
     // Move "x" to page 0, index 2 -> global index 2.
     m.move_to("x", 0, 2);
     assert_eq!(m.pages[0][2], "x");
-    assert_eq!(m.pages[0].len(), PAGE_CAP); // repacked full
+    assert_eq!(m.pages[0].len(), PAGE_CAP); // repacked full (PAGE_CAP total)
     assert_eq!(m.pages.len(), 1);
 }
 
@@ -319,16 +322,16 @@ Replace `working_pages` body:
         working_order(&self.model.pages, dragged, hover)
     }
 ```
-In `reflow_grid`, after building `targets` for the drag branch, remove the sentinel so no spring is created for it:
+In `reflow_grid`, the drag branch matches an **owned tuple** `Some((app_id, hover))` (the current code binds `let drag_app = ...map(|d| (d.app_id.clone(), d.hover));`), not a `DragItem`. Update that arm to build the working order and drop the sentinel:
 ```rust
-            Some(drag) => {
-                let working = self.working_pages(&drag.app_id, drag.hover);
+            Some((app_id, hover)) => {
+                let working = self.working_pages(&app_id, hover);
                 let mut t = reflow_targets_for(&working, w, h);
                 t.remove(HOLE);
                 t
             }
 ```
-(The real icons already carry their hole-shifted positions; `grid_anim.retain(|a,_| targets.contains_key(a))` then naturally never keeps HOLE.)
+(The real icons already carry their hole-shifted positions; `grid_anim.retain(|a,_| targets.contains_key(a))` then naturally never keeps HOLE. Read `reflow_grid` first to match the exact binding names — the prior branch already extracts the owned tuple for borrow-safety.)
 
 - [ ] **Step 2: Build + test** `nix develop --command bash -c 'cargo test -p sc-compositor'` → green.
 
@@ -471,14 +474,14 @@ git commit -m "feat(compositor): dock_anim springs + reflow_dock"
 
 ### Task E2: render the dock from `dock_anim`
 
-**Files:** Modify `crates/sc-compositor/src/main.rs`, `render.rs`, `skia_gl.rs`.
+**Files:** Modify `crates/sc-compositor/src/main.rs`, `render.rs`, `skia_gl.rs`, **`drm_backend.rs`**.
 
-- [ ] **Step 1: Thread `dock_positions`** — in `advance_frame`, build it like `grid_positions`:
+- [ ] **Step 1: Thread `dock_positions`** — `DrawCtx` is built in **two** places, each listing every field explicitly (no `..Default`): `main.rs` (`advance_frame`, winit) and `drm_backend.rs` (~line 460, DRM). In BOTH, build `dock_positions` next to where that call site builds `grid_positions`:
 ```rust
     let dock_positions: std::collections::HashMap<String, (f32, f32)> =
         state.dock_anim.iter().map(|(a, (sx, sy))| (a.clone(), (sx.value, sy.value))).collect();
 ```
-Add `pub dock_positions: &'a HashMap<String,(f32,f32)>` to `DrawCtx` (render.rs), pass it in the ctx literal, and forward to `draw_home` (render.rs `ctx.dock_positions`).
+Add `pub dock_positions: &'a HashMap<String,(f32,f32)>` to `DrawCtx` (render.rs), set it in **both** ctx literals, and forward to `draw_home` (render.rs `ctx.dock_positions`). (Missing the `drm_backend.rs` literal is a "missing field" compile error — the crate won't build until both are updated.)
 
 - [ ] **Step 2: `draw_home` + `visible_dock_slots`** (skia_gl.rs) — add a `dock_positions: &HashMap<String,(f32,f32)>` param to `draw_home`; replace the `for slot in &current_layout.dock` draw loop's source with animated slots:
 ```rust
