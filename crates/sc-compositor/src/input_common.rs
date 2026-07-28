@@ -331,9 +331,12 @@ pub fn on_release(state: &mut State) {
                 state.after_arrange_edit();
             } else {
                 // No model edit, but a drag may have created a trailing empty
-                // page via edge-dwell flip — drop it (no save needed).
+                // page via edge-dwell flip — drop it (no save needed). Also
+                // re-seed the dock so a snapped-back dock icon (dropped from
+                // dock_anim during the lift) springs back into place.
                 state.model.repack();
                 state.reflow_grid();
+                state.reflow_dock();
             }
             return;
         }

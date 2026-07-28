@@ -677,12 +677,18 @@ impl State {
             .and_then(|a| a.drag.as_ref())
             .filter(|d| d.source == input_dispatch::IconSource::Dock)
             .map(|d| d.app_id.clone());
-        let layout = sc_layout::compute(w, h, 0, &self.model);
+        // Lay out with the dragged dock app removed so the surviving icons
+        // re-center over the N-1 cells (the dock is anchored to fixed per-index
+        // cells, so omitting the app from `targets` alone would not move them).
+        let layout = if let Some(app) = &dragged {
+            let mut m = self.model.clone();
+            m.dock.retain(|a| a != app);
+            sc_layout::compute(w, h, 0, &m)
+        } else {
+            sc_layout::compute(w, h, 0, &self.model)
+        };
         let mut targets: std::collections::HashMap<String, (f32, f32)> = std::collections::HashMap::new();
         for slot in &layout.dock {
-            if Some(&slot.app_id) == dragged.as_ref() {
-                continue;
-            }
             targets.insert(slot.app_id.clone(), (slot.icon_rect.center_x(), slot.icon_rect.center_y()));
         }
         for (app, (tx, ty)) in &targets {
@@ -1761,6 +1767,11 @@ fn render_frame(
                     .drag
                     .as_ref()
                     .map(|d| {
+                        // Only a grid-sourced drag can pin, so only highlight the
+                        // dock drop target for those (a dock->dock drag is a no-op).
+                        if d.source != input_dispatch::IconSource::Grid {
+                            return false;
+                        }
                         let (w, h) = (state.output_size.0 as f32, state.output_size.1 as f32);
                         let page = if let UiState::Home { page, .. } = &state.ui {
                             *page

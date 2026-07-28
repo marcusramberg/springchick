@@ -690,15 +690,16 @@ pub(crate) fn visible_dock_slots(
     width: f32,
     height: f32,
 ) -> Vec<sc_layout::IconSlot> {
+    // Skip apps absent from `dock_positions` (mirrors `visible_grid_slots`): a
+    // dock icon being dragged is dropped from `dock_anim`, so it renders only as
+    // the ghost, not doubled in its dock cell.
     layout
         .dock
         .iter()
-        .map(|slot| {
-            let (cx, cy) = dock_positions
+        .filter_map(|slot| {
+            dock_positions
                 .get(&slot.app_id)
-                .copied()
-                .unwrap_or((slot.icon_rect.center_x(), slot.icon_rect.center_y()));
-            sc_layout::slot_at_center(slot.app_id.clone(), cx, cy, width, height)
+                .map(|&(cx, cy)| sc_layout::slot_at_center(slot.app_id.clone(), cx, cy, width, height))
         })
         .collect()
 }
