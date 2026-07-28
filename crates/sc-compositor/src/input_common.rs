@@ -308,10 +308,6 @@ pub fn on_release(state: &mut State) {
                 h,
             ) {
                 input_dispatch::DropAction::Pin => state.model.pin(&drag.app_id),
-                input_dispatch::DropAction::Unpin => {
-                    state.model.unpin(&drag.app_id);
-                    true
-                }
                 input_dispatch::DropAction::Reorder { page, index } => {
                     // `page` is the current Home page (edge-dwell flips update
                     // it); use it, not `drag.hover.page` which the flip does not

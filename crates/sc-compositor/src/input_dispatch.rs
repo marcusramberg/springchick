@@ -26,7 +26,6 @@ pub enum IconSource {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DropAction {
     Pin,
-    Unpin,
     Reorder { page: usize, index: usize },
     SnapBack,
 }
@@ -48,13 +47,12 @@ pub fn resolve_drop(
 ) -> DropAction {
     let over_dock = layout.dock_zone.contains(x, y);
     match (source, over_dock) {
-        (IconSource::Grid, true) => DropAction::Pin,
-        (IconSource::Dock, false) => DropAction::Unpin,
-        (IconSource::Grid, false) => {
+        (IconSource::Grid, true) => DropAction::Pin,        // grid -> dock: pin
+        (IconSource::Dock, true) => DropAction::SnapBack,   // dock -> dock: no-op
+        (_, false) => {                                     // any -> grid: reorder
             let idx = sc_layout::nearest_grid_index(w, h, x, y).min(page_len);
             DropAction::Reorder { page, index: idx }
         }
-        _ => DropAction::SnapBack,
     }
 }
 
@@ -232,14 +230,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_drop_dock_over_grid_is_unpin() {
+    fn resolve_drop_dock_over_grid_is_reorder() {
         let (w, h) = (1224.0, 2700.0);
-        let mut m = ShellModel::default();
-        m.place("a".into());
-        let l = sc_layout::compute(w, h, 0, &m);
+        let l = sc_layout::compute(w, h, 0, &ShellModel::default());
+        let p = sc_layout::global_slot_pos(0, 1, w, h);
         assert_eq!(
-            resolve_drop(612.0, 300.0, &l, IconSource::Dock, 0, 0, w, h),
-            DropAction::Unpin
+            resolve_drop(p.0, p.1, &l, IconSource::Dock, 0, 3, w, h),
+            DropAction::Reorder { page: 0, index: 1 },
         );
     }
 
