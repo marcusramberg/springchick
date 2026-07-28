@@ -116,23 +116,17 @@ impl ShellModel {
         self.pages.retain(|p| !p.is_empty());
     }
 
-    /// Move an app to (page, index), shifting others. Used by drag-rearrange.
+    /// Move `app` to the grid slot addressed by (page, index), treated as a
+    /// global position `page*PAGE_CAP + index` in the flattened order. Removes
+    /// `app` from pages/dock/hidden first, inserts, then repacks. Used by drag
+    /// reorder (grid- and dock-sourced).
     pub fn move_to(&mut self, app: &str, page: usize, index: usize) {
-        self.delete_keep_pages(app);
-        while self.pages.len() <= page {
-            self.pages.push(Vec::new());
-        }
-        let p = &mut self.pages[page];
-        let idx = index.min(p.len());
-        p.insert(idx, app.to_string());
-    }
-
-    // delete without collapsing empty pages (internal helper for moves)
-    fn delete_keep_pages(&mut self, app: &str) {
-        for page in &mut self.pages {
-            page.retain(|a| a != app);
-        }
+        let mut flat: Vec<AppId> = self.flat().into_iter().filter(|a| a != app).collect();
         self.dock.retain(|a| a != app);
+        self.hidden.retain(|a| a != app);
+        let gi = page.saturating_mul(PAGE_CAP).saturating_add(index).min(flat.len());
+        flat.insert(gi, app.to_string());
+        self.pages = flat.chunks(PAGE_CAP).map(|c| c.to_vec()).collect();
     }
 
     /// Pin `app` to the dock. Returns false if already docked or dock is full.
@@ -223,6 +217,29 @@ mod tests {
         }
         m.move_to("c", 0, 0);
         assert_eq!(m.pages[0], vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn move_to_cross_page_lands_at_global_index() {
+        // PAGE_CAP-1 on page0 + "x" on page1 = PAGE_CAP total -> repacks to one full page.
+        let mut m = ShellModel {
+            pages: vec![(0..PAGE_CAP - 1).map(|i| format!("a{i:02}")).collect(), vec!["x".into()]],
+            ..Default::default()
+        };
+        m.move_to("x", 0, 2); // global index 2
+        assert_eq!(m.pages[0][2], "x");
+        assert_eq!(m.pages[0].len(), PAGE_CAP);
+        assert_eq!(m.pages.len(), 1);
+    }
+
+    #[test]
+    fn move_to_from_dock_removes_from_dock() {
+        let mut m = ShellModel::default();
+        m.place("a".into());
+        m.dock.push("d".into());
+        m.move_to("d", 0, 0); // dock -> grid
+        assert!(m.dock.is_empty());
+        assert_eq!(m.pages[0], vec!["d", "a"]);
     }
 
     #[test]
