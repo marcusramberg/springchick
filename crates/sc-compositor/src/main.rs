@@ -626,12 +626,8 @@ impl State {
     /// is intentionally absent from the reflow targets. `hover` is accepted for
     /// future explicit-hole placement but the compacted layout already yields a
     /// gap at/after the removed slot.
-    fn working_pages(&self, dragged: &str, _hover: Option<(usize, usize)>) -> Vec<Vec<String>> {
-        let mut pages: Vec<Vec<String>> = self.model.pages.clone();
-        for p in &mut pages {
-            p.retain(|a| a != dragged);
-        }
-        pages
+    fn working_pages(&self, dragged: &str, hover: Option<(usize, usize)>) -> Vec<Vec<String>> {
+        working_order(&self.model.pages, dragged, hover)
     }
 
     fn reflow_grid(&mut self) {
@@ -644,7 +640,9 @@ impl State {
         let targets = match drag_app {
             Some((app_id, hover)) => {
                 let working = self.working_pages(&app_id, hover);
-                reflow_targets_for(&working, w, h)
+                let mut t = reflow_targets_for(&working, w, h);
+                t.remove(HOLE);
+                t
             }
             None => reflow_targets(&self.model, w, h),
         };
