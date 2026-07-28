@@ -176,6 +176,26 @@ impl ShellModel {
         }
         self.pages.retain(|p| !p.is_empty());
     }
+
+    /// Keep every page within PAGE_CAP by cascading overflow onto the next page
+    /// (creating one if needed), and drop empty pages. Called after any reorder.
+    pub fn normalize_pages(&mut self) {
+        let mut i = 0;
+        while i < self.pages.len() {
+            if self.pages[i].len() > PAGE_CAP {
+                let overflow: Vec<AppId> = self.pages[i].split_off(PAGE_CAP);
+                if i + 1 == self.pages.len() {
+                    self.pages.push(Vec::new());
+                }
+                let next = &mut self.pages[i + 1];
+                for (k, app) in overflow.into_iter().enumerate() {
+                    next.insert(k, app);
+                }
+            }
+            i += 1;
+        }
+        self.pages.retain(|p| !p.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -397,5 +417,22 @@ mod tests {
         m.move_to("c", 0, 0); // user order: c, a, b
         m.reconcile(&["a".into(), "b".into(), "c".into()], 0, false);
         assert_eq!(m.pages[0], vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn normalize_cascades_overflow_to_next_page() {
+        let mut m = ShellModel::default();
+        m.pages = vec![(0..=PAGE_CAP).map(|i| format!("a{i}")).collect()]; // PAGE_CAP+1 on one page
+        m.normalize_pages();
+        assert_eq!(m.pages[0].len(), PAGE_CAP);
+        assert_eq!(m.pages[1], vec![format!("a{PAGE_CAP}")]);
+    }
+
+    #[test]
+    fn normalize_drops_empty_trailing_pages() {
+        let mut m = ShellModel::default();
+        m.pages = vec![vec!["a".into()], vec![], vec![]];
+        m.normalize_pages();
+        assert_eq!(m.pages, vec![vec!["a".to_string()]]);
     }
 }
