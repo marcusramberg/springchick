@@ -981,7 +981,7 @@ impl State {
             .arrange
             .as_ref()
             .and_then(|a| a.drag.as_ref())
-            .map_or(false, |d| d.hover.is_some())
+            .is_some_and(|d| d.hover.is_some())
         {
             self.reflow_grid();
         }
@@ -1032,7 +1032,7 @@ impl State {
                     cur_page.saturating_sub(1)
                 } else if cur_page + 1 < self.model.pages.len() {
                     cur_page + 1
-                } else if self.model.pages.last().map_or(false, |p| p.is_empty()) {
+                } else if self.model.pages.last().is_some_and(|p| p.is_empty()) {
                     // Already a trailing empty page — go to it, don't add more.
                     self.model.pages.len() - 1
                 } else {

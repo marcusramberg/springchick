@@ -421,8 +421,11 @@ mod tests {
 
     #[test]
     fn normalize_cascades_overflow_to_next_page() {
-        let mut m = ShellModel::default();
-        m.pages = vec![(0..=PAGE_CAP).map(|i| format!("a{i}")).collect()]; // PAGE_CAP+1 on one page
+        // PAGE_CAP+1 icons on one page
+        let mut m = ShellModel {
+            pages: vec![(0..=PAGE_CAP).map(|i| format!("a{i}")).collect()],
+            ..Default::default()
+        };
         m.normalize_pages();
         assert_eq!(m.pages[0].len(), PAGE_CAP);
         assert_eq!(m.pages[1], vec![format!("a{PAGE_CAP}")]);
@@ -430,8 +433,10 @@ mod tests {
 
     #[test]
     fn normalize_drops_empty_trailing_pages() {
-        let mut m = ShellModel::default();
-        m.pages = vec![vec!["a".into()], vec![], vec![]];
+        let mut m = ShellModel {
+            pages: vec![vec!["a".into()], vec![], vec![]],
+            ..Default::default()
+        };
         m.normalize_pages();
         assert_eq!(m.pages, vec![vec!["a".to_string()]]);
     }

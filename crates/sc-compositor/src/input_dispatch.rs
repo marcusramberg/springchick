@@ -35,6 +35,7 @@ pub enum DropAction {
 /// A `Pin` may still fail at the model layer (full dock); the caller maps that to snap-back.
 /// `page` is the visible Home page and `page_len` its filled icon count; `(w, h)` is
 /// the output size (Layout has no size fields), used for nearest-slot mapping.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_drop(
     x: f32,
     y: f32,

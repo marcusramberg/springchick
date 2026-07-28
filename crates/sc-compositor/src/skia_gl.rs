@@ -697,8 +697,10 @@ mod tests {
 
     #[test]
     fn visible_grid_slots_follow_model_order_deterministically() {
-        let mut m = ShellModel::default();
-        m.pages = vec![vec!["a".into(), "b".into(), "c".into()]];
+        let m = ShellModel {
+            pages: vec![vec!["a".into(), "b".into(), "c".into()]],
+            ..Default::default()
+        };
         // Rebuild the map many times (fresh RandomState each) and confirm the
         // draw order is always the model order, never the HashMap's.
         for _ in 0..25 {
@@ -713,8 +715,10 @@ mod tests {
 
     #[test]
     fn visible_grid_slots_culls_offscreen() {
-        let mut m = ShellModel::default();
-        m.pages = vec![vec!["on".into(), "off".into()]];
+        let m = ShellModel {
+            pages: vec![vec!["on".into(), "off".into()]],
+            ..Default::default()
+        };
         let mut gp = HashMap::new();
         gp.insert("on".to_string(), (600.0, 400.0));
         gp.insert("off".to_string(), (1224.0 * 2.0, 400.0)); // far right, culled

@@ -8,7 +8,7 @@
 
 pub mod layer;
 
-use sc_shell_model::{ShellModel, COLS, DOCK_CAP, PAGE_CAP, ROWS};
+use sc_shell_model::{ShellModel, COLS, DOCK_CAP, ROWS};
 
 /// A rectangle in logical pixels (origin top-left).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -415,7 +415,7 @@ pub fn hit_test_arrange(layout: &Layout, x: f32, y: f32) -> Hit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sc_shell_model::ShellModel;
+    use sc_shell_model::{ShellModel, PAGE_CAP};
 
     fn sample_model() -> ShellModel {
         let mut m = ShellModel::default();
