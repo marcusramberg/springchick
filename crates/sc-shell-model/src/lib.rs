@@ -21,6 +21,7 @@ pub struct AppStat {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct FrecencyStore {
+    #[serde(default)]
     pub apps: HashMap<AppId, AppStat>,
 }
 
@@ -62,9 +63,10 @@ impl FrecencyStore {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ShellModel {
-    /// Runtime-derived grid view. Recomputed from catalog + frecency; never
-    /// persisted (see `recompute_pages`).
-    #[serde(skip)]
+    /// Grid view of apps, in manual (persisted) order. This is the source of
+    /// truth for on-screen grid order; `recompute_pages` is used only to seed
+    /// it initially from frecency.
+    #[serde(default)]
     pub pages: Vec<Vec<AppId>>,
     pub dock: Vec<AppId>, // len <= DOCK_CAP
     #[serde(default)]
@@ -269,16 +271,21 @@ mod tests {
     }
 
     #[test]
-    fn pages_not_serialized_frecency_is() {
+    fn pages_round_trip_through_serde() {
         let mut m = ShellModel::default();
-        m.frecency.record_launch("a", 42);
-        m.pages = vec![vec!["a".into()]];
-        let s = toml::to_string_pretty(&m).unwrap();
-        assert!(!s.contains("pages"));
-        assert!(s.contains("frecency") || s.contains("[frecency"));
+        m.place("a".into());
+        m.place("b".into());
+        let s = toml::to_string(&m).unwrap();
         let back: ShellModel = toml::from_str(&s).unwrap();
-        assert!(back.pages.is_empty());
-        assert_eq!(back.frecency.apps["a"].last_launch, 42);
+        assert_eq!(back.pages, m.pages);
+    }
+
+    #[test]
+    fn old_file_without_pages_loads_empty() {
+        // A config written before pages were persisted: only dock + frecency.
+        let s = "dock = []\n[frecency]\n";
+        let m: ShellModel = toml::from_str(s).unwrap();
+        assert!(m.pages.is_empty());
     }
 
     #[test]
