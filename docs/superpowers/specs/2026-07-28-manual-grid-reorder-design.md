@@ -45,9 +45,15 @@ existing slots:
 - **Prune** ids no longer in the catalog from `pages`, `dock`, and `hidden`
   (collapse emptied pages, as `delete` does). `frecency.prune(catalog_ids)`
   unchanged.
+- **Seed frecency** for newly-appended apps, preserving the existing startup
+  behavior (`frecency.seed(id, now, first_run)` — score 0 on a first-run empty
+  store, 1.0 for a later install so search can surface it). `reconcile` takes
+  `now` and a `first_run` flag (store was empty at bootstrap), replacing the
+  startup seed loop that today lives beside `recompute_pages` in `main.rs`.
 
-Called at startup and whenever the catalog changes. It only adds/removes; it
-never moves an app that is already placed.
+Called at startup and whenever the catalog changes. It only adds/removes/seeds;
+it never moves an app that is already placed. Signature:
+`reconcile(&mut self, catalog_ids: &[AppId], now: u64, first_run: bool)`.
 
 ## Arrange-mode edits stop recomputing
 
@@ -83,40 +89,92 @@ enum DropAction {
 }
 ```
 
+`resolve_drop`'s signature must grow to build `Reorder`: it currently gets
+`(x, y, layout, source)` and has no page number and no per-page fill count
+(`layout.grid` is a fixed `COLS*ROWS` slot array, not the number of filled
+slots). Extend to
+`resolve_drop(x, y, layout, source, page: usize, page_len: usize)`, where `page`
+is the currently-visible Home page and `page_len` is that page's filled icon
+count (`model.pages[page].len()`), passed by the caller.
+
 - source = Grid, over dock zone → `Pin` (unchanged).
 - source = Dock, over grid → `Unpin` (unchanged).
-- source = Grid, over grid (not dock) → `Reorder { page, index }`, where the
-  target slot is the nearest grid slot to the drop point on the current page,
-  clamped to the page's filled length. Replaces the old `SnapBack` for this
-  case.
+- source = Grid, over grid (not dock) → `Reorder { page, index }`. `page` is the
+  current page; `index` is the nearest grid slot to the drop point, clamped to
+  `page_len` (so a drop past the last icon appends). Replaces the old `SnapBack`
+  for this case.
 - otherwise → `SnapBack`.
 
 On `Reorder`, the compositor calls the existing
 `model.move_to(app, page, index)` then `after_arrange_edit`.
 
+### Cross-page drag
+
+Dragging near a horizontal edge flips pages so an icon can move to another page:
+
+- While a drag is active and the finger dwells in a left/right **edge zone**
+  (narrow band at each screen side) past a dwell threshold (~400 ms), flip to
+  the previous/next page. A held edge auto-repeats (flip, keep dwelling, flip
+  again). The dragged app keeps following the finger across the flip; the
+  working layout recomputes on the now-current page.
+- Flipping right past the **last** page appends a trailing empty page as a drop
+  target, so a drag can create a new page. If nothing is dropped there, the
+  empty trailing page is dropped by `normalize_pages` on settle.
+- Drop resolves on whatever page is current when the finger lifts:
+  `move_to(app, current_page, slot)` (already supports an arbitrary page index).
+
+### Overflow cascade (`normalize_pages`)
+
+Inserting into a full page can push a page over `PAGE_CAP`. Add
+`ShellModel::normalize_pages` that, after any reorder, cascades icons beyond
+`PAGE_CAP` onto the following page (creating one if needed) and collapses empty
+pages. `after_arrange_edit` calls it before `save`. This keeps every persisted
+page within `PAGE_CAP` while letting a mid-drag insert temporarily overflow.
+
 ### Live gap-opening (the requested feel)
 
 While a grid icon is being dragged:
 
-- The dragged app is pulled out of a **working layout** used only for
-  positioning the other icons, so remaining icons reflow-compact to close the
-  gap (via the existing `grid_anim` springs).
+- The **working layout** is a transient, drag-only copy of the current page's
+  app list with the dragged app removed and a hole inserted at the hovered slot.
+  It is *not* a new persistent structure: it is derived each frame from
+  `model.pages[page]` plus the drag's `app_id` and hovered index, stored on the
+  active drag (extend `arrange.drag` with a `hover: Option<(usize, usize)>`
+  page/slot). The model's `pages` is not mutated until drop.
 - Each frame, the hovered target slot is computed from the current finger
-  position (same nearest-slot logic as `resolve_drop`). The working layout
-  inserts a hole at that slot so the surrounding icons spring aside to open a
-  gap — iOS-style, the hole follows the finger.
-- The dragged icon renders as a ghost at `drag_pos` (existing `ArrangeView`).
-- On drop, `move_to` commits the app at the hovered slot; `reflow_grid` settles
-  everything. On an invalid drop the drag snaps back (no model change).
+  position (the same nearest-slot logic as `resolve_drop`). `reflow_grid` is
+  fed this working order instead of raw `model.pages`, so the surrounding icons
+  spring aside to open a gap — iOS-style, the hole follows the finger. Concretely
+  `reflow_targets` / `reflow_grid` gain an optional working-order override for
+  the dragged page; absent a drag they use `model.pages` as today.
+- The dragged icon renders as a ghost at `drag_pos` (existing `ArrangeView`);
+  its origin slot is the hole, so it is not double-drawn.
+- On drop, `move_to(app, page, hover_index)` commits, then `normalize_pages`,
+  `save`, `reflow_grid` (via `after_arrange_edit`). On an invalid drop the drag
+  snaps back — the working layout is discarded, no model change.
 
 This reuses the reflow spring infrastructure; the only new per-frame work is
-tracking the hovered slot and retargeting springs to the holed working layout.
+tracking the hovered slot and feeding the holed working order into `reflow_grid`.
+
+**Index-mapping caveat:** the dragged app stays in `model.pages[page]` until
+drop, so `page_len = model.pages[page].len()` counts the dragged icon itself
+while the working layout shows `len - 1` real icons plus a hole. Clamp-to-
+`page_len` still gives correct append behavior, but the nearest-slot index must
+be computed against the **working (hole-removed) order**, not the raw page, or a
+same-page reorder skews by one slot.
 
 ## Launch change (`launch_or_raise`)
 
 - Keep `model.frecency.record_launch(app_id, now)` (data).
 - Remove the `after_arrange_edit()` call — the grid no longer reorders on
   launch.
+- **Still persist.** `after_arrange_edit` was the only immediate
+  `config_state::save` on launch; the sole other save is graceful shutdown. A
+  phone shell is routinely killed, not cleanly exited, so without a save the
+  freshly-recorded frecency (the data we are keeping expressly for search) is
+  lost on kill. After `record_launch`, call `config_state::save(&self.model,
+  &config_path())` directly (log-and-continue on error, as `after_arrange_edit`
+  does). Grid order is unchanged so no reflow is needed.
 - Remove the `landed_origin` / page-follow block: since the icon does not move,
   the zoom origin is simply the tap point (`origin` already passed in). This
   simplifies the function.
@@ -138,6 +196,8 @@ Model (`sc-shell-model`):
 - `pin`/`unpin`/`hide`/`unhide` mutate `pages` as specified (round-trip: pin
   then unpin restores presence; hide then unhide restores presence).
 - `move_to` reorder within/across pages (existing test retained).
+- `normalize_pages` cascades a >`PAGE_CAP` page onto the next, creates a page
+  when the last overflows, and drops empty trailing pages.
 - `pages` round-trips through serde; old file without `pages` loads empty.
 
 Dispatch (`input_dispatch`):
@@ -148,9 +208,18 @@ Dispatch (`input_dispatch`):
 Compositor:
 - Launch does not change page order (grid order stable across a launch).
 
+### Tests to remove/replace
+
+The ordering change invalidates existing tests that must be deleted or rewritten
+(not left to rot):
+- `sc-shell-model`: the four `recompute_pages_*` tests, `launch_promotes_app_to_front_of_grid`,
+  and `pages_not_serialized_frecency_is` (pages ARE now serialized — replace
+  with a round-trip test).
+- `input_dispatch`: `resolve_drop_grid_over_grid_is_snapback` (now `Reorder`).
+- `main.rs`: `landed_origin_some_for_grid_none_for_absent` (page-follow removed;
+  `landed_origin` itself goes away).
+
 ## Out of scope
 
 - Search UI / using frecency for search (data is preserved for it, not consumed
   here).
-- Cross-page drag-drop while dragging (drop resolves on the current page; moving
-  an icon to another page is a future addition if wanted).
