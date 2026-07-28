@@ -275,8 +275,18 @@ pub fn on_release(state: &mut State) {
             } else {
                 0
             };
+            let page_len = state.model.pages.get(page).map_or(0, |p| p.len());
             let layout = sc_layout::compute(w, h, page, &state.model);
-            match input_dispatch::resolve_drop(drag.cur.0, drag.cur.1, &layout, drag.source) {
+            match input_dispatch::resolve_drop(
+                drag.cur.0,
+                drag.cur.1,
+                &layout,
+                drag.source,
+                page,
+                page_len,
+                w,
+                h,
+            ) {
                 input_dispatch::DropAction::Pin => {
                     if state.model.pin(&drag.app_id) {
                         state.after_arrange_edit();
@@ -286,6 +296,7 @@ pub fn on_release(state: &mut State) {
                     state.model.unpin(&drag.app_id);
                     state.after_arrange_edit();
                 }
+                input_dispatch::DropAction::Reorder { .. } => {} // wired in a later task
                 input_dispatch::DropAction::SnapBack => {}
             }
         }
