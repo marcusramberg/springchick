@@ -177,24 +177,18 @@ impl ShellModel {
         self.pages.retain(|p| !p.is_empty());
     }
 
-    /// Keep every page within PAGE_CAP by cascading overflow onto the next page
-    /// (creating one if needed), and drop empty pages. Called after any reorder.
-    pub fn normalize_pages(&mut self) {
-        let mut i = 0;
-        while i < self.pages.len() {
-            if self.pages[i].len() > PAGE_CAP {
-                let overflow: Vec<AppId> = self.pages[i].split_off(PAGE_CAP);
-                if i + 1 == self.pages.len() {
-                    self.pages.push(Vec::new());
-                }
-                let next = &mut self.pages[i + 1];
-                for (k, app) in overflow.into_iter().enumerate() {
-                    next.insert(k, app);
-                }
-            }
-            i += 1;
-        }
-        self.pages.retain(|p| !p.is_empty());
+    /// Flattened grid order (all pages concatenated).
+    fn flat(&self) -> Vec<AppId> {
+        self.pages.iter().flatten().cloned().collect()
+    }
+
+    /// Re-chunk the flattened order into PAGE_CAP-sized pages, dropping empty
+    /// tail pages. The single packing invariant: every page but the last is
+    /// full. A dense re-chunk can leave neither an interior hole nor an
+    /// overflow, so this handles both backfill and overflow cascade.
+    pub fn repack(&mut self) {
+        let flat = self.flat();
+        self.pages = flat.chunks(PAGE_CAP).map(|c| c.to_vec()).collect();
     }
 }
 
@@ -420,24 +414,30 @@ mod tests {
     }
 
     #[test]
-    fn normalize_cascades_overflow_to_next_page() {
-        // PAGE_CAP+1 icons on one page
+    fn repack_backfills_interior_hole() {
         let mut m = ShellModel {
-            pages: vec![(0..=PAGE_CAP).map(|i| format!("a{i}")).collect()],
+            pages: vec![
+                (0..PAGE_CAP).map(|i| format!("a{i:02}")).collect(),
+                vec!["tail".into()],
+            ],
             ..Default::default()
         };
-        m.normalize_pages();
-        assert_eq!(m.pages[0].len(), PAGE_CAP);
-        assert_eq!(m.pages[1], vec![format!("a{PAGE_CAP}")]);
+        m.pages[0].remove(5); // interior hole -> page0 now 23
+        m.repack();
+        assert_eq!(m.pages[0].len(), PAGE_CAP); // backfilled from page1
+        assert_eq!(m.pages[0][23], "tail");
+        assert_eq!(m.pages.len(), 1); // page1 emptied + dropped
     }
 
     #[test]
-    fn normalize_drops_empty_trailing_pages() {
+    fn repack_cascades_overflow_and_drops_empty_tail() {
         let mut m = ShellModel {
-            pages: vec![vec!["a".into()], vec![], vec![]],
+            pages: vec![(0..=PAGE_CAP).map(|i| format!("a{i}")).collect(), vec![], vec![]],
             ..Default::default()
         };
-        m.normalize_pages();
-        assert_eq!(m.pages, vec![vec!["a".to_string()]]);
+        m.repack();
+        assert_eq!(m.pages[0].len(), PAGE_CAP);
+        assert_eq!(m.pages[1], vec![format!("a{PAGE_CAP}")]);
+        assert_eq!(m.pages.len(), 2);
     }
 }
