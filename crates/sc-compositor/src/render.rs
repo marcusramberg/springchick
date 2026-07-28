@@ -21,7 +21,9 @@ use smithay::backend::renderer::element::utils::{
     Relocate, RelocateRenderElement, RescaleRenderElement,
 };
 use smithay::backend::renderer::element::{Element, Kind};
-use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::gles::{
+    GlesError, GlesRenderer, GlesTexProgram, Uniform, UniformName, UniformType,
+};
 use smithay::backend::renderer::utils::{draw_render_elements, CommitCounter};
 use smithay::backend::renderer::{Color32F, Frame, Renderer, RendererSuper};
 use smithay::backend::SwapBuffersError;
@@ -35,6 +37,80 @@ use tracing::warn;
 
 /// Background clear color.
 pub const CLEAR_COLOR: Color32F = Color32F::new(0.06, 0.10, 0.14, 1.0);
+
+/// Rounded-rect texture fragment shader. Derived verbatim from smithay's default
+/// `texture.frag` (pin ff5fa7d) — same `//_DEFINES_` placeholder and
+/// `NO_ALPHA`/`EXTERNAL`/`DEBUG_FLAGS` variants — with two extra uniforms
+/// (`corner_radius`, `card_size`) and a rounded-rect signed-distance-field mask
+/// applied to the premultiplied output. Mask is computed in card-local physical
+/// px via `v_coords` (0..1 spans the drawn card), so it is independent of the
+/// framebuffer orientation.
+const ROUNDED_TEX_SHADER: &str = r#"#version 100
+
+//_DEFINES_
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+precision highp float;
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+
+uniform float corner_radius;
+uniform vec2 card_size;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+void main() {
+    vec4 color = texture2D(tex, v_coords);
+
+#if defined(NO_ALPHA)
+    color = vec4(color.rgb, 1.0) * alpha;
+#else
+    color = color * alpha;
+#endif
+
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
+#endif
+
+    // Rounded-rect signed distance field in card-local physical px.
+    vec2 p = v_coords * card_size;
+    vec2 half_size = card_size * 0.5;
+    vec2 q = abs(p - half_size) - (half_size - vec2(corner_radius));
+    float dist = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - corner_radius;
+    float aa = max(0.5, min(card_size.x, card_size.y) * 0.004);
+    float mask = 1.0 - smoothstep(-aa, aa, dist);
+    color *= mask;
+
+    gl_FragColor = color;
+}
+"#;
+
+/// Compile the rounded-corner texture shader. Each backend calls this once,
+/// right after it creates its `GlesRenderer`, and stores the resulting program
+/// to hand to `draw_scene` via `DrawCtx::rounded_tex_shader`.
+pub fn compile_rounded_tex_shader(
+    renderer: &mut GlesRenderer,
+) -> Result<GlesTexProgram, GlesError> {
+    renderer.compile_custom_texture_shader(
+        ROUNDED_TEX_SHADER,
+        &[
+            UniformName::new("corner_radius", UniformType::_1f),
+            UniformName::new("card_size", UniformType::_2f),
+        ],
+    )
+}
 
 /// Render-only view of arrange-mode drag state, threaded through `DrawCtx`
 /// the same way `pressed_app` is: `main.rs`/`drm_backend.rs` derive it from
@@ -111,6 +187,10 @@ pub struct DrawCtx<'a> {
     /// and the `CommitCounter` last presented for it, so `damage_since` returns
     /// only what changed since. Reset (→ full damage) when the surface differs.
     pub last_present: &'a mut Option<(WlSurface, CommitCounter)>,
+    /// Rounded-corner texture program, compiled once per backend. Applied to a
+    /// card's root surface when its `corner_radius > 0` so shrunken app cards
+    /// (drag-up / switcher deck) render with rounded corners.
+    pub rounded_tex_shader: &'a GlesTexProgram,
 }
 
 /// Render a layer surface's tree at `origin` in its own pass. Used for both the
@@ -139,6 +219,78 @@ fn draw_layer(
     if let Err(e) = draw_render_elements(&mut frame, scale, &elements, &[damage]) {
         warn!(?e, "failed to draw layer surface");
     }
+    let _sync = frame.finish().map_err(SwapBuffersError::from)?;
+    Ok(())
+}
+
+/// Draw a shrunken app "card" (drag-up window or switcher-deck card): relocate +
+/// rescale the surface tree to the card rect, then draw it in its own pass.
+///
+/// When `corner_radius > 0`, the card's root surface (`elements[0]`, always first
+/// in the pre-order surface-tree walk) is drawn through the rounded-corner
+/// texture program so the card's outer shape is rounded; any subsurfaces
+/// (`elements[1..]`, interior content) draw unrounded. At `corner_radius == 0`
+/// the whole tree draws through the default program unchanged.
+#[allow(clippy::too_many_arguments)]
+fn draw_scaled_card(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    transform: Transform,
+    app_scale: f64,
+    elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+    card_x: i32,
+    card_y: i32,
+    scale: f32,
+    corner_radius: f32,
+    card_size: (f32, f32),
+    rounded_tex_shader: &GlesTexProgram,
+) -> Result<(), SwapBuffersError> {
+    if elements.is_empty() {
+        return Ok(());
+    }
+    let damage = Rectangle::from_size(size);
+    let scaled: Vec<
+        RescaleRenderElement<RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
+    > = elements
+        .into_iter()
+        .map(|e| {
+            let relocated = RelocateRenderElement::from_element(
+                e,
+                Point::<i32, Physical>::from((card_x, card_y)),
+                Relocate::Relative,
+            );
+            RescaleRenderElement::from_element(
+                relocated,
+                Point::<i32, Physical>::from((card_x, card_y)),
+                Scale::from(scale as f64),
+            )
+        })
+        .collect();
+
+    let mut frame = renderer
+        .render(framebuffer, size, transform)
+        .map_err(SwapBuffersError::from)?;
+
+    if corner_radius > 0.5 {
+        let uniforms = vec![
+            Uniform::new("corner_radius", corner_radius),
+            Uniform::new("card_size", card_size),
+        ];
+        frame.override_default_tex_program(rounded_tex_shader.clone(), uniforms);
+        if let Err(e) = draw_render_elements(&mut frame, app_scale, &scaled[..1], &[damage]) {
+            warn!(?e, "failed to draw rounded card root surface");
+        }
+        frame.clear_tex_program_override();
+        if scaled.len() > 1 {
+            if let Err(e) = draw_render_elements(&mut frame, app_scale, &scaled[1..], &[damage]) {
+                warn!(?e, "failed to draw card subsurfaces");
+            }
+        }
+    } else if let Err(e) = draw_render_elements(&mut frame, app_scale, &scaled, &[damage]) {
+        warn!(?e, "failed to draw scaled card elements");
+    }
+
     let _sync = frame.finish().map_err(SwapBuffersError::from)?;
     Ok(())
 }
@@ -275,46 +427,34 @@ pub fn draw_scene(
         );
     }
 
-    // Pass 2: draw the scaled app ON TOP of home (no clear).
+    // Pass 2: draw the scaled app ON TOP of home (no clear). Rounded corners
+    // when the transform carries a non-zero radius (drag-up / zoom transitions).
     if !is_fullscreen && !base_elements.is_empty() {
         if let Some(t) = window_transform {
-            let scale_f = t.scale as f64;
             let card_w = size.w as f32 * t.scale;
             let card_h = size.h as f32 * t.scale;
             let card_x = (t.center_x - card_w / 2.0) as i32;
             let card_y = (t.center_y - card_h / 2.0) as i32;
-
-            let scaled: Vec<
-                RescaleRenderElement<
-                    RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
-                >,
-            > = base_elements
-                .into_iter()
-                .map(|e| {
-                    let relocated = RelocateRenderElement::from_element(
-                        e,
-                        Point::<i32, Physical>::from((card_x, card_y)),
-                        Relocate::Relative,
-                    );
-                    RescaleRenderElement::from_element(
-                        relocated,
-                        Point::<i32, Physical>::from((card_x, card_y)),
-                        smithay::utils::Scale::from(scale_f),
-                    )
-                })
-                .collect();
-
-            let mut frame = renderer
-                .render(&mut *framebuffer, size, ctx.transform)
-                .map_err(SwapBuffersError::from)?;
-            if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &scaled, &[damage]) {
-                warn!(?e, "failed to draw scaled app elements");
-            }
-            let _sync = frame.finish().map_err(SwapBuffersError::from)?;
+            draw_scaled_card(
+                renderer,
+                framebuffer,
+                size,
+                ctx.transform,
+                ctx.app_scale,
+                base_elements,
+                card_x,
+                card_y,
+                t.scale,
+                t.corner_radius,
+                (card_w, card_h),
+                ctx.rounded_tex_shader,
+            )?;
         }
     }
 
     // Switcher cards: draw each card back-to-front (already sorted ascending z).
+    // close_progress lifts the card upward (via layout) as it slides off-screen
+    // to close; the deck itself needs no extra scaling here.
     if !scene.cards.is_empty() {
         for card in &scene.cards {
             let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) else {
@@ -334,39 +474,20 @@ pub fn draw_scene(
                     1.0,
                     Kind::Unspecified,
                 );
-            if card_elements.is_empty() {
-                continue;
-            }
-
-            let scaled: Vec<
-                RescaleRenderElement<
-                    RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
-                >,
-            > = card_elements
-                .into_iter()
-                .map(|e| {
-                    let relocated = RelocateRenderElement::from_element(
-                        e,
-                        Point::<i32, Physical>::from((card_x, card_y)),
-                        Relocate::Relative,
-                    );
-                    RescaleRenderElement::from_element(
-                        relocated,
-                        Point::<i32, Physical>::from((card_x, card_y)),
-                        smithay::utils::Scale::from(card.scale as f64),
-                    )
-                })
-                .collect();
-
-            // close_progress lifts the card upward (via layout) as it slides
-            // off-screen to close; the deck itself needs no extra scaling here.
-            let mut frame = renderer
-                .render(&mut *framebuffer, size, ctx.transform)
-                .map_err(SwapBuffersError::from)?;
-            if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &scaled, &[damage]) {
-                warn!(?e, "failed to draw switcher card");
-            }
-            let _sync = frame.finish().map_err(SwapBuffersError::from)?;
+            draw_scaled_card(
+                renderer,
+                framebuffer,
+                size,
+                ctx.transform,
+                ctx.app_scale,
+                card_elements,
+                card_x,
+                card_y,
+                card.scale,
+                card.corner_radius,
+                (card_w, card_h),
+                ctx.rounded_tex_shader,
+            )?;
         }
     }
 

@@ -73,8 +73,11 @@ impl WindowTransform {
         let center_x = finger_x;
         let center_y = finger_y - card_h / 2.0;
 
-        // Corner radius grows as window shrinks.
-        let corner_radius = (1.0 - scale) * 48.0;
+        // Corner radius: a base so the card reads as rounded the instant it
+        // lifts off the bottom (while held near full scale), growing as it
+        // shrinks. Approaches the switcher deck's `CORNER` at full travel so the
+        // grab→switcher hand-off is seamless.
+        let corner_radius = 24.0 + (1.0 - scale) * 28.0;
 
         Self {
             scale,

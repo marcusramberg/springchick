@@ -32,7 +32,7 @@ use sc_icons::IconPixels;
 use sc_shell_model::ShellModel;
 
 use smithay::backend::input::{Event, InputEvent, KeyboardKeyEvent};
-use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexProgram};
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::backend::winit::{self, WinitEvent, WinitGraphicsBackend};
 use smithay::backend::SwapBuffersError;
@@ -1587,6 +1587,15 @@ fn run_winit() {
 
     // Build State with the actual backend window size (the host compositor may
     // have clamped our requested dev-window size).
+    let rounded_tex_shader =
+        match render::compile_rounded_tex_shader(gfx_backend.renderer()) {
+            Ok(prog) => prog,
+            Err(err) => {
+                error!(err = ?err, "failed to compile rounded-corner shader");
+                return;
+            }
+        };
+
     let actual_size = gfx_backend.window_size();
     info!(w = actual_size.w, h = actual_size.h, "actual output size");
     let mut state = State::new(&display, socket_name.clone(), (actual_size.w, actual_size.h));
@@ -1649,7 +1658,7 @@ fn run_winit() {
         display.flush_clients().ok();
 
         // Render.
-        if let Err(err) = render_frame(&mut gfx_backend, &mut state) {
+        if let Err(err) = render_frame(&mut gfx_backend, &mut state, &rounded_tex_shader) {
             match err {
                 SwapBuffersError::ContextLost(err) => {
                     error!(%err, "context lost, exiting");
@@ -1705,6 +1714,7 @@ fn handle_winit_input(
 fn render_frame(
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
     state: &mut State,
+    rounded_tex_shader: &GlesTexProgram,
 ) -> Result<(), SwapBuffersError> {
     let size = backend.window_size();
     let damage = Rectangle::from_size(size);
@@ -1793,6 +1803,7 @@ fn render_frame(
             last_present: &mut state.last_present,
             grid_positions: &grid_positions,
             dock_positions: &dock_positions,
+            rounded_tex_shader,
         };
         render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }
