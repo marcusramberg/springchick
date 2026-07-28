@@ -296,7 +296,10 @@ pub fn on_release(state: &mut State) {
                     state.model.unpin(&drag.app_id);
                     state.after_arrange_edit();
                 }
-                input_dispatch::DropAction::Reorder { .. } => {} // wired in a later task
+                input_dispatch::DropAction::Reorder { page, index } => {
+                    state.model.move_to(&drag.app_id, page, index);
+                    state.after_arrange_edit();
+                }
                 input_dispatch::DropAction::SnapBack => {}
             }
         }
