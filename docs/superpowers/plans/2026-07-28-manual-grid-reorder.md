@@ -537,13 +537,20 @@ Not unit-testable in isolation; verified by compile + existing tests + a `run-sp
 
 - [ ] **Step 0: Rewrite the stale test that calls `recompute_pages`**
 
-`reflow_targets_maps_pages_and_excludes_dock` (main.rs:1658) calls `m.recompute_pages(&catalog, 0)`, deleted in A2. It only needs `m.pages` populated — set it directly instead:
+`reflow_targets_maps_pages_and_excludes_dock` (main.rs:1658) calls `m.recompute_pages(&catalog, 0)`, deleted in A2. The test asserts a page-1 app has `x > 1224.0`, so it needs > `PAGE_CAP` apps across two pages. Replace the frecency-record loop + `recompute_pages` with direct `place` calls:
 ```rust
-        // (replacing the recompute_pages call)
-        m.pages = vec![vec!["a".into(), "b".into()]];
-        m.dock = vec!["docked".into()];
+    fn reflow_targets_maps_pages_and_excludes_dock() {
+        let mut m = ShellModel::default();
+        for i in 0..25 { m.place(format!("app{i:02}")); } // 24 on page 0, 1 on page 1
+        let t = reflow_targets(&m, 1224.0, 2700.0);
+        assert_eq!(t.len(), 25);
+        let page1_app = &m.pages[1][0];
+        assert!(t[page1_app].0 > 1224.0);
+        let page0_app = &m.pages[0][0];
+        assert!(t[page0_app].0 < 1224.0);
+    }
 ```
-Keep the rest of the test's assertions (targets map the two grid apps, exclude the docked one). Adjust expected app ids to whatever the test asserts on.
+(The old test's "excludes dock" name is now covered by `reflow_targets` naturally skipping docked apps — they were never in `pages`; keep or trim the name as preferred.)
 
 - [ ] **Step 1: Replace the seed/prune/recompute block**
 
