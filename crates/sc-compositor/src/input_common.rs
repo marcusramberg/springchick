@@ -315,7 +315,8 @@ pub fn on_release(state: &mut State) {
                     state.after_arrange_edit();
                 }
                 input_dispatch::DropAction::Reorder { page, index } => {
-                    state.model.move_to(&drag.app_id, page, index);
+                    let (pg, ix) = drag.hover.unwrap_or((page, index));
+                    state.model.move_to(&drag.app_id, pg, ix);
                     state.after_arrange_edit();
                 }
                 input_dispatch::DropAction::SnapBack => {}
