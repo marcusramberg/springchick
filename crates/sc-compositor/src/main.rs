@@ -370,6 +370,10 @@ struct State {
     /// arrange-mode edits). Seeded lazily on first `advance_frame` and kept in
     /// sync with `model.pages` by `reflow_grid`.
     grid_anim: std::collections::HashMap<String, (sc_anim::Spring, sc_anim::Spring)>,
+    /// Per-app dock-reflow springs (x, y), keyed by app id. Mirror of
+    /// `grid_anim` for the dock row; seeded lazily and kept in sync by
+    /// `reflow_dock`.
+    dock_anim: std::collections::HashMap<String, (sc_anim::Spring, sc_anim::Spring)>,
 
     // Timing
     start_time: std::time::Instant,
@@ -576,6 +580,7 @@ impl State {
             pending_settle: None,
             last_log_state: None,
             grid_anim: std::collections::HashMap::new(),
+            dock_anim: std::collections::HashMap::new(),
             start_time: std::time::Instant::now(),
             stats: frame_stats::FrameStats::new(std::time::Duration::from_micros(11_111)),
             perf_log: false, // disabled for debugging
@@ -616,6 +621,7 @@ impl State {
             warn!(%e, "failed to save shell model after arrange edit");
         }
         self.reflow_grid();
+        self.reflow_dock();
     }
 
     /// Re-target the grid-reflow springs to each app's current slot position,
@@ -659,6 +665,39 @@ impl State {
             }
         }
         self.grid_anim.retain(|app, _| targets.contains_key(app));
+    }
+
+    /// Retarget dock springs to the current dock layout, dropping a dock icon
+    /// that is being dragged (it rides as the ghost). Mirror of `reflow_grid`.
+    fn reflow_dock(&mut self) {
+        let (w, h) = self.output_size_f();
+        let dragged = self
+            .arrange
+            .as_ref()
+            .and_then(|a| a.drag.as_ref())
+            .filter(|d| d.source == input_dispatch::IconSource::Dock)
+            .map(|d| d.app_id.clone());
+        let layout = sc_layout::compute(w, h, 0, &self.model);
+        let mut targets: std::collections::HashMap<String, (f32, f32)> = std::collections::HashMap::new();
+        for slot in &layout.dock {
+            if Some(&slot.app_id) == dragged.as_ref() {
+                continue;
+            }
+            targets.insert(slot.app_id.clone(), (slot.icon_rect.center_x(), slot.icon_rect.center_y()));
+        }
+        for (app, (tx, ty)) in &targets {
+            match self.dock_anim.get_mut(app) {
+                Some((sx, sy)) => {
+                    sx.retarget(*tx);
+                    sy.retarget(*ty);
+                }
+                None => {
+                    self.dock_anim
+                        .insert(app.clone(), (sc_anim::Spring::new(*tx), sc_anim::Spring::new(*ty)));
+                }
+            }
+        }
+        self.dock_anim.retain(|app, _| targets.contains_key(app));
     }
 
     fn launch_or_raise(&mut self, app_id: &str, origin: ZoomOrigin) {
@@ -990,6 +1029,9 @@ impl State {
         if self.grid_anim.is_empty() {
             self.reflow_grid();
         }
+        if self.dock_anim.is_empty() {
+            self.reflow_dock();
+        }
         // Live reorder: retarget springs to the working order each frame while
         // an icon is being dragged. Gated on the drag itself (not `hover`) so the
         // dragged app is dropped from `grid_anim` immediately on pickup and while
@@ -1000,6 +1042,7 @@ impl State {
             .is_some_and(|a| a.drag.is_some())
         {
             self.reflow_grid();
+            self.reflow_dock();
         }
 
         const EDGE_FRAC: f32 = 0.06;
@@ -1071,6 +1114,10 @@ impl State {
         }
 
         for (sx, sy) in self.grid_anim.values_mut() {
+            sx.step(dt);
+            sy.step(dt);
+        }
+        for (sx, sy) in self.dock_anim.values_mut() {
             sx.step(dt);
             sy.step(dt);
         }
