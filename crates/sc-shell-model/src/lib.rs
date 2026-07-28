@@ -135,6 +135,7 @@ impl ShellModel {
             return false;
         }
         self.remove_from_pages(app);
+        self.repack();
         self.dock.push(app.to_owned());
         true
     }
@@ -151,6 +152,7 @@ impl ShellModel {
     pub fn hide(&mut self, app: &str) {
         if !self.hidden.iter().any(|a| a == app) {
             self.remove_from_pages(app);
+            self.repack();
             self.hidden.push(app.to_owned());
         }
     }
@@ -444,6 +446,22 @@ mod tests {
         assert_eq!(m.pages[0].len(), PAGE_CAP); // backfilled from page1
         assert_eq!(m.pages[0][23], "tail");
         assert_eq!(m.pages.len(), 1); // page1 emptied + dropped
+    }
+
+    #[test]
+    fn pin_backfills_grid_across_pages() {
+        // 25 grid apps -> page0 full (24), page1 has 1. Pin one from page0.
+        let mut m = ShellModel {
+            pages: vec![
+                (0..PAGE_CAP).map(|i| format!("a{i:02}")).collect(),
+                vec!["tail".into()],
+            ],
+            ..Default::default()
+        };
+        assert!(m.pin("a05"));
+        assert!(m.dock.contains(&"a05".to_string()));
+        assert_eq!(m.pages[0].len(), PAGE_CAP); // tail pulled back, no interior hole
+        assert_eq!(m.pages.len(), 1);
     }
 
     #[test]
