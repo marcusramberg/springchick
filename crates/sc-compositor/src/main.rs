@@ -384,21 +384,6 @@ fn reflow_targets(model: &ShellModel, width: f32, height: f32) -> std::collectio
     out
 }
 
-/// The zoom origin an app should open from, based on where it actually
-/// landed in the grid (its page's icon slot) rather than where it was
-/// tapped. `None` if the app isn't on the grid (e.g. docked).
-fn landed_origin(model: &ShellModel, app_id: &str, w: f32, h: f32) -> Option<ZoomOrigin> {
-    for (pg, apps) in model.pages.iter().enumerate() {
-        if let Some(ix) = apps.iter().position(|a| a == app_id) {
-            let l = sc_layout::compute(w, h, pg, model);
-            if let Some(slot) = l.grid.get(ix) {
-                return Some(ZoomOrigin::icon((slot.icon_rect.center_x(), slot.icon_rect.center_y())));
-            }
-        }
-    }
-    None
-}
-
 impl State {
     fn new(display: &Display<Self>, wayland_socket: String, output_size: (i32, i32)) -> Self {
         let dh = display.handle();
@@ -620,40 +605,14 @@ impl State {
     fn launch_or_raise(&mut self, app_id: &str, origin: ZoomOrigin) {
         self.last_origin = origin;
 
-        // Record usage for frecency, re-derive grid order, persist (also
-        // reflows grid_anim to the new slot layout — see after_arrange_edit).
+        // Record usage for frecency (data for future search only — the grid no
+        // longer reorders on launch). Persist directly: after_arrange_edit was
+        // previously the only launch-time save, and a phone shell is usually
+        // killed, not cleanly exited.
         let now = unix_now();
         self.model.frecency.record_launch(app_id, now);
-        self.after_arrange_edit();
-
-        // Follow the launched app to its landed page and origin, so the
-        // zoom-open reads the icon's *new* slot rather than the tap location
-        // (which may be on a different page after reorder). Launch-only: a raise
-        // transitions away from Home and does not zoom, so following/retargeting
-        // page state there would be pointless churn.
-        let already_running = self
-            .toplevels
-            .iter()
-            .flatten()
-            .any(|tl| tl.app_id == app_id);
-        let (w, h) = self.output_size_f();
-        if !already_running {
-            if let Some(o) = landed_origin(&self.model, app_id, w, h) {
-                self.last_origin = o;
-                if let Some(pg) = self
-                    .model
-                    .pages
-                    .iter()
-                    .position(|apps| apps.iter().any(|a| a == app_id))
-                {
-                    let page_count = self.model.pages.len().max(1);
-                    if let UiState::Home { page, page_spring, page_count: pc, .. } = &mut self.ui {
-                        *page = pg;
-                        *pc = page_count;
-                        page_spring.retarget(pg as f32);
-                    }
-                }
-            }
+        if let Err(e) = config_state::save(&self.model, &config_path()) {
+            warn!(%e, "failed to save shell model after launch");
         }
 
         // Check if already running — raise it (no zoom, instant).
@@ -1660,14 +1619,5 @@ mod tests {
         assert!(t[page1_app].0 > 1224.0);
         let page0_app = &m.pages[0][0];
         assert!(t[page0_app].0 < 1224.0);
-    }
-
-    #[test]
-    fn landed_origin_some_for_grid_none_for_absent() {
-        let mut m = ShellModel::default();
-        for i in 0..25 { m.place(format!("app{i:02}")); } // 24 on page 0, 1 on page 1
-        let on_grid = &m.pages[1][0].clone();
-        assert!(landed_origin(&m, on_grid, 1224.0, 2700.0).is_some());
-        assert!(landed_origin(&m, "not-in-grid", 1224.0, 2700.0).is_none());
     }
 }
