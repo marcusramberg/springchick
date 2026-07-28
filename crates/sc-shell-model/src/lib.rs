@@ -64,8 +64,8 @@ impl FrecencyStore {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ShellModel {
     /// Grid view of apps, in manual (persisted) order. This is the source of
-    /// truth for on-screen grid order; `recompute_pages` is used only to seed
-    /// it initially from frecency.
+    /// truth for on-screen grid order. Seeded alphabetically from the catalog
+    /// by `reconcile` on first run; reordered only by manual drag.
     #[serde(default)]
     pub pages: Vec<Vec<AppId>>,
     pub dock: Vec<AppId>, // len <= DOCK_CAP
@@ -76,20 +76,26 @@ pub struct ShellModel {
 }
 
 impl ShellModel {
-    /// Rebuild `pages` from the catalog ordered by frecency at `now`,
-    /// excluding docked apps, chunked into PAGE_CAP-sized pages.
-    pub fn recompute_pages(&mut self, catalog_ids: &[AppId], now: u64) {
-        let mut ids: Vec<AppId> = catalog_ids
-            .iter()
-            .filter(|id| !self.dock.contains(id) && !self.hidden.contains(id))
-            .cloned()
-            .collect();
-        ids.sort_by(|a, b| {
-            let ea = self.frecency.apps.get(a).map_or(0.0, |s| eff(s, now));
-            let eb = self.frecency.apps.get(b).map_or(0.0, |s| eff(s, now));
-            eb.total_cmp(&ea).then_with(|| a.cmp(b))
-        });
-        self.pages = ids.chunks(PAGE_CAP).map(|c| c.to_vec()).collect();
+    /// Keep `pages` in sync with the installed catalog without reordering
+    /// existing slots. Appends catalog ids not yet in pages/dock/hidden (via
+    /// `place`), seeds their frecency, and prunes ids no longer installed.
+    /// `now`/`first_run` mirror the old startup seed loop (score 0 on a
+    /// first-run empty store, 1.0 for a later install).
+    pub fn reconcile(&mut self, catalog_ids: &[AppId], now: u64, first_run: bool) {
+        self.pages.iter_mut().for_each(|p| p.retain(|a| catalog_ids.contains(a)));
+        self.pages.retain(|p| !p.is_empty());
+        self.dock.retain(|a| catalog_ids.contains(a));
+        self.hidden.retain(|a| catalog_ids.contains(a));
+        self.frecency.prune(catalog_ids);
+        for id in catalog_ids {
+            let known = self.pages.iter().any(|p| p.contains(id))
+                || self.dock.contains(id)
+                || self.hidden.contains(id);
+            if !known {
+                self.place(id.clone());
+            }
+            self.frecency.seed(id, now, first_run);
+        }
     }
 
     /// Append an app to the first page with room, creating a page if needed.
@@ -238,39 +244,6 @@ mod tests {
     }
 
     #[test]
-    fn recompute_pages_orders_by_frecency_excluding_dock() {
-        let mut m = ShellModel::default();
-        m.dock = vec!["docked".into()];
-        m.frecency.record_launch("low", 0);
-        m.frecency.record_launch("high", 0);
-        m.frecency.record_launch("high", 0);
-        let catalog = ["high", "low", "docked", "zzz"].map(String::from).to_vec();
-        m.recompute_pages(&catalog, 0);
-        assert_eq!(m.pages[0][0], "high");
-        assert_eq!(m.pages[0][1], "low");
-        assert_eq!(m.pages[0][2], "zzz");
-        assert!(!m.pages.iter().flatten().any(|a| a == "docked"));
-    }
-
-    #[test]
-    fn recompute_pages_all_zero_is_alphabetical() {
-        let mut m = ShellModel::default();
-        let catalog = ["c", "a", "b"].map(String::from).to_vec();
-        m.recompute_pages(&catalog, 0);
-        assert_eq!(m.pages[0], vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn recompute_pages_chunks_into_pages() {
-        let mut m = ShellModel::default();
-        let catalog: Vec<String> = (0..(PAGE_CAP + 3)).map(|i| format!("app{i:03}")).collect();
-        m.recompute_pages(&catalog, 0);
-        assert_eq!(m.pages.len(), 2);
-        assert_eq!(m.pages[0].len(), PAGE_CAP);
-        assert_eq!(m.pages[1].len(), 3);
-    }
-
-    #[test]
     fn pages_round_trip_through_serde() {
         let mut m = ShellModel::default();
         m.place("a".into());
@@ -337,17 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn recompute_pages_excludes_hidden_and_dock() {
-        let mut m = ShellModel::default();
-        m.pin("docked");
-        m.hide("gone");
-        let catalog = ["docked", "gone", "shown"].map(String::from).to_vec();
-        m.recompute_pages(&catalog, 0);
-        let flat: Vec<&String> = m.pages.iter().flatten().collect();
-        assert_eq!(flat, vec!["shown"]);
-    }
-
-    #[test]
     fn hidden_serialized_with_default() {
         let mut m = ShellModel::default();
         m.hide("a");
@@ -359,12 +321,41 @@ mod tests {
     }
 
     #[test]
-    fn launch_promotes_app_to_front_of_grid() {
+    fn reconcile_appends_new_catalog_ids_in_order() {
         let mut m = ShellModel::default();
-        let catalog = ["a", "b", "c"].map(String::from).to_vec();
-        m.recompute_pages(&catalog, 0);
-        m.frecency.record_launch("c", 10);
-        m.recompute_pages(&catalog, 10);
-        assert_eq!(m.pages[0][0], "c");
+        m.place("b".into());
+        m.reconcile(&["a".into(), "b".into(), "c".into()], 0, false);
+        assert_eq!(m.pages[0], vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn reconcile_prunes_uninstalled_from_pages_dock_hidden() {
+        let mut m = ShellModel::default();
+        m.place("gone".into());
+        m.place("keep".into());
+        m.dock.push("dgone".into());
+        m.hidden.push("hgone".into());
+        m.reconcile(&["keep".into()], 0, false);
+        assert_eq!(m.pages, vec![vec!["keep".to_string()]]);
+        assert!(m.dock.is_empty());
+        assert!(m.hidden.is_empty());
+    }
+
+    #[test]
+    fn reconcile_seeds_frecency_for_new_apps() {
+        let mut m = ShellModel::default();
+        m.frecency.apps.insert("existing".into(), AppStat { score: 5.0, last_launch: 0 });
+        m.reconcile(&["existing".into(), "new".into()], 100, false);
+        assert_eq!(m.frecency.apps["new"].score, 1.0);
+        assert_eq!(m.frecency.apps["new"].last_launch, 100);
+    }
+
+    #[test]
+    fn reconcile_does_not_move_already_placed() {
+        let mut m = ShellModel::default();
+        for n in ["a", "b", "c"] { m.place(n.into()); }
+        m.move_to("c", 0, 0); // user order: c, a, b
+        m.reconcile(&["a".into(), "b".into(), "c".into()], 0, false);
+        assert_eq!(m.pages[0], vec!["c", "a", "b"]);
     }
 }
