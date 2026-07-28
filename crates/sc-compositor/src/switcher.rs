@@ -35,7 +35,7 @@ const FOLDED_PEEK_FRAC: f32 = 0.17;
 /// How far (fraction of front card width) a card slides right per unit of scroll
 /// once it has passed the front slot and is leaving to the right.
 const SLIDE_OFF_FRAC: f32 = 1.15;
-const CORNER: f32 = 28.0;
+const CORNER: f32 = 40.0;
 
 /// Compute card rects, back-to-front. `cards[0]` = most-recent.
 ///

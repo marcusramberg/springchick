@@ -16,7 +16,7 @@ use smithay::backend::input::{
     AbsolutePositionEvent, Event as InputEventTrait, InputEvent, KeyboardKeyEvent,
 };
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
-use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexProgram};
 use smithay::backend::renderer::{Bind, ImportDma};
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
@@ -42,6 +42,8 @@ struct Drm {
     _device: DrmDevice,
     gbm_surface: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, FlipData>,
     renderer: GlesRenderer,
+    /// Rounded-corner texture program, compiled once, passed to `draw_scene`.
+    rounded_tex_shader: GlesTexProgram,
     output_size: Size<i32, smithay::utils::Physical>,
     transform: Transform,
     /// Set false while a VT-switch has us deactivated.
@@ -118,7 +120,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let gbm = GbmDevice::new(device_fd.clone())?;
     let egl_display = unsafe { EGLDisplay::new(gbm.clone())? };
     let egl_context = EGLContext::new(&egl_display)?;
-    let renderer = unsafe { GlesRenderer::new(egl_context)? };
+    let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
+    let rounded_tex_shader = crate::render::compile_rounded_tex_shader(&mut renderer)?;
 
     // --- Find a connected connector + crtc + preferred mode ---
     let (connector_handle, crtc_handle, mode) = find_output(&drm_device)?;
@@ -176,6 +179,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         _device: drm_device,
         gbm_surface,
         renderer,
+        rounded_tex_shader,
         output_size,
         // App-window output transform. The DRM/GBM scanout buffer is itself
         // vertically flipped vs winit's framebuffer (hence Skia needs flip_y),
@@ -522,6 +526,7 @@ impl App {
                 last_present: &mut self.state.last_present,
                 grid_positions: &grid_positions,
                 dock_positions: &dock_positions,
+                rounded_tex_shader: &self.drm.rounded_tex_shader,
             };
             match crate::render::draw_scene(
                 &mut self.drm.renderer,
