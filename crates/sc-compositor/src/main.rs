@@ -976,12 +976,13 @@ impl State {
             self.reflow_grid();
         }
         // Live reorder: retarget springs to the working order each frame while
-        // an icon is being dragged over the grid.
+        // an icon is being dragged. Gated on the drag itself (not `hover`) so the
+        // dragged app is dropped from `grid_anim` immediately on pickup and while
+        // over the dock — otherwise it double-draws (in-slot + ghost).
         if self
             .arrange
             .as_ref()
-            .and_then(|a| a.drag.as_ref())
-            .is_some_and(|d| d.hover.is_some())
+            .is_some_and(|a| a.drag.is_some())
         {
             self.reflow_grid();
         }

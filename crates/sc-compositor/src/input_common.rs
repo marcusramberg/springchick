@@ -297,7 +297,7 @@ pub fn on_release(state: &mut State) {
             };
             let page_len = state.model.pages.get(page).map_or(0, |p| p.len());
             let layout = sc_layout::compute(w, h, page, &state.model);
-            match input_dispatch::resolve_drop(
+            let edited = match input_dispatch::resolve_drop(
                 drag.cur.0,
                 drag.cur.1,
                 &layout,
@@ -307,21 +307,29 @@ pub fn on_release(state: &mut State) {
                 w,
                 h,
             ) {
-                input_dispatch::DropAction::Pin => {
-                    if state.model.pin(&drag.app_id) {
-                        state.after_arrange_edit();
-                    }
-                }
+                input_dispatch::DropAction::Pin => state.model.pin(&drag.app_id),
                 input_dispatch::DropAction::Unpin => {
                     state.model.unpin(&drag.app_id);
-                    state.after_arrange_edit();
+                    true
                 }
                 input_dispatch::DropAction::Reorder { page, index } => {
-                    let (pg, ix) = drag.hover.unwrap_or((page, index));
-                    state.model.move_to(&drag.app_id, pg, ix);
-                    state.after_arrange_edit();
+                    // `page` is the current Home page (edge-dwell flips update
+                    // it); use it, not `drag.hover.page` which the flip does not
+                    // refresh. `hover.index` is computed against the working
+                    // (hole-removed) order, so prefer it to avoid a slot skew.
+                    let ix = drag.hover.map_or(index, |h| h.1);
+                    state.model.move_to(&drag.app_id, page, ix);
+                    true
                 }
-                input_dispatch::DropAction::SnapBack => {}
+                input_dispatch::DropAction::SnapBack => false,
+            };
+            if edited {
+                state.after_arrange_edit();
+            } else {
+                // No model edit, but a drag may have created a trailing empty
+                // page via edge-dwell flip — drop it (no save needed).
+                state.model.normalize_pages();
+                state.reflow_grid();
             }
         }
         return;
