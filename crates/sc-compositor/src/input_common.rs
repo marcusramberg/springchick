@@ -178,8 +178,13 @@ pub fn on_press(state: &mut State) {
                 state.model.hide(&app_id);
                 state.after_arrange_edit();
             }
-            sc_layout::Hit::DoneButton | sc_layout::Hit::Miss | sc_layout::Hit::Bar => {
+            sc_layout::Hit::DoneButton | sc_layout::Hit::Bar => {
                 state.arrange = None;
+            }
+            sc_layout::Hit::Miss => {
+                // Empty-area press in arrange: arm a page drag. A swipe pages
+                // (resolved in on_release); a still tap exits.
+                state.page_drag_start = Some(x);
             }
             sc_layout::Hit::GridIcon { app_id, .. } => {
                 if let Some(a) = &mut state.arrange {
@@ -287,8 +292,11 @@ pub fn on_release(state: &mut State) {
 
     // Arrange-mode release: resolve the drag (if any) to pin/unpin/snap-back,
     // then stay in arrange mode (only Done/empty-tap exits it).
-    if let Some(arrange) = &mut state.arrange {
-        if let Some(drag) = arrange.drag.take() {
+    if state.arrange.is_some() {
+        // Take the drag out (if any) without holding a &mut borrow across the
+        // body below.
+        let drag = state.arrange.as_mut().and_then(|a| a.drag.take());
+        if let Some(drag) = drag {
             let (w, h) = state.output_size_f();
             let page = if let UiState::Home { page, .. } = &state.ui {
                 *page
@@ -327,6 +335,37 @@ pub fn on_release(state: &mut State) {
                 state.model.repack();
                 state.reflow_grid();
             }
+            return;
+        }
+        // No icon drag: empty-area release. A swipe commits a page flip and
+        // stays in arrange; a still tap exits.
+        if let Some(start_x) = state.page_drag_start.take() {
+            let dx = x - start_x;
+            let w = state.output_size.0 as f32;
+            if dx.abs() > w * 0.15 {
+                let page_delta = -dx / w; // positive = swiping to next page
+                if let UiState::Home {
+                    page,
+                    page_spring,
+                    page_count,
+                    ..
+                } = &mut state.ui
+                {
+                    let target_page = if page_delta > 0.3 && *page + 1 < *page_count {
+                        *page + 1
+                    } else if page_delta < -0.3 && *page > 0 {
+                        *page - 1
+                    } else {
+                        *page
+                    };
+                    *page = target_page;
+                    page_spring.retarget(target_page as f32);
+                }
+            } else {
+                state.arrange = None; // still tap -> exit
+            }
+        } else {
+            state.arrange = None;
         }
         return;
     }
