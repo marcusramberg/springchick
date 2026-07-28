@@ -215,6 +215,15 @@ struct DragItem {
     /// (page, index) hole the grid opens under the finger; None until first
     /// motion or when the finger is over the dock zone.
     hover: Option<(usize, usize)>,
+    /// When the finger entered the current edge zone, for dwell-to-flip.
+    /// None when not in an edge zone.
+    edge_since: Option<(std::time::Instant, EdgeSide)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum EdgeSide {
+    Left,
+    Right,
 }
 
 /// Arrange-mode state: icons wiggle, badges/Done button are live, and an
@@ -951,6 +960,7 @@ impl State {
                         source: p.source,
                         cur: p.start,
                         hover: None,
+                        edge_since: None,
                     };
                     self.arrange = Some(ArrangeState { drag: Some(drag) });
                     self.pending_launch = None;
@@ -975,6 +985,75 @@ impl State {
         {
             self.reflow_grid();
         }
+
+        const EDGE_FRAC: f32 = 0.06;
+        const EDGE_DWELL_MS: u128 = 400;
+        // Edge-dwell page flip while dragging a reorder icon.
+        if let Some((cur_x, mut es)) = self
+            .arrange
+            .as_ref()
+            .and_then(|a| a.drag.as_ref())
+            .map(|d| (d.cur.0, d.edge_since))
+        {
+            let (w, _h) = self.output_size_f();
+            let side = if cur_x < w * EDGE_FRAC {
+                Some(EdgeSide::Left)
+            } else if cur_x > w * (1.0 - EDGE_FRAC) {
+                Some(EdgeSide::Right)
+            } else {
+                None
+            };
+            let now = std::time::Instant::now();
+            let mut flip: Option<i32> = None;
+            match side {
+                None => es = None,
+                Some(s) => match es {
+                    Some((since, prev)) if prev == s => {
+                        if now.duration_since(since).as_millis() >= EDGE_DWELL_MS {
+                            flip = Some(if s == EdgeSide::Left { -1 } else { 1 });
+                            es = Some((now, s)); // reset -> auto-repeat
+                        }
+                    }
+                    _ => es = Some((now, s)),
+                },
+            }
+            // Write edge_since back.
+            if let Some(d) = self.arrange.as_mut().and_then(|a| a.drag.as_mut()) {
+                d.edge_since = es;
+            }
+            // Apply a flip.
+            if let Some(dir) = flip {
+                let cur_page = if let UiState::Home { page, .. } = &self.ui {
+                    *page
+                } else {
+                    0
+                };
+                let new_page = if dir < 0 {
+                    cur_page.saturating_sub(1)
+                } else if cur_page + 1 < self.model.pages.len() {
+                    cur_page + 1
+                } else if self.model.pages.last().map_or(false, |p| p.is_empty()) {
+                    // Already a trailing empty page — go to it, don't add more.
+                    self.model.pages.len() - 1
+                } else {
+                    self.model.pages.push(Vec::new());
+                    self.model.pages.len() - 1
+                };
+                let page_count = self.model.pages.len().max(1);
+                if let UiState::Home {
+                    page,
+                    page_spring,
+                    page_count: pc,
+                    ..
+                } = &mut self.ui
+                {
+                    *page = new_page;
+                    *pc = page_count;
+                    page_spring.retarget(new_page as f32);
+                }
+            }
+        }
+
         for (sx, sy) in self.grid_anim.values_mut() {
             sx.step(dt);
             sy.step(dt);

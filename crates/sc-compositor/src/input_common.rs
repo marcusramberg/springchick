@@ -188,6 +188,7 @@ pub fn on_press(state: &mut State) {
                         source: input_dispatch::IconSource::Grid,
                         cur: (x, y),
                         hover: None,
+                        edge_since: None,
                     });
                 }
             }
@@ -198,6 +199,7 @@ pub fn on_press(state: &mut State) {
                         source: input_dispatch::IconSource::Dock,
                         cur: (x, y),
                         hover: None,
+                        edge_since: None,
                     });
                 }
             }
