@@ -140,25 +140,41 @@ impl ShellModel {
         if self.dock.iter().any(|a| a == app) || self.dock.len() >= DOCK_CAP {
             return false;
         }
+        self.remove_from_pages(app);
         self.dock.push(app.to_owned());
         true
     }
 
-    /// Remove `app` from the dock, if present.
+    /// Remove `app` from the dock, if present, restoring it to the home grid.
     pub fn unpin(&mut self, app: &str) {
-        self.dock.retain(|a| a != app);
+        if self.dock.iter().any(|a| a == app) {
+            self.dock.retain(|a| a != app);
+            self.place(app.to_owned());
+        }
     }
 
     /// Hide `app` from the home grid.
     pub fn hide(&mut self, app: &str) {
         if !self.hidden.iter().any(|a| a == app) {
+            self.remove_from_pages(app);
             self.hidden.push(app.to_owned());
         }
     }
 
     /// Unhide `app`, restoring it to the home grid.
     pub fn unhide(&mut self, app: &str) {
-        self.hidden.retain(|a| a != app);
+        if self.hidden.iter().any(|a| a == app) {
+            self.hidden.retain(|a| a != app);
+            self.place(app.to_owned());
+        }
+    }
+
+    /// Remove `app` from all pages, dropping any pages left empty.
+    fn remove_from_pages(&mut self, app: &str) {
+        for page in &mut self.pages {
+            page.retain(|a| a != app);
+        }
+        self.pages.retain(|p| !p.is_empty());
     }
 }
 
@@ -296,6 +312,30 @@ mod tests {
         m.pin("a");
         m.unpin("a");
         assert!(m.dock.is_empty());
+    }
+
+    #[test]
+    fn pin_removes_from_pages_unpin_restores() {
+        let mut m = ShellModel::default();
+        m.place("a".into());
+        assert!(m.pin("a"));
+        assert!(!m.pages.iter().any(|p| p.contains(&"a".to_string())));
+        assert!(m.dock.contains(&"a".to_string()));
+        m.unpin("a");
+        assert!(!m.dock.contains(&"a".to_string()));
+        assert!(m.pages.iter().any(|p| p.contains(&"a".to_string())));
+    }
+
+    #[test]
+    fn hide_removes_from_pages_unhide_restores() {
+        let mut m = ShellModel::default();
+        m.place("a".into());
+        m.hide("a");
+        assert!(!m.pages.iter().any(|p| p.contains(&"a".to_string())));
+        assert!(m.hidden.contains(&"a".to_string()));
+        m.unhide("a");
+        assert!(!m.hidden.contains(&"a".to_string()));
+        assert!(m.pages.iter().any(|p| p.contains(&"a".to_string())));
     }
 
     #[test]
