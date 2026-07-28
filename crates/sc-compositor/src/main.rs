@@ -1725,6 +1725,11 @@ fn render_frame(
         .iter()
         .map(|(app, (sx, sy))| (app.clone(), (sx.value - page_scroll * gp_w, sy.value)))
         .collect();
+    let dock_positions: std::collections::HashMap<String, (f32, f32)> = state
+        .dock_anim
+        .iter()
+        .map(|(a, (sx, sy))| (a.clone(), (sx.value, sy.value)))
+        .collect();
     {
         let mut ctx = render::DrawCtx {
             scene: &prep.scene,
@@ -1776,6 +1781,7 @@ fn render_frame(
             report_partial_damage: false,
             last_present: &mut state.last_present,
             grid_positions: &grid_positions,
+            dock_positions: &dock_positions,
         };
         render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }

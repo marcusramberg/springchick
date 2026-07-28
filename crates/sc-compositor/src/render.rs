@@ -98,6 +98,10 @@ pub struct DrawCtx<'a> {
     /// `State.grid_anim` springs. Used to render the grid so icons slide to
     /// their reflow targets instead of snapping.
     pub grid_positions: &'a HashMap<String, (f32, f32)>,
+    /// Screen-space animated center `(x, y)` for each dock app, driven by
+    /// `State.dock_anim` springs. Used to render the dock so icons slide to
+    /// their reflow targets instead of snapping.
+    pub dock_positions: &'a HashMap<String, (f32, f32)>,
     /// When true, the frame is a "quiet fullscreen app" (nothing but the app
     /// surface can have changed) and `draw_scene` may return a narrowed KMS
     /// page-flip damage hint instead of the full rect. The backend computes
@@ -267,6 +271,7 @@ pub fn draw_scene(
             ctx.pressed_app,
             ctx.arrange.as_ref(),
             ctx.grid_positions,
+            ctx.dock_positions,
         );
     }
 

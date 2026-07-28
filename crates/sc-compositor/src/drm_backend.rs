@@ -455,6 +455,12 @@ impl App {
             .iter()
             .map(|(app, (sx, sy))| (app.clone(), (sx.value - page_scroll * gp_w, sy.value)))
             .collect();
+        let dock_positions: std::collections::HashMap<String, (f32, f32)> = self
+            .state
+            .dock_anim
+            .iter()
+            .map(|(a, (sx, sy))| (a.clone(), (sx.value, sy.value)))
+            .collect();
 
         let flip_damage = {
             let mut ctx = crate::render::DrawCtx {
@@ -515,6 +521,7 @@ impl App {
                 report_partial_damage: report_partial,
                 last_present: &mut self.state.last_present,
                 grid_positions: &grid_positions,
+                dock_positions: &dock_positions,
             };
             match crate::render::draw_scene(
                 &mut self.drm.renderer,

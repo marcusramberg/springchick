@@ -170,6 +170,7 @@ impl SkiaGl {
         pressed_app: Option<&str>,
         arrange: Option<&ArrangeView>,
         grid_positions: &HashMap<String, (f32, f32)>,
+        dock_positions: &HashMap<String, (f32, f32)>,
     ) {
         if width <= 0 || height <= 0 {
             return;
@@ -256,7 +257,9 @@ impl SkiaGl {
         // Dock and dots don't scroll with pages.
         let current_layout = sc_layout::compute(width as f32, height as f32, page, model);
 
-        for slot in &current_layout.dock {
+        let dock_slots =
+            visible_dock_slots(&current_layout, dock_positions, width as f32, height as f32);
+        for slot in &dock_slots {
             draw_icon_slot(
                 canvas,
                 slot,
@@ -276,7 +279,7 @@ impl SkiaGl {
         // Arrange mode: remove-badges, Done button, dock drop highlight, and
         // the lifted (dragged) icon on top of everything else.
         if let Some(view) = arrange {
-            for slot in anim_slots.iter().chain(current_layout.dock.iter()) {
+            for slot in anim_slots.iter().chain(dock_slots.iter()) {
                 draw_remove_badge(canvas, slot);
             }
             draw_done_button(canvas, &current_layout, &self.font);
@@ -677,6 +680,27 @@ pub(crate) fn visible_grid_slots(
         }
     }
     out
+}
+
+/// Dock icon slots positioned from animated `dock_positions` (falling back to
+/// the static layout center for a not-yet-seeded app), so the dock reflows.
+pub(crate) fn visible_dock_slots(
+    layout: &sc_layout::Layout,
+    dock_positions: &HashMap<String, (f32, f32)>,
+    width: f32,
+    height: f32,
+) -> Vec<sc_layout::IconSlot> {
+    layout
+        .dock
+        .iter()
+        .map(|slot| {
+            let (cx, cy) = dock_positions
+                .get(&slot.app_id)
+                .copied()
+                .unwrap_or((slot.icon_rect.center_x(), slot.icon_rect.center_y()));
+            sc_layout::slot_at_center(slot.app_id.clone(), cx, cy, width, height)
+        })
+        .collect()
 }
 
 #[cfg(test)]
