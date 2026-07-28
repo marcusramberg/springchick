@@ -55,11 +55,27 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
 
     if state.pointer_down {
         // Arrange-mode drag: track the finger directly, no launch/swipe logic.
-        if let Some(arrange) = &mut state.arrange {
-            if let Some(drag) = &mut arrange.drag {
+        if state.arrange.as_ref().and_then(|a| a.drag.as_ref()).is_some() {
+            let (w, h) = state.output_size_f();
+            let page = if let UiState::Home { page, .. } = &state.ui { *page } else { 0 };
+            let layout = sc_layout::compute(w, h, page, &state.model);
+            let over_dock = layout.dock_zone.contains(x, y);
+            let hover = if over_dock {
+                None
+            } else {
+                let app = state.arrange.as_ref().unwrap().drag.as_ref().unwrap().app_id.clone();
+                // Fill count on this page with the dragged app removed, so the
+                // nearest index maps against the hole-removed order.
+                let live_len = state.model.pages.get(page)
+                    .map_or(0, |p| p.iter().filter(|a| **a != app).count());
+                let idx = sc_layout::nearest_grid_index(w, h, x, y).min(live_len);
+                Some((page, idx))
+            };
+            if let Some(drag) = state.arrange.as_mut().unwrap().drag.as_mut() {
                 drag.cur = (x, y);
-                return;
+                drag.hover = hover;
             }
+            return;
         }
 
         // Card drag: dominant-up closes that card, otherwise horizontal scroll.
@@ -171,6 +187,7 @@ pub fn on_press(state: &mut State) {
                         app_id,
                         source: input_dispatch::IconSource::Grid,
                         cur: (x, y),
+                        hover: None,
                     });
                 }
             }
@@ -180,6 +197,7 @@ pub fn on_press(state: &mut State) {
                         app_id,
                         source: input_dispatch::IconSource::Dock,
                         cur: (x, y),
+                        hover: None,
                     });
                 }
             }

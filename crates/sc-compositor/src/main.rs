@@ -212,6 +212,9 @@ struct DragItem {
     app_id: String,
     source: input_dispatch::IconSource,
     cur: (f32, f32),
+    /// (page, index) hole the grid opens under the finger; None until first
+    /// motion or when the finger is over the dock zone.
+    hover: Option<(usize, usize)>,
 }
 
 /// Arrange-mode state: icons wiggle, badges/Done button are live, and an
@@ -915,6 +918,7 @@ impl State {
                         app_id: p.app_id.clone(),
                         source: p.source,
                         cur: p.start,
+                        hover: None,
                     };
                     self.arrange = Some(ArrangeState { drag: Some(drag) });
                     self.pending_launch = None;
