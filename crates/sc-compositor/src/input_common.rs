@@ -328,7 +328,7 @@ pub fn on_release(state: &mut State) {
             } else {
                 // No model edit, but a drag may have created a trailing empty
                 // page via edge-dwell flip — drop it (no save needed).
-                state.model.normalize_pages();
+                state.model.repack();
                 state.reflow_grid();
             }
         }

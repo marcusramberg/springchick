@@ -594,7 +594,7 @@ impl State {
     /// Persist + reflow after a manual grid/dock edit (pin/unpin/hide/reorder).
     /// No frecency recompute — grid order is now manual.
     fn after_arrange_edit(&mut self) {
-        self.model.normalize_pages();
+        self.model.repack();
         if let Err(e) = config_state::save(&self.model, &config_path()) {
             warn!(%e, "failed to save shell model after arrange edit");
         }
