@@ -390,6 +390,23 @@ fn reflow_targets(model: &ShellModel, width: f32, height: f32) -> std::collectio
     reflow_targets_for(&model.pages, width, height)
 }
 
+/// Sentinel occupying the gap slot in the drag working order. Never a real app
+/// id (NUL-prefixed), so it can't collide; it is laid out for spacing but never
+/// drawn (it is not in `model.pages`, and `reflow_grid` drops it from targets).
+pub(crate) const HOLE: &str = "\u{0}hole";
+
+/// The drag "working order": the flattened grid with `dragged` removed and, when
+/// `hover` is Some, a HOLE sentinel inserted at the hovered global index so the
+/// real icons part to show the drop target. Re-chunked into pages.
+fn working_order(pages: &[Vec<String>], dragged: &str, hover: Option<(usize, usize)>) -> Vec<Vec<String>> {
+    let mut flat: Vec<String> = pages.iter().flatten().filter(|a| *a != dragged).cloned().collect();
+    if let Some((page, index)) = hover {
+        let gi = (page.saturating_mul(sc_shell_model::PAGE_CAP).saturating_add(index)).min(flat.len());
+        flat.insert(gi, HOLE.to_string());
+    }
+    flat.chunks(sc_shell_model::PAGE_CAP).map(|c| c.to_vec()).collect()
+}
+
 /// Reflow targets over an explicit page list (used for the live drag "working
 /// order": dragged app removed so remaining icons compact and open a gap).
 fn reflow_targets_for(pages: &[Vec<String>], width: f32, height: f32)
@@ -1745,5 +1762,21 @@ mod tests {
         assert!(t[page1_app].0 > 1224.0);
         let page0_app = &m.pages[0][0];
         assert!(t[page0_app].0 < 1224.0);
+    }
+
+    #[test]
+    fn working_order_opens_hole_at_hover() {
+        let pages = vec![vec!["a".to_string(), "b".into(), "c".into(), "d".into()]];
+        // Drag "a", hover global index 2 -> order without "a" is [b,c,d];
+        // hole at 2 -> [b, c, HOLE, d].
+        let out = working_order(&pages, "a", Some((0, 2)));
+        assert_eq!(out[0], vec!["b".to_string(), "c".into(), HOLE.to_string(), "d".into()]);
+    }
+
+    #[test]
+    fn working_order_no_hole_when_hover_none() {
+        let pages = vec![vec!["a".to_string(), "b".into(), "c".into()]];
+        let out = working_order(&pages, "a", None);
+        assert_eq!(out[0], vec!["b".to_string(), "c".into()]);
     }
 }
