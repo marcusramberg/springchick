@@ -378,8 +378,16 @@ struct State {
 /// hidden apps excluded — they aren't in `model.pages`), keyed by app id.
 /// Pure so it's cheap to unit-test independent of `State`.
 fn reflow_targets(model: &ShellModel, width: f32, height: f32) -> std::collections::HashMap<String, (f32, f32)> {
+    reflow_targets_for(&model.pages, width, height)
+}
+
+/// Reflow targets over an explicit page list (used for the live drag "working
+/// order": dragged app removed so remaining icons compact and open a gap).
+fn reflow_targets_for(pages: &[Vec<String>], width: f32, height: f32)
+    -> std::collections::HashMap<String, (f32, f32)>
+{
     let mut out = std::collections::HashMap::new();
-    for (page, apps) in model.pages.iter().enumerate() {
+    for (page, apps) in pages.iter().enumerate() {
         for (index, app) in apps.iter().enumerate() {
             out.insert(app.clone(), sc_layout::global_slot_pos(page, index, width, height));
         }
@@ -587,9 +595,33 @@ impl State {
     /// Re-target the grid-reflow springs to each app's current slot position,
     /// seeding new entries and dropping ones no longer on the grid (docked,
     /// hidden). Called after any change to `model.pages`.
+    /// The current pages with `dragged` removed (its slot becomes a gap the
+    /// remaining icons compact into). The dragged app renders as a ghost, so it
+    /// is intentionally absent from the reflow targets. `hover` is accepted for
+    /// future explicit-hole placement but the compacted layout already yields a
+    /// gap at/after the removed slot.
+    fn working_pages(&self, dragged: &str, _hover: Option<(usize, usize)>) -> Vec<Vec<String>> {
+        let mut pages: Vec<Vec<String>> = self.model.pages.clone();
+        for p in &mut pages {
+            p.retain(|a| a != dragged);
+        }
+        pages
+    }
+
     fn reflow_grid(&mut self) {
         let (w, h) = self.output_size_f();
-        let targets = reflow_targets(&self.model, w, h);
+        let drag_app = self
+            .arrange
+            .as_ref()
+            .and_then(|a| a.drag.as_ref())
+            .map(|d| (d.app_id.clone(), d.hover));
+        let targets = match drag_app {
+            Some((app_id, hover)) => {
+                let working = self.working_pages(&app_id, hover);
+                reflow_targets_for(&working, w, h)
+            }
+            None => reflow_targets(&self.model, w, h),
+        };
         for (app, (tx, ty)) in &targets {
             match self.grid_anim.get_mut(app) {
                 Some((sx, sy)) => {
@@ -931,6 +963,16 @@ impl State {
         // Lazy-seed the grid-reflow springs on first use so they snap to the
         // current order instead of animating in from (0,0).
         if self.grid_anim.is_empty() {
+            self.reflow_grid();
+        }
+        // Live reorder: retarget springs to the working order each frame while
+        // an icon is being dragged over the grid.
+        if self
+            .arrange
+            .as_ref()
+            .and_then(|a| a.drag.as_ref())
+            .map_or(false, |d| d.hover.is_some())
+        {
             self.reflow_grid();
         }
         for (sx, sy) in self.grid_anim.values_mut() {
