@@ -20,7 +20,7 @@ idle_blank_secs = 600
 
 # Base corner radius (logical px) for shrunken app cards: switcher deck and the
 # drag-lift card. Other card radii scale proportionally from this.
-card_radius = 40.0
+card_radius = 120.0
 
 [keybinds]
 # Long-press threshold (ms): how long a button is held before its "long" action

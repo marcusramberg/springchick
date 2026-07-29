@@ -87,9 +87,8 @@ pub const DEFAULT_DPI: u32 = 3;
 /// the config disables idle blanking entirely.
 pub const DEFAULT_IDLE_BLANK_SECS: u64 = 600;
 
-/// Card corner radius when `[main]` does not say otherwise. Matches the switcher
-/// deck's original hardcoded corner so the shipped look is unchanged.
-pub const DEFAULT_CARD_RADIUS: f32 = 40.0;
+/// Card corner radius when `[main]` does not say otherwise. 
+pub const DEFAULT_CARD_RADIUS: f32 = 120.0;
 
 /// Shipped defaults, mirroring the user's niri bindings. Defined as TOML so the
 /// documented example and the built-in behavior cannot drift apart.
