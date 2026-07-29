@@ -135,12 +135,6 @@ impl UiState {
 /// Events the UI state machine accepts.
 #[derive(Clone, Debug)]
 pub enum UiEvent {
-    /// Icon tapped — launch or raise.
-    TapIcon {
-        app_id: String,
-        /// Zoom origin for the launched app.
-        origin: ZoomOrigin,
-    },
     /// App launched and matched to a toplevel (with zoom animation).
     AppMapped {
         toplevel: ToplevelId,
@@ -156,10 +150,6 @@ pub enum UiEvent {
     ReturnHome { origin: ZoomOrigin },
     /// Foreground app's toplevel was destroyed.
     ToplevelClosed { toplevel: ToplevelId },
-    /// Horizontal page swipe delta.
-    PageDrag { delta: f32 },
-    /// Page swipe released.
-    PageRelease,
     /// Finger down on bar zone — start grab.
     GrabStart { point: sc_input::Pt },
     /// Finger moved during grab.
@@ -172,8 +162,6 @@ pub enum UiEvent {
     Tick { dt: f32 },
     /// Enter switcher deck from grab release.
     EnterSwitcher { cards: Vec<ToplevelId> },
-    /// Horizontal scroll delta during finger drag.
-    SwitcherScroll { delta: f32 },
     /// Tap a card to open that app.
     SwitcherTapCard {
         toplevel: ToplevelId,
@@ -188,9 +176,6 @@ pub enum UiEvent {
 /// Side effect from a transition.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
-    Launch {
-        app_id: String,
-    },
     CloseToplevel {
         toplevel: ToplevelId,
     },
@@ -214,12 +199,6 @@ pub fn desired_focus(state: &UiState) -> Option<ToplevelId> {
 /// Advance the state machine.
 pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
     match event {
-        UiEvent::TapIcon { app_id, origin: _ } => {
-            if matches!(state, UiState::Home { .. }) {
-                return Effect::Launch { app_id };
-            }
-            Effect::None
-        }
         UiEvent::AppMapped {
             toplevel,
             app_id,
@@ -279,36 +258,6 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 if cards.is_empty() {
                     *state = UiState::home(0, 1);
                 }
-            }
-            Effect::None
-        }
-        UiEvent::PageDrag { delta } => {
-            if let UiState::Home {
-                page,
-                page_spring,
-                page_count,
-            } = state
-            {
-                let target =
-                    (*page as f32 + delta).clamp(0.0, (*page_count).saturating_sub(1) as f32);
-                page_spring.retarget(target);
-            }
-            Effect::None
-        }
-        UiEvent::PageRelease => {
-            if let UiState::Home {
-                page,
-                page_spring,
-                page_count,
-            } = state
-            {
-                let nearest = page_spring
-                    .value
-                    .round()
-                    .clamp(0.0, (*page_count).saturating_sub(1) as f32)
-                    as usize;
-                *page = nearest;
-                page_spring.retarget(nearest as f32);
             }
             Effect::None
         }
@@ -486,14 +435,6 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             };
             Effect::None
         }
-        UiEvent::SwitcherScroll { delta } => {
-            if let UiState::Switcher { scroll, .. } = state {
-                scroll.value += delta;
-                scroll.target = scroll.value;
-                scroll.velocity = 0.0;
-            }
-            Effect::None
-        }
         UiEvent::SwitcherTapCard { toplevel, origin } => {
             if let UiState::Switcher { cards, .. } = state {
                 if cards.contains(&toplevel) {
@@ -532,20 +473,6 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
 mod tests {
     use super::*;
     use sc_input::Pt;
-
-    #[test]
-    fn tap_icon_produces_launch_effect() {
-        let mut state = UiState::home(0, 1);
-        let effect = transition(
-            &mut state,
-            UiEvent::TapIcon {
-                app_id: "org.foo.Bar".into(),
-                origin: ZoomOrigin::icon((100.0, 200.0)),
-            },
-        );
-        assert!(matches!(effect, Effect::Launch { app_id } if app_id == "org.foo.Bar"));
-        assert!(matches!(state, UiState::Home { .. }));
-    }
 
     #[test]
     fn app_mapped_starts_opening_animation() {
@@ -759,24 +686,6 @@ mod tests {
             }
         }
         assert!(matches!(state, UiState::Home { .. }));
-    }
-
-    #[test]
-    fn page_release_snaps_to_nearest() {
-        let mut state = UiState::home(0, 3);
-        if let UiState::Home { page_spring, .. } = &mut state {
-            page_spring.value = 1.7;
-        }
-        transition(&mut state, UiEvent::PageRelease);
-        if let UiState::Home {
-            page, page_spring, ..
-        } = &state
-        {
-            assert_eq!(*page, 2);
-            assert!((page_spring.target - 2.0).abs() < 0.01);
-        } else {
-            panic!("expected Home");
-        }
     }
 
     // --- Switcher tests ---
