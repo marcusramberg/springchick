@@ -74,6 +74,27 @@ pub enum UiState {
         progress: Spring,
         origin: ZoomOrigin,
     },
+    /// Live horizontal quick-switch: current app slides sideways following the
+    /// finger, revealing the adjacent MRU app. Rubber-bands when there is no
+    /// app in the swiped direction (end of the stack).
+    QuickSwitch {
+        current: ToplevelId,
+        current_app: String,
+        /// App revealed by a rightward swipe (`offset > 0`) — the previous app.
+        prev: Option<(ToplevelId, String)>,
+        /// App revealed by a leftward swipe (`offset < 0`) — the next app.
+        next: Option<(ToplevelId, String)>,
+        /// Horizontal offset as a fraction of screen width. `+` = current slides
+        /// right (revealing `prev` from the left edge); `-` = slides left.
+        offset: Spring,
+        /// After release: `Some` = settling onto this app; `None` = rejected,
+        /// springing back to `current`. Ignored until `releasing`.
+        commit: Option<(ToplevelId, String)>,
+        /// Finger let go — `Tick` drives `offset` to rest, then resolves.
+        releasing: bool,
+        /// Screen-x (px) where the slide began — the point at which `offset` is 0.
+        start_x: f32,
+    },
     /// Switcher deck: fanned stack of running apps.
     Switcher {
         /// MRU card order; cards[0] = front (most recent).
@@ -108,6 +129,7 @@ impl UiState {
             | UiState::AppClosing { toplevel, .. }
             | UiState::Grabbing { toplevel, .. }
             | UiState::Settling { toplevel, .. } => Some(*toplevel),
+            UiState::QuickSwitch { current, .. } => Some(*current),
             UiState::Home { .. } => None,
             UiState::Switcher { cards, .. } => cards.first().copied(),
         }
@@ -121,6 +143,9 @@ impl UiState {
             UiState::Settling { progress, .. } => !progress.is_settled(),
             UiState::Home { page_spring, .. } => !page_spring.is_settled(),
             UiState::Grabbing { .. } => true,
+            // Dragging (not releasing) is finger-driven and repaints on move;
+            // once releasing, the spring must tick until it settles.
+            UiState::QuickSwitch { releasing, offset, .. } => *releasing && !offset.is_settled(),
             UiState::App { .. } => false,
             UiState::Switcher {
                 scroll,
@@ -246,7 +271,8 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 | UiState::AppOpening { toplevel: t, .. }
                 | UiState::AppClosing { toplevel: t, .. }
                 | UiState::Grabbing { toplevel: t, .. }
-                | UiState::Settling { toplevel: t, .. } => *t == toplevel,
+                | UiState::Settling { toplevel: t, .. }
+                | UiState::QuickSwitch { current: t, .. } => *t == toplevel,
                 _ => false,
             };
             if is_foreground {
@@ -414,6 +440,26 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 UiState::Grabbing { tracker, .. } => {
                     // Decay velocity so a stationary hold doesn't read as a flick.
                     tracker.decay(dt);
+                }
+                UiState::QuickSwitch {
+                    current,
+                    current_app,
+                    commit,
+                    offset,
+                    releasing,
+                    ..
+                } => {
+                    if *releasing {
+                        offset.step(dt);
+                        if offset.is_settled() {
+                            // Land on the committed neighbour, or fall back to the
+                            // app we started on (rejected swipe).
+                            let (toplevel, app_id) = commit
+                                .take()
+                                .unwrap_or_else(|| (*current, current_app.clone()));
+                            *state = UiState::App { toplevel, app_id };
+                        }
+                    }
                 }
                 _ => {}
             }

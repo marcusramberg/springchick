@@ -21,6 +21,9 @@ const FRONT_SCALE_PX_FRAC: f32 = 0.42;
 /// (launch). Past this the press is cancelled and the gesture becomes a page
 /// swipe.
 const ICON_TAP_SLOP: f32 = 12.0;
+/// Fraction of screen width the quick-switch slide must reach at release to
+/// commit to the neighbour app; short of it the swipe is rejected (springs back).
+const BAR_QS_COMMIT_FRAC: f32 = 0.3;
 
 /// A finger held on an app icon, waiting to see if it becomes a tap (launch)
 /// or a page swipe. Cleared once movement exceeds `ICON_TAP_SLOP`.
@@ -153,6 +156,125 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
         if let Some(ev) = input_dispatch::on_move(&state.ui, x, y, dt, state.output_size) {
             transition(&mut state.ui, ev);
         }
+
+        // A grab that turns clearly horizontal becomes the live quick-switch
+        // slide: the current app slides sideways revealing the adjacent app.
+        if let UiState::Grabbing { tracker, .. } = &state.ui {
+            if sc_input::live_state(tracker) == sc_input::NavState::QuickSwitching {
+                let (w, _) = state.output_size_f();
+                let start_x = x - tracker.dx() * w; // screen-x where the drag began
+                enter_quick_switch(state, start_x);
+            }
+        }
+        // Track the finger while sliding.
+        if matches!(state.ui, UiState::QuickSwitch { .. }) {
+            update_quick_switch(state, x);
+        }
+    }
+}
+
+/// Resolve a released quick-switch: commit to the revealed neighbour if the
+/// slide passed the threshold (advancing the MRU cursor without reordering),
+/// else reject and spring back to the current app. Sets the offset spring
+/// animating; `Tick` finishes it and swaps to `App`.
+fn settle_quick_switch(state: &mut State) {
+    let f = match &state.ui {
+        UiState::QuickSwitch { offset, .. } => offset.value,
+        _ => return,
+    };
+    // dir: -1 = committed to previous (offset > 0), +1 = next (offset < 0).
+    let (commit, target, dir) = match &state.ui {
+        UiState::QuickSwitch { prev, next, .. } => {
+            if f >= BAR_QS_COMMIT_FRAC && prev.is_some() {
+                (prev.clone(), 1.0f32, -1)
+            } else if f <= -BAR_QS_COMMIT_FRAC && next.is_some() {
+                (next.clone(), -1.0f32, 1)
+            } else {
+                (None, 0.0, 0)
+            }
+        }
+        _ => return,
+    };
+
+    if dir != 0 {
+        // Move the cursor onto the committed neighbour — browse, no reorder.
+        state.history.quick_switch(dir);
+    }
+    if let UiState::QuickSwitch {
+        offset,
+        commit: c,
+        releasing,
+        ..
+    } = &mut state.ui
+    {
+        *c = commit;
+        *releasing = true;
+        offset.stiffness = 280.0;
+        offset.damping = 32.0;
+        offset.retarget(target);
+    }
+}
+
+/// App id for a live toplevel, if it exists.
+fn app_id_of(state: &State, tid: ToplevelId) -> Option<(ToplevelId, String)> {
+    state
+        .toplevels
+        .get(tid)
+        .and_then(|slot| slot.as_ref())
+        .map(|tl| (tid, tl.app_id.clone()))
+}
+
+/// Convert the current `Grabbing` (or `App`) state into a live quick-switch,
+/// capturing the adjacent apps from the MRU cursor. `start_x` is the screen-x at
+/// which `offset` is zero. No-op if already switching.
+fn enter_quick_switch(state: &mut State, start_x: f32) {
+    let (current, current_app) = match &state.ui {
+        UiState::Grabbing {
+            toplevel, app_id, ..
+        }
+        | UiState::App { toplevel, app_id } => (*toplevel, app_id.clone()),
+        _ => return,
+    };
+    let prev = state.history.peek(-1).and_then(|t| app_id_of(state, t));
+    let next = state.history.peek(1).and_then(|t| app_id_of(state, t));
+    state.ui = UiState::QuickSwitch {
+        current,
+        current_app,
+        prev,
+        next,
+        offset: sc_anim::Spring::new(0.0),
+        commit: None,
+        releasing: false,
+        start_x,
+    };
+}
+
+/// Track the finger during a live quick-switch. Positive travel (finger right of
+/// `start_x`) reveals the previous app; negative reveals the next. Rubber-bands
+/// when there is no app in that direction (matches the home-page edge).
+fn update_quick_switch(state: &mut State, x: f32) {
+    let (w, _) = state.output_size_f();
+    if let UiState::QuickSwitch {
+        prev,
+        next,
+        offset,
+        releasing,
+        start_x,
+        ..
+    } = &mut state.ui
+    {
+        if *releasing {
+            return; // finger already lifted; let the spring finish
+        }
+        let mut f = (x - *start_x) / w;
+        let at_end = (f > 0.0 && prev.is_none()) || (f < 0.0 && next.is_none());
+        if at_end {
+            f *= 0.3;
+        }
+        f = f.clamp(-1.0, 1.0);
+        offset.value = f;
+        offset.target = f;
+        offset.velocity = 0.0;
     }
 }
 
@@ -289,6 +411,15 @@ pub fn on_release(state: &mut State) {
     };
     state.pointer_down = false;
 
+    // Live quick-switch release: commit to the revealed neighbour past the
+    // threshold, otherwise spring back (reject). Everything below is irrelevant
+    // in this state.
+    if matches!(state.ui, UiState::QuickSwitch { .. }) {
+        state.bar_drag_start = None;
+        settle_quick_switch(state);
+        return;
+    }
+
     // Arrange-mode release: resolve the drag (if any) to pin/unpin/snap-back,
     // then stay in arrange mode (only Done/empty-tap exits it).
     if state.arrange.is_some() {
@@ -388,16 +519,18 @@ pub fn on_release(state: &mut State) {
         let dy = start_y - y; // positive = swiped up
         let (w, h) = state.output_size_f();
 
+        // From the Home bar there is no foreground app to slide, so the
+        // horizontal switch stays a release-classified instant raise. (The live
+        // slide is the in-app grab gesture — see `enter_quick_switch`.)
         if dy > h * 0.08 {
-            // Swiped up from bar → raise most recent app.
+            // Swiped up from bar → raise most recent app (deliberate jump).
             if let Some(tid) = state.history.previous() {
-                state.raise_toplevel_centered(tid);
+                state.raise_toplevel_centered(tid, true);
             }
         } else if dx.abs() > w * 0.15 {
-            // Horizontal swipe on bar → quick-switch.
             let dir = if dx < 0.0 { 1 } else { -1 };
             if let Some(tid) = state.history.quick_switch(dir) {
-                state.raise_toplevel_centered(tid);
+                state.raise_toplevel_centered(tid, false);
             }
         }
     }
@@ -529,8 +662,8 @@ pub fn on_release(state: &mut State) {
                     .filter(|tid| matches!(state.toplevels.get(*tid), Some(Some(_))));
                 match adj {
                     Some(tid) => {
+                        // Browse without reordering — same rule as the bar swipe.
                         let app_id = state.toplevels[tid].as_ref().unwrap().app_id.clone();
-                        state.history.push_foreground(tid);
                         transition(
                             &mut state.ui,
                             UiEvent::RaiseApp {

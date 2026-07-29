@@ -35,21 +35,24 @@ $D shot /tmp/sc.png        # grim the host output; then Read /tmp/sc.png
 $D down                    # kill compositor + every client it launched, by PID
 ```
 
-**`up` blocks and a cold build overruns the command timeout.** `up` waits
-synchronously for the frame loop, and if the tree isn't built it compiles first —
-a cold compile alone can exceed the ~5-min Bash-tool ceiling. `nix develop
---command true` only warms the devshell, NOT the crate build, so the first `up`
-after any code change still pays the full compile cost.
+**`up` NEVER returns — it holds the terminal running the compositor.** It is the
+foreground compositor process, not a launch-and-exit command. Running it as a
+normal foreground Bash call ALWAYS hits the tool timeout — that timeout is NOT a
+failure, the compositor is up and fine. Do not wait on it.
 
-- **Do this:** run `$D build` first, in the background (`run_in_background: true`)
-  or with a long timeout; then `$D up` launches an already-built binary and returns
-  fast, well under timeout.
-- **If `$D up` times out anyway:** it usually still came up — the driver's wait
-  just outran the tool clock. Do NOT assume failure. Check
-  `ls /run/user/$(id -u)/springchick-0` and
-  `grep "entering frame loop" /tmp/sc-driver/compositor.log`; if both are present,
-  it's running — go straight to `send`/`shot`. (If the log ends mid-compile, it's
-  still building; wait and re-check.)
+- **ALWAYS run `$D up` with `run_in_background: true`.** It stays running there;
+  you get the terminal back immediately. Never run it foreground "just to see if
+  it comes up".
+- **Then poll for readiness** (it's ready in a few seconds on an already-built
+  tree): `ls /run/user/$(id -u)/springchick-0` exists AND
+  `grep "entering frame loop" /tmp/sc-driver/compositor.log` hits. Once both are
+  true, go straight to `client`/`send`/`shot`. The PID / socket / `actual output
+  size` line are in `/tmp/sc-driver/compositor.log`.
+- **Build first, separately.** A cold compile alone can exceed the ~5-min
+  Bash ceiling, and `up` compiles if the tree isn't built. Run `$D build` first
+  (background or long timeout); `nix develop --command true` only warms the
+  devshell, NOT the crate build. If the log ends mid-compile, it's still
+  building — wait and re-check.
 
 `up` prints the compositor PID, the `springchick-0` socket path, and the
 `actual output size` line (e.g. `w=1901 h=2088` — niri clamps the window, so

@@ -3,4 +3,4 @@ pub mod gesture;
 pub mod nav;
 pub mod thresholds;
 pub use gesture::{Pt, Tracker};
-pub use nav::{classify_release, NavState, NavTarget};
+pub use nav::{classify_release, live_state, NavState, NavTarget};

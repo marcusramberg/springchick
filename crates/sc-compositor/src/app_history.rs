@@ -7,44 +7,75 @@ use crate::ui_state::ToplevelId;
 pub struct AppHistory {
     /// MRU stack. Front = most recent (current foreground).
     pub stack: Vec<ToplevelId>,
+    /// Position the quick-switch walk currently sits at. `push_foreground`
+    /// resets it to the front; a horizontal bar swipe walks it through the
+    /// stack *without* reordering, so swiping repeatedly cycles the whole list
+    /// instead of bouncing between the last two apps.
+    cursor: usize,
 }
 
 impl AppHistory {
     pub fn new() -> Self {
-        Self { stack: Vec::new() }
+        Self {
+            stack: Vec::new(),
+            cursor: 0,
+        }
     }
 
-    /// Record an app coming to foreground. Moves it to front.
+    /// Record an app coming to foreground. Moves it to front and resets the
+    /// quick-switch cursor. Only deliberate activations (launcher, switcher tap,
+    /// a newly mapped app) call this — quick-switch does not.
     pub fn push_foreground(&mut self, id: ToplevelId) {
         self.stack.retain(|&x| x != id);
         self.stack.insert(0, id);
+        self.cursor = 0;
     }
 
     /// Remove a closed toplevel.
     pub fn remove(&mut self, id: ToplevelId) {
         self.stack.retain(|&x| x != id);
+        if self.cursor >= self.stack.len() {
+            self.cursor = 0;
+        }
     }
 
-    /// Get the previous app (for quick-switch -1).
+    /// Get the previous app (for swipe-up-from-bar).
     pub fn previous(&self) -> Option<ToplevelId> {
         self.stack.get(1).copied()
     }
 
-    /// Get the next app (for quick-switch +1). Wraps around.
-    pub fn next(&self) -> Option<ToplevelId> {
-        if self.stack.len() <= 1 {
-            return None;
-        }
-        self.stack.get(2).or(self.stack.get(1)).copied()
+    /// Peek the app one step from the cursor without moving it (`dir`: -1 =
+    /// previous, +1 = next). Returns `None` at the stack ends — the live
+    /// quick-switch uses this to know when to rubber-band. `quick_switch(dir)`
+    /// commits the same step.
+    pub fn peek(&self, dir: i32) -> Option<ToplevelId> {
+        let idx = match dir {
+            d if d > 0 => self.cursor + 1,
+            d if d < 0 => self.cursor.checked_sub(1)?,
+            _ => return None,
+        };
+        self.stack.get(idx).copied()
     }
 
-    /// Get app in the given direction (-1 = previous, +1 = next).
-    pub fn quick_switch(&self, dir: i32) -> Option<ToplevelId> {
-        match dir {
-            d if d < 0 => self.previous(),
-            d if d > 0 => self.next(),
-            _ => None,
+    /// Walk the quick-switch cursor one step (`dir`: -1 = previous / swipe
+    /// right, +1 = next / swipe left) and return the app now under it. Clamps at
+    /// the stack ends — a swipe past either end returns `None` (reject, cursor
+    /// unmoved) rather than wrapping — and does *not* reorder, so the MRU order
+    /// is preserved.
+    pub fn quick_switch(&mut self, dir: i32) -> Option<ToplevelId> {
+        let len = self.stack.len();
+        if len <= 1 || dir == 0 {
+            return None;
         }
+        let next = match dir {
+            d if d > 0 => self.cursor + 1,
+            _ => self.cursor.checked_sub(1)?,
+        };
+        if next >= len {
+            return None; // reject: already at the end of the stack
+        }
+        self.cursor = next;
+        self.stack.get(next).copied()
     }
 
     /// Return the full MRU list (front = most recent).
@@ -92,13 +123,46 @@ mod tests {
     }
 
     #[test]
-    fn quick_switch_directions() {
+    fn quick_switch_walks_without_reordering() {
+        let mut h = AppHistory::new();
+        h.push_foreground(1);
+        h.push_foreground(2);
+        h.push_foreground(3); // stack: [3, 2, 1], cursor 0
+
+        // Swipe next walks deeper into the stack, no reorder.
+        assert_eq!(h.quick_switch(1), Some(2));
+        assert_eq!(h.quick_switch(1), Some(1));
+        // At the end: reject, no wrap, cursor stays put.
+        assert_eq!(h.quick_switch(1), None);
+        assert_eq!(h.quick_switch(1), None);
+        // Reversing still works from the held position.
+        assert_eq!(h.quick_switch(-1), Some(2));
+        // Order is untouched.
+        assert_eq!(h.stack, vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn quick_switch_rejects_at_front() {
+        let mut h = AppHistory::new();
+        h.push_foreground(1);
+        h.push_foreground(2);
+        h.push_foreground(3); // stack: [3, 2, 1], cursor 0
+        // Already at the front — swiping back rejects.
+        assert_eq!(h.quick_switch(-1), None);
+        assert_eq!(h.quick_switch(1), Some(2));
+        assert_eq!(h.quick_switch(-1), Some(3));
+        assert_eq!(h.quick_switch(-1), None);
+    }
+
+    #[test]
+    fn push_foreground_resets_cursor() {
         let mut h = AppHistory::new();
         h.push_foreground(1);
         h.push_foreground(2);
         h.push_foreground(3);
-        assert_eq!(h.quick_switch(-1), Some(2));
-        assert_eq!(h.quick_switch(1), Some(1));
+        h.quick_switch(1); // cursor -> 1
+        h.push_foreground(9); // deliberate activation resets walk
+        assert_eq!(h.quick_switch(1), Some(3)); // stack [9,3,2,1], cursor 0 -> 1
     }
 
     #[test]

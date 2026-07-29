@@ -148,6 +148,10 @@ pub fn on_press(
             // Switcher handles its own input in input_common.
             DownAction::None
         }
+        UiState::QuickSwitch { .. } => {
+            // Mid-slide (or its settle) — ignore extra presses.
+            DownAction::None
+        }
     }
 }
 
