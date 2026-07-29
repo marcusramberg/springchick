@@ -424,6 +424,7 @@ pub fn draw_scene(
             ctx.arrange.as_ref(),
             ctx.grid_positions,
             ctx.dock_positions,
+            ctx.app_origin.1 as f32,
         );
     }
 
