@@ -21,6 +21,17 @@ impl Spring {
         }
     }
 
+    /// A snappy zoom spring (stiffness 300, damping 35) starting at `from` and
+    /// retargeted to `to`. Used for the icon-zoom / card-open/close transitions,
+    /// which all share this tuning.
+    pub fn zoom(from: f32, to: f32) -> Self {
+        let mut s = Spring::new(from);
+        s.stiffness = 300.0;
+        s.damping = 35.0;
+        s.retarget(to);
+        s
+    }
+
     /// Retarget without losing current value/velocity (interruptible).
     pub fn retarget(&mut self, target: f32) {
         self.target = target;

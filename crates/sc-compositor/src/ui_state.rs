@@ -225,14 +225,10 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             app_id,
             origin,
         } => {
-            let mut progress = Spring::new(0.0);
-            progress.stiffness = 300.0;
-            progress.damping = 35.0;
-            progress.retarget(1.0);
             *state = UiState::AppOpening {
                 toplevel,
                 app_id,
-                progress,
+                progress: Spring::zoom(0.0, 1.0),
                 origin,
             };
             Effect::None
@@ -245,21 +241,8 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             match state {
                 UiState::App {
                     toplevel, app_id, ..
-                } => {
-                    let toplevel = *toplevel;
-                    let app_id = app_id.clone();
-                    let mut progress = Spring::new(1.0);
-                    progress.stiffness = 300.0;
-                    progress.damping = 35.0;
-                    progress.retarget(0.0);
-                    *state = UiState::AppClosing {
-                        toplevel,
-                        app_id,
-                        progress,
-                        origin,
-                    };
                 }
-                UiState::Grabbing {
+                | UiState::Grabbing {
                     toplevel, app_id, ..
                 }
                 | UiState::Settling {
@@ -267,14 +250,10 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 } => {
                     let toplevel = *toplevel;
                     let app_id = app_id.clone();
-                    let mut progress = Spring::new(1.0);
-                    progress.stiffness = 300.0;
-                    progress.damping = 35.0;
-                    progress.retarget(0.0);
                     *state = UiState::AppClosing {
                         toplevel,
                         app_id,
-                        progress,
+                        progress: Spring::zoom(1.0, 0.0),
                         origin,
                     };
                 }
@@ -369,8 +348,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 let current_progress = tracker.up_progress().clamp(0.0, 1.0);
                 let settle_target = match target {
                     NavTarget::BackToApp => 0.0,
-                    NavTarget::Home | NavTarget::Switcher => 1.0,
-                    NavTarget::QuickSwitch(_) => 1.0,
+                    NavTarget::Home | NavTarget::Switcher | NavTarget::QuickSwitch(_) => 1.0,
                 };
                 let mut progress = Spring::new(current_progress);
                 progress.stiffness = 280.0;
@@ -520,14 +498,10 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             if let UiState::Switcher { cards, .. } = state {
                 if cards.contains(&toplevel) {
                     let app_id = format!("app_{}", toplevel);
-                    let mut progress = Spring::new(0.0);
-                    progress.stiffness = 300.0;
-                    progress.damping = 35.0;
-                    progress.retarget(1.0);
                     *state = UiState::AppOpening {
                         toplevel,
                         app_id,
-                        progress,
+                        progress: Spring::zoom(0.0, 1.0),
                         origin,
                     };
                 }
