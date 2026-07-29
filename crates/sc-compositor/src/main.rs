@@ -106,29 +106,6 @@ fn config_home() -> PathBuf {
         .unwrap_or_else(|_| home_dir().join(".config"))
 }
 
-/// `$XDG_DATA_HOME`, else `~/.local/share`.
-/// XDG base data directories, highest precedence first:
-/// `$XDG_DATA_HOME` (default `~/.local/share`), then each `$XDG_DATA_DIRS`
-/// entry (default `/usr/local/share:/usr/share`) left-to-right.
-fn xdg_data_dirs() -> Vec<PathBuf> {
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".local/share"));
-    let data_dirs = std::env::var("XDG_DATA_DIRS")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
-
-    let mut dirs = vec![data_home];
-    dirs.extend(
-        data_dirs
-            .split(':')
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from),
-    );
-    dirs
-}
-
 /// Config file path.
 fn config_path() -> PathBuf {
     config_home().join("springchick/state.toml")
@@ -148,7 +125,7 @@ fn scan_apps() -> Vec<AppEntry> {
     let mut seen = std::collections::HashSet::new();
     // Search `<datadir>/applications` for each XDG data dir. Dirs are ordered
     // highest precedence first, so the first .desktop seen for a given id wins.
-    for dir in xdg_data_dirs() {
+    for dir in sc_config::xdg_data_dirs() {
         let Ok(read) = std::fs::read_dir(dir.join("applications")) else {
             continue;
         };
@@ -429,6 +406,16 @@ fn reflow_targets_for(pages: &[Vec<String>], width: f32, height: f32)
 }
 
 impl State {
+    /// Record one frame's duration and emit a perf summary at most once per
+    /// second. Shared by the winit and DRM render loops.
+    fn record_and_log_frame(&mut self, frame_start: std::time::Instant) {
+        self.stats.record_frame(frame_start.elapsed());
+        if self.perf_log && self.last_perf_log.elapsed() >= Duration::from_secs(1) {
+            debug!(target: "springchick::perf", "{}", self.stats.format_line());
+            self.last_perf_log = std::time::Instant::now();
+        }
+    }
+
     fn new(display: &Display<Self>, wayland_socket: String, output_size: (i32, i32)) -> Self {
         let dh = display.handle();
         let (out_w, out_h) = output_size;
@@ -1831,11 +1818,7 @@ fn render_frame(
     let result = backend.submit(Some(&[damage]));
 
     // Record + periodically log frame timing.
-    state.stats.record_frame(frame_start.elapsed());
-    if state.perf_log && state.last_perf_log.elapsed() >= Duration::from_secs(1) {
-        debug!(target: "springchick::perf", "{}", state.stats.format_line());
-        state.last_perf_log = std::time::Instant::now();
-    }
+    state.record_and_log_frame(frame_start);
 
     result
 }

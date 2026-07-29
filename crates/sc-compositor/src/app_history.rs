@@ -21,7 +21,6 @@ impl AppHistory {
     }
 
     /// Remove a closed toplevel.
-    #[allow(dead_code)]
     pub fn remove(&mut self, id: ToplevelId) {
         self.stack.retain(|&x| x != id);
     }

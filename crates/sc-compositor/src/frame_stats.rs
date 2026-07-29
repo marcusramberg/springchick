@@ -46,17 +46,6 @@ impl FrameStats {
         self.samples.push_back(dt);
     }
 
-    /// Number of recorded samples.
-    #[allow(dead_code)] // diagnostic helper; wired by later backends
-    pub fn len(&self) -> usize {
-        self.samples.len()
-    }
-
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.samples.is_empty()
-    }
-
     /// Compute a snapshot. Returns zeros when empty.
     pub fn snapshot(&self) -> StatsSnapshot {
         if self.samples.is_empty() {
