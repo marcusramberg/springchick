@@ -1003,17 +1003,21 @@ impl State {
         }
     }
 
-    /// Raise `tid` to the foreground with a screen-centered zoom origin,
-    /// recording it as the most-recent app. Backs the bar swipe-up and the bar
-    /// horizontal quick-switch, which differ only in which toplevel they pick.
-    pub(crate) fn raise_toplevel_centered(&mut self, tid: ToplevelId) {
+    /// Raise `tid` to the foreground with a screen-centered zoom origin. Backs
+    /// the bar swipe-up and the bar horizontal quick-switch, which differ only
+    /// in which toplevel they pick. `reorder` records it as the most-recent app
+    /// (swipe-up, a deliberate jump); quick-switch passes `false` so browsing
+    /// left/right does not shuffle the MRU order.
+    pub(crate) fn raise_toplevel_centered(&mut self, tid: ToplevelId, reorder: bool) {
         let Some(Some(tl)) = self.toplevels.get(tid) else {
             return;
         };
         let app_id = tl.app_id.clone();
         let (w, h) = self.output_size_f();
         self.last_origin = ZoomOrigin::icon((w / 2.0, h / 2.0));
-        self.history.push_foreground(tid);
+        if reorder {
+            self.history.push_foreground(tid);
+        }
         transition(
             &mut self.ui,
             UiEvent::RaiseApp {

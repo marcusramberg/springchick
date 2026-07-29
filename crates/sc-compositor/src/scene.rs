@@ -219,6 +219,54 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32), card_radius: f32)
                 cards: Vec::new(),
             }
         }
+        UiState::QuickSwitch {
+            current,
+            prev,
+            next,
+            offset,
+            ..
+        } => {
+            // Both apps ride at full scale; the pair slides horizontally as one.
+            // The current app's centre shifts by `offset` screen-widths; the
+            // revealed neighbour sits flush against it on the appropriate side.
+            let off = offset.value;
+            let cur_cx = w / 2.0 + off * w;
+            let mut cards = Vec::with_capacity(2);
+            // Neighbour first (z=0, drawn behind the seam).
+            let neighbor = if off > 0.0 {
+                prev.as_ref().map(|(t, _)| (*t, cur_cx - w))
+            } else if off < 0.0 {
+                next.as_ref().map(|(t, _)| (*t, cur_cx + w))
+            } else {
+                None
+            };
+            if let Some((tid, cx)) = neighbor {
+                cards.push(switcher::CardRect {
+                    toplevel: tid,
+                    center_x: cx,
+                    center_y: h / 2.0,
+                    scale: 1.0,
+                    corner_radius: 0.0,
+                    z: 0,
+                    close_progress: 0.0,
+                });
+            }
+            cards.push(switcher::CardRect {
+                toplevel: *current,
+                center_x: cur_cx,
+                center_y: h / 2.0,
+                scale: 1.0,
+                corner_radius: 0.0,
+                z: 1,
+                close_progress: 0.0,
+            });
+            Scene {
+                window: None,
+                show_home: false,
+                home_page: 0,
+                cards,
+            }
+        }
         UiState::Switcher {
             cards,
             scroll,
