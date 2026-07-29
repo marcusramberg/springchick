@@ -56,6 +56,12 @@ pub fn load_idle_blank_secs() -> u64 {
     load_config().idle_blank_secs
 }
 
+/// Base card corner radius in logical px (`[main].card_radius`). Reads the same
+/// config file as [`Keys::load`].
+pub fn load_card_radius() -> f32 {
+    load_config().card_radius
+}
+
 /// Config lookup: `SPRINGCHICK_CONFIG` is a strict override — if set, it is the
 /// only path tried, with no fallthrough to XDG or `/etc` if that file is
 /// missing. Otherwise, in order: `$XDG_CONFIG_HOME/springchick/config.toml`

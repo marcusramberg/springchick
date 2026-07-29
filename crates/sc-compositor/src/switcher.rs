@@ -35,7 +35,6 @@ const FOLDED_PEEK_FRAC: f32 = 0.17;
 /// How far (fraction of front card width) a card slides right per unit of scroll
 /// once it has passed the front slot and is leaving to the right.
 const SLIDE_OFF_FRAC: f32 = 1.15;
-const CORNER: f32 = 40.0;
 
 /// Compute card rects, back-to-front. `cards[0]` = most-recent.
 ///
@@ -56,6 +55,7 @@ pub fn layout(
     size: (f32, f32),
     close: Option<(ToplevelId, f32)>,
     entry: f32,
+    corner_radius: f32,
 ) -> Vec<CardRect> {
     let (w, h) = size;
     let n = cards.len();
@@ -103,7 +103,7 @@ pub fn layout(
                 center_x,
                 center_y: cy - close_progress * h,
                 scale,
-                corner_radius: CORNER,
+                corner_radius,
                 z,
                 close_progress,
             }
@@ -155,10 +155,11 @@ mod tests {
     use super::*;
 
     const SIZE: (f32, f32) = (1224.0, 2700.0);
+    const CORNER: f32 = 40.0;
 
     #[test]
     fn front_is_rightmost_when_folded() {
-        let rects = layout(&[0, 1, 2], 0.0, SIZE, None, 1.0);
+        let rects = layout(&[0, 1, 2], 0.0, SIZE, None, 1.0, CORNER);
         // cards[0] is the front; it sits furthest right and is largest / top z.
         let front = rects.iter().find(|r| r.toplevel == 0).unwrap();
         for r in &rects {
@@ -172,8 +173,8 @@ mod tests {
 
     #[test]
     fn scroll_advances_focus_to_front_and_slides_active_off_right() {
-        let s0 = layout(&[0, 1, 2], 0.0, SIZE, None, 1.0);
-        let s1 = layout(&[0, 1, 2], 1.0, SIZE, None, 1.0);
+        let s0 = layout(&[0, 1, 2], 0.0, SIZE, None, 1.0, CORNER);
+        let s1 = layout(&[0, 1, 2], 1.0, SIZE, None, 1.0, CORNER);
         let front_x = s0.iter().find(|r| r.toplevel == 0).unwrap().center_x;
         // At scroll 1, the next card (1) occupies the front slot...
         let c1 = s1.iter().find(|r| r.toplevel == 1).unwrap();
@@ -188,27 +189,27 @@ mod tests {
     #[test]
     fn scroll_clamps_and_rubber_bands() {
         // Past max, positions keep moving but sub-linearly (rubber-band), never NaN.
-        let a = layout(&[0, 1, 2], 5.0, SIZE, None, 1.0);
-        let b = layout(&[0, 1, 2], 50.0, SIZE, None, 1.0);
+        let a = layout(&[0, 1, 2], 5.0, SIZE, None, 1.0, CORNER);
+        let b = layout(&[0, 1, 2], 50.0, SIZE, None, 1.0, CORNER);
         assert!(a.iter().all(|r| r.center_x.is_finite()));
         assert!(b.iter().all(|r| r.center_x.is_finite()));
     }
 
     #[test]
     fn single_card_centers() {
-        let rects = layout(&[7], 0.0, SIZE, None, 1.0);
+        let rects = layout(&[7], 0.0, SIZE, None, 1.0, CORNER);
         assert_eq!(rects.len(), 1);
         assert_eq!(rects[0].toplevel, 7);
     }
 
     #[test]
     fn empty_is_empty() {
-        assert!(layout(&[], 0.0, SIZE, None, 1.0).is_empty());
+        assert!(layout(&[], 0.0, SIZE, None, 1.0, CORNER).is_empty());
     }
 
     #[test]
     fn hit_test_picks_topmost() {
-        let rects = layout(&[0, 1, 2], 1.0, SIZE, None, 1.0);
+        let rects = layout(&[0, 1, 2], 1.0, SIZE, None, 1.0, CORNER);
         let front = rects.iter().max_by_key(|r| r.z).unwrap();
         match hit_test(&rects, front.center_x, front.center_y, SIZE) {
             CardHit::Card(i) => assert_eq!(rects[i].toplevel, front.toplevel),
@@ -218,14 +219,14 @@ mod tests {
 
     #[test]
     fn hit_test_empty_off_card() {
-        let rects = layout(&[0], 0.0, SIZE, None, 1.0);
+        let rects = layout(&[0], 0.0, SIZE, None, 1.0, CORNER);
         assert!(matches!(hit_test(&rects, 5.0, 5.0, SIZE), CardHit::Empty));
     }
 
     #[test]
     fn close_lifts_and_records_only_that_card() {
-        let base = layout(&[0, 1, 2], 0.0, SIZE, None, 1.0);
-        let rects = layout(&[0, 1, 2], 0.0, SIZE, Some((1, 0.5)), 1.0);
+        let base = layout(&[0, 1, 2], 0.0, SIZE, None, 1.0, CORNER);
+        let rects = layout(&[0, 1, 2], 0.0, SIZE, Some((1, 0.5)), 1.0, CORNER);
         let closing = rects.iter().find(|r| r.toplevel == 1).unwrap();
         let base1 = base.iter().find(|r| r.toplevel == 1).unwrap();
         // Records progress and lifts the card upward (smaller y = higher).
