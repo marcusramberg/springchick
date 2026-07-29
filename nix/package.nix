@@ -131,6 +131,11 @@ rustPlatform.buildRustPackage {
 
     install -Dm444 ${./springchick.desktop} \
       $out/share/wayland-sessions/springchick.desktop
+
+    # Sample config with every option at its built-in default. The module
+    # installs this to /etc/springchick/config.toml.example as a starting point.
+    install -Dm444 ${../config.example.toml} \
+      $out/share/springchick/config.example.toml
   '';
 
   # Required by services.displayManager.sessionPackages; must match the

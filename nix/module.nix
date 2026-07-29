@@ -113,6 +113,12 @@ in
       text = cfg.config;
     };
 
+    # Reference config with every option at its default, for users to copy to
+    # config.toml and edit. Kept as .example so it never shadows the built-in
+    # defaults or a user's own /etc/springchick/config.toml.
+    environment.etc."springchick/config.toml.example".source =
+      "${cfg.package}/share/springchick/config.example.toml";
+
     # DRM master + libinput come from the logind seat the greeter hands over.
     hardware.graphics.enable = lib.mkDefault true;
     security.polkit.enable = lib.mkDefault true;

@@ -1,0 +1,70 @@
+# springchick config — sample with every option set to its built-in default.
+#
+# Copy to one of (first found wins):
+#   $XDG_CONFIG_HOME/springchick/config.toml  (or ~/.config/springchick/config.toml)
+#   /etc/springchick/config.toml
+# or point SPRINGCHICK_CONFIG at a file to override the lookup entirely.
+#
+# Unknown keys are ignored; a bad keybinding is dropped with a warning and the
+# rest of the config still applies. Values below match the compiled-in defaults,
+# so this file changes nothing until you edit it.
+
+[main]
+# Output scale advertised to clients. The FP5 panel is dense enough that 1:1
+# rendering is illegibly small.
+dpi = 3
+
+# Seconds of no input before the panel idle-blanks. 0 disables idle blanking
+# (the power button still blanks on demand).
+idle_blank_secs = 600
+
+# Base corner radius (logical px) for shrunken app cards: switcher deck and the
+# drag-lift card. Other card radii scale proportionally from this.
+card_radius = 40.0
+
+[keybinds]
+# Long-press threshold (ms): how long a button is held before its "long" action
+# fires instead of its "short" one.
+long_press_ms = 800
+
+# Each binding needs `key` (xkb keysym name) and `press` ("short" or "long"),
+# plus exactly one of `action` (built-in) or `command` (run through `sh -c`).
+# Optional `mods` = list of ["Ctrl", "Alt", "Shift", "Super"].
+#
+# Built-in actions: close-app, home, toggle-display, volume-up, volume-down,
+# volume-mute.
+
+[[keybinds.binding]]
+key = "XF86AudioRaiseVolume"
+press = "short"
+action = "volume-up"
+
+[[keybinds.binding]]
+key = "XF86AudioRaiseVolume"
+press = "long"
+action = "close-app"
+
+[[keybinds.binding]]
+key = "XF86AudioLowerVolume"
+press = "short"
+action = "volume-down"
+
+[[keybinds.binding]]
+key = "XF86AudioLowerVolume"
+press = "long"
+command = "pkill -SIGRTMIN -f wvkbd-mobintl"
+
+[[keybinds.binding]]
+key = "XF86PowerOff"
+press = "short"
+action = "toggle-display"
+
+[[keybinds.binding]]
+key = "XF86PowerOff"
+press = "long"
+command = "systemctl poweroff"
+
+[[keybinds.binding]]
+key = "Escape"
+press = "short"
+action = "home"
