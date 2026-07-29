@@ -851,6 +851,26 @@ impl State {
         (self.bar_alpha - self.bar_alpha_target()).abs() > f32::EPSILON
     }
 
+    /// True while anything on screen is still changing, so the DRM loop should
+    /// keep priming page-flips. False on a static screen (idle home, foreground
+    /// app that isn't drawing) so the vblank render loop can stop and let the
+    /// CPU/GPU idle. A fresh commit, input, or animation start re-arms rendering
+    /// via `needs_render` and the animation springs below.
+    fn is_animating(&self, now: std::time::Instant) -> bool {
+        self.needs_render
+            || self.ui.needs_animation()
+            || self.osd.is_active(now)
+            || self.bar_fading()
+            || self
+                .grid_anim
+                .values()
+                .any(|(sx, sy)| !sx.is_settled() || !sy.is_settled())
+            || self
+                .dock_anim
+                .values()
+                .any(|(sx, sy)| !sx.is_settled() || !sy.is_settled())
+    }
+
     /// Close whatever app is in front, if any. Backs the `close-app` binding.
     fn close_front_app(&mut self) {
         let Some(id) = ui_state::desired_focus(&self.ui) else {

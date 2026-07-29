@@ -214,7 +214,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     warn!("frame_submitted error: {e}");
                 }
                 app.drm.pending_flip = false;
-                app.render();
+                // Only re-prime a flip if something is still changing. On a
+                // static screen (idle home, quiescent app) this lets the vblank
+                // loop stop instead of rendering every frame forever — the idle
+                // CPU cost was ~60% of one core on-device. A commit/input/
+                // animation start re-arms via `needs_render` in the 2ms timeout.
+                if app.state.is_animating(Instant::now()) {
+                    app.render();
+                }
             }
             DrmEvent::Error(err) => warn!("DRM error: {err}"),
         })
@@ -285,13 +292,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         app.apply_blanking();
         app.apply_gamma();
-        // The OSD fades over time with no other event driving frames; keep
-        // rendering while it is visible. `render` early-returns on pending_flip,
-        // so this tracks vblank cadence rather than the 2ms wake.
-        if app.state.needs_render
-            || app.state.osd.is_active(Instant::now())
-            || app.state.bar_fading()
-        {
+        // Drive frames that no vblank is priming: a fresh commit/input
+        // (`needs_render`) or an animation that started on an otherwise idle
+        // screen. `render` early-returns on pending_flip, so once a flip is in
+        // flight the vblank handler carries the animation and this is a no-op.
+        if app.state.is_animating(Instant::now()) {
             app.render();
         }
     })?;
