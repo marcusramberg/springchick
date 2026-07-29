@@ -168,6 +168,8 @@ impl SkiaGl {
         app_catalog: &HashMap<String, AppEntry>,
         flip_y: bool,
         pressed_app: Option<&str>,
+        launching_app: Option<&str>,
+        launching_elapsed: f32,
         arrange: Option<&ArrangeView>,
         grid_positions: &HashMap<String, (f32, f32)>,
         dock_positions: &HashMap<String, (f32, f32)>,
@@ -252,6 +254,7 @@ impl SkiaGl {
                 &self.font,
                 app_catalog,
                 pressed_app == Some(slot.app_id.as_str()),
+                launch_pulse(launching_app, launching_elapsed, &slot.app_id),
             );
         }
 
@@ -270,6 +273,7 @@ impl SkiaGl {
                 &self.font,
                 app_catalog,
                 pressed_app == Some(slot.app_id.as_str()),
+                launch_pulse(launching_app, launching_elapsed, &slot.app_id),
             );
         }
 
@@ -475,6 +479,12 @@ impl Default for SkiaGl {
 
 // --- Free functions for drawing (avoids borrow issues with &mut self + canvas) ---
 
+/// Seconds-since-launch for `app_id` iff it is the currently launching app,
+/// else `None`. Feeds the breathing pulse phase in [`draw_icon_slot`].
+fn launch_pulse(launching_app: Option<&str>, elapsed: f32, app_id: &str) -> Option<f32> {
+    (launching_app == Some(app_id)).then_some(elapsed)
+}
+
 fn draw_icon_slot(
     canvas: &skia_safe::Canvas,
     slot: &IconSlot,
@@ -482,10 +492,33 @@ fn draw_icon_slot(
     font: &Option<Font>,
     app_catalog: &HashMap<String, AppEntry>,
     pressed: bool,
+    launching: Option<f32>,
 ) {
-    // Press highlight: a translucent rounded backing behind the icon so a tap
-    // reads as "launching" before the zoom animation begins.
-    if pressed {
+    // Launch pulse: while the app is spawning (before its window maps) the icon
+    // breathes — a halo that swells and fades and a gentle scale — so the tap
+    // has visible, ongoing feedback instead of a dead icon. Takes over from the
+    // static press highlight.
+    let mut icon_scale = 1.0;
+    if let Some(elapsed) = launching {
+        // ~0.7 Hz breath: sin over elapsed, remapped to 0..1.
+        let phase = (elapsed * 4.4).sin() * 0.5 + 0.5;
+        let alpha = (40.0 + 70.0 * phase) as u8;
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(Color::from_argb(alpha, 255, 255, 255));
+        let pad = slot.icon_rect.w * (0.14 + 0.20 * phase);
+        let rect = Rect::new(
+            slot.icon_rect.x - pad,
+            slot.icon_rect.y - pad,
+            slot.icon_rect.x + slot.icon_rect.w + pad,
+            slot.icon_rect.y + slot.icon_rect.h + pad,
+        );
+        let rrect = RRect::new_rect_xy(rect, 28.0, 28.0);
+        canvas.draw_rrect(rrect, &paint);
+        icon_scale = 1.0 + 0.06 * phase;
+    } else if pressed {
+        // Press highlight: a translucent rounded backing behind the icon so a
+        // tap reads as "launching" before the zoom animation begins.
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         paint.set_color(Color::from_argb(60, 255, 255, 255));
@@ -500,26 +533,21 @@ fn draw_icon_slot(
         canvas.draw_rrect(rrect, &paint);
     }
 
+    // Icon rect, grown about its center by the launch pulse scale.
+    let cx = slot.icon_rect.x + slot.icon_rect.w / 2.0;
+    let cy = slot.icon_rect.y + slot.icon_rect.h / 2.0;
+    let hw = slot.icon_rect.w / 2.0 * icon_scale;
+    let hh = slot.icon_rect.h / 2.0 * icon_scale;
+    let icon_dst = Rect::new(cx - hw, cy - hh, cx + hw, cy + hh);
+
     // Draw icon image.
     if let Some(image) = icon_images.get(&slot.app_id) {
-        let dst = Rect::new(
-            slot.icon_rect.x,
-            slot.icon_rect.y,
-            slot.icon_rect.x + slot.icon_rect.w,
-            slot.icon_rect.y + slot.icon_rect.h,
-        );
-        canvas.draw_image_rect(image, None, dst, &Paint::default());
+        canvas.draw_image_rect(image, None, icon_dst, &Paint::default());
     } else {
         // Placeholder rect.
         let mut paint = Paint::default();
         paint.set_color(Color::from_argb(255, 80, 80, 100));
-        let rect = Rect::new(
-            slot.icon_rect.x,
-            slot.icon_rect.y,
-            slot.icon_rect.x + slot.icon_rect.w,
-            slot.icon_rect.y + slot.icon_rect.h,
-        );
-        let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
+        let rrect = RRect::new_rect_xy(icon_dst, 20.0, 20.0);
         canvas.draw_rrect(rrect, &paint);
     }
 

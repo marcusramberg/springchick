@@ -283,6 +283,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // nothing animates, so a frame-driven poll would never fire on an idle
         // screen.
         crate::keybinds::poll(&mut app.state);
+        app.state.poll_launching();
         app.state.sync_keyboard_focus();
         // Idle-blank once the timeout elapses. Reuses the power-button DPMS-off
         // path; a power-button press wakes it and resets the countdown (input
@@ -502,6 +503,12 @@ impl App {
                     .pending_launch
                     .as_ref()
                     .map(|p| p.app_id.as_str()),
+                launching_app: self.state.launching.as_ref().map(|l| l.app_id.as_str()),
+                launching_elapsed: self
+                    .state
+                    .launching
+                    .as_ref()
+                    .map_or(0.0, |l| l.started.elapsed().as_secs_f32()),
                 arrange: self.state.arrange.as_ref().map(|a| {
                     let drag_app = a.drag.as_ref().map(|d| d.app_id.as_str());
                     let drag_pos = a.drag.as_ref().map(|d| d.cur);
