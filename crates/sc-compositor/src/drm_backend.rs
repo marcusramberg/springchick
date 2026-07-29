@@ -467,6 +467,9 @@ impl App {
             .collect();
 
         let flip_damage = {
+            // Hoisted so the `arrange` closure captures a plain `usize`, not a
+            // borrow of `self.state` (which clashes with `skia: &mut ...skia`).
+            let cur_home_page = self.state.current_home_page();
             let mut ctx = crate::render::DrawCtx {
                 scene: &prep.scene,
                 app_surface: prep.app_surface.as_ref(),
@@ -505,14 +508,7 @@ impl App {
                                 self.state.output_size.0 as f32,
                                 self.state.output_size.1 as f32,
                             );
-                            let page = if let crate::ui_state::UiState::Home { page, .. } =
-                                &self.state.ui
-                            {
-                                *page
-                            } else {
-                                0
-                            };
-                            let layout = sc_layout::compute(w, h, page, &self.state.model);
+                            let layout = sc_layout::compute(w, h, cur_home_page, &self.state.model);
                             layout.dock_zone.contains(d.cur.0, d.cur.1)
                         })
                         .unwrap_or(false);

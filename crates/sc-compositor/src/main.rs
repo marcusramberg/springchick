@@ -987,6 +987,15 @@ impl State {
         (self.output_size.0 as f32, self.output_size.1 as f32)
     }
 
+    /// Current Home page, or `0` when not on the home screen (app/switcher/etc).
+    fn current_home_page(&self) -> usize {
+        if let UiState::Home { page, .. } = &self.ui {
+            *page
+        } else {
+            0
+        }
+    }
+
     /// Raise `tid` to the foreground with a screen-centered zoom origin,
     /// recording it as the most-recent app. Backs the bar swipe-up and the bar
     /// horizontal quick-switch, which differ only in which toplevel they pick.
@@ -1012,27 +1021,101 @@ impl State {
     /// scene, and gather the app surface, OSD, bar fade, and layer lists. Shared
     /// by the winit and DRM backends, which differ only in how they present the
     /// resulting frame.
-    fn advance_frame(&mut self, dt: f32) -> FramePrep {
-        // Long-press hold: an icon held past HOLD_MS without moving into a
-        // swipe or launch engages arrange mode, picking up the same icon as
-        // the initial drag item so the finger doesn't need to move first.
-        if self.arrange.is_none() && self.pointer_down {
-            if let Some(p) = &self.icon_press {
-                if p.at.elapsed().as_millis() >= HOLD_MS {
-                    let drag = DragItem {
-                        app_id: p.app_id.clone(),
-                        source: p.source,
-                        cur: p.start,
-                        hover: None,
-                        edge_since: None,
-                    };
-                    self.arrange = Some(ArrangeState { drag: Some(drag) });
-                    self.pending_launch = None;
-                    self.page_drag_start = None;
-                    self.icon_press = None;
-                }
+    /// Long-press hold: an icon held past HOLD_MS without moving into a swipe or
+    /// launch engages arrange mode, picking up the same icon as the initial drag
+    /// item so the finger doesn't need to move first.
+    fn maybe_engage_arrange_hold(&mut self) {
+        if self.arrange.is_some() || !self.pointer_down {
+            return;
+        }
+        if let Some(p) = &self.icon_press {
+            if p.at.elapsed().as_millis() >= HOLD_MS {
+                let drag = DragItem {
+                    app_id: p.app_id.clone(),
+                    source: p.source,
+                    cur: p.start,
+                    hover: None,
+                    edge_since: None,
+                };
+                self.arrange = Some(ArrangeState { drag: Some(drag) });
+                self.pending_launch = None;
+                self.page_drag_start = None;
+                self.icon_press = None;
             }
         }
+    }
+
+    /// Edge-dwell page flip: while dragging a reorder icon, holding it against a
+    /// screen edge past EDGE_DWELL_MS flips the home page (auto-repeating), adding
+    /// a trailing page if needed.
+    fn tick_edge_page_flip(&mut self) {
+        const EDGE_FRAC: f32 = 0.06;
+        const EDGE_DWELL_MS: u128 = 400;
+        let Some((cur_x, mut es)) = self
+            .arrange
+            .as_ref()
+            .and_then(|a| a.drag.as_ref())
+            .map(|d| (d.cur.0, d.edge_since))
+        else {
+            return;
+        };
+        let (w, _h) = self.output_size_f();
+        let side = if cur_x < w * EDGE_FRAC {
+            Some(EdgeSide::Left)
+        } else if cur_x > w * (1.0 - EDGE_FRAC) {
+            Some(EdgeSide::Right)
+        } else {
+            None
+        };
+        let now = std::time::Instant::now();
+        let mut flip: Option<i32> = None;
+        match side {
+            None => es = None,
+            Some(s) => match es {
+                Some((since, prev)) if prev == s => {
+                    if now.duration_since(since).as_millis() >= EDGE_DWELL_MS {
+                        flip = Some(if s == EdgeSide::Left { -1 } else { 1 });
+                        es = Some((now, s)); // reset -> auto-repeat
+                    }
+                }
+                _ => es = Some((now, s)),
+            },
+        }
+        // Write edge_since back.
+        if let Some(d) = self.arrange.as_mut().and_then(|a| a.drag.as_mut()) {
+            d.edge_since = es;
+        }
+        // Apply a flip.
+        if let Some(dir) = flip {
+            let cur_page = self.current_home_page();
+            let new_page = if dir < 0 {
+                cur_page.saturating_sub(1)
+            } else if cur_page + 1 < self.model.pages.len() {
+                cur_page + 1
+            } else if self.model.pages.last().is_some_and(|p| p.is_empty()) {
+                // Already a trailing empty page — go to it, don't add more.
+                self.model.pages.len() - 1
+            } else {
+                self.model.pages.push(Vec::new());
+                self.model.pages.len() - 1
+            };
+            let page_count = self.model.pages.len().max(1);
+            if let UiState::Home {
+                page,
+                page_spring,
+                page_count: pc,
+                ..
+            } = &mut self.ui
+            {
+                *page = new_page;
+                *pc = page_count;
+                page_spring.retarget(new_page as f32);
+            }
+        }
+    }
+
+    fn advance_frame(&mut self, dt: f32) -> FramePrep {
+        self.maybe_engage_arrange_hold();
 
         // Lazy-seed the grid-reflow springs on first use so they snap to the
         // current order instead of animating in from (0,0).
@@ -1055,73 +1138,7 @@ impl State {
             self.reflow_dock();
         }
 
-        const EDGE_FRAC: f32 = 0.06;
-        const EDGE_DWELL_MS: u128 = 400;
-        // Edge-dwell page flip while dragging a reorder icon.
-        if let Some((cur_x, mut es)) = self
-            .arrange
-            .as_ref()
-            .and_then(|a| a.drag.as_ref())
-            .map(|d| (d.cur.0, d.edge_since))
-        {
-            let (w, _h) = self.output_size_f();
-            let side = if cur_x < w * EDGE_FRAC {
-                Some(EdgeSide::Left)
-            } else if cur_x > w * (1.0 - EDGE_FRAC) {
-                Some(EdgeSide::Right)
-            } else {
-                None
-            };
-            let now = std::time::Instant::now();
-            let mut flip: Option<i32> = None;
-            match side {
-                None => es = None,
-                Some(s) => match es {
-                    Some((since, prev)) if prev == s => {
-                        if now.duration_since(since).as_millis() >= EDGE_DWELL_MS {
-                            flip = Some(if s == EdgeSide::Left { -1 } else { 1 });
-                            es = Some((now, s)); // reset -> auto-repeat
-                        }
-                    }
-                    _ => es = Some((now, s)),
-                },
-            }
-            // Write edge_since back.
-            if let Some(d) = self.arrange.as_mut().and_then(|a| a.drag.as_mut()) {
-                d.edge_since = es;
-            }
-            // Apply a flip.
-            if let Some(dir) = flip {
-                let cur_page = if let UiState::Home { page, .. } = &self.ui {
-                    *page
-                } else {
-                    0
-                };
-                let new_page = if dir < 0 {
-                    cur_page.saturating_sub(1)
-                } else if cur_page + 1 < self.model.pages.len() {
-                    cur_page + 1
-                } else if self.model.pages.last().is_some_and(|p| p.is_empty()) {
-                    // Already a trailing empty page — go to it, don't add more.
-                    self.model.pages.len() - 1
-                } else {
-                    self.model.pages.push(Vec::new());
-                    self.model.pages.len() - 1
-                };
-                let page_count = self.model.pages.len().max(1);
-                if let UiState::Home {
-                    page,
-                    page_spring,
-                    page_count: pc,
-                    ..
-                } = &mut self.ui
-                {
-                    *page = new_page;
-                    *pc = page_count;
-                    page_spring.retarget(new_page as f32);
-                }
-            }
-        }
+        self.tick_edge_page_flip();
 
         for (sx, sy) in self.grid_anim.values_mut() {
             sx.step(dt);
@@ -1751,6 +1768,9 @@ fn render_frame(
         .map(|(a, (sx, sy))| (a.clone(), (sx.value, sy.value)))
         .collect();
     {
+        // Hoisted so the `arrange` closure below captures a plain `usize`, not a
+        // borrow of `state` (which would clash with `skia: &mut state.skia`).
+        let cur_home_page = state.current_home_page();
         let mut ctx = render::DrawCtx {
             scene: &prep.scene,
             app_surface: prep.app_surface.as_ref(),
@@ -1787,12 +1807,7 @@ fn render_frame(
                             return false;
                         }
                         let (w, h) = (state.output_size.0 as f32, state.output_size.1 as f32);
-                        let page = if let UiState::Home { page, .. } = &state.ui {
-                            *page
-                        } else {
-                            0
-                        };
-                        let layout = sc_layout::compute(w, h, page, &state.model);
+                        let layout = sc_layout::compute(w, h, cur_home_page, &state.model);
                         layout.dock_zone.contains(d.cur.0, d.cur.1)
                     })
                     .unwrap_or(false);

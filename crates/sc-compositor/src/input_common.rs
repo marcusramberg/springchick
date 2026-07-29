@@ -57,7 +57,7 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
         // Arrange-mode drag: track the finger directly, no launch/swipe logic.
         if state.arrange.as_ref().and_then(|a| a.drag.as_ref()).is_some() {
             let (w, h) = state.output_size_f();
-            let page = if let UiState::Home { page, .. } = &state.ui { *page } else { 0 };
+            let page = state.current_home_page();
             let layout = sc_layout::compute(w, h, page, &state.model);
             let over_dock = layout.dock_zone.contains(x, y);
             let hover = if over_dock {
@@ -167,11 +167,7 @@ pub fn on_press(state: &mut State) {
     // take priority over the normal Home hit-testing below.
     if state.arrange.is_some() {
         let (w, h) = state.output_size_f();
-        let page = if let UiState::Home { page, .. } = &state.ui {
-            *page
-        } else {
-            0
-        };
+        let page = state.current_home_page();
         let layout = sc_layout::compute(w, h, page, &state.model);
         match sc_layout::hit_test_arrange(&layout, x, y) {
             sc_layout::Hit::RemoveBadge { app_id } => {
