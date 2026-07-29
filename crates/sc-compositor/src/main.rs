@@ -151,6 +151,18 @@ struct AppToplevel {
     app_id: String,
 }
 
+/// An app spawned from the launcher but not yet mapped to a toplevel. Its Home
+/// icon pulses until the window opens, the process dies, or we time out waiting.
+struct Launching {
+    app_id: String,
+    child: Child,
+    started: std::time::Instant,
+}
+
+/// How long to keep pulsing a launching icon before giving up (a daemonizing or
+/// hung launcher may never map a window; stop breathing forever).
+const LAUNCH_PULSE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Backend-agnostic render snapshot produced by [`State::advance_frame`]. Holds
 /// everything both backends feed into [`render::DrawCtx`]; each backend adds
 /// only its own output transform, Skia flip, and framebuffer binding.
@@ -293,6 +305,9 @@ struct State {
     icon_cache: HashMap<String, IconPixels>,
     toplevels: Vec<Option<AppToplevel>>,
     children: Vec<Child>,
+    /// App spawned and awaiting its first toplevel — drives the pulsing launch
+    /// icon. Cleared when the window maps, the process exits, or on timeout.
+    launching: Option<Launching>,
     history: AppHistory,
     /// Last zoom origin (cached when launching).
     last_origin: ZoomOrigin,
@@ -547,6 +562,7 @@ impl State {
             icon_cache,
             toplevels: Vec::new(),
             children: Vec::new(),
+            launching: None,
             history: AppHistory::new(),
             last_origin: ZoomOrigin::icon((out_w as f32 / 2.0, out_h as f32 / 2.0)),
             output_size,
@@ -727,11 +743,43 @@ impl State {
             }
         }
 
-        // Launch new.
+        // Launch new. Track it as `launching` so its icon pulses until the
+        // window maps or the process dies. A prior in-flight launch is abandoned
+        // (its child moved to the reap list) so only one icon pulses at a time.
         if let Some(entry) = self.app_catalog.get(app_id) {
             let exec = entry.exec.clone();
             if let Some(child) = spawn_app(&exec, &self.wayland_socket) {
-                self.children.push(child);
+                if let Some(prev) = self.launching.take() {
+                    self.children.push(prev.child);
+                }
+                self.launching = Some(Launching {
+                    app_id: app_id.to_string(),
+                    child,
+                    started: std::time::Instant::now(),
+                });
+            }
+        }
+    }
+
+    /// Poll the pulsing launch: reap the child if it exited (launch failed) and
+    /// give up after [`LAUNCH_PULSE_TIMEOUT`] (daemonized/hung launcher). Called
+    /// from both backend loops; the mapped-window case is handled in
+    /// `register_toplevel`.
+    fn poll_launching(&mut self) {
+        // Reap exited children so abandoned/finished launches don't zombie. The
+        // `children` list is drained here (every loop tick) rather than on push,
+        // since a launch's child may map, be abandoned, or time out — all funnel
+        // through here.
+        keybinds::reap(&mut self.children);
+
+        let Some(l) = &mut self.launching else {
+            return;
+        };
+        let exited = matches!(l.child.try_wait(), Ok(Some(_)) | Err(_));
+        let timed_out = l.started.elapsed() >= LAUNCH_PULSE_TIMEOUT;
+        if exited || timed_out {
+            if let Some(prev) = self.launching.take() {
+                self.children.push(prev.child);
             }
         }
     }
@@ -755,6 +803,18 @@ impl State {
         // Enter the output so the client receives its scale factor (`[main].dpi`)
         // and renders a HiDPI buffer instead of 1:1.
         self.output.enter(surface.wl_surface());
+
+        // Window opened — stop the launch pulse. Keep the child handle for
+        // reaping. Match by app_id; an unmatched launch is caught by the timeout.
+        if self
+            .launching
+            .as_ref()
+            .is_some_and(|l| l.app_id == app_id)
+        {
+            if let Some(prev) = self.launching.take() {
+                self.children.push(prev.child);
+            }
+        }
 
         let id = self.toplevels.len();
         self.toplevels.push(Some(AppToplevel {
@@ -859,6 +919,7 @@ impl State {
     fn is_animating(&self, now: std::time::Instant) -> bool {
         self.needs_render
             || self.ui.needs_animation()
+            || self.launching.is_some()
             || self.osd.is_active(now)
             || self.bar_fading()
             || self
@@ -1756,6 +1817,7 @@ fn render_frame(
     let prep = state.advance_frame(1.0 / 90.0);
 
     keybinds::poll(state);
+    state.poll_launching();
     state.sync_keyboard_focus();
 
     let (renderer, mut framebuffer) = backend.bind()?;
@@ -1805,6 +1867,11 @@ fn render_frame(
             layer_popups: &prep.layer_popups,
             bar_alpha: prep.bar_alpha,
             pressed_app: state.pending_launch.as_ref().map(|p| p.app_id.as_str()),
+            launching_app: state.launching.as_ref().map(|l| l.app_id.as_str()),
+            launching_elapsed: state
+                .launching
+                .as_ref()
+                .map_or(0.0, |l| l.started.elapsed().as_secs_f32()),
             arrange: state.arrange.as_ref().map(|a| {
                 let drag_app = a.drag.as_ref().map(|d| d.app_id.as_str());
                 let drag_pos = a.drag.as_ref().map(|d| d.cur);

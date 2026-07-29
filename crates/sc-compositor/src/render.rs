@@ -167,6 +167,11 @@ pub struct DrawCtx<'a> {
     pub bar_alpha: f32,
     /// App id of the icon currently pressed on Home (draws a press highlight).
     pub pressed_app: Option<&'a str>,
+    /// App id of an icon whose app is launching but hasn't mapped a window yet
+    /// (draws a breathing pulse). `None` when nothing is launching.
+    pub launching_app: Option<&'a str>,
+    /// Seconds since the current launch began — drives the pulse phase.
+    pub launching_elapsed: f32,
     /// Arrange-mode view (badges/Done/drag ghost). `None` when arrange mode
     /// is inactive.
     pub arrange: Option<ArrangeView<'a>>,
@@ -421,6 +426,8 @@ pub fn draw_scene(
             ctx.app_catalog,
             ctx.skia_flip_y,
             ctx.pressed_app,
+            ctx.launching_app,
+            ctx.launching_elapsed,
             ctx.arrange.as_ref(),
             ctx.grid_positions,
             ctx.dock_positions,
