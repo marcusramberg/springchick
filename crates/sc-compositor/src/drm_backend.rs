@@ -30,7 +30,7 @@ use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::{Display, ListeningSocket};
 use smithay::utils::{DeviceFd, Size, Transform};
 
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::{accept_client, create_display, State};
 
@@ -554,11 +554,7 @@ impl App {
             Err(e) => warn!("queue_buffer failed: {e}"),
         }
 
-        self.state.stats.record_frame(frame_start.elapsed());
-        if self.state.perf_log && self.state.last_perf_log.elapsed() >= Duration::from_secs(1) {
-            debug!(target: "springchick::perf", "{}", self.state.stats.format_line());
-            self.state.last_perf_log = Instant::now();
-        }
+        self.state.record_and_log_frame(frame_start);
     }
 }
 

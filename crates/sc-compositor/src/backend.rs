@@ -19,7 +19,6 @@ fn parse_dev_window_size(value: Option<&str>) -> (i32, i32) {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum BackendKind {
     Winit,
     Drm,
@@ -27,7 +26,6 @@ pub enum BackendKind {
 
 impl BackendKind {
     /// Chosen by `SPRINGCHICK_BACKEND` env var (default: winit on desktop).
-    #[allow(dead_code)]
     pub fn from_env() -> Self {
         Self::from_value(std::env::var("SPRINGCHICK_BACKEND").as_deref().ok())
     }

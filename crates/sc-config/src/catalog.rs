@@ -1,4 +1,27 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// XDG base data directories, highest precedence first: `$XDG_DATA_HOME`
+/// (default `~/.local/share`), then each `$XDG_DATA_DIRS` entry (default
+/// `/usr/local/share:/usr/share`) left-to-right. Callers append `applications`
+/// (desktop files) or `icons` (themes) to each.
+pub fn xdg_data_dirs() -> Vec<PathBuf> {
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+    let data_dirs = std::env::var("XDG_DATA_DIRS")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
+
+    let mut dirs: Vec<PathBuf> = data_home.into_iter().collect();
+    dirs.extend(
+        data_dirs
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from),
+    );
+    dirs
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppEntry {
