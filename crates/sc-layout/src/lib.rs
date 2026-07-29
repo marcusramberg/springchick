@@ -65,6 +65,17 @@ pub struct Layout {
     pub done_button: Rect,
 }
 
+impl Layout {
+    /// Shift the arrange-mode "Done" button down by a top exclusive-zone
+    /// reservation (e.g. an external status bar's exclusive zone) so it isn't
+    /// drawn underneath it. `top_inset` is in the layout's coordinate space
+    /// (physical px). Must be applied identically to the render and hit-test
+    /// paths so the tap target tracks the drawn button.
+    pub fn shift_done_below(&mut self, top_inset: f32) {
+        self.done_button.y += top_inset.max(0.0);
+    }
+}
+
 /// Result of hit-testing a point against the layout.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Hit {

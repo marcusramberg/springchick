@@ -171,6 +171,7 @@ impl SkiaGl {
         arrange: Option<&ArrangeView>,
         grid_positions: &HashMap<String, (f32, f32)>,
         dock_positions: &HashMap<String, (f32, f32)>,
+        top_inset: f32,
     ) {
         if width <= 0 || height <= 0 {
             return;
@@ -255,7 +256,9 @@ impl SkiaGl {
         }
 
         // Dock and dots don't scroll with pages.
-        let current_layout = sc_layout::compute(width as f32, height as f32, page, model);
+        let mut current_layout = sc_layout::compute(width as f32, height as f32, page, model);
+        // Keep the arrange-mode Done button below a top exclusive-zone bar.
+        current_layout.shift_done_below(top_inset);
 
         let dock_slots =
             visible_dock_slots(&current_layout, dock_positions, width as f32, height as f32);

@@ -168,7 +168,10 @@ pub fn on_press(state: &mut State) {
     if state.arrange.is_some() {
         let (w, h) = state.output_size_f();
         let page = state.current_home_page();
-        let layout = sc_layout::compute(w, h, page, &state.model);
+        let mut layout = sc_layout::compute(w, h, page, &state.model);
+        // Match the render path: Done button is shifted below a top
+        // exclusive-zone bar, so the tap target must move with it.
+        layout.shift_done_below(state.layers.usable(state.dpi).y);
         match sc_layout::hit_test_arrange(&layout, x, y) {
             sc_layout::Hit::RemoveBadge { app_id } => {
                 state.model.hide(&app_id);
