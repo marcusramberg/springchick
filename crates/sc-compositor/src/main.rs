@@ -328,6 +328,9 @@ struct State {
     /// Output scale (`[main].dpi`). Client buffers are `logical * dpi`, so xdg
     /// configure sizes are physical/dpi.
     dpi: i32,
+    /// Base card corner radius in logical px (`[main].card_radius`). Threaded
+    /// into `compute_scene` so the switcher/drag card rounding is configurable.
+    card_radius: f32,
     /// wlr-gamma-control state (night-light / color-temperature clients).
     gamma: gamma_control::GammaControl,
 
@@ -562,6 +565,7 @@ impl State {
             output_size,
             output,
             dpi,
+            card_radius: keybinds::load_card_radius(),
             gamma,
             skia: SkiaGl::new(),
             wayland_socket,
@@ -1146,7 +1150,7 @@ impl State {
             *page_count = self.model.pages.len().max(1);
         }
 
-        let scene = compute_scene(&self.ui, self.output_size);
+        let scene = compute_scene(&self.ui, self.output_size, self.card_radius);
         self.switcher_cards = scene.cards.clone();
         let disc = std::mem::discriminant(&self.ui);
         if self.last_log_state != Some(disc) {

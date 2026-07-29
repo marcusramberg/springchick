@@ -68,6 +68,10 @@ pub struct Config {
     /// Seconds of no input before the panel idle-blanks. `0` disables idle
     /// blanking (the power button still blanks on demand).
     pub idle_blank_secs: u64,
+    /// Base corner radius (logical px) for shrunken app cards: the switcher deck
+    /// and the drag-lift card. Other card radii (drag growth, zoom transitions)
+    /// scale proportionally from this.
+    pub card_radius: f32,
     pub bindings: Vec<Binding>,
 }
 
@@ -82,6 +86,10 @@ pub const DEFAULT_DPI: u32 = 3;
 /// Idle-blank timeout when `[main]` does not say otherwise: 10 minutes. `0` in
 /// the config disables idle blanking entirely.
 pub const DEFAULT_IDLE_BLANK_SECS: u64 = 600;
+
+/// Card corner radius when `[main]` does not say otherwise. Matches the switcher
+/// deck's original hardcoded corner so the shipped look is unchanged.
+pub const DEFAULT_CARD_RADIUS: f32 = 40.0;
 
 /// Shipped defaults, mirroring the user's niri bindings. Defined as TOML so the
 /// documented example and the built-in behavior cannot drift apart.
@@ -147,6 +155,7 @@ struct RawConfigFile {
 struct RawMain {
     dpi: Option<u32>,
     idle_blank_secs: Option<u64>,
+    card_radius: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -177,6 +186,7 @@ impl Config {
                     long_press_ms: DEFAULT_LONG_PRESS_MS,
                     dpi: DEFAULT_DPI,
                     idle_blank_secs: DEFAULT_IDLE_BLANK_SECS,
+                    card_radius: DEFAULT_CARD_RADIUS,
                     bindings: Vec::new(),
                 };
             }
@@ -184,6 +194,7 @@ impl Config {
         let main = file.main.unwrap_or_default();
         let dpi = main.dpi.unwrap_or(DEFAULT_DPI);
         let idle_blank_secs = main.idle_blank_secs.unwrap_or(DEFAULT_IDLE_BLANK_SECS);
+        let card_radius = main.card_radius.unwrap_or(DEFAULT_CARD_RADIUS).max(0.0);
         let raw = file.keybinds.unwrap_or_default();
 
         let bindings = raw.binding.into_iter().filter_map(convert).collect();
@@ -191,6 +202,7 @@ impl Config {
             long_press_ms: raw.long_press_ms.unwrap_or(DEFAULT_LONG_PRESS_MS),
             dpi,
             idle_blank_secs,
+            card_radius,
             bindings,
         }
     }
@@ -399,6 +411,24 @@ mod tests {
         let cfg = Config::parse("[main]\ndpi = 2\nidle_blank_secs = 90\n");
         assert_eq!(cfg.dpi, 2);
         assert_eq!(cfg.idle_blank_secs, 90);
+    }
+
+    #[test]
+    fn card_radius_defaults_when_main_section_absent() {
+        let cfg = Config::parse("[keybinds]\nlong_press_ms = 800\n");
+        assert_eq!(cfg.card_radius, DEFAULT_CARD_RADIUS);
+    }
+
+    #[test]
+    fn card_radius_is_read_from_main_section() {
+        let cfg = Config::parse("[main]\ncard_radius = 12.5\n");
+        assert_eq!(cfg.card_radius, 12.5);
+    }
+
+    #[test]
+    fn negative_card_radius_clamped_to_zero() {
+        let cfg = Config::parse("[main]\ncard_radius = -4.0\n");
+        assert_eq!(cfg.card_radius, 0.0);
     }
 
     #[test]
