@@ -174,7 +174,6 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
             PopupPress::None => surface_under(state, x, y),
         };
         if let Some((surface, origin, scale)) = target {
-            state.input_scale = scale;
             let ptr = state.seat.get_pointer().unwrap();
             // Enter/position the pointer, then press.
             let focus = Point::from((origin.0 / scale, origin.1 / scale));
@@ -221,7 +220,10 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
     }
 }
 
-/// A finger touched down at output-pixel `(x, y)`.
+/// A finger touched down at output-pixel `(x, y)`. Routed per-slot: a slot that
+/// lands on a client surface is recorded in `touch_targets` and forwarded there;
+/// a slot on empty space drives the gesture funnel — but only the first such
+/// slot (`gesture_slot`), since the funnel is single-touch.
 pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
     let target = match popup_press(state, x, y) {
         PopupPress::Consumed => return,
@@ -229,8 +231,9 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
         PopupPress::None => surface_under(state, x, y),
     };
     if let Some((surface, origin, scale)) = target {
-        state.touch_grab = Some(surface.clone());
-        state.input_scale = scale;
+        // Record only the coord scale per slot; presence marks the slot as
+        // client-routed. Smithay's TouchHandle tracks the focused surface itself.
+        state.touch_targets.insert(slot, scale);
         let touch = state.touch.clone();
         let event = DownEvent {
             slot,
@@ -243,18 +246,22 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
         touch.frame(state);
         return;
     }
-    // Not on a client surface — drive the gesture system.
-    input_common::on_motion(state, x, y);
-    input_common::on_press(state);
+    // Not on a client surface — drive the gesture system, but only from the one
+    // slot that owns it. Extra fingers on empty space are ignored until it lifts.
+    if state.gesture_slot.is_none() {
+        state.gesture_slot = Some(slot);
+        input_common::on_motion(state, x, y);
+        input_common::on_press(state);
+    }
 }
 
 /// A finger moved to `(x, y)`.
 pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
-    if state.touch_grab.is_some() {
+    if let Some(&scale) = state.touch_targets.get(&slot) {
         let touch = state.touch.clone();
         let event = MotionEvent {
             slot,
-            location: to_local(x, y, state.input_scale),
+            location: to_local(x, y, scale),
             time,
         };
         // Focus is only used for DnD during motion; we pass none.
@@ -262,12 +269,14 @@ pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
         touch.frame(state);
         return;
     }
-    input_common::on_motion(state, x, y);
+    if state.gesture_slot == Some(slot) {
+        input_common::on_motion(state, x, y);
+    }
 }
 
 /// A finger lifted.
 pub fn up(state: &mut State, slot: TouchSlot, time: u32) {
-    if state.touch_grab.take().is_some() {
+    if state.touch_targets.remove(&slot).is_some() {
         let touch = state.touch.clone();
         let event = UpEvent {
             slot,
@@ -278,5 +287,8 @@ pub fn up(state: &mut State, slot: TouchSlot, time: u32) {
         touch.frame(state);
         return;
     }
-    input_common::on_release(state);
+    if state.gesture_slot == Some(slot) {
+        state.gesture_slot = None;
+        input_common::on_release(state);
+    }
 }
