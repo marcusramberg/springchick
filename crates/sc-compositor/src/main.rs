@@ -279,13 +279,18 @@ struct State {
     layers: layer_shell::LayerShell,
     /// Seat touch handle, for forwarding taps to layer surfaces.
     touch: smithay::input::touch::TouchHandle<Self>,
-    /// Which layer surface (if any) currently owns the touch sequence.
-    touch_grab: Option<WlSurface>,
-    /// Coordinate scale of the surface currently receiving forwarded input
-    /// (`dpi` — OSK layer surfaces render at fractional scale `dpi`, apps at
-    /// output scale `dpi`). Physical input coords are divided by this to reach
-    /// the surface's logical space.
-    input_scale: f64,
+    /// Per-slot touch routing. The phone panel delivers concurrent slots
+    /// (fingers); each slot that lands on a client surface (OSK layer, app,
+    /// popup) gets its own target here so one finger's up never clears another's
+    /// grab, and a stray slot never leaks into the gesture funnel. Slots that
+    /// start on empty space are absent (they drive the gesture funnel instead).
+    /// Value is the slot's coord scale (`dpi`); presence marks it client-routed.
+    touch_targets: std::collections::HashMap<smithay::backend::input::TouchSlot, f64>,
+    /// The single slot currently driving the home-screen gesture funnel
+    /// (`input_common`), which is inherently single-touch. Only this slot feeds
+    /// press/motion/release; additional fingers on empty space are ignored until
+    /// it lifts.
+    gesture_slot: Option<smithay::backend::input::TouchSlot>,
     /// Whether the pointer press is currently held on a client surface.
     pointer_grab: bool,
     /// wl_surfaces of popups that issued an `xdg_popup.grab()`. Only these are
@@ -551,8 +556,8 @@ impl State {
             viewporter_state,
             layers: layer_shell::LayerShell::new(output.clone(), out_w as f32, out_h as f32),
             touch,
-            touch_grab: None,
-            input_scale: 1.0,
+            touch_targets: std::collections::HashMap::new(),
+            gesture_slot: None,
             pointer_grab: false,
             popup_grabs: std::collections::HashSet::new(),
             bar_alpha: 1.0,
