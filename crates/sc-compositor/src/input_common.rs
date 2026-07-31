@@ -124,6 +124,21 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
             }
         }
 
+        // Pull-down to open search: a dominant downward drag on empty Home
+        // space launches the search app. A sideways drag falls through to the
+        // page drag below (still pages); an upward drag does nothing.
+        if matches!(state.ui, UiState::Home { .. }) {
+            if let Some((sx, sy)) = state.search_arm {
+                let (_, h) = state.output_size_f();
+                let dy = y - sy;
+                let dx = (x - sx).abs();
+                if dy > h * 0.08 && dy > dx {
+                    state.open_search();
+                    return;
+                }
+            }
+        }
+
         // Page drag: update spring value to follow finger.
         if let Some(start_x) = state.page_drag_start {
             let dx = x - start_x;
@@ -457,6 +472,9 @@ pub fn on_press(state: &mut State) {
         }
         DownAction::StartPageDrag { start_x } => {
             state.page_drag_start = Some(start_x);
+            // Arm a pull-down: a dominant downward drag from here opens search
+            // (a sideways drag still pages — resolved in `on_motion`).
+            state.search_arm = Some((x, y));
         }
         DownAction::StartBarDrag { start_x, start_y } => {
             state.bar_drag_start = Some((start_x, start_y));
@@ -471,6 +489,8 @@ pub fn on_release(state: &mut State) {
         return;
     };
     state.pointer_down = false;
+    // A completed (or abandoned) gesture disarms the pull-down.
+    state.search_arm = None;
 
     // Live quick-switch release: commit to the revealed neighbour past the
     // threshold, otherwise spring back (reject). Everything below is irrelevant

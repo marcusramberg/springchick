@@ -1,5 +1,16 @@
 use sc_shell_model::ShellModel;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// The springchick state file: `$XDG_CONFIG_HOME/springchick/state.toml`, else
+/// `~/.config/springchick/state.toml`. Single source shared by the compositor
+/// (which reads + writes it) and the search app (which only reads frecency).
+pub fn config_path() -> PathBuf {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    config_home.join("springchick/state.toml")
+}
 
 pub fn save(model: &ShellModel, path: &Path) -> std::io::Result<()> {
     let s = toml::to_string_pretty(model).expect("serialize model");

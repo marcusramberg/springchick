@@ -109,15 +109,24 @@ rustPlatform.buildRustPackage {
   cargoBuildFlags = [
     "-p"
     "sc-compositor"
+    "-p"
+    "sc-search"
   ];
 
   # Workspace tests need no display; keep them on so `nix flake check` is useful.
   cargoTestFlags = [ "--workspace" ];
 
   postInstall = ''
+    # `$out/bin` on PATH so the compositor can spawn the sibling `sc-search`
+    # binary (the pull-down search app) by name.
     wrapProgram $out/bin/springchick \
       --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}" \
-      --prefix PATH : "${lib.makeBinPath [ xwayland ]}"
+      --prefix PATH : "${lib.makeBinPath [ xwayland ]}:$out/bin"
+
+    # The search app is an eframe/glow Wayland client: it needs the GL + wayland
+    # libs at runtime the same way the compositor does.
+    wrapProgram $out/bin/sc-search \
+      --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}"
 
     # Session entry point launched by the display manager. It does not exec the
     # compositor directly: it starts springchick.service (Type=notify) so that

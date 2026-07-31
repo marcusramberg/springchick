@@ -8,6 +8,7 @@ members = [
   "crates/sc-config",
   "crates/sc-layout",
   "crates/sc-icons",
+  "crates/sc-search",
   "crates/sc-compositor",
 ]
 

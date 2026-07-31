@@ -31,6 +31,49 @@ pub struct AppEntry {
     pub icon: String, // icon name or absolute path
 }
 
+/// Scan `.desktop` files from every XDG data dir's `applications/`, highest
+/// precedence first (the first entry seen for a given id wins). Skips
+/// NoDisplay/Hidden/non-Application entries via [`parse_desktop`]. Shared by the
+/// compositor and the search app so both see the same catalog.
+pub fn scan_apps() -> Vec<AppEntry> {
+    let mut entries = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for dir in xdg_data_dirs() {
+        let Ok(read) = std::fs::read_dir(dir.join("applications")) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "desktop") {
+                if let Ok(contents) = std::fs::read_to_string(&path) {
+                    if let Some(app) = parse_desktop(&path, &contents) {
+                        if seen.insert(app.id.clone()) {
+                            entries.push(app);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    entries
+}
+
+/// Strip desktop-file field codes (`%U %f %F %u %i %c %k` etc.) from an Exec
+/// line, collapsing the whitespace left behind. Shared by the compositor's
+/// launcher and the search app.
+pub fn strip_field_codes(exec: &str) -> String {
+    let mut result = String::with_capacity(exec.len());
+    let mut chars = exec.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            chars.next(); // skip the field-code character
+        } else {
+            result.push(ch);
+        }
+    }
+    result.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Parse a single .desktop file. Returns None if it should not be shown
 /// (NoDisplay=true, Hidden=true, or not a launchable Application).
 pub fn parse_desktop(path: &Path, contents: &str) -> Option<AppEntry> {

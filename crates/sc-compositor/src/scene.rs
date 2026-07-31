@@ -55,6 +55,22 @@ impl WindowTransform {
         }
     }
 
+    /// Slide up full-size from below the bottom edge. `progress`: 0 = fully
+    /// below the screen, 1 = centered/fullscreen. Held just under fullscreen
+    /// scale so the shared renderer keeps it on the card path (drawn over home,
+    /// honouring the offset) until the state settles to `App`; the final 2% pop
+    /// to true fullscreen is imperceptible.
+    pub fn slide_up(progress: f32, width: f32, height: f32, card_radius: f32) -> Self {
+        let p = progress.clamp(0.0, 1.0);
+        let ease = 1.0 - (1.0 - p).powi(3); // ease-out
+        Self {
+            scale: 0.98,
+            center_x: width / 2.0,
+            center_y: height * 0.5 + (1.0 - ease) * height,
+            corner_radius: card_radius * (1.0 - ease),
+        }
+    }
+
     /// Freeform grab: window follows finger, pivoting from the bottom.
     /// The finger stays at the bottom edge of the scaled window.
     /// Scale shrinks aggressively so the top moves down toward the finger.
@@ -142,16 +158,24 @@ pub fn compute_scene(
             toplevel,
             progress,
             origin,
+            open_mode,
             ..
-        } => Scene {
-            window: Some((
-                *toplevel,
-                WindowTransform::from_zoom_progress(progress.value, *origin, w, h, card_radius),
-            )),
-            show_home: true,
-            home_page: 0,
-            cards: Vec::new(),
-        },
+        } => {
+            let transform = match open_mode {
+                crate::ui_state::OpenMode::SlideUp => {
+                    WindowTransform::slide_up(progress.value, w, h, card_radius)
+                }
+                crate::ui_state::OpenMode::Zoom => {
+                    WindowTransform::from_zoom_progress(progress.value, *origin, w, h, card_radius)
+                }
+            };
+            Scene {
+                window: Some((*toplevel, transform)),
+                show_home: true,
+                home_page: 0,
+                cards: Vec::new(),
+            }
+        }
         UiState::AppClosing {
             toplevel,
             progress,
@@ -418,6 +442,7 @@ mod tests {
                 toplevel: 0,
                 app_id: "x".into(),
                 origin: ZoomOrigin::icon((100.0, 200.0)),
+                open_mode: crate::ui_state::OpenMode::Zoom,
             },
         );
         assert!(matches!(state, UiState::AppOpening { .. }));
