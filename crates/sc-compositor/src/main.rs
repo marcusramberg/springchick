@@ -1232,8 +1232,8 @@ impl State {
                 self.close_toplevel(toplevel);
             }
             ui_state::Effect::EnterSwitcher => {
-                let cards = self.history.mru_list();
-                info!(target: "springchick::debug", "Effect::EnterSwitcher mru_list={:?}", cards);
+                let cards = self.history.deck_order();
+                info!(target: "springchick::debug", "Effect::EnterSwitcher deck={:?}", cards);
                 transition(&mut self.ui, UiEvent::EnterSwitcher { cards });
             }
             _ => {}

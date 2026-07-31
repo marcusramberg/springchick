@@ -64,6 +64,10 @@ pub enum UiState {
         toplevel: ToplevelId,
         app_id: String,
         tracker: Tracker,
+        /// MRU deck for the live switcher-preview fan (front = current app).
+        /// Populated by the caller after the grab starts (the pure state machine
+        /// has no history); empty until then, which just shows the single card.
+        cards: Vec<ToplevelId>,
     },
     /// Released — spring-animating toward a target.
     Settling {
@@ -73,6 +77,10 @@ pub enum UiState {
         /// Spring animating toward rest (0 = app fullscreen, 1 = target reached).
         progress: Spring,
         origin: ZoomOrigin,
+        /// MRU deck carried from the grab (front = current app). For the
+        /// `Switcher` target it keeps the neighbour fan on screen through the
+        /// settle so the deck doesn't vanish and re-fan; empty otherwise.
+        cards: Vec<ToplevelId>,
     },
     /// Live horizontal quick-switch: current app slides sideways following the
     /// finger, revealing the adjacent MRU app. Rubber-bands when there is no
@@ -94,6 +102,10 @@ pub enum UiState {
         releasing: bool,
         /// Screen-x (px) where the slide began — the point at which `offset` is 0.
         start_x: f32,
+        /// Normalized grab origin (the point the finger first went down on the
+        /// bar). Kept so an upward drag can hand back to `Grabbing` with a
+        /// continuous `up_progress` — see `input_common::revert_quick_switch`.
+        origin: sc_input::Pt,
     },
     /// Switcher deck: fanned stack of running apps.
     Switcher {
@@ -105,8 +117,6 @@ pub enum UiState {
         /// `releasing` = finger let go below the commit threshold, so `Tick`
         /// decays progress back to 0. `None` at rest.
         close: Option<(ToplevelId, f32, bool)>,
-        /// Deck fan-in animation, 0→1 (cards spread out from behind the front).
-        entry: Spring,
     },
 }
 
@@ -147,12 +157,9 @@ impl UiState {
             // once releasing, the spring must tick until it settles.
             UiState::QuickSwitch { releasing, offset, .. } => *releasing && !offset.is_settled(),
             UiState::App { .. } => false,
-            UiState::Switcher {
-                scroll,
-                close,
-                entry,
-                ..
-            } => !scroll.is_settled() || !entry.is_settled() || matches!(close, Some((_, _, true))),
+            UiState::Switcher { scroll, close, .. } => {
+                !scroll.is_settled() || matches!(close, Some((_, _, true)))
+            }
         }
     }
 }
@@ -298,6 +305,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     toplevel,
                     app_id,
                     tracker: Tracker::begin(point),
+                    cards: Vec::new(),
                 };
             }
             Effect::None
@@ -313,12 +321,20 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 toplevel,
                 app_id,
                 tracker,
+                cards,
             } = state
             {
                 let target = sc_input::classify_release(tracker);
                 info!(target: "springchick::debug", "GrabRelease target={:?} progress={} vel={}", target, tracker.up_progress(), tracker.velocity.y);
                 let toplevel = *toplevel;
                 let app_id = app_id.clone();
+                // Keep the deck through the settle only when landing in the
+                // switcher; other targets have no fan.
+                let cards = if matches!(target, NavTarget::Switcher) {
+                    std::mem::take(cards)
+                } else {
+                    Vec::new()
+                };
                 // Start from current drag progress.
                 let current_progress = tracker.up_progress().clamp(0.0, 1.0);
                 let settle_target = match target {
@@ -336,6 +352,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     target,
                     progress,
                     origin: ZoomOrigin::icon((0.5, 0.5)), // will be overridden by caller with actual origin
+                    cards,
                 };
             }
             Effect::None
@@ -354,6 +371,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                         toplevel,
                         app_id,
                         tracker: Tracker::begin(point),
+                        cards: Vec::new(),
                     };
                 }
                 UiState::AppOpening {
@@ -424,11 +442,9 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 UiState::Switcher {
                     scroll,
                     close,
-                    entry,
                     ..
                 } => {
                     scroll.step(dt);
-                    entry.step(dt);
                     // Decay a cancelled close-swipe back to rest.
                     if let Some((_, progress, true)) = close {
                         *progress -= dt / CLOSE_SPRINGBACK_SECS;
@@ -467,17 +483,13 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
         }
         UiEvent::EnterSwitcher { cards } => {
             info!(target: "springchick::debug", "EnterSwitcher cards={:?}", cards);
-            let mut entry = Spring::new(0.0);
-            // Snappy launch so the fan unfolds immediately (no perceived delay
-            // from a slow spring ease-in). Near-critical damping keeps it clean.
-            entry.stiffness = 900.0;
-            entry.damping = 54.0;
-            entry.retarget(1.0);
+            // The settle already held the fan fully open (neighbours fanned
+            // around the front card into their rest slots), so the deck is simply
+            // presented at rest — there is no fan-in animation.
             *state = UiState::Switcher {
                 cards,
                 scroll: Spring::new(0.0),
                 close: None,
-                entry,
             };
             Effect::None
         }
@@ -693,6 +705,7 @@ mod tests {
             toplevel: 3,
             app_id: "x".into(),
             tracker: Tracker::begin(Pt { x: 0.5, y: 0.9 }),
+            cards: Vec::new(),
         };
         transition(&mut state, UiEvent::ToplevelClosed { toplevel: 3 });
         assert!(matches!(state, UiState::Home { .. }));
@@ -762,6 +775,7 @@ mod tests {
             target: sc_input::NavTarget::Switcher,
             progress: Spring::new(1.0),
             origin: ZoomOrigin::icon((0.5, 0.5)),
+            cards: vec![1, 2, 3],
         };
         let eff = transition(&mut state, UiEvent::Tick { dt: 1.0 / 60.0 });
         assert!(matches!(eff, Effect::EnterSwitcher));
@@ -773,9 +787,7 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
-            close: None,
-            entry: Spring::new(1.0),
-        };
+            close: None,        };
         // Events carry the toplevel id, not a positional index — so the render
         // z-order and the MRU order can never desync (regression: tapping the
         // front card used to open the mirrored back card).
@@ -794,9 +806,7 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
-            close: None,
-            entry: Spring::new(1.0),
-        };
+            close: None,        };
         let eff = transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 2 });
         assert_eq!(eff, Effect::CloseToplevel { toplevel: 2 });
         if let UiState::Switcher { cards, .. } = &state {
@@ -811,9 +821,7 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
-            close: None,
-            entry: Spring::new(1.0),
-        };
+            close: None,        };
         transition(
             &mut state,
             UiEvent::SwitcherTapCard {
@@ -829,9 +837,7 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![9],
             scroll: Spring::new(0.0),
-            close: None,
-            entry: Spring::new(1.0),
-        };
+            close: None,        };
         transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 9 });
         assert!(matches!(state, UiState::Home { .. }));
     }
@@ -841,9 +847,7 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2],
             scroll: Spring::new(0.0),
-            close: None,
-            entry: Spring::new(1.0),
-        };
+            close: None,        };
         transition(&mut state, UiEvent::SwitcherDismiss);
         assert!(matches!(state, UiState::Home { .. }));
     }
@@ -853,9 +857,7 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
-            close: None,
-            entry: Spring::new(1.0),
-        };
+            close: None,        };
         transition(&mut state, UiEvent::ToplevelClosed { toplevel: 2 });
         if let UiState::Switcher { cards, .. } = &state {
             assert_eq!(cards, &vec![1, 3]);
@@ -871,9 +873,7 @@ mod tests {
         let state = UiState::Switcher {
             cards: vec![1],
             scroll: spring,
-            close: None,
-            entry: Spring::new(1.0),
-        };
+            close: None,        };
         assert!(state.needs_animation());
     }
 
@@ -882,9 +882,7 @@ mod tests {
         let state = UiState::Switcher {
             cards: vec![5, 3, 1],
             scroll: Spring::new(0.0),
-            close: None,
-            entry: Spring::new(1.0),
-        };
+            close: None,        };
         assert_eq!(state.foreground_toplevel(), Some(5));
     }
 }

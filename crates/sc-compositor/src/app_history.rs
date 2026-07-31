@@ -78,9 +78,21 @@ impl AppHistory {
         self.stack.get(next).copied()
     }
 
-    /// Return the full MRU list (front = most recent).
-    pub fn mru_list(&self) -> Vec<ToplevelId> {
-        self.stack.clone()
+    /// Deck order for the fan / switcher: the **current** app (the one under the
+    /// quick-switch cursor, i.e. what is actually on screen) first, then the rest
+    /// in MRU order. After a quick-switch *browse* the cursor has moved without
+    /// reordering the stack, so `stack[0]` is no longer the current app — using
+    /// the raw stack here would put the wrong card at the front and duplicate the
+    /// current app (front card + a neighbour). Front-first keeps every card unique.
+    pub fn deck_order(&self) -> Vec<ToplevelId> {
+        if self.stack.is_empty() {
+            return Vec::new();
+        }
+        let cur = self.stack[self.cursor.min(self.stack.len() - 1)];
+        let mut v = Vec::with_capacity(self.stack.len());
+        v.push(cur);
+        v.extend(self.stack.iter().copied().filter(|&x| x != cur));
+        v
     }
 }
 
@@ -163,6 +175,20 @@ mod tests {
         h.quick_switch(1); // cursor -> 1
         h.push_foreground(9); // deliberate activation resets walk
         assert_eq!(h.quick_switch(1), Some(3)); // stack [9,3,2,1], cursor 0 -> 1
+    }
+
+    #[test]
+    fn deck_order_puts_current_first_after_browse() {
+        let mut h = AppHistory::new();
+        h.push_foreground(1);
+        h.push_foreground(2);
+        h.push_foreground(3); // stack [3,2,1], cursor 0
+        // No browse: current is the front already.
+        assert_eq!(h.deck_order(), vec![3, 2, 1]);
+        // Browse to the second app (cursor -> 1, current = 2). The deck must
+        // lead with 2 and list each app exactly once — no duplicate front card.
+        h.quick_switch(1);
+        assert_eq!(h.deck_order(), vec![2, 3, 1]);
     }
 
     #[test]
