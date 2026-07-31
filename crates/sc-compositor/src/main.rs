@@ -1244,7 +1244,13 @@ impl State {
             *page_count = self.model.pages.len().max(1);
         }
 
-        let scene = compute_scene(&self.ui, self.output_size, self.card_radius);
+        let usable = self.layers.usable(self.dpi);
+        let scene = compute_scene(
+            &self.ui,
+            self.output_size,
+            (usable.x, usable.y),
+            self.card_radius,
+        );
         self.switcher_cards = scene.cards.clone();
         let disc = std::mem::discriminant(&self.ui);
         if self.last_log_state != Some(disc) {
