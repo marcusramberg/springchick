@@ -157,18 +157,32 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
             transition(&mut state.ui, ev);
         }
 
-        // A grab that turns clearly horizontal becomes the live quick-switch
-        // slide: the current app slides sideways revealing the adjacent app.
+        // A grab that turns clearly horizontal — while still low on the screen —
+        // becomes the live quick-switch slide: the current app slides sideways
+        // revealing the adjacent app. Once the finger has risen past the reveal
+        // point it is a vertical gesture (fan), so don't hijack it into a slide.
         if let UiState::Grabbing { tracker, .. } = &state.ui {
-            if sc_input::live_state(tracker) == sc_input::NavState::QuickSwitching {
+            if tracker.up_progress() < sc_input::thresholds::SWITCHER_REVEAL_PROGRESS
+                && sc_input::live_state(tracker) == sc_input::NavState::QuickSwitching
+            {
                 let (w, _) = state.output_size_f();
                 let start_x = x - tracker.dx() * w; // screen-x where the drag began
-                enter_quick_switch(state, start_x);
+                let origin = tracker.start;
+                enter_quick_switch(state, start_x, origin);
             }
         }
-        // Track the finger while sliding.
-        if matches!(state.ui, UiState::QuickSwitch { .. }) {
-            update_quick_switch(state, x);
+        // Within a quick-switch, pulling up past the reveal point lifts into the
+        // vertical grab gesture (fan / switcher / home) — you can start a
+        // left/right slide and then curve upward into the switcher. Otherwise
+        // keep tracking the horizontal slide.
+        if let UiState::QuickSwitch { origin, .. } = &state.ui {
+            let (_, h) = state.output_size_f();
+            let up = (origin.y - y / h).max(0.0);
+            if up > sc_input::thresholds::SWITCHER_REVEAL_PROGRESS {
+                revert_quick_switch(state, x, y);
+            } else {
+                update_quick_switch(state, x);
+            }
         }
     }
 }
@@ -226,8 +240,9 @@ fn app_id_of(state: &State, tid: ToplevelId) -> Option<(ToplevelId, String)> {
 
 /// Convert the current `Grabbing` (or `App`) state into a live quick-switch,
 /// capturing the adjacent apps from the MRU cursor. `start_x` is the screen-x at
-/// which `offset` is zero. No-op if already switching.
-fn enter_quick_switch(state: &mut State, start_x: f32) {
+/// which `offset` is zero; `origin` is the normalized grab start. No-op if
+/// already switching.
+fn enter_quick_switch(state: &mut State, start_x: f32, origin: sc_input::Pt) {
     let (current, current_app) = match &state.ui {
         UiState::Grabbing {
             toplevel, app_id, ..
@@ -246,6 +261,44 @@ fn enter_quick_switch(state: &mut State, start_x: f32) {
         commit: None,
         releasing: false,
         start_x,
+        origin,
+    };
+}
+
+/// Lift a live quick-switch back into the vertical grab gesture. Reconstructs a
+/// `Tracker` from the original `origin` to the current finger point so
+/// `up_progress` stays continuous into the fan/home logic; the horizontal offset
+/// is dropped (the finger is now driving a vertical gesture). Re-seeds the MRU
+/// fan deck, same as `on_press`.
+fn revert_quick_switch(state: &mut State, x: f32, y: f32) {
+    let (current, app_id, origin) = match &state.ui {
+        UiState::QuickSwitch {
+            current,
+            current_app,
+            origin,
+            ..
+        } => (*current, current_app.clone(), *origin),
+        _ => return,
+    };
+    let (w, h) = state.output_size_f();
+    // Anchor the horizontal origin at the current x so `dx` starts at zero: the
+    // finger is now driving a vertical gesture, and any earlier sideways travel
+    // must not make the release classify as a quick-switch. Keep the original
+    // start.y so `up_progress` continues smoothly into the fan.
+    let mut tracker = sc_input::Tracker::begin(sc_input::Pt {
+        x: x / w,
+        y: origin.y,
+    });
+    tracker.current = sc_input::Pt {
+        x: x / w,
+        y: y / h,
+    };
+    let cards = state.history.deck_order();
+    state.ui = UiState::Grabbing {
+        toplevel: current,
+        app_id,
+        tracker,
+        cards,
     };
 }
 
@@ -367,6 +420,14 @@ pub fn on_press(state: &mut State) {
     match action {
         DownAction::Event(ev) => {
             transition(&mut state.ui, ev);
+            // Seed the live switcher-preview fan with the MRU deck (front =
+            // current app). Same source as Effect::EnterSwitcher.
+            if matches!(state.ui, UiState::Grabbing { ref cards, .. } if cards.is_empty()) {
+                let deck = state.history.deck_order();
+                if let UiState::Grabbing { cards, .. } = &mut state.ui {
+                    *cards = deck;
+                }
+            }
         }
         DownAction::PressIcon {
             app_id,
@@ -641,6 +702,7 @@ pub fn on_release(state: &mut State) {
         tracker,
         toplevel,
         app_id,
+        ..
     } = &state.ui
     {
         Some((

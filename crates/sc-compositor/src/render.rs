@@ -479,7 +479,7 @@ pub fn draw_scene(
                     tl.surface.wl_surface(),
                     (0, 0),
                     ctx.app_scale,
-                    1.0,
+                    card.alpha,
                     Kind::Unspecified,
                 );
             draw_scaled_card(

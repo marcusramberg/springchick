@@ -4,12 +4,14 @@
 /// Release below this upward progress → return to the app. Kept small so it's
 /// easy to clear and land in the fan stack.
 pub const BACK_TO_APP_MAX_PROGRESS: f32 = 0.10;
-/// Switcher card deck begins fanning in at/above this progress (live preview).
-/// Low so the fan previews early and the gesture feels responsive.
-pub const SWITCHER_REVEAL_PROGRESS: f32 = 0.22;
-/// Released at/above this progress goes home — "dragged all the way up". Below
-/// it (and above BACK_TO_APP_MAX) a slow release settles in the fan stack.
-pub const HOME_MIN_PROGRESS: f32 = 0.85;
+/// Switcher card deck begins fading in at/above this progress (live preview).
+/// Low — just past the bottom dock — so neighbours appear as soon as the drag
+/// clears the dock, not several icon rows up.
+pub const SWITCHER_REVEAL_PROGRESS: f32 = 0.12;
+/// Band B/C boundary: at/above this progress the live fan has faded out and a
+/// release goes home. Below it (and above SWITCHER_REVEAL) the fan is live and a
+/// release settles in the switcher stack.
+pub const HOME_MIN_PROGRESS: f32 = 0.35;
 /// Upward velocity (fraction of screen height per second) above which a flick
 /// always flings home regardless of distance. Negative = upward. Only decisive
 /// flicks should go home, so the fan stack stays easy to reach.

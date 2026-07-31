@@ -25,7 +25,10 @@ pub fn live_state(t: &Tracker) -> NavState {
     if horizontal && t.dx().abs() >= th::QUICK_SWITCH_PROGRESS {
         return NavState::QuickSwitching;
     }
-    if t.up_progress() >= th::SWITCHER_REVEAL_PROGRESS {
+    let up = t.up_progress();
+    // Band B (reveal..mid): live fan. Band C (>= mid, past mid-screen): fan
+    // collapses back to the single card heading home, so report plain Grabbing.
+    if up >= th::SWITCHER_REVEAL_PROGRESS && up < th::HOME_MIN_PROGRESS {
         return NavState::SwitcherPreview;
     }
     NavState::Grabbing
@@ -92,13 +95,36 @@ mod tests {
     }
 
     #[test]
-    fn slow_far_drag_settles_in_switcher() {
+    fn slow_mid_drag_settles_in_switcher() {
+        // A slow drag into band B (below mid-screen) lands in the switcher.
         let t = t_with(
             Pt { x: 0.5, y: 0.95 },
-            Pt { x: 0.5, y: 0.35 },
+            Pt { x: 0.5, y: 0.65 }, // up_progress 0.30 (band B, below 0.35 mid)
             Pt { x: 0.0, y: -0.5 },
         );
         assert_eq!(classify_release(&t), NavTarget::Switcher);
+    }
+
+    #[test]
+    fn slow_drag_past_mid_goes_home() {
+        // Past mid-screen (band C), a slow release goes home, not switcher.
+        let t = t_with(
+            Pt { x: 0.5, y: 0.95 },
+            Pt { x: 0.5, y: 0.35 }, // up_progress 0.60 >= 0.50
+            Pt { x: 0.0, y: -0.5 },
+        );
+        assert_eq!(classify_release(&t), NavTarget::Home);
+    }
+
+    #[test]
+    fn live_state_collapses_fan_past_mid() {
+        // Above mid-screen the fan collapses: live_state reports plain Grabbing.
+        let t = t_with(
+            Pt { x: 0.5, y: 0.95 },
+            Pt { x: 0.5, y: 0.35 }, // up_progress 0.60 >= 0.50
+            Pt { x: 0.0, y: -0.5 },
+        );
+        assert_eq!(live_state(&t), NavState::Grabbing);
     }
 
     #[test]
@@ -149,7 +175,7 @@ mod tests {
     fn live_state_reveals_switcher_past_threshold() {
         let t = t_with(
             Pt { x: 0.5, y: 0.95 },
-            Pt { x: 0.5, y: 0.55 },
+            Pt { x: 0.5, y: 0.75 }, // up_progress 0.20 (band B: reveal..mid)
             Pt { x: 0.0, y: -0.5 },
         );
         assert_eq!(live_state(&t), NavState::SwitcherPreview);

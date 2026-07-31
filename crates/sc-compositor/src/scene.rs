@@ -61,9 +61,10 @@ impl WindowTransform {
     pub fn from_tracker(tracker: &Tracker, width: f32, height: f32, card_radius: f32) -> Self {
         let up = tracker.up_progress().clamp(0.0, 1.0);
 
-        // Aggressive scaling: 1.0 → 0.35 over full vertical travel.
-        // Cubic ease-in so it accelerates as you drag further.
-        let scale = 1.0 - up.powf(0.6) * 0.65;
+        // Aggressive scaling: 1.0 → 0.20 over full vertical travel, so the card
+        // shrinks fast enough that its top edge doesn't reach the screen top
+        // early in the drag. Ease-in so it accelerates as you drag further.
+        let scale = 1.0 - up.powf(0.6) * 0.8;
 
         // Finger position in screen coords.
         let finger_x = tracker.current.x * width;
@@ -158,17 +159,63 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32), card_radius: f32)
             cards: Vec::new(),
         },
         UiState::Grabbing {
-            toplevel, tracker, ..
+            toplevel,
+            tracker,
+            cards,
+            ..
         } => {
             let up = tracker.up_progress();
-            Scene {
-                window: Some((
-                    *toplevel,
-                    WindowTransform::from_tracker(tracker, w, h, card_radius),
-                )),
-                show_home: up > 0.05,
-                home_page: 0,
-                cards: Vec::new(),
+            let t = WindowTransform::from_tracker(tracker, w, h, card_radius);
+            // Band B (reveal..mid): unfold the live fan behind the finger-tracked
+            // front card. Bands A/C: just the single card (window path).
+            let preview = matches!(
+                sc_input::live_state(tracker),
+                sc_input::NavState::SwitcherPreview
+            ) && cards.len() > 1;
+            if preview {
+                use sc_input::thresholds as th;
+                // Neighbours sit at full switcher spread and simply fade in after
+                // the reveal point / fade out before the mid collapse (no gradual
+                // unfolding). Linear ramps over FADE either side.
+                const FADE: f32 = 0.06;
+                let a_in = ((up - th::SWITCHER_REVEAL_PROGRESS) / FADE).clamp(0.0, 1.0);
+                let a_out = ((th::HOME_MIN_PROGRESS - up) / FADE).clamp(0.0, 1.0);
+                let alpha = a_in.min(a_out);
+                let mut card_rects = switcher::fan_around(
+                    t.center_x,
+                    t.center_y,
+                    t.scale,
+                    cards,
+                    alpha,
+                    t.corner_radius,
+                    (w, h),
+                );
+                // Front (current) card on top, drawn from the finger transform;
+                // it is the live window, always fully opaque.
+                card_rects.push(switcher::CardRect {
+                    toplevel: *toplevel,
+                    center_x: t.center_x,
+                    center_y: t.center_y,
+                    scale: t.scale,
+                    corner_radius: t.corner_radius,
+                    z: 1000,
+                    close_progress: 0.0,
+                    alpha: 1.0,
+                });
+                card_rects.sort_by_key(|r| r.z);
+                Scene {
+                    window: None,
+                    show_home: true,
+                    home_page: 0,
+                    cards: card_rects,
+                }
+            } else {
+                Scene {
+                    window: Some((*toplevel, t)),
+                    show_home: up > 0.05,
+                    home_page: 0,
+                    cards: Vec::new(),
+                }
             }
         }
         UiState::Settling {
@@ -176,6 +223,7 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32), card_radius: f32)
             target,
             progress,
             origin,
+            cards,
             ..
         } => {
             use sc_input::NavTarget;
@@ -212,6 +260,39 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32), card_radius: f32)
                     )
                 }
             };
+            // Settling into the switcher keeps the neighbour fan on screen the
+            // whole way: neighbours fan around the front card as it zooms into
+            // the deck's front slot, ending exactly at the switcher rest layout
+            // (fan_around and switcher::layout share the same peek gap). The
+            // switcher is then entered already-unfolded, so no vanish/re-fan.
+            if matches!(target, NavTarget::Switcher) && cards.len() > 1 {
+                let mut card_rects = switcher::fan_around(
+                    transform.center_x,
+                    transform.center_y,
+                    transform.scale,
+                    cards,
+                    1.0,
+                    transform.corner_radius,
+                    (w, h),
+                );
+                card_rects.push(switcher::CardRect {
+                    toplevel: *toplevel,
+                    center_x: transform.center_x,
+                    center_y: transform.center_y,
+                    scale: transform.scale,
+                    corner_radius: transform.corner_radius,
+                    z: 1000,
+                    close_progress: 0.0,
+                    alpha: 1.0,
+                });
+                card_rects.sort_by_key(|r| r.z);
+                return Scene {
+                    window: None,
+                    show_home: true,
+                    home_page: 0,
+                    cards: card_rects,
+                };
+            }
             Scene {
                 window: Some((*toplevel, transform)),
                 show_home: !matches!(target, NavTarget::BackToApp),
@@ -226,17 +307,22 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32), card_radius: f32)
             offset,
             ..
         } => {
-            // Both apps ride at full scale; the pair slides horizontally as one.
-            // The current app's centre shifts by `offset` screen-widths; the
-            // revealed neighbour sits flush against it on the appropriate side.
+            // Rounded, FULL-HEIGHT cards with a margin between them slide
+            // horizontally as a pair (no fullscreen pop, but not raised — a pure
+            // left/right slide keeps full height). The current app's centre
+            // shifts by `offset` screen-widths; the revealed neighbour sits one
+            // card-width-plus-gap away on the appropriate side.
+            const QS_SCALE: f32 = 1.0;
+            let gap = w * 0.03;
+            let step = w * QS_SCALE + gap;
             let off = offset.value;
             let cur_cx = w / 2.0 + off * w;
             let mut cards = Vec::with_capacity(2);
-            // Neighbour first (z=0, drawn behind the seam).
+            // Neighbour first (z=0, drawn behind).
             let neighbor = if off > 0.0 {
-                prev.as_ref().map(|(t, _)| (*t, cur_cx - w))
+                prev.as_ref().map(|(t, _)| (*t, cur_cx - step))
             } else if off < 0.0 {
-                next.as_ref().map(|(t, _)| (*t, cur_cx + w))
+                next.as_ref().map(|(t, _)| (*t, cur_cx + step))
             } else {
                 None
             };
@@ -245,24 +331,26 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32), card_radius: f32)
                     toplevel: tid,
                     center_x: cx,
                     center_y: h / 2.0,
-                    scale: 1.0,
-                    corner_radius: 0.0,
+                    scale: QS_SCALE,
+                    corner_radius: card_radius,
                     z: 0,
                     close_progress: 0.0,
+                    alpha: 1.0,
                 });
             }
             cards.push(switcher::CardRect {
                 toplevel: *current,
                 center_x: cur_cx,
                 center_y: h / 2.0,
-                scale: 1.0,
-                corner_radius: 0.0,
+                scale: QS_SCALE,
+                corner_radius: card_radius,
                 z: 1,
                 close_progress: 0.0,
+                alpha: 1.0,
             });
             Scene {
                 window: None,
-                show_home: false,
+                show_home: true,
                 home_page: 0,
                 cards,
             }
@@ -271,11 +359,10 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32), card_radius: f32)
             cards,
             scroll,
             close,
-            entry,
         } => {
             let close_geo = close.map(|(t, p, _)| (t, p));
             let mut card_rects =
-                switcher::layout(cards, scroll.value, (w, h), close_geo, entry.value, card_radius);
+                switcher::layout(cards, scroll.value, (w, h), close_geo, card_radius);
             // Sort ascending z for back-to-front draw order.
             card_rects.sort_by_key(|r| r.z);
             Scene {
@@ -380,12 +467,108 @@ mod tests {
     }
 
     #[test]
+    fn grabbing_band_b_unfolds_live_fan() {
+        // Finger dragged up into band B (reveal..mid) with a multi-app deck:
+        // the scene renders a rounded fan (no window), current card on top.
+        let mut tracker = Tracker::begin(sc_input::Pt { x: 0.5, y: 0.95 });
+        tracker.current = sc_input::Pt { x: 0.5, y: 0.75 }; // up_progress 0.20 (band B)
+        let state = UiState::Grabbing {
+            toplevel: 7,
+            app_id: "x".into(),
+            tracker,
+            cards: vec![7, 3, 1],
+        };
+        let scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
+        assert!(scene.window.is_none(), "fan uses the card path, not window");
+        assert_eq!(scene.cards.len(), 3, "front + two neighbours");
+        // Front card is the current app, sits on top (highest z), fully opaque.
+        let front = scene.cards.iter().max_by_key(|c| c.z).unwrap();
+        assert_eq!(front.toplevel, 7);
+        assert_eq!(front.alpha, 1.0);
+        // Neighbours are faded to full here (mid of band B) and rounded.
+        assert!(scene.cards.iter().all(|c| c.corner_radius > 0.0));
+        let nb = scene.cards.iter().find(|c| c.toplevel == 3).unwrap();
+        assert!(nb.alpha > 0.9, "neighbour visible in mid-band");
+    }
+
+    /// Neighbour opacity at a given up_progress (0 if there is no fan).
+    fn fan_neighbour_alpha(up: f32) -> Option<f32> {
+        let mut tracker = Tracker::begin(sc_input::Pt { x: 0.5, y: 0.95 });
+        tracker.current = sc_input::Pt { x: 0.5, y: 0.95 - up };
+        let state = UiState::Grabbing {
+            toplevel: 7,
+            app_id: "x".into(),
+            tracker,
+            cards: vec![7, 3, 1],
+        };
+        let scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
+        scene.cards.iter().find(|c| c.toplevel == 3).map(|c| c.alpha)
+    }
+
+    #[test]
+    fn grabbing_fan_fades_in_and_out_at_band_edges() {
+        // Below reveal (0.12): no fan at all — the single card is on the window
+        // path, no neighbour cards.
+        assert!(fan_neighbour_alpha(0.05).is_none());
+        // Fading in just above reveal: partially transparent, not popped to full.
+        let a_in = fan_neighbour_alpha(0.15).expect("fan present");
+        assert!(a_in > 0.0 && a_in < 1.0, "fade-in alpha was {a_in}");
+        // Fully opaque through the middle of the band.
+        assert!((fan_neighbour_alpha(0.23).expect("fan present") - 1.0).abs() < 1e-6);
+        // Fading out approaching mid (0.35): partially transparent again.
+        let a_out = fan_neighbour_alpha(0.32).expect("fan present");
+        assert!(a_out > 0.0 && a_out < 1.0, "fade-out alpha was {a_out}");
+    }
+
+    #[test]
+    fn grabbing_band_a_keeps_single_window() {
+        // A tiny lift stays below the reveal threshold: single card, no fan.
+        let mut tracker = Tracker::begin(sc_input::Pt { x: 0.5, y: 0.95 });
+        tracker.current = sc_input::Pt { x: 0.5, y: 0.92 }; // up_progress 0.03
+        let state = UiState::Grabbing {
+            toplevel: 7,
+            app_id: "x".into(),
+            tracker,
+            cards: vec![7, 3, 1],
+        };
+        let scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
+        assert!(scene.window.is_some());
+        assert!(scene.cards.is_empty());
+    }
+
+    #[test]
+    fn quick_switch_cards_are_rounded_and_scaled() {
+        use sc_anim::Spring;
+        let mut offset = Spring::new(0.0);
+        offset.value = -0.2; // sliding left, revealing `next`
+        let state = UiState::QuickSwitch {
+            current: 1,
+            current_app: "a".into(),
+            prev: Some((2, "b".into())),
+            next: Some((3, "c".into())),
+            offset,
+            commit: None,
+            releasing: false,
+            start_x: 0.0,
+            origin: sc_input::Pt { x: 0.5, y: 0.95 },
+        };
+        let scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
+        assert_eq!(scene.cards.len(), 2, "current + revealed neighbour");
+        // Full-height on a pure horizontal slide, but rounded (not a sharp pop).
+        assert!(scene.cards.iter().all(|c| (c.scale - 1.0).abs() < 1e-6 && c.corner_radius > 0.0));
+        // Neighbour separated from the current card by more than a card width
+        // (there is a visible margin, not a flush seam).
+        let cur = scene.cards.iter().find(|c| c.toplevel == 1).unwrap();
+        let nb = scene.cards.iter().find(|c| c.toplevel == 3).unwrap();
+        assert!((nb.center_x - cur.center_x).abs() > TEST_SIZE.0 as f32 * 0.9);
+    }
+
+    #[test]
     fn switcher_scene_has_cards_back_to_front() {
         let state = UiState::Switcher {
             cards: vec![0, 1, 2],
             scroll: sc_anim::Spring::new(0.0),
             close: None,
-            entry: sc_anim::Spring::new(1.0),
         };
         let scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
         assert_eq!(scene.cards.len(), 3);
