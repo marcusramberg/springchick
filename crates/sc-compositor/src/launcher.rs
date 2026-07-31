@@ -1,23 +1,8 @@
 //! App launching: strip field codes from Exec lines and spawn processes.
 
+use sc_config::strip_field_codes;
 use std::process::{Child, Command};
 use tracing::{error, info};
-
-/// Strip desktop-file field codes (%U %f %F %u %i %c %k etc.) from an Exec line.
-pub fn strip_field_codes(exec: &str) -> String {
-    let mut result = String::with_capacity(exec.len());
-    let mut chars = exec.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '%' {
-            // Skip the field code character.
-            chars.next();
-        } else {
-            result.push(ch);
-        }
-    }
-    // Clean up extra whitespace from removed codes.
-    result.split_whitespace().collect::<Vec<_>>().join(" ")
-}
 
 /// Spawn a Wayland client with the given exec line, pointing at our socket.
 pub fn spawn_app(exec: &str, wayland_display: &str) -> Option<Child> {

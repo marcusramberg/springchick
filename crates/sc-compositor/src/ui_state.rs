@@ -30,6 +30,16 @@ impl ZoomOrigin {
     }
 }
 
+/// How an app's open (and close) animation plays.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OpenMode {
+    /// Zoom from the launch origin (icon / switcher card) to fullscreen.
+    Zoom,
+    /// Slide up full-size from below the bottom edge. Used by the pull-down
+    /// search app, which has no icon origin.
+    SlideUp,
+}
+
 /// The shell's UI states, including transition animations.
 #[derive(Clone, Debug)]
 pub enum UiState {
@@ -50,6 +60,8 @@ pub enum UiState {
         progress: Spring,
         /// Zoom origin (center + start scale).
         origin: ZoomOrigin,
+        /// Which entrance animation to play.
+        open_mode: OpenMode,
     },
     /// Fullscreen → icon shrink animation.
     AppClosing {
@@ -167,11 +179,12 @@ impl UiState {
 /// Events the UI state machine accepts.
 #[derive(Clone, Debug)]
 pub enum UiEvent {
-    /// App launched and matched to a toplevel (with zoom animation).
+    /// App launched and matched to a toplevel (with entrance animation).
     AppMapped {
         toplevel: ToplevelId,
         app_id: String,
         origin: ZoomOrigin,
+        open_mode: OpenMode,
     },
     /// Raise an already-running app directly (no zoom animation).
     RaiseApp {
@@ -235,12 +248,14 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             toplevel,
             app_id,
             origin,
+            open_mode,
         } => {
             *state = UiState::AppOpening {
                 toplevel,
                 app_id,
                 progress: Spring::zoom(0.0, 1.0),
                 origin,
+                open_mode,
             };
             Effect::None
         }
@@ -502,6 +517,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                         app_id,
                         progress: Spring::zoom(0.0, 1.0),
                         origin,
+                        open_mode: OpenMode::Zoom,
                     };
                 }
             }
@@ -541,6 +557,7 @@ mod tests {
                 toplevel: 1,
                 app_id: "foo".into(),
                 origin: ZoomOrigin::icon((100.0, 200.0)),
+                open_mode: OpenMode::Zoom,
             },
         );
         assert!(matches!(state, UiState::AppOpening { toplevel: 1, .. }));
@@ -555,6 +572,7 @@ mod tests {
                 toplevel: 1,
                 app_id: "foo".into(),
                 origin: ZoomOrigin::icon((100.0, 200.0)),
+                open_mode: OpenMode::Zoom,
             },
         );
         // Tick until settled.
@@ -687,6 +705,7 @@ mod tests {
                 toplevel: 1,
                 app_id: "foo".into(),
                 origin: ZoomOrigin::icon((100.0, 200.0)),
+                open_mode: OpenMode::Zoom,
             },
         );
         assert!(matches!(state, UiState::AppOpening { .. }));

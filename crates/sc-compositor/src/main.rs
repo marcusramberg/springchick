@@ -27,7 +27,7 @@ use scene::compute_scene;
 use skia_gl::SkiaGl;
 use ui_state::{transition, ToplevelId, UiEvent, UiState, ZoomOrigin};
 
-use sc_config::{catalog, state as config_state, AppEntry};
+use sc_config::{state as config_state, AppEntry};
 use sc_icons::IconPixels;
 use sc_shell_model::ShellModel;
 
@@ -43,6 +43,12 @@ use smithay::delegate_seat;
 use smithay::delegate_shm;
 use smithay::delegate_xdg_decoration;
 use smithay::delegate_xdg_shell;
+use smithay::delegate_input_method_manager;
+use smithay::delegate_text_input_manager;
+use smithay::wayland::input_method::{
+    InputMethodHandler, InputMethodManagerState, PopupSurface as ImePopupSurface,
+};
+use smithay::wayland::text_input::TextInputManagerState;
 use smithay::input::keyboard::XkbConfig;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
@@ -94,21 +100,9 @@ use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
 
-/// `$HOME`, or `/tmp` as a last resort so path construction never panics.
-fn home_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
-}
-
-/// `$XDG_CONFIG_HOME`, else `~/.config`.
-fn config_home() -> PathBuf {
-    std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir().join(".config"))
-}
-
-/// Config file path.
+/// Config file path (shared with the search app via sc-config).
 fn config_path() -> PathBuf {
-    config_home().join("springchick/state.toml")
+    config_state::config_path()
 }
 
 /// Current unix time in whole seconds (monotonic-enough for frecency).
@@ -117,32 +111,6 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// Scan .desktop files from standard locations.
-fn scan_apps() -> Vec<AppEntry> {
-    let mut entries = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    // Search `<datadir>/applications` for each XDG data dir. Dirs are ordered
-    // highest precedence first, so the first .desktop seen for a given id wins.
-    for dir in sc_config::xdg_data_dirs() {
-        let Ok(read) = std::fs::read_dir(dir.join("applications")) else {
-            continue;
-        };
-        for entry in read.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "desktop") {
-                if let Ok(contents) = std::fs::read_to_string(&path) {
-                    if let Some(app) = catalog::parse_desktop(&path, &contents) {
-                        if seen.insert(app.id.clone()) {
-                            entries.push(app);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    entries
 }
 
 /// A running app's toplevel state.
@@ -186,6 +154,13 @@ type PopupRect = (PopupKind, (i32, i32), (i32, i32));
 /// mode engages.
 const HOLD_MS: u128 = 500;
 
+/// xdg `app_id` the pull-down search app sets on its toplevel. The compositor
+/// recognises it to give it a slide-up open animation and to keep it out of the
+/// task switcher / MRU history.
+const SEARCH_APP_ID: &str = "chick.springchick.Search";
+/// Exec line for the search app, spawned on the pull-down gesture.
+const SEARCH_APP_EXEC: &str = "sc-search";
+
 /// A finger held on an icon on Home, waiting to see if it becomes a
 /// long-press (arrange mode). Cancelled if the finger moves past the tap
 /// slop (becomes a swipe) or releases before `HOLD_MS`.
@@ -221,6 +196,7 @@ enum EdgeSide {
 struct ArrangeState {
     drag: Option<DragItem>,
 }
+
 
 /// Main compositor state.
 struct State {
@@ -352,6 +328,14 @@ struct State {
     /// Arrange-mode state (icon reorder/pin/unpin/hide). `None` outside
     /// arrange mode.
     arrange: Option<ArrangeState>,
+    /// Armed pull-down: `(start_x, start_y)` of an empty-space Home press that
+    /// may become a downward drag launching the search app. Cleared once resolved.
+    search_arm: Option<(f32, f32)>,
+    /// Set when the search app was just spawned; the next toplevel to map is
+    /// treated as the search app (slide-up open, no switcher/frecency). winit
+    /// sets the xdg `app_id` after `new_toplevel` fires, so the client id is not
+    /// yet readable at registration — the spawn intent is the reliable signal.
+    expecting_search: bool,
     /// Switcher deck drag state.
     switcher_drag: input_common::SwitcherDrag,
     /// Switcher card rects for hit-testing during drag.
@@ -510,7 +494,7 @@ impl State {
 
         // Load shell model + app catalog.
         let model = config_state::load(&config_path()).unwrap_or_default();
-        let apps = scan_apps();
+        let apps = sc_config::scan_apps();
         let app_catalog: HashMap<String, AppEntry> =
             apps.into_iter().map(|e| (e.id.clone(), e)).collect();
 
@@ -584,6 +568,8 @@ impl State {
             pending_launch: None,
             icon_press: None,
             arrange: None,
+            search_arm: None,
+            expecting_search: false,
             switcher_drag: input_common::SwitcherDrag::None,
             switcher_cards: Vec::new(),
             active_gesture: None,
@@ -718,18 +704,34 @@ impl State {
         self.dock_anim.retain(|app, _| targets.contains_key(app));
     }
 
+    /// Launch the pull-down search app. It is a normal Wayland client (a
+    /// fullscreen xdg toplevel) that owns the search UI, keyboard, and app
+    /// launching; the compositor only spawns it and gives it the usual app
+    /// treatment (focus/touch/animation). Deduped: if it is already running,
+    /// raise it instead of spawning a second copy.
+    fn open_search(&mut self) {
+        self.search_arm = None;
+        self.page_drag_start = None;
+        self.pending_launch = None;
+        for (idx, slot) in self.toplevels.iter().enumerate() {
+            if slot.as_ref().is_some_and(|tl| tl.app_id == SEARCH_APP_ID) {
+                self.raise_toplevel_centered(idx, false);
+                return;
+            }
+        }
+        if let Some(child) = spawn_app(SEARCH_APP_EXEC, &self.wayland_socket) {
+            self.children.push(child);
+            self.expecting_search = true;
+        }
+        self.needs_render = true;
+    }
+
     fn launch_or_raise(&mut self, app_id: &str, origin: ZoomOrigin) {
         self.last_origin = origin;
 
-        // Record usage for frecency (data for future search only — the grid no
-        // longer reorders on launch). Persist directly: after_arrange_edit was
-        // previously the only launch-time save, and a phone shell is usually
-        // killed, not cleanly exited.
-        let now = unix_now();
-        self.model.frecency.record_launch(app_id, now);
-        if let Err(e) = config_state::save(&self.model, &config_path()) {
-            warn!(%e, "failed to save shell model after launch");
-        }
+        // Frecency is recorded when a window actually maps (`register_toplevel`),
+        // so launches from the search app — which exec apps directly rather than
+        // through here — count the same as icon taps.
 
         // Check if already running — raise it (no zoom, instant).
         for (idx, slot) in self.toplevels.iter().enumerate() {
@@ -799,11 +801,29 @@ impl State {
         })
         .unwrap_or_default();
 
-        let app_id = if !wl_app_id.is_empty() && self.app_catalog.contains_key(&wl_app_id) {
+        // The pull-down search app is a normal toplevel but gets special
+        // treatment: a slide-up open, no frecency, and hidden from the switcher.
+        // Detect it by the spawn intent (the app_id isn't set yet at this point)
+        // or, as a fallback, its id. The flag is consumed by the first map.
+        let is_search = self.expecting_search || wl_app_id == SEARCH_APP_ID;
+        self.expecting_search = false;
+        let app_id = if is_search {
+            SEARCH_APP_ID.to_string()
+        } else if !wl_app_id.is_empty() && self.app_catalog.contains_key(&wl_app_id) {
             wl_app_id
         } else {
             format!("unknown_{}", self.toplevels.len())
         };
+
+        // Record frecency as a real app maps (covers both Home icon taps and
+        // launches from the search app, which exec directly). Non-catalog ids
+        // (the search app, unmatched clients) are skipped.
+        if self.app_catalog.contains_key(&app_id) {
+            self.model.frecency.record_launch(&app_id, unix_now());
+            if let Err(e) = config_state::save(&self.model, &config_path()) {
+                warn!(%e, "failed to save shell model after launch");
+            }
+        }
 
         // Enter the output so the client receives its scale factor (`[main].dpi`)
         // and renders a HiDPI buffer instead of 1:1.
@@ -827,13 +847,22 @@ impl State {
             app_id: app_id.clone(),
         }));
 
-        self.history.push_foreground(id);
+        // Keep the search app out of the MRU / task switcher.
+        if !is_search {
+            self.history.push_foreground(id);
+        }
+        let open_mode = if is_search {
+            ui_state::OpenMode::SlideUp
+        } else {
+            ui_state::OpenMode::Zoom
+        };
         transition(
             &mut self.ui,
             UiEvent::AppMapped {
                 toplevel: id,
                 app_id,
                 origin: self.last_origin,
+                open_mode,
             },
         );
 
@@ -1542,6 +1571,42 @@ smithay::delegate_layer_shell!(State);
 smithay::delegate_virtual_keyboard_manager!(State);
 smithay::delegate_fractional_scale!(State);
 smithay::delegate_viewporter!(State);
+delegate_text_input_manager!(State);
+delegate_input_method_manager!(State);
+
+impl InputMethodHandler for State {
+    fn new_popup(&mut self, surface: ImePopupSurface) {
+        // Track the IME popup like an xdg popup so it renders + hit-tests. It is
+        // parented to the focused app surface, so `app_popups()` picks it up
+        // automatically (PopupManager::popups_for_surface yields all kinds).
+        if let Err(e) = self.popups.track_popup(PopupKind::from(surface)) {
+            warn!(?e, "failed to track input-method popup");
+        }
+        self.needs_render = true;
+    }
+
+    fn dismiss_popup(&mut self, surface: ImePopupSurface) {
+        if let Some(parent) = surface.get_parent().map(|p| p.surface.clone()) {
+            let _ = PopupManager::dismiss_popup(&parent, &PopupKind::from(surface));
+        }
+        self.needs_render = true;
+    }
+
+    fn popup_repositioned(&mut self, _surface: ImePopupSurface) {}
+
+    fn parent_geometry(&self, _parent: &WlSurface) -> Rectangle<i32, smithay::utils::Logical> {
+        // Apps are fullscreen within the usable area; report it in logical coords
+        // (client space) so the IME positions its popup over the focused field.
+        let u = self.layers.usable(self.dpi);
+        Rectangle::from_size(
+            (
+                (u.w.round() as i32) / self.dpi,
+                (u.h.round() as i32) / self.dpi,
+            )
+                .into(),
+        )
+    }
+}
 
 impl smithay::wayland::shell::wlr_layer::WlrLayerShellHandler for State {
     fn shell_state(&mut self) -> &mut smithay::wayland::shell::wlr_layer::WlrLayerShellState {
