@@ -114,8 +114,16 @@ impl Scene {
     }
 }
 
-/// Compute the scene from the current UiState.
-pub fn compute_scene(state: &UiState, output_size: (i32, i32), card_radius: f32) -> Scene {
+/// Compute the scene from the current UiState. `usable_origin` is the physical
+/// top-left of the usable area (output minus exclusive-zone reservations, e.g. a
+/// top panel); full-height cards are shifted by it so they sit where the real
+/// fullscreen app sits instead of riding up over the reserved zone.
+pub fn compute_scene(
+    state: &UiState,
+    output_size: (i32, i32),
+    usable_origin: (f32, f32),
+    card_radius: f32,
+) -> Scene {
     let (w, h) = (output_size.0 as f32, output_size.1 as f32);
     match state {
         UiState::Home { page, .. } => Scene {
@@ -316,7 +324,10 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32), card_radius: f32)
             let gap = w * 0.03;
             let step = w * QS_SCALE + gap;
             let off = offset.value;
-            let cur_cx = w / 2.0 + off * w;
+            // Anchor to the usable area so a full-height card lands exactly where
+            // the fullscreen app sits (below a top panel), not raised to y=0.
+            let cur_cx = usable_origin.0 + w / 2.0 + off * w;
+            let cy = usable_origin.1 + h / 2.0;
             let mut cards = Vec::with_capacity(2);
             // Neighbour first (z=0, drawn behind).
             let neighbor = if off > 0.0 {
@@ -330,7 +341,7 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32), card_radius: f32)
                 cards.push(switcher::CardRect {
                     toplevel: tid,
                     center_x: cx,
-                    center_y: h / 2.0,
+                    center_y: cy,
                     scale: QS_SCALE,
                     corner_radius: card_radius,
                     z: 0,
@@ -341,7 +352,7 @@ pub fn compute_scene(state: &UiState, output_size: (i32, i32), card_radius: f32)
             cards.push(switcher::CardRect {
                 toplevel: *current,
                 center_x: cur_cx,
-                center_y: h / 2.0,
+                center_y: cy,
                 scale: QS_SCALE,
                 corner_radius: card_radius,
                 z: 1,
@@ -386,7 +397,7 @@ mod tests {
     #[test]
     fn home_state_no_window() {
         let state = UiState::home(0, 1);
-        let scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
+        let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert!(scene.window.is_none());
         assert!(scene.show_home);
     }
@@ -412,13 +423,13 @@ mod tests {
         assert!(matches!(state, UiState::AppOpening { .. }));
 
         // Tick until the window transform reaches (near-)fullscreen scale.
-        let mut scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
+        let mut scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         for _ in 0..200 {
             if scene.window_covers_screen() {
                 break;
             }
             transition(&mut state, UiEvent::Tick { dt: 1.0 / 60.0 });
-            scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
+            scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         }
 
         assert!(
@@ -437,7 +448,7 @@ mod tests {
             toplevel: 0,
             app_id: "x".into(),
         };
-        let scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
+        let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         let (_, transform) = scene.window.unwrap();
         assert!((transform.scale - 1.0).abs() < 0.001);
         assert!(!scene.show_home);
@@ -478,7 +489,7 @@ mod tests {
             tracker,
             cards: vec![7, 3, 1],
         };
-        let scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
+        let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert!(scene.window.is_none(), "fan uses the card path, not window");
         assert_eq!(scene.cards.len(), 3, "front + two neighbours");
         // Front card is the current app, sits on top (highest z), fully opaque.
@@ -501,7 +512,7 @@ mod tests {
             tracker,
             cards: vec![7, 3, 1],
         };
-        let scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
+        let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         scene.cards.iter().find(|c| c.toplevel == 3).map(|c| c.alpha)
     }
 
@@ -531,7 +542,7 @@ mod tests {
             tracker,
             cards: vec![7, 3, 1],
         };
-        let scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
+        let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert!(scene.window.is_some());
         assert!(scene.cards.is_empty());
     }
@@ -552,7 +563,7 @@ mod tests {
             start_x: 0.0,
             origin: sc_input::Pt { x: 0.5, y: 0.95 },
         };
-        let scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
+        let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert_eq!(scene.cards.len(), 2, "current + revealed neighbour");
         // Full-height on a pure horizontal slide, but rounded (not a sharp pop).
         assert!(scene.cards.iter().all(|c| (c.scale - 1.0).abs() < 1e-6 && c.corner_radius > 0.0));
@@ -570,7 +581,7 @@ mod tests {
             scroll: sc_anim::Spring::new(0.0),
             close: None,
         };
-        let scene = compute_scene(&state, TEST_SIZE, TEST_RADIUS);
+        let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert_eq!(scene.cards.len(), 3);
         assert!(scene.show_home);
         assert!(scene.window.is_none());
