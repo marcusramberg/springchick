@@ -495,18 +495,18 @@ fn draw_icon_slot(
     launching: Option<f32>,
 ) {
     // Launch pulse: while the app is spawning (before its window maps) the icon
-    // breathes — a halo that swells and fades and a gentle scale — so the tap
+    // breathes — a halo that swells and fades  — so the tap
     // has visible, ongoing feedback instead of a dead icon. Takes over from the
     // static press highlight.
     let icon_scale = 1.0;
     if let Some(elapsed) = launching {
-        // ~0.7 Hz breath: halo alpha pulses in place — no swell, no icon scale.
+        // ~0.7 Hz breath: halo alpha pulses in place 
         let phase = (elapsed * 4.4).sin() * 0.5 + 0.5;
         let alpha = (40.0 + 70.0 * phase) as u8;
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         paint.set_color(Color::from_argb(alpha, 255, 255, 255));
-        let pad = slot.icon_rect.w * 0.18;
+        let pad = slot.icon_rect.w * 0.1;
         let rect = Rect::new(
             slot.icon_rect.x - pad,
             slot.icon_rect.y - pad,
