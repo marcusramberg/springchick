@@ -498,15 +498,15 @@ fn draw_icon_slot(
     // breathes — a halo that swells and fades and a gentle scale — so the tap
     // has visible, ongoing feedback instead of a dead icon. Takes over from the
     // static press highlight.
-    let mut icon_scale = 1.0;
+    let icon_scale = 1.0;
     if let Some(elapsed) = launching {
-        // ~0.7 Hz breath: sin over elapsed, remapped to 0..1.
+        // ~0.7 Hz breath: halo alpha pulses in place — no swell, no icon scale.
         let phase = (elapsed * 4.4).sin() * 0.5 + 0.5;
         let alpha = (40.0 + 70.0 * phase) as u8;
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         paint.set_color(Color::from_argb(alpha, 255, 255, 255));
-        let pad = slot.icon_rect.w * (0.14 + 0.20 * phase);
+        let pad = slot.icon_rect.w * 0.18;
         let rect = Rect::new(
             slot.icon_rect.x - pad,
             slot.icon_rect.y - pad,
@@ -515,7 +515,6 @@ fn draw_icon_slot(
         );
         let rrect = RRect::new_rect_xy(rect, 28.0, 28.0);
         canvas.draw_rrect(rrect, &paint);
-        icon_scale = 1.0 + 0.06 * phase;
     } else if pressed {
         // Press highlight: a translucent rounded backing behind the icon so a
         // tap reads as "launching" before the zoom animation begins.

@@ -830,12 +830,11 @@ impl State {
         self.output.enter(surface.wl_surface());
 
         // Window opened — stop the launch pulse. Keep the child handle for
-        // reaping. Match by app_id; an unmatched launch is caught by the timeout.
-        if self
-            .launching
-            .as_ref()
-            .is_some_and(|l| l.app_id == app_id)
-        {
+        // reaping. The mapping client's `wl_app_id` is usually still empty at
+        // first map (so `app_id` here is `unknown_N`), meaning an app_id match
+        // is unreliable. Since only one launch pulses at a time and the search
+        // app is handled separately, stop the pulse on the first non-search map.
+        if !is_search && self.launching.is_some() {
             if let Some(prev) = self.launching.take() {
                 self.children.push(prev.child);
             }
