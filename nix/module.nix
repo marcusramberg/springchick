@@ -76,6 +76,7 @@ in
       environment = {
         # Device backend (DRM/libseat), previously set on the session wrapper.
         SPRINGCHICK_BACKEND = "drm";
+        XDG_CURRENT_DESKTOP = "springchick";
         XDG_SESSION_TYPE = "wayland";
       };
       serviceConfig = {
@@ -122,5 +123,23 @@ in
     # DRM master + libinput come from the logind seat the greeter hands over.
     hardware.graphics.enable = lib.mkDefault true;
     security.polkit.enable = lib.mkDefault true;
+
+    # xdg-desktop-portal: needed for apps like Fractal (Matrix secrets portal),
+    # file pickers, screenshots, etc. `config.springchick` writes
+    # /etc/xdg/xdg-desktop-portal/springchick-portals.conf, matched by
+    # XDG_CURRENT_DESKTOP=springchick set in the service environment.
+    # Mirrors niri.nix upstream.
+    xdg.portal = {
+      enable = true;
+      extraPortals = [ pkgs.xdg-desktop-portal-gnome ];
+      config.springchick = {
+        default = [ "gnome" "gtk" ];
+        # Secret portal only works with gnome backend (delegates to gnome-keyring).
+        "org.freedesktop.impl.portal.Secret" = "gnome-keyring";
+      };
+    };
+
+    # Required for gnome-keyring Secret portal backend.
+    services.gnome.gnome-keyring.enable = lib.mkDefault true;
   };
 }
