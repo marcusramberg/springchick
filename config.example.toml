@@ -22,6 +22,10 @@ idle_blank_secs = 600
 # drag-lift card. Other card radii scale proportionally from this.
 card_radius = 120.0
 
+# Draw a visual indicator under each touch/pointer contact (a filled disc plus a
+# fading ring on release). Off by default; turn on for demo recordings.
+show_touches = false
+
 [keybinds]
 # Long-press threshold (ms): how long a button is held before its "long" action
 # fires instead of its "short" one.

@@ -19,6 +19,7 @@ pub mod scene;
 mod skia_gl;
 mod switcher;
 mod touch;
+mod touch_viz;
 pub mod ui_state;
 
 use app_history::AppHistory;
@@ -144,6 +145,8 @@ pub(crate) struct FramePrep {
     pub layers_above: layer_shell::RenderList,
     pub app_popups: layer_shell::RenderList,
     pub layer_popups: layer_shell::RenderList,
+    /// Touch indicator marks to overlay (empty unless `show_touches`).
+    pub touch_marks: Vec<touch_viz::TouchMark>,
 }
 
 /// A popup and its clamped physical geometry: `(kind, origin, size)`. Chains are
@@ -278,6 +281,12 @@ struct State {
     /// Home-bar opacity, faded to 0 when a bottom exclusive-zone surface (the
     /// on-screen keyboard) covers it.
     bar_alpha: f32,
+    /// Whether to draw the touch indicator overlay (`[main].show_touches`), for
+    /// demo recordings. When true, input events feed `touch_viz`.
+    show_touches: bool,
+    /// Live touch-visualization state (contacts + fading release rings). Only
+    /// populated while `show_touches` is set.
+    touch_viz: touch_viz::TouchViz,
 
     // Shell state
     ui: UiState,
@@ -545,6 +554,8 @@ impl State {
             pointer_grab: false,
             popup_grabs: std::collections::HashSet::new(),
             bar_alpha: 1.0,
+            show_touches: keybinds::load_show_touches(),
+            touch_viz: touch_viz::TouchViz::new(),
             ui,
             model,
             app_catalog,
@@ -1319,6 +1330,19 @@ impl State {
         let app_popups = to_render_list(self.app_popups());
         let layer_popups = to_render_list(self.layer_popups());
 
+        // Touch indicator overlay: prune expired rings, then snapshot the marks
+        // for this frame. Empty (and cheap) unless `show_touches` is on.
+        let touch_marks = if self.show_touches {
+            self.touch_viz.prune(osd_now);
+            // Keep the vblank-driven DRM loop awake while rings are still fading.
+            if self.touch_viz.is_active(osd_now) {
+                self.needs_render = true;
+            }
+            self.touch_viz.marks(osd_now)
+        } else {
+            Vec::new()
+        };
+
         FramePrep {
             scene,
             app_surface,
@@ -1329,6 +1353,7 @@ impl State {
             layers_above,
             app_popups,
             layer_popups,
+            touch_marks,
         }
     }
 }
@@ -1936,6 +1961,7 @@ fn render_frame(
             skia_flip_y: false,
             frame_time: prep.frame_time,
             osd: prep.osd_view,
+            touches: &prep.touch_marks,
             layers_below: &prep.layers_below,
             layers_above: &prep.layers_above,
             app_popups: &prep.app_popups,

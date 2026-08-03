@@ -493,6 +493,7 @@ impl App {
                 skia_flip_y: true,
                 frame_time: prep.frame_time,
                 osd: prep.osd_view,
+                touches: &prep.touch_marks,
                 layers_below: &prep.layers_below,
                 layers_above: &prep.layers_above,
                 app_popups: &prep.app_popups,

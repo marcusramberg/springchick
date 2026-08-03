@@ -152,6 +152,9 @@ pub struct DrawCtx<'a> {
     pub frame_time: u32,
     /// Volume OSD to overlay: `(level, muted, alpha)`. `None` when inactive.
     pub osd: Option<(f32, bool, f32)>,
+    /// Touch indicator marks (physical coords) drawn on top of everything for
+    /// demo recordings. Empty unless `[main].show_touches` is set.
+    pub touches: &'a [crate::touch_viz::TouchMark],
     /// Layer-shell surfaces below the app (background/bottom): `(surface, origin)`.
     pub layers_below: &'a [(WlSurface, (i32, i32))],
     /// Layer-shell surfaces above the app (top/overlay): `(surface, origin)`.
@@ -550,6 +553,13 @@ pub fn draw_scene(
     if let Some((level, muted, alpha)) = ctx.osd {
         ctx.skia
             .draw_osd_overlay(size.w, size.h, level, muted, alpha, ctx.skia_flip_y);
+    }
+
+    // Touch indicators sit on the very top so recordings show them over any
+    // chrome or app.
+    if !ctx.touches.is_empty() {
+        ctx.skia
+            .draw_touches_overlay(size.w, size.h, ctx.touches, ctx.skia_flip_y);
     }
 
     // Send frame callbacks. The foreground app surface always gets one; in the

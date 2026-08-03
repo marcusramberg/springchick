@@ -410,6 +410,57 @@ impl SkiaGl {
             draw_volume_osd(canvas, width as f32, height as f32, level, muted, alpha);
         });
     }
+
+    /// Draw the touch indicator marks on top of everything (demo recordings).
+    pub fn draw_touches_overlay(
+        &mut self,
+        width: i32,
+        height: i32,
+        marks: &[crate::touch_viz::TouchMark],
+        flip_y: bool,
+    ) {
+        if marks.is_empty() {
+            return;
+        }
+        self.with_overlay_canvas(width, height, flip_y, |canvas| {
+            draw_touch_marks(canvas, marks);
+        });
+    }
+}
+
+/// Draw touch indicator marks: a soft filled disc under each held finger, with
+/// a brighter rim, and an expanding stroked ring for each releasing contact.
+/// Colors are a warm accent so contacts stand out over both light and dark UI.
+fn draw_touch_marks(canvas: &skia_safe::Canvas, marks: &[crate::touch_viz::TouchMark]) {
+    // Accent (springchick warm yellow), tuned for legibility on recordings.
+    const R: u8 = 255;
+    const G: u8 = 205;
+    const B: u8 = 70;
+    for m in marks {
+        let a = |x: f32| (x * m.alpha).round().clamp(0.0, 255.0) as u8;
+        if m.filled {
+            // Solid fingertip fill plus a crisper rim for definition.
+            let mut fill = Paint::default();
+            fill.set_anti_alias(true);
+            fill.set_color(Color::from_argb(a(255.0), R, G, B));
+            canvas.draw_circle((m.x, m.y), m.radius, &fill);
+
+            let mut rim = Paint::default();
+            rim.set_anti_alias(true);
+            rim.set_stroke(true);
+            rim.set_stroke_width(m.radius * 0.10);
+            rim.set_color(Color::from_argb(a(255.0), 255, 235, 170));
+            canvas.draw_circle((m.x, m.y), m.radius, &rim);
+        } else {
+            // Expanding release ring.
+            let mut ring = Paint::default();
+            ring.set_anti_alias(true);
+            ring.set_stroke(true);
+            ring.set_stroke_width(m.radius * 0.12);
+            ring.set_color(Color::from_argb(a(255.0), R, G, B));
+            canvas.draw_circle((m.x, m.y), m.radius, &ring);
+        }
+    }
 }
 
 /// Draw the volume OSD track + fill. Geometry is a slim vertical pill hugging

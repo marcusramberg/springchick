@@ -72,6 +72,9 @@ pub struct Config {
     /// and the drag-lift card. Other card radii (drag growth, zoom transitions)
     /// scale proportionally from this.
     pub card_radius: f32,
+    /// Draw a visual indicator under each touch/pointer contact. Off by default;
+    /// meant for demo recordings, not daily use.
+    pub show_touches: bool,
     pub bindings: Vec<Binding>,
 }
 
@@ -87,8 +90,11 @@ pub const DEFAULT_DPI: u32 = 3;
 /// the config disables idle blanking entirely.
 pub const DEFAULT_IDLE_BLANK_SECS: u64 = 600;
 
-/// Card corner radius when `[main]` does not say otherwise. 
+/// Card corner radius when `[main]` does not say otherwise.
 pub const DEFAULT_CARD_RADIUS: f32 = 120.0;
+
+/// Touch indicator is off unless `[main].show_touches = true`.
+pub const DEFAULT_SHOW_TOUCHES: bool = false;
 
 /// Shipped defaults, mirroring the user's niri bindings. Defined as TOML so the
 /// documented example and the built-in behavior cannot drift apart.
@@ -155,6 +161,7 @@ struct RawMain {
     dpi: Option<u32>,
     idle_blank_secs: Option<u64>,
     card_radius: Option<f32>,
+    show_touches: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -186,6 +193,7 @@ impl Config {
                     dpi: DEFAULT_DPI,
                     idle_blank_secs: DEFAULT_IDLE_BLANK_SECS,
                     card_radius: DEFAULT_CARD_RADIUS,
+                    show_touches: DEFAULT_SHOW_TOUCHES,
                     bindings: Vec::new(),
                 };
             }
@@ -194,6 +202,7 @@ impl Config {
         let dpi = main.dpi.unwrap_or(DEFAULT_DPI);
         let idle_blank_secs = main.idle_blank_secs.unwrap_or(DEFAULT_IDLE_BLANK_SECS);
         let card_radius = main.card_radius.unwrap_or(DEFAULT_CARD_RADIUS).max(0.0);
+        let show_touches = main.show_touches.unwrap_or(DEFAULT_SHOW_TOUCHES);
         let raw = file.keybinds.unwrap_or_default();
 
         let bindings = raw.binding.into_iter().filter_map(convert).collect();
@@ -202,6 +211,7 @@ impl Config {
             dpi,
             idle_blank_secs,
             card_radius,
+            show_touches,
             bindings,
         }
     }
