@@ -91,7 +91,7 @@ impl TouchViz {
         let moved = self
             .active
             .get(&id)
-            .map_or(true, |&(px, py)| (px - x).hypot(py - y) >= TRAIL_MIN_STEP);
+            .is_none_or(|&(px, py)| (px - x).hypot(py - y) >= TRAIL_MIN_STEP);
         self.active.insert(id, (x, y));
         if moved {
             self.trail.push(TrailPoint { x, y, at: now });
