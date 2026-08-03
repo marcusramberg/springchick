@@ -46,7 +46,7 @@ impl Keys {
 /// The output scale (`[main].dpi` in `config.toml`) to advertise to clients.
 /// Reads the same config file as [`Keys::load`]; called separately because
 /// the output is created before `Keys` is constructed.
-pub fn load_dpi() -> u32 {
+pub fn load_dpi() -> f64 {
     sc_config::load().dpi
 }
 

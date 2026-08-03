@@ -12,7 +12,7 @@
 //! ## Coordinate spaces
 //!
 //! `LayerMap` works in **logical** coordinates at the output scale. Our output
-//! scale is `Scale::Integer(dpi)`, so logical = physical / `dpi`. The rest of
+//! scale is `Scale::Fractional(dpi)`, so logical = physical / `dpi`. The rest of
 //! the compositor (render origins, touch hit-testing, the Skia home bar) works
 //! in **physical** px, so every geometry we read back from the map is scaled up
 //! by `dpi` here. Layer clients render at fractional scale `dpi` (advertised via
@@ -40,12 +40,12 @@ fn is_mapped(surface: &WlSurface) -> bool {
 }
 
 /// Scale a logical rectangle up to a physical [`Rect`].
-fn to_physical(r: Rectangle<i32, Logical>, dpi: i32) -> Rect {
+fn to_physical(r: Rectangle<i32, Logical>, dpi: f64) -> Rect {
     Rect {
-        x: (r.loc.x * dpi) as f32,
-        y: (r.loc.y * dpi) as f32,
-        w: (r.size.w * dpi) as f32,
-        h: (r.size.h * dpi) as f32,
+        x: (r.loc.x as f64 * dpi) as f32,
+        y: (r.loc.y as f64 * dpi) as f32,
+        w: (r.size.w as f64 * dpi) as f32,
+        h: (r.size.h as f64 * dpi) as f32,
     }
 }
 
@@ -78,7 +78,7 @@ impl LayerShell {
 
     /// Recompute the usable area after an arrange. Returns `Some(new)` if it
     /// changed since the last call (so the caller resizes app toplevels).
-    pub fn usable_changed(&mut self, dpi: i32) -> Option<Rect> {
+    pub fn usable_changed(&mut self, dpi: f64) -> Option<Rect> {
         let now = self.usable(dpi);
         (now != self.last_usable).then(|| {
             self.last_usable = now;
@@ -157,7 +157,7 @@ impl LayerShell {
     }
 
     /// Physical usable area (the output minus exclusive-zone reservations).
-    pub fn usable(&self, dpi: i32) -> Rect {
+    pub fn usable(&self, dpi: f64) -> Rect {
         let zone = layer_map_for_output(&self.output).non_exclusive_zone();
         let mut r = to_physical(zone, dpi);
         // Reserve the home gesture bar's zone off the bottom (physical px, so
@@ -188,7 +188,7 @@ impl LayerShell {
     /// `(surface, physical origin)` pairs for the render pass, split into those
     /// drawn below the app (background, bottom) and above it (top, overlay),
     /// each in bottom-to-top order.
-    pub fn render_lists(&self, dpi: i32) -> (RenderList, RenderList) {
+    pub fn render_lists(&self, dpi: f64) -> (RenderList, RenderList) {
         let map = layer_map_for_output(&self.output);
         let collect = |layers: &[Layer]| {
             let mut v = Vec::new();
@@ -210,7 +210,7 @@ impl LayerShell {
 
     /// Whether any Top/Overlay surface overlaps `rect` (physical) — used to hide
     /// the home bar when the on-screen keyboard covers it.
-    pub fn top_overlaps(&self, rect: Rect, dpi: i32) -> bool {
+    pub fn top_overlaps(&self, rect: Rect, dpi: f64) -> bool {
         let map = layer_map_for_output(&self.output);
         // Collect first so the `layers()` borrow ends before `layer_geometry`.
         let tops: Vec<LayerSurface> = map
@@ -227,7 +227,7 @@ impl LayerShell {
     /// The topmost hit-testable (Top/Overlay) surface containing the physical
     /// point, with its physical origin. Overlay is above Top; within a layer,
     /// later-created is on top.
-    pub fn hit_test(&self, x: f32, y: f32, dpi: i32) -> Option<(WlSurface, (i32, i32))> {
+    pub fn hit_test(&self, x: f32, y: f32, dpi: f64) -> Option<(WlSurface, (i32, i32))> {
         let map = layer_map_for_output(&self.output);
         for wanted in [Layer::Overlay, Layer::Top] {
             // Collect (ending the `layers()` borrow), then `.rev()` on insertion

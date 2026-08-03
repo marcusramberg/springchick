@@ -308,9 +308,10 @@ struct State {
     /// The advertised output. Retained so surfaces can `enter` it (which is how
     /// clients learn the scale factor).
     output: Output,
-    /// Output scale (`[main].dpi`). Client buffers are `logical * dpi`, so xdg
+    /// Output scale (`[main].dpi`), advertised via `wp_fractional_scale` so it
+    /// may be fractional (e.g. 2.5). Client buffers are `logical * dpi`, so xdg
     /// configure sizes are physical/dpi.
-    dpi: i32,
+    dpi: f64,
     /// Base card corner radius in logical px (`[main].card_radius`). Threaded
     /// into `compute_scene` so the switcher/drag card rounding is configurable.
     card_radius: f32,
@@ -487,11 +488,11 @@ impl State {
             size: (out_w, out_h).into(),
             refresh: 90_000, // 90 Hz in mHz
         };
-        let dpi = keybinds::load_dpi().max(1) as i32;
+        let dpi = keybinds::load_dpi().max(1.0);
         output.change_current_state(
             Some(mode),
             None,
-            Some(smithay::output::Scale::Integer(dpi)),
+            Some(smithay::output::Scale::Fractional(dpi)),
             None,
         );
         output.set_preferred(mode);
@@ -911,8 +912,8 @@ impl State {
         // Logical size: client scales its buffer up by `dpi`.
         let usable = self.layers.usable(self.dpi);
         let size = (
-            (usable.w.round() as i32) / self.dpi,
-            (usable.h.round() as i32) / self.dpi,
+            (usable.w as f64 / self.dpi).round() as i32,
+            (usable.h as f64 / self.dpi).round() as i32,
         );
         for slot in self.toplevels.iter().flatten() {
             slot.surface.with_pending_state(|state| {
@@ -1034,8 +1035,14 @@ impl State {
         PopupManager::popups_for_surface(root)
             .map(|(kind, loc)| {
                 let geo = kind.geometry();
-                let size = (geo.size.w * dpi, geo.size.h * dpi);
-                let origin = (root_origin.0 + loc.x * dpi, root_origin.1 + loc.y * dpi);
+                let size = (
+                    (geo.size.w as f64 * dpi).round() as i32,
+                    (geo.size.h as f64 * dpi).round() as i32,
+                );
+                let origin = (
+                    root_origin.0 + (loc.x as f64 * dpi).round() as i32,
+                    root_origin.1 + (loc.y as f64 * dpi).round() as i32,
+                );
                 let clamped = popups::clamp_origin(origin, size, self.output_size);
                 (kind, clamped, size)
             })
@@ -1323,7 +1330,10 @@ impl State {
                 .into_iter()
                 .map(|(kind, origin, _)| {
                     let gloc = kind.geometry().loc;
-                    let render_origin = (origin.0 - gloc.x * dpi, origin.1 - gloc.y * dpi);
+                    let render_origin = (
+                        origin.0 - (gloc.x as f64 * dpi).round() as i32,
+                        origin.1 - (gloc.y as f64 * dpi).round() as i32,
+                    );
                     (kind.wl_surface().clone(), render_origin)
                 })
                 .collect::<layer_shell::RenderList>()
@@ -1401,8 +1411,8 @@ impl XdgShellHandler for State {
         // so an app that opens while an OSK is up already fits above it.
         // xdg sizes are logical; the client scales its buffer up by `dpi`.
         let usable = self.layers.usable(self.dpi);
-        let w = (usable.w.round() as i32) / self.dpi;
-        let h = (usable.h.round() as i32) / self.dpi;
+        let w = (usable.w as f64 / self.dpi).round() as i32;
+        let h = (usable.h as f64 / self.dpi).round() as i32;
         surface.with_pending_state(|state| {
             state.size = Some((w, h).into());
             state.decoration_mode = Some(DecorationMode::ServerSide);
@@ -1550,7 +1560,7 @@ impl FractionalScaleHandler for State {
     /// A client bound `wp_fractional_scale` for a surface: tell it to render at
     /// `dpi`. Constant here (single output), so one send at creation suffices.
     fn new_fractional_scale(&mut self, surface: WlSurface) {
-        let scale = self.dpi as f64;
+        let scale = self.dpi;
         with_states(&surface, |states| {
             with_fractional_scale(states, |fractional| {
                 fractional.set_preferred_scale(scale);
@@ -1625,8 +1635,8 @@ impl InputMethodHandler for State {
         let u = self.layers.usable(self.dpi);
         Rectangle::from_size(
             (
-                (u.w.round() as i32) / self.dpi,
-                (u.h.round() as i32) / self.dpi,
+                (u.w as f64 / self.dpi).round() as i32,
+                (u.h as f64 / self.dpi).round() as i32,
             )
                 .into(),
         )
@@ -1953,7 +1963,7 @@ fn render_frame(
             icon_cache: &state.icon_cache,
             app_catalog: &state.app_catalog,
             toplevels: &state.toplevels,
-            app_scale: state.dpi as f64,
+            app_scale: state.dpi,
             app_origin: {
                 let u = state.layers.usable(state.dpi);
                 (u.x.round() as i32, u.y.round() as i32)

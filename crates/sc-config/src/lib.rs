@@ -69,7 +69,10 @@ pub struct Binding {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub long_press_ms: u64,
-    pub dpi: u32,
+    /// Output scale advertised to clients. Fractional is allowed (e.g. `2.5`):
+    /// the compositor advertises it via `wp_fractional_scale`, and its geometry
+    /// math is `f64` throughout.
+    pub dpi: f64,
     /// Seconds of no input before the panel idle-blanks. `0` disables idle
     /// blanking (the power button still blanks on demand).
     pub idle_blank_secs: u64,
@@ -89,7 +92,7 @@ pub const DEFAULT_LONG_PRESS_MS: u64 = 800;
 
 /// Output scale when `[main]` does not say otherwise: the FP5 panel is dense
 /// enough that 1:1 client rendering (the old M4 behavior) is illegibly small.
-pub const DEFAULT_DPI: u32 = 3;
+pub const DEFAULT_DPI: f64 = 3.0;
 
 /// Idle-blank timeout when `[main]` does not say otherwise: 10 minutes. `0` in
 /// the config disables idle blanking entirely.
@@ -163,7 +166,7 @@ struct RawConfigFile {
 
 #[derive(Deserialize, Default)]
 struct RawMain {
-    dpi: Option<u32>,
+    dpi: Option<f64>,
     idle_blank_secs: Option<u64>,
     card_radius: Option<f32>,
     show_touches: Option<bool>,
@@ -462,13 +465,19 @@ mod tests {
     #[test]
     fn dpi_defaults_to_3_when_main_section_absent() {
         let cfg = Config::parse("[keybinds]\nlong_press_ms = 800\n");
-        assert_eq!(cfg.dpi, 3);
+        assert_eq!(cfg.dpi, 3.0);
     }
 
     #[test]
     fn dpi_is_read_from_main_section() {
         let cfg = Config::parse("[main]\ndpi = 2\n");
-        assert_eq!(cfg.dpi, 2);
+        assert_eq!(cfg.dpi, 2.0);
+    }
+
+    #[test]
+    fn fractional_dpi_is_read_from_main_section() {
+        let cfg = Config::parse("[main]\ndpi = 2.5\n");
+        assert_eq!(cfg.dpi, 2.5);
     }
 
     #[test]
@@ -492,7 +501,7 @@ mod tests {
     #[test]
     fn dpi_and_idle_blank_read_together_from_main() {
         let cfg = Config::parse("[main]\ndpi = 2\nidle_blank_secs = 90\n");
-        assert_eq!(cfg.dpi, 2);
+        assert_eq!(cfg.dpi, 2.0);
         assert_eq!(cfg.idle_blank_secs, 90);
     }
 
