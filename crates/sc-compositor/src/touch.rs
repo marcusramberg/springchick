@@ -32,7 +32,7 @@ fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64)
     //    scale `dpi`, so their logical coord space is physical/dpi — map input by
     //    /dpi. The rect origin is physical, so surface-local = (input-origin)/dpi.
     if let Some((surface, (ox, oy))) = state.layers.hit_test(x, y, state.dpi) {
-        return Some((surface, (ox as f64, oy as f64), state.dpi as f64));
+        return Some((surface, (ox as f64, oy as f64), state.dpi));
     }
     // 2. The focused fullscreen app, except the bottom bar zone (home gesture).
     //    App surfaces render at `dpi`, so input maps into logical space by /dpi.
@@ -45,7 +45,7 @@ fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64)
             if let Some(Some(tl)) = state.toplevels.get(*toplevel) {
                 let u = state.layers.usable(state.dpi);
                 let origin = (u.x as f64, u.y as f64);
-                return Some((tl.surface.wl_surface().clone(), origin, state.dpi as f64));
+                return Some((tl.surface.wl_surface().clone(), origin, state.dpi));
             }
         }
     }
@@ -79,7 +79,7 @@ fn popup_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64), 
     Some((
         kind.wl_surface().clone(),
         (origin.0 as f64, origin.1 as f64),
-        state.dpi as f64,
+        state.dpi,
     ))
 }
 
@@ -140,7 +140,7 @@ fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
             PopupPress::Route(
                 kind.wl_surface().clone(),
                 (origin.0 as f64, origin.1 as f64),
-                state.dpi as f64,
+                state.dpi,
             )
         }
         // Missed every popup. Only a modal (grabbing) popup consumes the tap;

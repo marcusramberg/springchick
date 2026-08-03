@@ -11,7 +11,8 @@
 
 [main]
 # Output scale advertised to clients. The FP5 panel is dense enough that 1:1
-# rendering is illegibly small.
+# rendering is illegibly small. Advertised via wp_fractional_scale, so a
+# fractional value (e.g. 2.5) is allowed, not just whole numbers.
 dpi = 3
 
 # Seconds of no input before the panel idle-blanks. 0 disables idle blanking
