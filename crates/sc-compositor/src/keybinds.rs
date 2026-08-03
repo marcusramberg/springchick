@@ -62,6 +62,12 @@ pub fn load_card_radius() -> f32 {
     load_config().card_radius
 }
 
+/// Whether to draw the touch indicator overlay (`[main].show_touches`). Reads
+/// the same config file as [`Keys::load`].
+pub fn load_show_touches() -> bool {
+    load_config().show_touches
+}
+
 /// Config lookup: `SPRINGCHICK_CONFIG` is a strict override — if set, it is the
 /// only path tried, with no fallthrough to XDG or `/etc` if that file is
 /// missing. Otherwise, in order: `$XDG_CONFIG_HOME/springchick/config.toml`

@@ -7,6 +7,7 @@
 //! funnel unchanged.
 
 use crate::input_common;
+use crate::touch_viz;
 use crate::State;
 use smithay::backend::input::TouchSlot;
 use smithay::input::pointer::{ButtonEvent, MotionEvent as PointerMotionEvent};
@@ -49,6 +50,12 @@ fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64)
         }
     }
     None
+}
+
+/// Stable numeric id for a touch slot, for touch-visualization keying. Kept in
+/// the positive `i32` range so it never aliases [`touch_viz::POINTER_ID`].
+fn slot_id(slot: TouchSlot) -> u64 {
+    i32::from(slot) as u64
 }
 
 /// Convert a physical output-pixel point into a surface's local logical space.
@@ -147,6 +154,12 @@ fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
 /// the cursor while a press is held on it, else drives gestures.
 pub fn pointer_motion(state: &mut State, x: f32, y: f32, time: u32) {
     state.last_pointer_pos = Some((x, y));
+    // Track the pointer as a touch contact only while a button is held (a
+    // gesture press or a client grab), so a bare hover leaves no mark.
+    if state.show_touches && (state.pointer_grab || state.pointer_down) {
+        state.touch_viz.contact(touch_viz::POINTER_ID, x, y);
+        state.needs_render = true;
+    }
     if state.pointer_grab {
         if let Some((surface, origin, scale)) = surface_under(state, x, y) {
             let ptr = state.seat.get_pointer().unwrap();
@@ -167,6 +180,16 @@ pub fn pointer_motion(state: &mut State, x: f32, y: f32, time: u32) {
 /// Pointer button changed (winit/desktop).
 pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) {
     let (x, y) = state.last_pointer_pos.unwrap_or((0.0, 0.0));
+    if state.show_touches {
+        if pressed {
+            state.touch_viz.contact(touch_viz::POINTER_ID, x, y);
+        } else {
+            state
+                .touch_viz
+                .release(touch_viz::POINTER_ID, std::time::Instant::now());
+        }
+        state.needs_render = true;
+    }
     if pressed {
         let target = match popup_press(state, x, y) {
             PopupPress::Consumed => return,
@@ -225,6 +248,10 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
 /// a slot on empty space drives the gesture funnel — but only the first such
 /// slot (`gesture_slot`), since the funnel is single-touch.
 pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
+    if state.show_touches {
+        state.touch_viz.contact(slot_id(slot), x, y);
+        state.needs_render = true;
+    }
     let target = match popup_press(state, x, y) {
         PopupPress::Consumed => return,
         PopupPress::Route(surface, origin, scale) => Some((surface, origin, scale)),
@@ -257,6 +284,10 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
 
 /// A finger moved to `(x, y)`.
 pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
+    if state.show_touches {
+        state.touch_viz.contact(slot_id(slot), x, y);
+        state.needs_render = true;
+    }
     if let Some(&scale) = state.touch_targets.get(&slot) {
         let touch = state.touch.clone();
         let event = MotionEvent {
@@ -276,6 +307,10 @@ pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
 
 /// A finger lifted.
 pub fn up(state: &mut State, slot: TouchSlot, time: u32) {
+    if state.show_touches {
+        state.touch_viz.release(slot_id(slot), std::time::Instant::now());
+        state.needs_render = true;
+    }
     if state.touch_targets.remove(&slot).is_some() {
         let touch = state.touch.clone();
         let event = UpEvent {
