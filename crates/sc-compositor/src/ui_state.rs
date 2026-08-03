@@ -479,17 +479,15 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     offset,
                     releasing,
                     ..
-                } => {
-                    if *releasing {
-                        offset.step(dt);
-                        if offset.is_settled() {
-                            // Land on the committed neighbour, or fall back to the
-                            // app we started on (rejected swipe).
-                            let (toplevel, app_id) = commit
-                                .take()
-                                .unwrap_or_else(|| (*current, current_app.clone()));
-                            *state = UiState::App { toplevel, app_id };
-                        }
+                } if *releasing => {
+                    offset.step(dt);
+                    if offset.is_settled() {
+                        // Land on the committed neighbour, or fall back to the
+                        // app we started on (rejected swipe).
+                        let (toplevel, app_id) = commit
+                            .take()
+                            .unwrap_or_else(|| (*current, current_app.clone()));
+                        *state = UiState::App { toplevel, app_id };
                     }
                 }
                 _ => {}

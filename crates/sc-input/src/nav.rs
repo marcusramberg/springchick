@@ -28,7 +28,7 @@ pub fn live_state(t: &Tracker) -> NavState {
     let up = t.up_progress();
     // Band B (reveal..mid): live fan. Band C (>= mid, past mid-screen): fan
     // collapses back to the single card heading home, so report plain Grabbing.
-    if up >= th::SWITCHER_REVEAL_PROGRESS && up < th::HOME_MIN_PROGRESS {
+    if (th::SWITCHER_REVEAL_PROGRESS..th::HOME_MIN_PROGRESS).contains(&up) {
         return NavState::SwitcherPreview;
     }
     NavState::Grabbing

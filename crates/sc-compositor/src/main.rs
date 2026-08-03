@@ -46,10 +46,7 @@ use smithay::delegate_xdg_decoration;
 use smithay::delegate_xdg_shell;
 use smithay::delegate_input_method_manager;
 use smithay::delegate_text_input_manager;
-use smithay::wayland::input_method::{
-    InputMethodHandler, InputMethodManagerState, PopupSurface as ImePopupSurface,
-};
-use smithay::wayland::text_input::TextInputManagerState;
+use smithay::wayland::input_method::{InputMethodHandler, PopupSurface as ImePopupSurface};
 use smithay::wayland::image_capture_source::{
     ImageCaptureSource, ImageCaptureSourceHandler, ImageCaptureSourceState,
     OutputCaptureSourceHandler, OutputCaptureSourceState,
@@ -166,6 +163,9 @@ pub(crate) struct FramePrep {
 /// ordered root→leaf.
 type PopupRect = (PopupKind, (i32, i32), (i32, i32));
 
+/// Capture buffer formats to advertise: `(render node, [(fourcc, modifiers)])`.
+type CaptureFormats = (DrmNode, Vec<(Fourcc, Vec<Modifier>)>);
+
 /// Hold duration (milliseconds) an icon press must survive before arrange
 /// mode engages.
 const HOLD_MS: u128 = 500;
@@ -281,7 +281,7 @@ struct State {
     /// Capture buffer formats to advertise, set by the DRM backend once the
     /// renderer exists: `(render node, [(fourcc, modifiers)])`. `None` on the
     /// winit backend (no dmabuf capture there).
-    capture_formats: Option<(DrmNode, Vec<(Fourcc, Vec<Modifier>)>)>,
+    capture_formats: Option<CaptureFormats>,
     /// Capture frames awaiting a blit; drained by the DRM render loop each frame.
     pending_captures: Vec<CaptureFrame>,
     /// Tracked layer surfaces + reserved-area bookkeeping.
