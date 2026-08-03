@@ -334,7 +334,7 @@ fn advance_gesture(state: &mut State) {
         g.started = true;
     }
 
-    let (px, py) = lerp(g.from, g.to, t);
+    let (px, py) = sc_anim::lerp_point(g.from, g.to, t);
     input_common::on_motion(state, px, py);
 
     if t >= 1.0 {
@@ -404,12 +404,6 @@ fn idle(state: &State) -> bool {
     )
 }
 
-/// Interpolate a swipe point at normalized time `t`. `t` is clamped to `[0,1]`.
-pub fn lerp(from: (f32, f32), to: (f32, f32), t: f32) -> (f32, f32) {
-    let t = t.clamp(0.0, 1.0);
-    (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
-}
-
 /// Normalized swipe progress for `elapsed_ms` of a `dur_ms` gesture. Clamped to
 /// `[0,1]`; a zero-duration swipe is immediately complete (`1.0`).
 pub fn swipe_t(elapsed_ms: f32, dur_ms: u32) -> f32 {
@@ -431,19 +425,6 @@ mod tests {
 
     const W: f32 = 1224.0;
     const H: f32 = 2700.0;
-
-    #[test]
-    fn lerp_endpoints_and_midpoint() {
-        assert_eq!(lerp((0.0, 0.0), (10.0, 20.0), 0.0), (0.0, 0.0));
-        assert_eq!(lerp((0.0, 0.0), (10.0, 20.0), 1.0), (10.0, 20.0));
-        assert_eq!(lerp((0.0, 0.0), (10.0, 20.0), 0.5), (5.0, 10.0));
-    }
-
-    #[test]
-    fn lerp_clamps_t() {
-        assert_eq!(lerp((0.0, 0.0), (10.0, 0.0), -1.0), (0.0, 0.0));
-        assert_eq!(lerp((0.0, 0.0), (10.0, 0.0), 2.0), (10.0, 0.0));
-    }
 
     #[test]
     fn swipe_t_progresses_and_clamps() {

@@ -28,9 +28,9 @@ use scene::compute_scene;
 use skia_gl::SkiaGl;
 use ui_state::{transition, ToplevelId, UiEvent, UiState, ZoomOrigin};
 
-use sc_config::{state as config_state, AppEntry};
+use sc_catalog::AppEntry;
 use sc_icons::IconPixels;
-use sc_shell_model::ShellModel;
+use sc_shell_model::{persist, ShellModel};
 
 use smithay::backend::input::{Event, InputEvent, KeyboardKeyEvent};
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexProgram};
@@ -101,9 +101,10 @@ use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
 
-/// Config file path (shared with the search app via sc-config).
-fn config_path() -> PathBuf {
-    config_state::config_path()
+/// Persisted-state file path (`state.toml`; shared read-only with the search
+/// app). Distinct from `config.toml`, which `sc-config` parses.
+fn state_path() -> PathBuf {
+    persist::state_path()
 }
 
 /// Current unix time in whole seconds (monotonic-enough for frecency).
@@ -502,8 +503,8 @@ impl State {
         let gamma = gamma_control::GammaControl::new(&dh, 256);
 
         // Load shell model + app catalog.
-        let model = config_state::load(&config_path()).unwrap_or_default();
-        let apps = sc_config::scan_apps();
+        let model = persist::load(&state_path()).unwrap_or_default();
+        let apps = sc_catalog::scan_apps();
         let app_catalog: HashMap<String, AppEntry> =
             apps.into_iter().map(|e| (e.id.clone(), e)).collect();
 
@@ -626,7 +627,7 @@ impl State {
     /// No frecency recompute — grid order is now manual.
     fn after_arrange_edit(&mut self) {
         self.model.repack();
-        if let Err(e) = config_state::save(&self.model, &config_path()) {
+        if let Err(e) = persist::save(&self.model, &state_path()) {
             warn!(%e, "failed to save shell model after arrange edit");
         }
         self.reflow_grid();
@@ -831,7 +832,7 @@ impl State {
         // (the search app, unmatched clients) are skipped.
         if self.app_catalog.contains_key(&app_id) {
             self.model.frecency.record_launch(&app_id, unix_now());
-            if let Err(e) = config_state::save(&self.model, &config_path()) {
+            if let Err(e) = persist::save(&self.model, &state_path()) {
                 warn!(%e, "failed to save shell model after launch");
             }
         }
@@ -1872,7 +1873,7 @@ fn run_winit() {
     }
 
     // Save state.
-    if let Err(e) = config_state::save(&state.model, &config_path()) {
+    if let Err(e) = persist::save(&state.model, &state_path()) {
         warn!(%e, "failed to save shell model");
     }
 

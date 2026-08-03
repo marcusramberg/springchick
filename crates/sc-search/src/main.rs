@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use eframe::egui;
-use sc_config::AppEntry;
+use sc_catalog::AppEntry;
 use sc_shell_model::FrecencyStore;
 
 /// xdg app_id — the compositor keys on this to slide it in and hide it from the
@@ -51,9 +51,9 @@ struct SearchApp {
 impl SearchApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let catalog: HashMap<String, AppEntry> =
-            sc_config::scan_apps().into_iter().map(|e| (e.id.clone(), e)).collect();
+            sc_catalog::scan_apps().into_iter().map(|e| (e.id.clone(), e)).collect();
         // Frecency is read-only here; the compositor stays the sole writer.
-        let frecency = sc_config::state::load(&sc_config::state::config_path())
+        let frecency = sc_shell_model::persist::load(&sc_shell_model::persist::state_path())
             .map(|m| m.frecency)
             .unwrap_or_default();
         let mut app = Self {
@@ -70,7 +70,7 @@ impl SearchApp {
 
     fn recompute(&mut self) {
         let limit = if self.query.is_empty() { DEFAULT_LIMIT } else { FILTER_LIMIT };
-        self.results = sc_config::rank(&self.catalog, &self.frecency, unix_now(), &self.query, limit);
+        self.results = sc_catalog::rank(&self.catalog, &self.frecency, unix_now(), &self.query, limit);
     }
 
     /// Lazily upload an app's icon into an egui texture.
@@ -95,7 +95,7 @@ impl SearchApp {
     /// Launch `id` (strip field codes, spawn detached) and quit.
     fn launch(&self, id: &str) {
         if let Some(entry) = self.catalog.get(id) {
-            let clean = sc_config::strip_field_codes(&entry.exec);
+            let clean = sc_catalog::strip_field_codes(&entry.exec);
             let parts: Vec<&str> = clean.split_whitespace().collect();
             if let Some((prog, args)) = parts.split_first() {
                 // WAYLAND_DISPLAY etc. are inherited from the compositor.

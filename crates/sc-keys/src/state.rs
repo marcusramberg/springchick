@@ -5,7 +5,7 @@
 //! crossed, while the key is still held; the matching short binding is then
 //! suppressed on release.
 
-use crate::config::{Action, ModMask, PressKind};
+use sc_config::{Action, ModMask, PressKind};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -193,7 +193,7 @@ impl PressTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Action, ModMask, PressKind};
+    use sc_config::{Action, ModMask, PressKind};
 
     const VOL_UP: u32 = 100;
     const VOL_DOWN: u32 = 200;

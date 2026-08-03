@@ -1,6 +1,6 @@
 //! App launching: strip field codes from Exec lines and spawn processes.
 
-use sc_config::strip_field_codes;
+use sc_catalog::strip_field_codes;
 use std::process::{Child, Command};
 use tracing::{error, info};
 

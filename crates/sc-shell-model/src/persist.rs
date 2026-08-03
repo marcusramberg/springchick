@@ -1,10 +1,14 @@
-use sc_shell_model::ShellModel;
+//! On-disk persistence for the [`ShellModel`]: atomic save + tolerant load of
+//! `state.toml`. Lives with the model it serializes; the compositor reads and
+//! writes it, the search app only reads frecency from it.
+
+use crate::ShellModel;
 use std::path::{Path, PathBuf};
 
 /// The springchick state file: `$XDG_CONFIG_HOME/springchick/state.toml`, else
-/// `~/.config/springchick/state.toml`. Single source shared by the compositor
-/// (which reads + writes it) and the search app (which only reads frecency).
-pub fn config_path() -> PathBuf {
+/// `~/.config/springchick/state.toml`. This is persisted *state* (dock, pages,
+/// frecency), not user config — see `sc-config` for `config.toml`.
+pub fn state_path() -> PathBuf {
     let config_home = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
@@ -36,7 +40,6 @@ pub fn load(path: &Path) -> std::io::Result<ShellModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sc_shell_model::ShellModel;
 
     #[test]
     fn round_trips() {

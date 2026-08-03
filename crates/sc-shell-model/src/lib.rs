@@ -1,4 +1,7 @@
 #![forbid(unsafe_code)]
+
+pub mod persist;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
