@@ -21,6 +21,7 @@ use smithay::backend::renderer::{Bind, ImportDma, RendererSuper};
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev;
+use smithay::reexports::calloop::signals::{Signal, Signals};
 use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::drm::control::{
     connector, crtc, property, Device as ControlDevice, ModeTypeFlags,
@@ -40,7 +41,6 @@ use crate::{accept_client, create_display, State};
 type FlipData = ();
 
 struct Drm {
-    _session: LibSeatSession,
     _device: DrmDevice,
     gbm_surface: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, FlipData>,
     renderer: GlesRenderer,
@@ -63,6 +63,10 @@ struct Drm {
     /// The CRTC gamma table captured at startup, restored when a gamma-control
     /// client releases the output. `None` if the CRTC has no gamma LUT.
     orig_gamma: Option<[Vec<u16>; 3]>,
+    /// libseat session. Declared last so it drops *after* the DrmDevice releases
+    /// the master and the renderer/surface tear down — closing the seat before
+    /// the device is released can leave the handoff in a bad state.
+    _session: LibSeatSession,
 }
 
 /// DPMS levels, per `drm_mode.h`. Off (3) disables the pipe and powers the
@@ -330,6 +334,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         warn!(%e, "sd_notify READY failed");
     }
 
+    // Graceful shutdown: catch SIGTERM (systemd stop, e.g. nixos-rebuild) and
+    // SIGINT (Ctrl-C on a bare VT launch), stop the loop, and tear down the DRM
+    // output cleanly below. Without this the process is SIGKILL'd mid-modeset,
+    // which can leave the msm DPU / Adreno GMU wedged so the *next* compositor's
+    // DrmDevice::new hard-resets the device at login.
+    let signals =
+        Signals::new(&[Signal::SIGTERM, Signal::SIGINT]).map_err(|e| format!("signals: {e}"))?;
+    let loop_signal = event_loop.get_signal();
+    event_loop
+        .handle()
+        .insert_source(signals, move |event, _, _app| {
+            info!(signal = ?event.signal(), "termination signal; shutting down");
+            loop_signal.stop();
+        })
+        .map_err(|e| format!("insert signals source: {e}"))?;
+
     // The 2ms timeout wakes the loop to accept + dispatch wayland clients even
     // when no DRM/input event fires.
     event_loop.run(Some(Duration::from_millis(2)), &mut app, |app| {
@@ -357,6 +377,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     })?;
 
+    // Loop stopped by SIGTERM/SIGINT: restore DRM state, then let `app` drop —
+    // which tears down the renderer, surface, DrmDevice (releases the master)
+    // and finally the libseat session, in that order.
+    app.shutdown();
+
     Ok(())
 }
 
@@ -372,6 +397,22 @@ struct App {
 }
 
 impl App {
+    /// Restore DRM state before the compositor exits, so the greeter / next
+    /// compositor inherits a sane device: panel powered on, original gamma ramp.
+    /// The heavy lifting (releasing the DRM master, closing the seat) happens as
+    /// `App` drops right after this returns.
+    fn shutdown(&mut self) {
+        info!("restoring DRM state for clean handoff");
+        // Never hand over a blanked panel.
+        self.drm.set_dpms(true);
+        // Undo any gamma-control client's ramp.
+        if let Some([r, g, b]) = &self.drm.orig_gamma {
+            if let Err(e) = self.drm.device_fd.set_gamma(self.drm.crtc, r, g, b) {
+                warn!("restore gamma on shutdown: {e}");
+            }
+        }
+    }
+
     fn dispatch_wayland(&mut self) {
         accept_client(&self.display, &self.listener);
         self.display.dispatch_clients(&mut self.state).ok();

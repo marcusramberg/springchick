@@ -44,7 +44,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 skia-safe = { version = "0.99", features = ["gl"] }
-calloop = "0.14"
+# Matches smithay's calloop (0.14); the `signals` feature enables SIGTERM
+# handling on the event loop we get via smithay::reexports::calloop (feature
+# unification). Not imported directly — see drm_backend's signal source.
+calloop = { version = "0.14", features = ["signals"] }
 
 # Type=notify readiness handshake with the systemd user service that runs us
 # (springchick.service). Pure-Rust, no libsystemd link. No-ops when
