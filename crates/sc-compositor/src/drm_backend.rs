@@ -9,15 +9,15 @@
 use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
-use smithay::backend::allocator::Fourcc;
-use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface};
+use smithay::backend::allocator::{Fourcc, Modifier};
+use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, GbmBufferedSurface, NodeType};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
     AbsolutePositionEvent, Event as InputEventTrait, InputEvent, KeyboardKeyEvent,
 };
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexProgram};
-use smithay::backend::renderer::{Bind, ImportDma};
+use smithay::backend::renderer::{Bind, ImportDma, RendererSuper};
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev;
@@ -28,7 +28,9 @@ use smithay::reexports::drm::control::{
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::{Display, ListeningSocket};
-use smithay::utils::{DeviceFd, Size, Transform};
+use smithay::utils::{Clock, DeviceFd, Monotonic, Physical, Rectangle, Size, Transform};
+use smithay::wayland::dmabuf::get_dmabuf;
+use smithay::wayland::image_copy_capture::CaptureFailureReason;
 
 use tracing::{error, info, warn};
 
@@ -189,8 +191,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = State::new(&display, socket_name, (output_size.w, output_size.h));
     state.perf_log = true; // perf logging is the point of this backend
     // Advertise zwp_linux_dmabuf so GL clients (GTK4, etc.) share buffers
-    // zero-copy instead of falling back to slow shm software upload.
-    state.init_dmabuf_global(&display.handle(), renderer.dmabuf_formats());
+    // zero-copy instead of falling back to slow shm software upload. Passing the
+    // main device binds version 4 with default feedback, which wl-screenrec
+    // requires to allocate capture buffers.
+    let main_device = device_fd.dev_id().ok();
+    state.init_dmabuf_global(&display.handle(), renderer.dmabuf_formats(), main_device);
+
+    // Screencopy dmabuf constraints: the render node + format/modifier set a
+    // recorder must allocate its capture buffers with, so we can blit into them
+    // zero-copy. Falls back to shm-only if the node can't be resolved.
+    if let Ok(node) = DrmNode::from_file(&device_fd) {
+        let render_node = node
+            .node_with_type(NodeType::Render)
+            .and_then(Result::ok)
+            .unwrap_or(node);
+        state.capture_formats = Some((render_node, group_formats(renderer.dmabuf_formats())));
+    }
 
     // Look up the connector's DPMS property so power-short can truly blank the
     // panel (disabling scanout) rather than freezing the last frame.
@@ -239,6 +255,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         display,
         listener,
         last_frame: Instant::now(),
+        clock: Clock::new(),
     };
 
     // --- calloop sources ---
@@ -350,6 +367,8 @@ struct App {
     display: Display<State>,
     listener: ListeningSocket,
     last_frame: Instant,
+    /// Monotonic clock for screencopy frame presentation timestamps.
+    clock: Clock<Monotonic>,
 }
 
 impl App {
@@ -456,8 +475,6 @@ impl App {
         self.last_frame = Instant::now();
         let prep = self.state.advance_frame(dt);
 
-        let size = self.drm.output_size;
-
         // Partial page-flip damage is only safe when nothing but the app surface
         // could have changed: fullscreen app, no switcher/home/OSD/OSK, no touch
         // markers, and the bar not mid-fade. Any of these repaint via Skia
@@ -489,6 +506,44 @@ impl App {
             }
         };
 
+        let flip_damage = match self.draw_scene_into(&mut framebuffer, &prep, report_partial) {
+            Some(damage) => damage,
+            None => return,
+        };
+        drop(framebuffer);
+
+        // Fence the frame: block until smithay + Skia GL work has completed so
+        // the page-flip never scans out a half-rendered buffer (tearing). We
+        // have ~6ms of slack under the 11ms 90Hz budget, so the stall is free.
+        self.state.skia.finish_gpu();
+
+        // Queue the page-flip; vblank fires the next render.
+        match self
+            .drm
+            .gbm_surface
+            .queue_buffer(None, Some(flip_damage), ())
+        {
+            Ok(()) => self.drm.pending_flip = true,
+            Err(e) => warn!("queue_buffer failed: {e}"),
+        }
+
+        self.state.record_and_log_frame(frame_start);
+
+        // Screencopy: satisfy any pending capture requests from the same scene.
+        self.capture_pending_frames(&prep);
+    }
+
+    /// Compose the current scene (`prep`) into `framebuffer`. Shared by the
+    /// scanout path and screencopy so a captured frame is pixel-identical to what
+    /// is presented. Returns the damage, or `None` if the draw failed (logged).
+    fn draw_scene_into(
+        &mut self,
+        framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+        prep: &crate::FramePrep,
+        report_partial: bool,
+    ) -> Option<Vec<Rectangle<i32, Physical>>> {
+        let size = self.drm.output_size;
+
         // Screen-space animated grid centers: global spring position minus the
         // current page scroll, so the grid pass in draw_home can render
         // sliding icons without knowing about pages itself.
@@ -512,103 +567,131 @@ impl App {
             .map(|(a, (sx, sy))| (a.clone(), (sx.value, sy.value)))
             .collect();
 
-        let flip_damage = {
-            // Hoisted so the `arrange` closure captures a plain `usize`, not a
-            // borrow of `self.state` (which clashes with `skia: &mut ...skia`).
-            let cur_home_page = self.state.current_home_page();
-            let mut ctx = crate::render::DrawCtx {
-                scene: &prep.scene,
-                app_surface: prep.app_surface.as_ref(),
-                skia: &mut self.state.skia,
-                model: &self.state.model,
-                icon_cache: &self.state.icon_cache,
-                app_catalog: &self.state.app_catalog,
-                toplevels: &self.state.toplevels,
-                app_scale: self.state.dpi,
-                app_origin: {
-                    let u = self.state.layers.usable(self.state.dpi);
-                    (u.x.round() as i32, u.y.round() as i32)
-                },
-                transform: self.drm.transform,
-                skia_flip_y: true,
-                frame_time: prep.frame_time,
-                osd: prep.osd_view,
-                touches: &prep.touch_marks,
-                layers_below: &prep.layers_below,
-                layers_above: &prep.layers_above,
-                app_popups: &prep.app_popups,
-                layer_popups: &prep.layer_popups,
-                bar_alpha: prep.bar_alpha,
-                pressed_app: self
-                    .state
-                    .pending_launch
+        // Hoisted so the `arrange` closure captures a plain `usize`, not a
+        // borrow of `self.state` (which clashes with `skia: &mut ...skia`).
+        let cur_home_page = self.state.current_home_page();
+        let mut ctx = crate::render::DrawCtx {
+            scene: &prep.scene,
+            app_surface: prep.app_surface.as_ref(),
+            skia: &mut self.state.skia,
+            model: &self.state.model,
+            icon_cache: &self.state.icon_cache,
+            app_catalog: &self.state.app_catalog,
+            toplevels: &self.state.toplevels,
+            app_scale: self.state.dpi,
+            app_origin: {
+                let u = self.state.layers.usable(self.state.dpi);
+                (u.x.round() as i32, u.y.round() as i32)
+            },
+            transform: self.drm.transform,
+            skia_flip_y: true,
+            frame_time: prep.frame_time,
+            osd: prep.osd_view,
+            touches: &prep.touch_marks,
+            layers_below: &prep.layers_below,
+            layers_above: &prep.layers_above,
+            app_popups: &prep.app_popups,
+            layer_popups: &prep.layer_popups,
+            bar_alpha: prep.bar_alpha,
+            pressed_app: self
+                .state
+                .pending_launch
+                .as_ref()
+                .map(|p| p.app_id.as_str()),
+            launching_app: self.state.launching.as_ref().map(|l| l.app_id.as_str()),
+            launching_elapsed: self
+                .state
+                .launching
+                .as_ref()
+                .map_or(0.0, |l| l.started.elapsed().as_secs_f32()),
+            arrange: self.state.arrange.as_ref().map(|a| {
+                let drag_app = a.drag.as_ref().map(|d| d.app_id.as_str());
+                let drag_pos = a.drag.as_ref().map(|d| d.cur);
+                let over_dock = a
+                    .drag
                     .as_ref()
-                    .map(|p| p.app_id.as_str()),
-                launching_app: self.state.launching.as_ref().map(|l| l.app_id.as_str()),
-                launching_elapsed: self
-                    .state
-                    .launching
-                    .as_ref()
-                    .map_or(0.0, |l| l.started.elapsed().as_secs_f32()),
-                arrange: self.state.arrange.as_ref().map(|a| {
-                    let drag_app = a.drag.as_ref().map(|d| d.app_id.as_str());
-                    let drag_pos = a.drag.as_ref().map(|d| d.cur);
-                    let over_dock = a
-                        .drag
-                        .as_ref()
-                        .map(|d| {
-                            let (w, h) = (
-                                self.state.output_size.0 as f32,
-                                self.state.output_size.1 as f32,
-                            );
-                            let layout = sc_layout::compute(w, h, cur_home_page, &self.state.model);
-                            layout.dock_zone.contains(d.cur.0, d.cur.1)
-                        })
-                        .unwrap_or(false);
-                    crate::render::ArrangeView {
-                        drag_app,
-                        drag_pos,
-                        over_dock,
-                    }
-                }),
-                report_partial_damage: report_partial,
-                last_present: &mut self.state.last_present,
-                grid_positions: &grid_positions,
-                dock_positions: &dock_positions,
-                rounded_tex_shader: &self.drm.rounded_tex_shader,
-            };
-            match crate::render::draw_scene(
-                &mut self.drm.renderer,
-                &mut framebuffer,
-                size,
-                &mut ctx,
-            ) {
-                Ok(damage) => damage,
-                Err(e) => {
-                    warn!("draw_scene failed: {e}");
-                    return;
+                    .map(|d| {
+                        let (w, h) = (
+                            self.state.output_size.0 as f32,
+                            self.state.output_size.1 as f32,
+                        );
+                        let layout = sc_layout::compute(w, h, cur_home_page, &self.state.model);
+                        layout.dock_zone.contains(d.cur.0, d.cur.1)
+                    })
+                    .unwrap_or(false);
+                crate::render::ArrangeView {
+                    drag_app,
+                    drag_pos,
+                    over_dock,
                 }
-            }
+            }),
+            report_partial_damage: report_partial,
+            last_present: &mut self.state.last_present,
+            grid_positions: &grid_positions,
+            dock_positions: &dock_positions,
+            rounded_tex_shader: &self.drm.rounded_tex_shader,
         };
-        drop(framebuffer);
-
-        // Fence the frame: block until smithay + Skia GL work has completed so
-        // the page-flip never scans out a half-rendered buffer (tearing). We
-        // have ~6ms of slack under the 11ms 90Hz budget, so the stall is free.
-        self.state.skia.finish_gpu();
-
-        // Queue the page-flip; vblank fires the next render.
-        match self
-            .drm
-            .gbm_surface
-            .queue_buffer(None, Some(flip_damage), ())
-        {
-            Ok(()) => self.drm.pending_flip = true,
-            Err(e) => warn!("queue_buffer failed: {e}"),
+        match crate::render::draw_scene(&mut self.drm.renderer, framebuffer, size, &mut ctx) {
+            Ok(damage) => Some(damage),
+            Err(e) => {
+                warn!("draw_scene failed: {e}");
+                None
+            }
         }
-
-        self.state.record_and_log_frame(frame_start);
     }
+
+    /// Blit the just-composited scene into each pending screencopy frame's
+    /// dmabuf and signal completion. Runs only while a recorder is attached, so
+    /// it costs nothing on the idle path. dmabuf capture keeps the GPU→CPU
+    /// download in the recorder process, off our render thread; shm buffers are
+    /// rejected (a dmabuf-first recorder falls back on its own).
+    fn capture_pending_frames(&mut self, prep: &crate::FramePrep) {
+        if self.state.pending_captures.is_empty() {
+            return;
+        }
+        let present = self.clock.now();
+        let transform = self.drm.transform;
+        for frame in std::mem::take(&mut self.state.pending_captures) {
+            let buffer = frame.buffer();
+            let mut dmabuf = match get_dmabuf(&buffer) {
+                Ok(d) => d.clone(),
+                Err(_) => {
+                    frame.fail(CaptureFailureReason::BufferConstraints);
+                    continue;
+                }
+            };
+            let mut fb = match self.drm.renderer.bind(&mut dmabuf) {
+                Ok(fb) => fb,
+                Err(e) => {
+                    warn!("capture bind failed: {e}");
+                    frame.fail(CaptureFailureReason::Unknown);
+                    continue;
+                }
+            };
+            let drawn = self.draw_scene_into(&mut fb, prep, false).is_some();
+            drop(fb);
+            if drawn {
+                // Fence so the recorder never maps a half-written buffer.
+                self.state.skia.finish_gpu();
+                frame.success(transform, None, present);
+            } else {
+                frame.fail(CaptureFailureReason::Unknown);
+            }
+        }
+    }
+}
+
+/// Group a renderer's flat dmabuf format set into the `(fourcc, [modifiers])`
+/// shape the screencopy dmabuf constraints expect.
+fn group_formats(
+    formats: smithay::backend::allocator::format::FormatSet,
+) -> Vec<(Fourcc, Vec<Modifier>)> {
+    let mut by_code: std::collections::HashMap<Fourcc, Vec<Modifier>> =
+        std::collections::HashMap::new();
+    for f in formats.iter() {
+        by_code.entry(f.code).or_default().push(f.modifier);
+    }
+    by_code.into_iter().collect()
 }
 
 /// Snapshot the CRTC's current gamma ramp so it can be restored when a
