@@ -459,15 +459,17 @@ impl App {
         let size = self.drm.output_size;
 
         // Partial page-flip damage is only safe when nothing but the app surface
-        // could have changed: fullscreen app, no switcher/home/OSD/OSK, and the
-        // bar not mid-fade. Any of these repaint via Skia (untracked) and would
-        // leave stale pixels if excluded from the damage hint.
+        // could have changed: fullscreen app, no switcher/home/OSD/OSK, no touch
+        // markers, and the bar not mid-fade. Any of these repaint via Skia
+        // (untracked) and would leave stale pixels if excluded from the damage
+        // hint — for the touch overlay that means the marks never reach scanout.
         let report_partial = prep.scene.window_covers_screen()
             && prep.app_surface.is_some()
             && prep.scene.cards.is_empty()
             && !prep.scene.show_home
             && prep.osd_view.is_none()
             && !self.state.bar_fading()
+            && prep.touch_marks.is_empty()
             && prep.layers_below.is_empty()
             && prep.layers_above.is_empty();
 
