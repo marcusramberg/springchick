@@ -484,7 +484,7 @@ impl App {
                 icon_cache: &self.state.icon_cache,
                 app_catalog: &self.state.app_catalog,
                 toplevels: &self.state.toplevels,
-                app_scale: self.state.dpi as f64,
+                app_scale: self.state.dpi,
                 app_origin: {
                     let u = self.state.layers.usable(self.state.dpi);
                     (u.x.round() as i32, u.y.round() as i32)
