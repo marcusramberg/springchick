@@ -50,6 +50,27 @@ impl Spring {
     }
 }
 
+/// Linear interpolation of a 2D point at normalized `t`, clamped to `[0,1]`.
+/// The straight-line tween used for synthetic swipe playback.
+pub fn lerp_point(from: (f32, f32), to: (f32, f32), t: f32) -> (f32, f32) {
+    let t = t.clamp(0.0, 1.0);
+    (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
+}
+
+/// Ease-out cubic: `1 - (1-p)^3`, clamped to `[0,1]`. Fast start, gentle
+/// settle — the standard curve for slide-in/zoom transitions.
+pub fn ease_out_cubic(p: f32) -> f32 {
+    let p = p.clamp(0.0, 1.0);
+    1.0 - (1.0 - p).powi(3)
+}
+
+/// A breathing/pulse value in `[0,1]` from a monotonic `elapsed` (seconds) and
+/// angular `rate` (radians/sec): `sin(elapsed*rate)*0.5 + 0.5`. Drives the
+/// launching-icon halo.
+pub fn pulse(elapsed: f32, rate: f32) -> f32 {
+    (elapsed * rate).sin() * 0.5 + 0.5
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,5 +121,32 @@ mod tests {
         let v = s.velocity;
         s.retarget(50.0); // interrupt
         assert_eq!(s.velocity, v, "retarget must not zero velocity");
+    }
+
+    #[test]
+    fn lerp_point_endpoints_midpoint_and_clamp() {
+        assert_eq!(lerp_point((0.0, 0.0), (10.0, 20.0), 0.0), (0.0, 0.0));
+        assert_eq!(lerp_point((0.0, 0.0), (10.0, 20.0), 1.0), (10.0, 20.0));
+        assert_eq!(lerp_point((0.0, 0.0), (10.0, 20.0), 0.5), (5.0, 10.0));
+        assert_eq!(lerp_point((0.0, 0.0), (10.0, 0.0), -1.0), (0.0, 0.0));
+        assert_eq!(lerp_point((0.0, 0.0), (10.0, 0.0), 2.0), (10.0, 0.0));
+    }
+
+    #[test]
+    fn ease_out_cubic_endpoints_and_clamp() {
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        assert_eq!(ease_out_cubic(-1.0), 0.0);
+        assert_eq!(ease_out_cubic(2.0), 1.0);
+        assert!(ease_out_cubic(0.5) > 0.5); // fast start: past halfway by midpoint
+    }
+
+    #[test]
+    fn pulse_stays_in_unit_range_and_starts_mid() {
+        assert!((pulse(0.0, 4.4) - 0.5).abs() < 1e-6);
+        for i in 0..100 {
+            let v = pulse(i as f32 * 0.1, 4.4);
+            assert!((0.0..=1.0).contains(&v), "pulse out of range: {v}");
+        }
     }
 }

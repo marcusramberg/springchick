@@ -5,7 +5,7 @@
 //! recreating only on change.
 
 use crate::render::ArrangeView;
-use sc_config::AppEntry;
+use sc_catalog::AppEntry;
 use sc_icons::IconPixels;
 use sc_layout::{self, IconSlot, Layout};
 use sc_shell_model::ShellModel;
@@ -551,8 +551,8 @@ fn draw_icon_slot(
     // static press highlight.
     let icon_scale = 1.0;
     if let Some(elapsed) = launching {
-        // ~0.7 Hz breath: halo alpha pulses in place 
-        let phase = (elapsed * 4.4).sin() * 0.5 + 0.5;
+        // ~0.7 Hz breath: halo alpha pulses in place
+        let phase = sc_anim::pulse(elapsed, 4.4);
         let alpha = (40.0 + 70.0 * phase) as u8;
         let mut paint = Paint::default();
         paint.set_anti_alias(true);

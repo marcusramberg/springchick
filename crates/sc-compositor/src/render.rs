@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use crate::scene::Scene;
 use crate::skia_gl::SkiaGl;
 
-use sc_config::AppEntry;
+use sc_catalog::AppEntry;
 use sc_icons::IconPixels;
 use sc_shell_model::ShellModel;
 

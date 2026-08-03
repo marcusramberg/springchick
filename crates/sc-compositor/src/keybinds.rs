@@ -1,15 +1,15 @@
 //! Keybinding glue: resolves keysym names, owns the press tracker, runs actions.
 //!
 //! This is the only module that knows both `sc-keys` types and smithay types.
-//! The timing rules live in `sc-keys`; the I/O (xkb, config file, spawning)
-//! lives here.
+//! The timing rules live in `sc-keys`, the config.toml parse + load in
+//! `sc-config`; the remaining I/O (xkb, spawning) lives here.
 
 use crate::State;
-use sc_keys::{Action, Config, KeyBindings, ModMask, PressOutcome, PressTracker};
+use sc_config::{Action, Config, ModMask};
+use sc_keys::{KeyBindings, PressOutcome, PressTracker};
 use smithay::backend::input::{KeyState, Keycode};
 use smithay::input::keyboard::{xkb, FilterResult, ModifiersState};
 use smithay::utils::SERIAL_COUNTER;
-use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Duration;
 use std::time::Instant;
@@ -25,7 +25,7 @@ pub struct Keys {
 impl Keys {
     /// Load the config from disk (or defaults) and resolve it.
     pub fn load() -> Keys {
-        Keys::from_config(load_config())
+        Keys::from_config(sc_config::load())
     }
 
     fn from_config(config: Config) -> Keys {
@@ -47,84 +47,25 @@ impl Keys {
 /// Reads the same config file as [`Keys::load`]; called separately because
 /// the output is created before `Keys` is constructed.
 pub fn load_dpi() -> u32 {
-    load_config().dpi
+    sc_config::load().dpi
 }
 
 /// Seconds of inactivity before the panel idle-blanks (`[main].idle_blank_secs`;
 /// `0` disables). Reads the same config file as [`Keys::load`].
 pub fn load_idle_blank_secs() -> u64 {
-    load_config().idle_blank_secs
+    sc_config::load().idle_blank_secs
 }
 
 /// Base card corner radius in logical px (`[main].card_radius`). Reads the same
 /// config file as [`Keys::load`].
 pub fn load_card_radius() -> f32 {
-    load_config().card_radius
+    sc_config::load().card_radius
 }
 
 /// Whether to draw the touch indicator overlay (`[main].show_touches`). Reads
 /// the same config file as [`Keys::load`].
 pub fn load_show_touches() -> bool {
-    load_config().show_touches
-}
-
-/// Config lookup: `SPRINGCHICK_CONFIG` is a strict override — if set, it is the
-/// only path tried, with no fallthrough to XDG or `/etc` if that file is
-/// missing. Otherwise, in order: `$XDG_CONFIG_HOME/springchick/config.toml`
-/// (or `~/.config/...`), then `/etc/springchick/config.toml`.
-fn env_override(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    env("SPRINGCHICK_CONFIG").map(PathBuf::from)
-}
-
-/// XDG-then-`/etc` candidates, in lookup order. Takes an injectable env lookup
-/// so tests don't mutate real process env vars (multithreaded test binary).
-fn candidate_paths(env: impl Fn(&str) -> Option<String>) -> Vec<PathBuf> {
-    let xdg = env("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .map(|base| base.join("springchick/config.toml"));
-
-    let mut paths = Vec::new();
-    if let Some(path) = xdg {
-        paths.push(path);
-    }
-    paths.push(PathBuf::from("/etc/springchick/config.toml"));
-    paths
-}
-
-/// Try to read and parse one candidate path. `None` means "this tier failed" —
-/// callers decide what that means (fall back to defaults immediately for the
-/// env override, or try the next candidate for the lookup tiers). A missing
-/// file is silent; any other read error is a warning either way.
-fn try_read(path: &Path) -> Option<Config> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            info!(path = %path.display(), "loading config");
-            Some(Config::parse_or_defaults(&text))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => {
-            warn!(%e, path = %path.display(), "cannot read config");
-            None
-        }
-    }
-}
-
-/// Read the config file, falling back to the shipped defaults. A missing file is
-/// normal; an unreadable or unparseable one is a warning, never fatal.
-fn load_config() -> Config {
-    let real_env = |k: &str| std::env::var(k).ok();
-
-    if let Some(path) = env_override(real_env) {
-        return try_read(&path).unwrap_or_else(Config::defaults);
-    }
-
-    for path in candidate_paths(real_env) {
-        if let Some(config) = try_read(&path) {
-            return config;
-        }
-    }
-    Config::defaults()
+    sc_config::load().show_touches
 }
 
 /// xkb keysym name → raw keysym value. Case-sensitive, as xkb defines them.
@@ -376,59 +317,5 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(mod_mask(&mods), ModMask::NONE);
-    }
-
-    #[test]
-    fn env_override_short_circuits_on_missing_var() {
-        let env = |_: &str| None;
-        assert_eq!(env_override(env), None);
-    }
-
-    #[test]
-    fn env_override_uses_springchick_config_only() {
-        let env = |k: &str| match k {
-            "SPRINGCHICK_CONFIG" => Some("/tmp/x.toml".to_string()),
-            _ => None,
-        };
-        assert_eq!(env_override(env), Some(PathBuf::from("/tmp/x.toml")));
-    }
-
-    #[test]
-    fn candidate_paths_orders_xdg_then_etc() {
-        let env = |k: &str| match k {
-            "XDG_CONFIG_HOME" => Some("/home/u/.config".to_string()),
-            _ => None,
-        };
-        assert_eq!(
-            candidate_paths(env),
-            vec![
-                PathBuf::from("/home/u/.config/springchick/config.toml"),
-                PathBuf::from("/etc/springchick/config.toml"),
-            ]
-        );
-    }
-
-    #[test]
-    fn candidate_paths_falls_back_to_home_for_xdg() {
-        let env = |k: &str| match k {
-            "HOME" => Some("/home/u".to_string()),
-            _ => None,
-        };
-        assert_eq!(
-            candidate_paths(env),
-            vec![
-                PathBuf::from("/home/u/.config/springchick/config.toml"),
-                PathBuf::from("/etc/springchick/config.toml"),
-            ]
-        );
-    }
-
-    #[test]
-    fn candidate_paths_omits_xdg_when_neither_var_set() {
-        let env = |_: &str| None;
-        assert_eq!(
-            candidate_paths(env),
-            vec![PathBuf::from("/etc/springchick/config.toml")],
-        );
     }
 }

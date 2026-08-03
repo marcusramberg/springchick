@@ -2646,12 +2646,23 @@ name = "sc-anim"
 version = "0.1.0"
 
 [[package]]
+name = "sc-catalog"
+version = "0.1.0"
+dependencies = [
+ "sc-shell-model",
+ "serde",
+ "tempfile",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "sc-compositor"
 version = "0.1.0"
 dependencies = [
  "calloop 0.14.4",
  "libc",
  "sc-anim",
+ "sc-catalog",
  "sc-config",
  "sc-icons",
  "sc-input",
@@ -2670,10 +2681,9 @@ dependencies = [
 name = "sc-config"
 version = "0.1.0"
 dependencies = [
- "sc-shell-model",
  "serde",
- "tempfile",
  "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]
@@ -2693,9 +2703,7 @@ version = "0.1.0"
 name = "sc-keys"
 version = "0.1.0"
 dependencies = [
- "serde",
- "toml 0.8.23",
- "tracing",
+ "sc-config",
 ]
 
 [[package]]
@@ -2711,7 +2719,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
- "sc-config",
+ "sc-catalog",
  "sc-icons",
  "sc-shell-model",
 ]
@@ -2721,6 +2729,7 @@ name = "sc-shell-model"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "tempfile",
  "toml 0.8.23",
 ]
 

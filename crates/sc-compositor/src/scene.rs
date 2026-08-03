@@ -62,7 +62,7 @@ impl WindowTransform {
     /// to true fullscreen is imperceptible.
     pub fn slide_up(progress: f32, width: f32, height: f32, card_radius: f32) -> Self {
         let p = progress.clamp(0.0, 1.0);
-        let ease = 1.0 - (1.0 - p).powi(3); // ease-out
+        let ease = sc_anim::ease_out_cubic(p);
         Self {
             scale: 0.98,
             center_x: width / 2.0,

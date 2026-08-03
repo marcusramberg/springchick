@@ -3,9 +3,10 @@ resolver = "2"
 members = [
   "crates/sc-anim",
   "crates/sc-input",
+  "crates/sc-config",
   "crates/sc-keys",
   "crates/sc-shell-model",
-  "crates/sc-config",
+  "crates/sc-catalog",
   "crates/sc-layout",
   "crates/sc-icons",
   "crates/sc-search",
