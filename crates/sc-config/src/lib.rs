@@ -83,6 +83,12 @@ pub struct Config {
     /// Draw a visual indicator under each touch/pointer contact. Off by default;
     /// meant for demo recordings, not daily use.
     pub show_touches: bool,
+    /// Prefer server-side (compositor-owned = no) decorations. When `true`,
+    /// top-level app windows are told to skip their own client-side titlebars
+    /// for a borderless phone look. Child windows (dialogs) always keep CSD
+    /// regardless, so toolkits like GTK still draw the header bar that holds a
+    /// file chooser's Open/Cancel buttons.
+    pub prefer_no_csd: bool,
     pub bindings: Vec<Binding>,
 }
 
@@ -103,6 +109,10 @@ pub const DEFAULT_CARD_RADIUS: f32 = 120.0;
 
 /// Touch indicator is off unless `[main].show_touches = true`.
 pub const DEFAULT_SHOW_TOUCHES: bool = false;
+
+/// Prefer no client-side decorations by default: the phone shell wants
+/// borderless app windows. Dialogs keep CSD regardless (see [`Config`]).
+pub const DEFAULT_PREFER_NO_CSD: bool = true;
 
 /// Shipped defaults, mirroring the user's niri bindings. Defined as TOML so the
 /// documented example and the built-in behavior cannot drift apart.
@@ -170,6 +180,7 @@ struct RawMain {
     idle_blank_secs: Option<u64>,
     card_radius: Option<f32>,
     show_touches: Option<bool>,
+    prefer_no_csd: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -202,6 +213,7 @@ impl Config {
                     idle_blank_secs: DEFAULT_IDLE_BLANK_SECS,
                     card_radius: DEFAULT_CARD_RADIUS,
                     show_touches: DEFAULT_SHOW_TOUCHES,
+                    prefer_no_csd: DEFAULT_PREFER_NO_CSD,
                     bindings: Vec::new(),
                 };
             }
@@ -211,6 +223,7 @@ impl Config {
         let idle_blank_secs = main.idle_blank_secs.unwrap_or(DEFAULT_IDLE_BLANK_SECS);
         let card_radius = main.card_radius.unwrap_or(DEFAULT_CARD_RADIUS).max(0.0);
         let show_touches = main.show_touches.unwrap_or(DEFAULT_SHOW_TOUCHES);
+        let prefer_no_csd = main.prefer_no_csd.unwrap_or(DEFAULT_PREFER_NO_CSD);
         let raw = file.keybinds.unwrap_or_default();
 
         let bindings = raw.binding.into_iter().filter_map(convert).collect();
@@ -220,6 +233,7 @@ impl Config {
             idle_blank_secs,
             card_radius,
             show_touches,
+            prefer_no_csd,
             bindings,
         }
     }

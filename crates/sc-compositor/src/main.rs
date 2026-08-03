@@ -344,6 +344,10 @@ struct State {
     /// Base card corner radius in logical px (`[main].card_radius`). Threaded
     /// into `compute_scene` so the switcher/drag card rounding is configurable.
     card_radius: f32,
+    /// Prefer server-side (= no client) decorations for top-level app windows
+    /// (`[main].prefer_no_csd`). Dialogs (child toplevels) always get CSD so
+    /// their toolkit header bar — and its action buttons — stay present.
+    prefer_no_csd: bool,
     /// wlr-gamma-control state (night-light / color-temperature clients).
     gamma: gamma_control::GammaControl,
 
@@ -466,7 +470,14 @@ impl State {
 
         // v6 so clients like wvkbd that bind wl_compositor@6 can connect.
         let compositor_state = CompositorState::new_v6::<Self>(&dh);
-        let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        // Advertise only Fullscreen as a WM capability. Maximize/Minimize/
+        // WindowMenu are meaningless in a single-window phone shell, and hinting
+        // them absent tells toolkits (GTK) to omit those title-bar buttons on the
+        // few windows that do draw client-side decorations (dialogs).
+        let xdg_shell_state = XdgShellState::new_with_capabilities::<Self>(
+            &dh,
+            [xdg_toplevel::WmCapabilities::Fullscreen],
+        );
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         // Global created later by the backend via `init_dmabuf_global`, once the
@@ -615,6 +626,7 @@ impl State {
             output,
             dpi,
             card_radius: keybinds::load_card_radius(),
+            prefer_no_csd: keybinds::load_prefer_no_csd(),
             gamma,
             skia: SkiaGl::new(),
             wayland_socket,
@@ -1465,24 +1477,39 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        // Size to the usable area (output minus any exclusive-zone reservations),
-        // so an app that opens while an OSK is up already fits above it.
-        // xdg sizes are logical; the client scales its buffer up by `dpi`.
-        let usable = self.layers.usable(self.dpi);
-        let w = (usable.w as f64 / self.dpi).round() as i32;
-        let h = (usable.h as f64 / self.dpi).round() as i32;
-        surface.with_pending_state(|state| {
-            state.size = Some((w, h).into());
-            state.decoration_mode = Some(DecorationMode::ServerSide);
-            state.states.set(xdg_toplevel::State::Fullscreen);
-            state.states.set(xdg_toplevel::State::Activated);
-        });
-        surface.send_configure();
+        self.configure_maximized(&surface);
         self.register_toplevel(surface);
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         self.unregister_toplevel(surface.wl_surface());
+    }
+
+    fn fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        _output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
+    ) {
+        // A client (video player, game) asked to go truly immersive. Cover the
+        // whole output — not just the usable area — force server-side (= no)
+        // decorations, and set the Fullscreen state so the toolkit hides its own
+        // chrome. This is the only path that hides the OSK's exclusive zone.
+        let (ow, oh) = self.output_size;
+        let w = (ow as f64 / self.dpi).round() as i32;
+        let h = (oh as f64 / self.dpi).round() as i32;
+        surface.with_pending_state(|state| {
+            state.size = Some((w, h).into());
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+            state.states.unset(xdg_toplevel::State::Maximized);
+            state.states.set(xdg_toplevel::State::Fullscreen);
+            state.states.set(xdg_toplevel::State::Activated);
+        });
+        surface.send_configure();
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        // Back to the normal maximized app state.
+        self.configure_maximized(&surface);
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
@@ -1627,27 +1654,73 @@ impl FractionalScaleHandler for State {
     }
 }
 
-/// Force a toplevel to server-side decorations (= no CSD) and configure it.
-/// Every xdg-decoration request resolves the same way, regardless of what the
-/// client asked for.
-fn force_server_side_decoration(toplevel: &ToplevelSurface) {
-    toplevel.with_pending_state(|state| {
-        state.decoration_mode = Some(DecorationMode::ServerSide);
-    });
-    toplevel.send_configure();
+impl State {
+    /// Decoration mode for a toplevel under the current policy.
+    ///
+    /// Dialogs (child toplevels) always keep client-side decorations: their
+    /// toolkit draws the action buttons (a GTK file chooser's Open/Cancel) into
+    /// its own header bar, which vanishes under server-side decorations. Top-level
+    /// app windows follow `prefer_no_csd` — server-side (borderless) by default,
+    /// otherwise honoring whatever the client asked for.
+    fn decoration_for(
+        &self,
+        toplevel: &ToplevelSurface,
+        requested: Option<DecorationMode>,
+    ) -> DecorationMode {
+        if toplevel.parent().is_some() {
+            DecorationMode::ClientSide
+        } else if self.prefer_no_csd {
+            DecorationMode::ServerSide
+        } else {
+            requested.unwrap_or(DecorationMode::ClientSide)
+        }
+    }
+
+    /// Resolve and send a toplevel's decoration mode. Called for every
+    /// xdg-decoration request (create / set / unset).
+    fn apply_decoration(&self, toplevel: &ToplevelSurface, requested: Option<DecorationMode>) {
+        let mode = self.decoration_for(toplevel, requested);
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(mode);
+        });
+        toplevel.send_configure();
+    }
+
+    /// Configure a toplevel as maximized to the usable area (output minus any
+    /// exclusive-zone reservations, e.g. the OSK), so an app that opens while an
+    /// OSK is up already fits above it. xdg sizes are logical; the client scales
+    /// its buffer up by `dpi`.
+    ///
+    /// Maximized — not Fullscreen — is the normal app state: it fills the screen
+    /// but leaves a client-side header bar visible (toolkits hide it in the
+    /// Fullscreen state), which is what keeps a dialog's buttons on screen.
+    fn configure_maximized(&self, surface: &ToplevelSurface) {
+        let usable = self.layers.usable(self.dpi);
+        let w = (usable.w as f64 / self.dpi).round() as i32;
+        let h = (usable.h as f64 / self.dpi).round() as i32;
+        let deco = self.decoration_for(surface, None);
+        surface.with_pending_state(|state| {
+            state.size = Some((w, h).into());
+            state.decoration_mode = Some(deco);
+            state.states.unset(xdg_toplevel::State::Fullscreen);
+            state.states.set(xdg_toplevel::State::Maximized);
+            state.states.set(xdg_toplevel::State::Activated);
+        });
+        surface.send_configure();
+    }
 }
 
 impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
-        force_server_side_decoration(&toplevel);
+        self.apply_decoration(&toplevel, None);
     }
 
-    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
-        force_server_side_decoration(&toplevel);
+    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: DecorationMode) {
+        self.apply_decoration(&toplevel, Some(mode));
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
-        force_server_side_decoration(&toplevel);
+        self.apply_decoration(&toplevel, None);
     }
 }
 

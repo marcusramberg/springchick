@@ -27,6 +27,13 @@ card_radius = 120.0
 # fading ring on release). Off by default; turn on for demo recordings.
 show_touches = false
 
+# Prefer server-side (= no client) decorations for top-level app windows, for a
+# borderless phone look. Child windows (dialogs) always keep client-side
+# decorations regardless, so toolkits like GTK still draw the header bar that
+# holds a file chooser's Open/Cancel buttons. Set false to let apps draw their
+# own titlebars.
+prefer_no_csd = true
+
 [keybinds]
 # Long-press threshold (ms): how long a button is held before its "long" action
 # fires instead of its "short" one.

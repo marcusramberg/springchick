@@ -68,6 +68,12 @@ pub fn load_show_touches() -> bool {
     sc_config::load().show_touches
 }
 
+/// Whether app windows should prefer server-side (= no client) decorations
+/// (`[main].prefer_no_csd`). Reads the same config file as [`Keys::load`].
+pub fn load_prefer_no_csd() -> bool {
+    sc_config::load().prefer_no_csd
+}
+
 /// xkb keysym name → raw keysym value. Case-sensitive, as xkb defines them.
 pub fn resolve_keysym(name: &str) -> Option<u32> {
     let sym = xkb::keysym_from_name(name, xkb::KEYSYM_NO_FLAGS);
