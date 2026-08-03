@@ -99,6 +99,44 @@ pub fn run_drm() {
     }
 }
 
+/// Open the DRM node through the session, retrying on transient failure.
+///
+/// At login the previous session's compositor (the greeter) may still hold the
+/// DRM master when we start. logind then refuses to hand us the device fd —
+/// `session.open` fails with EPERM (`Operation not permitted`) — until it
+/// finishes deactivating that session and activating ours on the seat. Without a
+/// retry this aborts the compositor at login and drops the user back to the
+/// greeter, which on the phone reads as a reboot. Retry a bounded number of
+/// times with a short backoff so the handover can complete; after that, give up
+/// and surface the last error.
+fn open_drm_node(
+    session: &mut LibSeatSession,
+    path: &std::path::Path,
+) -> Result<std::os::fd::OwnedFd, Box<dyn std::error::Error>> {
+    const MAX_ATTEMPTS: u32 = 20;
+    const BACKOFF: Duration = Duration::from_millis(150);
+    let flags = OFlags::RDWR | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    let mut attempt = 1;
+    loop {
+        match session.open(path, flags) {
+            Ok(fd) => {
+                if attempt > 1 {
+                    info!(attempt, "DRM node opened after retrying session handover");
+                }
+                return Ok(fd);
+            }
+            Err(e) if attempt < MAX_ATTEMPTS => {
+                warn!(attempt, error = %e, "DRM open failed; retrying (session handover in progress?)");
+                std::thread::sleep(BACKOFF);
+                attempt += 1;
+            }
+            Err(e) => {
+                return Err(format!("open DRM node after {attempt} attempts: {e}").into())
+            }
+        }
+    }
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut event_loop: EventLoop<'static, App> = EventLoop::try_new()?;
 
@@ -112,7 +150,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     info!(path = ?gpu_path, "primary GPU");
 
     // --- Open the DRM node through the session ---
-    let fd = session.open(&gpu_path, OFlags::RDWR | OFlags::CLOEXEC | OFlags::NONBLOCK)?;
+    let fd = open_drm_node(&mut session, &gpu_path)?;
     let device_fd = DrmDeviceFd::new(DeviceFd::from(fd));
 
     // --- DRM device + GBM + EGL + GLES renderer ---
