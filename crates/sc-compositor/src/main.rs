@@ -50,6 +50,16 @@ use smithay::wayland::input_method::{
     InputMethodHandler, InputMethodManagerState, PopupSurface as ImePopupSurface,
 };
 use smithay::wayland::text_input::TextInputManagerState;
+use smithay::wayland::image_capture_source::{
+    ImageCaptureSource, ImageCaptureSourceHandler, ImageCaptureSourceState,
+    OutputCaptureSourceHandler, OutputCaptureSourceState,
+};
+use smithay::wayland::image_copy_capture::{
+    BufferConstraints, Frame as CaptureFrame, ImageCopyCaptureHandler, ImageCopyCaptureState,
+    Session as CaptureSession, SessionRef as CaptureSessionRef,
+};
+use smithay::backend::allocator::{Fourcc, Modifier};
+use smithay::backend::drm::DrmNode;
 use smithay::input::keyboard::XkbConfig;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
@@ -70,12 +80,14 @@ use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     with_states, CompositorClientState, CompositorHandler, CompositorState,
 };
-use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
+use smithay::wayland::dmabuf::{
+    DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier,
+};
 use smithay::wayland::fractional_scale::{
     with_fractional_scale, FractionalScaleHandler, FractionalScaleManagerState,
 };
 use smithay::wayland::viewporter::ViewporterState;
-use smithay::wayland::output::OutputHandler;
+use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::wayland::selection::data_device::{
     DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
 };
@@ -255,6 +267,23 @@ struct State {
     fractional_scale_manager_state: FractionalScaleManagerState,
     #[allow(dead_code)]
     viewporter_state: ViewporterState,
+    /// `zxdg_output_manager_v1`: output name + logical geometry for clients that
+    /// ask (recorders). Held to keep the global advertised.
+    #[allow(dead_code)]
+    output_manager_state: OutputManagerState,
+    /// `ext-image-capture-source-v1` + `ext-image-copy-capture-v1` (screencopy):
+    /// let recorders capture the output. Held to keep the globals advertised.
+    #[allow(dead_code)]
+    image_capture_source: ImageCaptureSourceState,
+    #[allow(dead_code)]
+    output_capture_source: OutputCaptureSourceState,
+    image_copy_capture: ImageCopyCaptureState,
+    /// Capture buffer formats to advertise, set by the DRM backend once the
+    /// renderer exists: `(render node, [(fourcc, modifiers)])`. `None` on the
+    /// winit backend (no dmabuf capture there).
+    capture_formats: Option<(DrmNode, Vec<(Fourcc, Vec<Modifier>)>)>,
+    /// Capture frames awaiting a blit; drained by the DRM render loop each frame.
+    pending_captures: Vec<CaptureFrame>,
     /// Tracked layer surfaces + reserved-area bookkeeping.
     layers: layer_shell::LayerShell,
     /// Seat touch handle, for forwarding taps to layer surfaces.
@@ -464,6 +493,11 @@ impl State {
         // ignores). See `FractionalScaleHandler` below.
         let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
         let viewporter_state = ViewporterState::new::<Self>(&dh);
+        // Screencopy: the source-manager globals let a client name our output as a
+        // capture source; the copy-capture global negotiates buffers + frames.
+        let image_capture_source = ImageCaptureSourceState::new();
+        let output_capture_source = OutputCaptureSourceState::new::<Self>(&dh);
+        let image_copy_capture = ImageCopyCaptureState::new::<Self>(&dh);
         // Virtual keyboard (on-screen keyboards like wvkbd). smithay's built-in
         // handler works now that we're on smithay-git + xkbcommon 0.9, which
         // fixed the keymap-size off-by-one that used to truncate wvkbd's uploaded
@@ -497,6 +531,10 @@ impl State {
         );
         output.set_preferred(mode);
         output.create_global::<Self>(&dh);
+        // xdg-output manager (`zxdg_output_manager_v1`): reports each output's
+        // name + logical geometry. Recorders like wl-screenrec require it to
+        // resolve which output to capture. Dispatched via `delegate_output!`.
+        let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
 
         // wlr-gamma-control: advertise the manager global. 256 is a mock LUT
         // size for the winit backend; the DRM backend overrides it with the
@@ -549,6 +587,12 @@ impl State {
             layer_shell_state,
             fractional_scale_manager_state,
             viewporter_state,
+            output_manager_state,
+            image_capture_source,
+            output_capture_source,
+            image_copy_capture,
+            capture_formats: None,
+            pending_captures: Vec::new(),
             layers: layer_shell::LayerShell::new(output.clone(), out_w as f32, out_h as f32),
             touch,
             touch_targets: std::collections::HashMap::new(),
@@ -603,12 +647,26 @@ impl State {
     /// Advertise `zwp_linux_dmabuf` with the formats the backend's renderer can
     /// import. Called once per backend after the renderer exists, so GL clients
     /// negotiate zero-copy buffers instead of falling back to shm.
+    ///
+    /// When `main_device` is known (the DRM backend), bind version 4 with default
+    /// feedback: it advertises the render device + format tranches that zero-copy
+    /// clients and, crucially, `wl-screenrec` need to allocate importable capture
+    /// buffers. A version-3 global (no feedback) is rejected by wl-screenrec.
     fn init_dmabuf_global(
         &mut self,
         dh: &DisplayHandle,
         formats: impl IntoIterator<Item = DrmFormat>,
+        main_device: Option<libc::dev_t>,
     ) {
-        let global = self.dmabuf_state.create_global::<Self>(dh, formats);
+        let formats: Vec<DrmFormat> = formats.into_iter().collect();
+        let feedback = main_device
+            .and_then(|dev| DmabufFeedbackBuilder::new(dev, formats.iter().copied()).build().ok());
+        let global = match feedback {
+            Some(feedback) => self
+                .dmabuf_state
+                .create_global_with_default_feedback::<Self>(dh, &feedback),
+            None => self.dmabuf_state.create_global::<Self>(dh, formats),
+        };
         self.dmabuf_global = Some(global);
     }
 
@@ -1608,6 +1666,69 @@ smithay::delegate_fractional_scale!(State);
 smithay::delegate_viewporter!(State);
 delegate_text_input_manager!(State);
 delegate_input_method_manager!(State);
+smithay::delegate_image_capture_source!(State);
+smithay::delegate_output_capture_source!(State);
+smithay::delegate_image_copy_capture!(State);
+
+impl ImageCaptureSourceHandler for State {}
+
+impl OutputCaptureSourceHandler for State {
+    fn output_capture_source_state(&mut self) -> &mut OutputCaptureSourceState {
+        &mut self.output_capture_source
+    }
+
+    fn output_source_created(&mut self, source: ImageCaptureSource, output: &Output) {
+        // Stash the output on the source so `capture_constraints` can recover it.
+        source.user_data().insert_if_missing(|| output.downgrade());
+    }
+}
+
+impl ImageCopyCaptureHandler for State {
+    fn image_copy_capture_state(&mut self) -> &mut ImageCopyCaptureState {
+        &mut self.image_copy_capture
+    }
+
+    fn capture_constraints(&mut self, source: &ImageCaptureSource) -> Option<BufferConstraints> {
+        // Only our output is a valid source; recover it from the source's data.
+        let output = source
+            .user_data()
+            .get::<smithay::output::WeakOutput>()?
+            .upgrade()?;
+        let mode = output.current_mode()?;
+        let size = mode
+            .size
+            .to_logical(1)
+            .to_buffer(1, smithay::utils::Transform::Normal);
+        // Advertise dmabuf (zero-copy blit) when the DRM backend supplied formats,
+        // plus shm as a universal fallback so a client can always allocate.
+        let dma = self
+            .capture_formats
+            .as_ref()
+            .map(|(node, formats)| smithay::wayland::image_copy_capture::DmabufConstraints {
+                node: *node,
+                formats: formats.clone(),
+            });
+        Some(BufferConstraints {
+            size,
+            shm: vec![
+                smithay::reexports::wayland_server::protocol::wl_shm::Format::Xrgb8888,
+                smithay::reexports::wayland_server::protocol::wl_shm::Format::Argb8888,
+            ],
+            dma,
+        })
+    }
+
+    fn new_session(&mut self, _session: CaptureSession) {
+        // Sessions clean up on drop; we only act per-frame.
+    }
+
+    fn frame(&mut self, _session: &CaptureSessionRef, frame: CaptureFrame) {
+        // Defer the actual capture to the render loop, which owns the renderer and
+        // the just-composited scene. `success`/`fail` happens there.
+        self.pending_captures.push(frame);
+        self.needs_render = true;
+    }
+}
 
 impl InputMethodHandler for State {
     fn new_popup(&mut self, surface: ImePopupSurface) {
@@ -1803,7 +1924,8 @@ fn run_winit() {
     let actual_size = gfx_backend.window_size();
     info!(w = actual_size.w, h = actual_size.h, "actual output size");
     let mut state = State::new(&display, socket_name.clone(), (actual_size.w, actual_size.h));
-    state.init_dmabuf_global(&display.handle(), gfx_backend.renderer().dmabuf_formats());
+    // Winit has no DRM main device; a version-3 global is fine (no recording).
+    state.init_dmabuf_global(&display.handle(), gfx_backend.renderer().dmabuf_formats(), None);
 
     // Optional debug input socket (dev/test harness). Inert unless env is set.
     let debug_chan = match std::env::var("SPRINGCHICK_DEBUG_SOCK") {
@@ -2022,6 +2144,13 @@ fn render_frame(
 
     // Record + periodically log frame timing.
     state.record_and_log_frame(frame_start);
+
+    // The winit backend has no dmabuf capture path, so fail any pending
+    // screencopy frames rather than leave a recorder waiting forever. Real
+    // capture is the DRM backend's job.
+    for frame in std::mem::take(&mut state.pending_captures) {
+        frame.fail(smithay::wayland::image_copy_capture::CaptureFailureReason::Unknown);
+    }
 
     result
 }
