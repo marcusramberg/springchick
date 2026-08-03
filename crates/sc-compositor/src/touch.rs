@@ -157,7 +157,9 @@ pub fn pointer_motion(state: &mut State, x: f32, y: f32, time: u32) {
     // Track the pointer as a touch contact only while a button is held (a
     // gesture press or a client grab), so a bare hover leaves no mark.
     if state.show_touches && (state.pointer_grab || state.pointer_down) {
-        state.touch_viz.contact(touch_viz::POINTER_ID, x, y);
+        state
+            .touch_viz
+            .contact(touch_viz::POINTER_ID, x, y, std::time::Instant::now());
         state.needs_render = true;
     }
     if state.pointer_grab {
@@ -182,7 +184,9 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
     let (x, y) = state.last_pointer_pos.unwrap_or((0.0, 0.0));
     if state.show_touches {
         if pressed {
-            state.touch_viz.contact(touch_viz::POINTER_ID, x, y);
+            state
+                .touch_viz
+                .contact(touch_viz::POINTER_ID, x, y, std::time::Instant::now());
         } else {
             state
                 .touch_viz
@@ -249,7 +253,9 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
 /// slot (`gesture_slot`), since the funnel is single-touch.
 pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
     if state.show_touches {
-        state.touch_viz.contact(slot_id(slot), x, y);
+        state
+            .touch_viz
+            .contact(slot_id(slot), x, y, std::time::Instant::now());
         state.needs_render = true;
     }
     let target = match popup_press(state, x, y) {
@@ -285,7 +291,9 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
 /// A finger moved to `(x, y)`.
 pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
     if state.show_touches {
-        state.touch_viz.contact(slot_id(slot), x, y);
+        state
+            .touch_viz
+            .contact(slot_id(slot), x, y, std::time::Instant::now());
         state.needs_render = true;
     }
     if let Some(&scale) = state.touch_targets.get(&slot) {
