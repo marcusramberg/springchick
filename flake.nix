@@ -48,6 +48,15 @@
         packages.springchick = pkgs.springchick;
         packages.default = pkgs.springchick;
 
+        # VM tests (nixos test driver). Boot-smoke gates the DRM/GL stack in a
+        # headless VM; run with `nix build .#checks.<system>.vm-boot -L`. Built
+        # for the host arch (aarch64-linux and x86_64-linux) — always build the
+        # check matching `nix eval --raw --impure --expr builtins.currentSystem`,
+        # since cross-building the guest under qemu-user emulation crashes rustc.
+        checks = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          vm-boot = import ./nix/vm-test.nix { inherit self pkgs; };
+        };
+
         devShells.default = pkgs.mkShell {
           buildInputs = [
             rust

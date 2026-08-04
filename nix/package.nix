@@ -54,6 +54,25 @@ let
         or (throw "no prebuilt Skia binaries pinned for target ${rustTarget}");
   };
 
+  # Only the Rust workspace feeds the build. The flake passes `src = self` (the
+  # whole tree), so without this filter an edit to anything — nix/, tests/,
+  # docs/, scripts/ — changes the src hash and busts the expensive release
+  # build. Restrict to the files cargo actually reads; postInstall pulls
+  # config.example.toml and the session scripts via their own nix paths, so they
+  # are unaffected.
+  cargoSrc = lib.cleanSourceWith {
+    inherit src;
+    # `src` arrives as a string-like store path (flake `self`), which
+    # lib.fileset rejects — cleanSourceWith's path filter accepts it. Keep the
+    # workspace manifests and every crate; drop everything else.
+    filter =
+      path: _type:
+      let
+        rel = lib.removePrefix "${toString src}/" (toString path);
+      in
+      rel == "Cargo.toml" || rel == "Cargo.lock" || rel == "crates" || lib.hasPrefix "crates/" rel;
+  };
+
   # winit/EGL/GLES and libseat are dlopen'd at runtime, so they must be on the
   # loader path of the installed binary — build-time rpath does not cover them.
   runtimeLibs = [
@@ -69,7 +88,8 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "springchick";
-  inherit version src;
+  inherit version;
+  src = cargoSrc;
 
   cargoLock = {
     lockFile = ../Cargo.lock;
