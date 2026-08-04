@@ -1,4 +1,4 @@
-//! App search ranking, shared by the compositor and the search app.
+//! App search ranking, used by the pull-down search app.
 //!
 //! Pure ordering of catalog apps: the default view (empty query) surfaces the
 //! highest-frecency apps; typing filters the full catalog by a case-insensitive

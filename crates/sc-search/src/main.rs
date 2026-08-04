@@ -10,20 +10,13 @@ use std::collections::HashMap;
 
 use eframe::egui;
 use sc_catalog::AppEntry;
-use sc_shell_model::FrecencyStore;
+use sc_shell_model::{unix_now, FrecencyStore};
 
 /// xdg app_id — the compositor keys on this to slide it in and hide it from the
 /// task switcher. Must match `SEARCH_APP_ID` in the compositor.
 const APP_ID: &str = "chick.springchick.Search";
 const DEFAULT_LIMIT: usize = 5;
 const FILTER_LIMIT: usize = 8;
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
