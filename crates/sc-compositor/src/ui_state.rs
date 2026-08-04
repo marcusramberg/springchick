@@ -143,6 +143,46 @@ impl UiState {
         }
     }
 
+    /// Replace the stored `app_id` for `toplevel` wherever the current state
+    /// references it. A client usually sets its xdg `app_id` *after* the
+    /// toplevel maps (winit does), so the id captured at map time is a
+    /// placeholder; this retags the live UI so switcher/zoom visuals resolve
+    /// the real catalog icon.
+    pub fn retag_app(&mut self, toplevel: ToplevelId, app_id: &str) {
+        let set = |a: &mut String| *a = app_id.to_string();
+        match self {
+            UiState::App { toplevel: t, app_id: a, .. }
+            | UiState::AppOpening { toplevel: t, app_id: a, .. }
+            | UiState::AppClosing { toplevel: t, app_id: a, .. }
+            | UiState::Grabbing { toplevel: t, app_id: a, .. }
+            | UiState::Settling { toplevel: t, app_id: a, .. }
+                if *t == toplevel =>
+            {
+                set(a);
+            }
+            UiState::QuickSwitch {
+                current,
+                current_app,
+                prev,
+                next,
+                commit,
+                ..
+            } => {
+                if *current == toplevel {
+                    set(current_app);
+                }
+                for slot in [prev, next, commit] {
+                    if let Some((t, a)) = slot {
+                        if *t == toplevel {
+                            set(a);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Get the foreground toplevel id if any app is visible/animating.
     pub fn foreground_toplevel(&self) -> Option<ToplevelId> {
         match self {

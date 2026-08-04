@@ -911,14 +911,13 @@ impl State {
             format!("unknown_{}", self.toplevels.len())
         };
 
-        // Record frecency as a real app maps (covers both Home icon taps and
-        // launches from the search app, which exec directly). Non-catalog ids
-        // (the search app, unmatched clients) are skipped.
+        // Frecency is recorded in `app_id_changed`, not here: clients set their
+        // xdg `app_id` *after* the toplevel maps, so `app_id` above is a
+        // placeholder at this point and never catalog-matches. Recording only
+        // fires once the real id arrives. The rare client that sets app_id
+        // before mapping resolves here instead — log it either way.
         if self.app_catalog.contains_key(&app_id) {
-            self.model.frecency.record_launch(&app_id, unix_now());
-            if let Err(e) = persist::save(&self.model, &state_path()) {
-                warn!(%e, "failed to save shell model after launch");
-            }
+            info!(toplevel = self.toplevels.len(), app_id, "toplevel app_id resolved");
         }
 
         // Enter the output so the client receives its scale factor (`[main].dpi`)
@@ -1492,6 +1491,48 @@ impl XdgShellHandler for State {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         self.configure_maximized(&surface);
         self.register_toplevel(surface);
+    }
+
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        // Clients set the xdg `app_id` after `new_toplevel`/map, so the id
+        // captured in `register_toplevel` is a `unknown_N` placeholder. Now
+        // that the real id has arrived, match it against the catalog and, on a
+        // hit, retag the stored toplevel + live UI and record frecency (which
+        // register could not — see the note there).
+        let wl_surface = surface.wl_surface().clone();
+        let Some(id) = self.toplevels.iter().position(|s| {
+            s.as_ref()
+                .is_some_and(|t| t.surface.wl_surface() == &wl_surface)
+        }) else {
+            return;
+        };
+        // Only a placeholder id is worth replacing; a real match already stuck
+        // (e.g. the search app, or a client that set app_id before mapping).
+        if !self.toplevels[id]
+            .as_ref()
+            .is_some_and(|t| t.app_id.starts_with("unknown_"))
+        {
+            return;
+        }
+        let new_id = with_states(&wl_surface, |states| {
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .and_then(|d| d.lock().ok().and_then(|d| d.app_id.clone()))
+        })
+        .unwrap_or_default();
+        if new_id.is_empty() || !self.app_catalog.contains_key(&new_id) {
+            return;
+        }
+        if let Some(tl) = self.toplevels[id].as_mut() {
+            tl.app_id = new_id.clone();
+        }
+        info!(toplevel = id, app_id = %new_id, "toplevel app_id resolved");
+        self.model.frecency.record_launch(&new_id, unix_now());
+        if let Err(e) = persist::save(&self.model, &state_path()) {
+            warn!(%e, "failed to save shell model after launch");
+        }
+        self.ui.retag_app(id, &new_id);
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
