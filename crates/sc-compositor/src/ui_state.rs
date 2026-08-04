@@ -174,11 +174,9 @@ impl UiState {
                 if *current == toplevel {
                     set(current_app);
                 }
-                for slot in [prev, next, commit] {
-                    if let Some((t, a)) = slot {
-                        if *t == toplevel {
-                            set(a);
-                        }
+                for (t, a) in [prev, next, commit].into_iter().flatten() {
+                    if *t == toplevel {
+                        set(a);
                     }
                 }
             }

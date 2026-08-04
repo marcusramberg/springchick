@@ -28,6 +28,14 @@ pub struct FrecencyStore {
     pub apps: HashMap<AppId, AppStat>,
 }
 
+/// Current unix time in whole seconds (monotonic-enough for frecency).
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Decayed score of `stat` evaluated at `now` (unix secs). Compare all apps at
 /// the same `now` to get a consistent ordering.
 pub fn eff(stat: &AppStat, now: u64) -> f64 {
