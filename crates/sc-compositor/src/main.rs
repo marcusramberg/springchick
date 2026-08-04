@@ -1050,6 +1050,13 @@ impl State {
             || self.launching.is_some()
             || self.osd.is_active(now)
             || self.bar_fading()
+            // A debug-input gesture/key/touch/settle in flight must keep the DRM
+            // loop rendering each tick so it advances (page-flips otherwise stop
+            // on an idle screen). Inert in normal runs — these are always None.
+            || self.active_gesture.is_some()
+            || self.active_key.is_some()
+            || self.active_touch.is_some()
+            || self.pending_settle.is_some()
             || self
                 .grid_anim
                 .values()

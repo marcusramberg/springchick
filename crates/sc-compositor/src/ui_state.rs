@@ -100,9 +100,12 @@ pub enum UiState {
     QuickSwitch {
         current: ToplevelId,
         current_app: String,
-        /// App revealed by a rightward swipe (`offset > 0`) — the previous app.
+        /// App revealed by a rightward swipe (`offset > 0`) — the older/next app
+        /// (carousel handedness: most-recent on the right, so sliding right
+        /// walks toward older apps).
         prev: Option<(ToplevelId, String)>,
-        /// App revealed by a leftward swipe (`offset < 0`) — the next app.
+        /// App revealed by a leftward swipe (`offset < 0`) — the more-recent
+        /// (previous) app.
         next: Option<(ToplevelId, String)>,
         /// Horizontal offset as a fraction of screen width. `+` = current slides
         /// right (revealing `prev` from the left edge); `-` = slides left.
@@ -247,9 +250,11 @@ pub enum UiEvent {
     Tick { dt: f32 },
     /// Enter switcher deck from grab release.
     EnterSwitcher { cards: Vec<ToplevelId> },
-    /// Tap a card to open that app.
+    /// Tap a card to open that app. `app_id` is the real id resolved from the
+    /// toplevel by the caller — the switcher deck tracks only toplevel ids.
     SwitcherTapCard {
         toplevel: ToplevelId,
+        app_id: String,
         origin: ZoomOrigin,
     },
     /// Swipe a card up to close.
@@ -546,10 +551,9 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             };
             Effect::None
         }
-        UiEvent::SwitcherTapCard { toplevel, origin } => {
+        UiEvent::SwitcherTapCard { toplevel, app_id, origin } => {
             if let UiState::Switcher { cards, .. } = state {
                 if cards.contains(&toplevel) {
-                    let app_id = format!("app_{}", toplevel);
                     *state = UiState::AppOpening {
                         toplevel,
                         app_id,
@@ -852,10 +856,16 @@ mod tests {
             &mut state,
             UiEvent::SwitcherTapCard {
                 toplevel: 3,
+                app_id: "org.foo.Bar".into(),
                 origin: ZoomOrigin::card((600.0, 1350.0), 0.62),
             },
         );
-        assert!(matches!(state, UiState::AppOpening { toplevel: 3, .. }));
+        // The real app_id from the event must carry through — not a fabricated
+        // `app_{toplevel}` placeholder.
+        assert!(matches!(
+            &state,
+            UiState::AppOpening { toplevel: 3, app_id, .. } if app_id == "org.foo.Bar"
+        ));
     }
 
     #[test]
@@ -883,6 +893,7 @@ mod tests {
             &mut state,
             UiEvent::SwitcherTapCard {
                 toplevel: 99,
+                app_id: "nope".into(),
                 origin: ZoomOrigin::card((600.0, 1350.0), 0.62),
             },
         );
