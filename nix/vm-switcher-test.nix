@@ -1,8 +1,8 @@
 # Task-switcher / quick-switcher MRU interaction test.
 #
 # Launches three foot windows with distinct background colours and app_ids
-# (red/green/blue), then drives synthetic gestures over the debug-input socket
-# (SPRINGCHICK_DEBUG_SOCK, wired into the DRM backend) to exercise:
+# (red/green/blue), then drives synthetic gestures through the shipped
+# `springchick ipc` client (over the compositor's control socket) to exercise:
 #   - quick-switch (horizontal bar swipe) BROWSES without reordering the MRU;
 #   - picking a card in the task switcher promotes it to the front of the MRU.
 # The distinct colours make the front-most app identifiable in screenshots; the
@@ -48,9 +48,11 @@ pkgs.testers.runNixOSTest {
       systemd.user.services.springchick.environment = {
         LIBGL_ALWAYS_SOFTWARE = "1";
         GALLIUM_DRIVER = "llvmpipe";
-        # Debug-input socket the test driver sends gestures to.
-        SPRINGCHICK_DEBUG_SOCK = "/tmp/sc-debug.sock";
       };
+      # No socket override: the compositor uses its default control-socket path,
+      # $XDG_RUNTIME_DIR/springchick-ipc.sock = /run/user/1000/springchick-ipc.sock
+      # (the tester's runtime dir). The root test driver reaches it by pointing
+      # the client there explicitly (root can read the tester's runtime socket).
 
       services.greetd = {
         enable = true;
@@ -71,9 +73,10 @@ pkgs.testers.runNixOSTest {
         extraGroups = [ "video" "input" ];
       };
 
+      # springchick itself is on PATH via the module (systemPackages), so the
+      # test drives gestures with the shipped `springchick ipc` client.
       environment.systemPackages = [
         pkgs.foot
-        pkgs.socat # send lines to the debug socket
         redApp
         greenApp
         blueApp
@@ -85,21 +88,23 @@ pkgs.testers.runNixOSTest {
     };
 
   testScript = ''
-    import shlex
-
     machine.wait_for_unit("multi-user.target")
     machine.wait_until_succeeds(
         "systemctl --user -M tester@.host is-active springchick.service", timeout=90
     )
     sock = machine.succeed("basename $(ls /run/user/1000/springchick-*.lock) .lock").strip()
-    machine.wait_until_succeeds("ls /tmp/sc-debug.sock", timeout=30)
+    IPC_SOCK = "/run/user/1000/springchick-ipc.sock"
+    machine.wait_until_succeeds(f"ls {IPC_SOCK}", timeout=30)
 
     JOURNAL = "journalctl -b _SYSTEMD_USER_UNIT=springchick.service"
 
     def dbg(line):
-        # One line to the debug-input socket; blocks for the compositor's reply.
+        # Drive one gesture via the shipped client. SPRINGCHICK_IPC_SOCK points at
+        # the tester's default runtime socket; `springchick` is on PATH via the
+        # module. The client blocks for the compositor's reply and exits non-zero
+        # on error, so machine.succeed doubles as an assertion the verb was taken.
         return machine.succeed(
-            f"echo {shlex.quote(line)} | socat -t6 - UNIX-CONNECT:/tmp/sc-debug.sock"
+            f"SPRINGCHICK_IPC_SOCK={IPC_SOCK} springchick ipc {line}"
         ).strip()
 
     # Toplevels are numbered in map order, so launching red, green, blue fixes a

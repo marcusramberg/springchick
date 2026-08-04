@@ -201,26 +201,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let main_device = device_fd.dev_id().ok();
     state.init_dmabuf_global(&display.handle(), renderer.dmabuf_formats(), main_device);
 
-    // Optional debug input socket (dev/test harness), same as the winit backend.
-    // Lets the VM tests drive synthetic touch/swipe/key over a unix socket.
-    // Inert unless SPRINGCHICK_DEBUG_SOCK is set.
-    let debug_chan = match std::env::var("SPRINGCHICK_DEBUG_SOCK") {
-        Ok(path) => match crate::debug_input::spawn(
-            &path,
-            state.output_size.0 as f32,
-            state.output_size.1 as f32,
-        ) {
-            Ok(chan) => {
-                info!(path = %path, "debug input socket listening");
-                Some(chan)
-            }
-            Err(e) => {
-                error!(%e, "failed to bind debug input socket");
-                None
-            }
-        },
-        Err(_) => None,
-    };
+    // Control/IPC socket (`springchick ipc …`), same as the winit backend.
+    // Always listening; carries the debug-input gestures the VM tests drive too.
+    let debug_chan = crate::debug_input::spawn_listener(state.output_size);
 
     // Screencopy dmabuf constraints: the render node + format/modifier set a
     // recorder must allocate its capture buffers with, so we can blit into them
