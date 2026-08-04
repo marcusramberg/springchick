@@ -65,6 +65,23 @@ Edit the scripted assertions in `nix/vm-test.nix`. The `src` filter in
 `nix/package.nix` means editing `nix/`, `tests/`, or `docs/` does NOT rebuild
 the compositor — only `crates/`, `Cargo.toml`, `Cargo.lock` do.
 
+### Driving gestures — `springchick ipc`
+
+A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`
+(override with `SPRINGCHICK_IPC_SOCK`). The shipped `springchick ipc <verb>`
+client sends one line and prints the reply (exit non-zero on error). Verbs are
+the debug-input gestures: `tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`,
+`down/move/up`, `settle [MS]`. Used by `nix/vm-switcher-test.nix`; also works
+on-device. From the test driver (root reaching the tester's socket):
+
+```python
+IPC = "/run/user/1000/springchick-ipc.sock"
+machine.succeed(f"SPRINGCHICK_IPC_SOCK={IPC} springchick ipc swipe 640 788 1080 788 500")
+```
+
+Quick-switch handedness follows the carousel (most-recent on the right): swipe
+**right** → older app, swipe **left** → more-recent.
+
 ## Prerequisites (local nested path only)
 
 The VM path needs only `nix` + KVM (`/dev/kvm`). For `driver.sh`:

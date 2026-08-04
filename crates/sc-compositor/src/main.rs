@@ -9,6 +9,7 @@ mod frame_stats;
 mod gamma_control;
 mod input_common;
 mod input_dispatch;
+mod ipc;
 mod keybinds;
 mod launcher;
 mod layer_shell;
@@ -1984,7 +1985,15 @@ impl ClientData for ClientState {
 
 // --- Main entry ---
 
-fn main() {
+fn main() -> std::process::ExitCode {
+    // `springchick ipc <verb> [args...]` runs as a control-socket client against
+    // a running compositor instead of starting one. Handled before tracing so
+    // the client's stdout stays clean.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("ipc") {
+        return ipc::run_client(&args[2..]);
+    }
+
     init_tracing();
     match backend::BackendKind::from_env() {
         backend::BackendKind::Winit => {
@@ -1996,6 +2005,7 @@ fn main() {
             drm_backend::run_drm();
         }
     }
+    std::process::ExitCode::SUCCESS
 }
 
 fn init_tracing() {
@@ -2102,26 +2112,9 @@ fn run_winit() {
     // Winit has no DRM main device; a version-3 global is fine (no recording).
     state.init_dmabuf_global(&display.handle(), gfx_backend.renderer().dmabuf_formats(), None);
 
-    // Optional debug input socket (dev/test harness). Inert unless env is set.
-    let debug_chan = match std::env::var("SPRINGCHICK_DEBUG_SOCK") {
-        Ok(path) => {
-            match debug_input::spawn(
-                &path,
-                state.output_size.0 as f32,
-                state.output_size.1 as f32,
-            ) {
-                Ok(chan) => {
-                    info!(path = %path, "debug input socket listening");
-                    Some((path, chan))
-                }
-                Err(e) => {
-                    error!(%e, "failed to bind debug input socket");
-                    None
-                }
-            }
-        }
-        Err(_) => None,
-    };
+    // Control/IPC socket (`springchick ipc …`). Always listening; the client
+    // connects to the same path. Shared setup with the DRM backend.
+    let debug_chan = debug_input::spawn_listener(state.output_size);
 
     info!("entering frame loop");
 
@@ -2150,7 +2143,7 @@ fn run_winit() {
         }
 
         // Drain debug input (dev harness) before rendering this frame.
-        if let Some((_, chan)) = &debug_chan {
+        if let Some(chan) = &debug_chan {
             debug_input::drain(&mut state, chan);
         }
 
@@ -2174,9 +2167,10 @@ fn run_winit() {
         std::thread::sleep(Duration::from_millis(1));
     }
 
-    // Remove the debug socket file (best-effort).
-    if let Some((path, _)) = &debug_chan {
-        let _ = std::fs::remove_file(path);
+    // Remove the control socket file (best-effort). `spawn` also unlinks any
+    // stale socket before binding, so this is just tidy-up.
+    if debug_chan.is_some() {
+        let _ = std::fs::remove_file(ipc::socket_path());
     }
 
     // Save state.

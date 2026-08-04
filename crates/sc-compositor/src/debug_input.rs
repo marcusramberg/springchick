@@ -1,9 +1,10 @@
-//! Debug input socket — dev/test harness for driving the winit compositor.
+//! Debug input socket — the line protocol behind the control socket.
 //!
-//! Active only when `SPRINGCHICK_DEBUG_SOCK=<path>` is set (winit backend only).
-//! A reader thread parses newline commands off a unix socket into [`DebugCmd`]
-//! values and hands them to the render loop, which injects them through the
-//! existing `input_common` funnel. See
+//! The compositor (both winit and DRM backends) always listens on
+//! [`crate::ipc::socket_path`]; `springchick ipc <verb>` is the client. A reader
+//! thread parses newline commands off the unix socket into [`DebugCmd`] values
+//! and hands them to the render loop, which injects them through the existing
+//! `input_common` funnel. See
 //! `docs/superpowers/specs/2026-07-24-debug-input-socket-design.md`.
 
 /// A parsed command from the debug socket.
@@ -187,6 +188,23 @@ pub fn spawn(path: &str, w: f32, h: f32) -> std::io::Result<DebugChannel> {
         .spawn(move || reader_loop(listener, tx, w, h))?;
 
     Ok(DebugChannel { rx })
+}
+
+/// Bind the control socket at [`crate::ipc::socket_path`] and start its reader
+/// thread. Shared by both backends so the listener setup lives in one place;
+/// returns `None` (logged) if the bind fails, which is non-fatal.
+pub fn spawn_listener(output_size: (i32, i32)) -> Option<DebugChannel> {
+    let path = crate::ipc::socket_path();
+    match spawn(&path.to_string_lossy(), output_size.0 as f32, output_size.1 as f32) {
+        Ok(chan) => {
+            tracing::info!(path = %path.display(), "ipc socket listening");
+            Some(chan)
+        }
+        Err(e) => {
+            tracing::warn!(%e, "failed to bind ipc socket");
+            None
+        }
+    }
 }
 
 /// Accept clients one at a time; parse each line and forward valid commands.
