@@ -43,6 +43,7 @@ use smithay::delegate_output;
 use smithay::delegate_seat;
 use smithay::delegate_shm;
 use smithay::delegate_xdg_decoration;
+use smithay::delegate_xdg_dialog;
 use smithay::delegate_xdg_shell;
 use smithay::delegate_input_method_manager;
 use smithay::delegate_text_input_manager;
@@ -97,6 +98,9 @@ use smithay::wayland::shell::xdg::{
     XdgToplevelSurfaceData,
 };
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
+use smithay::wayland::shell::xdg::dialog::{
+    ToplevelDialogHint, XdgDialogHandler, XdgDialogState,
+};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::wayland::shm::{ShmHandler, ShmState};
@@ -223,6 +227,8 @@ struct State {
     popups: PopupManager,
     #[allow(dead_code)] // Must stay alive to keep the global registered.
     xdg_decoration_state: XdgDecorationState,
+    #[allow(dead_code)] // Must stay alive to keep the xdg-wm-dialog global registered.
+    xdg_dialog_state: XdgDialogState,
     shm_state: ShmState,
     /// zwp_linux_dmabuf: lets GL clients (GTK4, etc.) share buffers zero-copy
     /// instead of falling back to slow shm software upload. The global is
@@ -479,6 +485,12 @@ impl State {
             [xdg_toplevel::WmCapabilities::Fullscreen],
         );
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
+        // xdg-dialog: lets toolkits flag a toplevel as a dialog/modal. We use the
+        // hint (alongside set_parent) to keep client-side decorations — and thus
+        // action buttons — on dialogs. Portal file choosers run in their own
+        // process with no in-process parent, so the hint is the only signal that
+        // identifies them as dialogs.
+        let xdg_dialog_state = XdgDialogState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         // Global created later by the backend via `init_dmabuf_global`, once the
         // renderer's importable formats are known.
@@ -580,6 +592,7 @@ impl State {
             xdg_shell_state,
             popups: PopupManager::default(),
             xdg_decoration_state,
+            xdg_dialog_state,
             shm_state,
             dmabuf_state,
             dmabuf_global: None,
@@ -1485,6 +1498,16 @@ impl XdgShellHandler for State {
         self.unregister_toplevel(surface.wl_surface());
     }
 
+    fn parent_changed(&mut self, surface: ToplevelSurface) {
+        // `new_toplevel` fires on the `get_toplevel` request, before the client
+        // has sent `set_parent`, so its first configure always saw `parent() ==
+        // None` and treated even a dialog as a top-level app (→ server-side, no
+        // header bar). Once the parent arrives we know it's a child toplevel, so
+        // reconfigure to flip the decoration policy and restore the toolkit's
+        // action buttons (e.g. a GTK file chooser's Open/Cancel).
+        self.configure_maximized(&surface);
+    }
+
     fn fullscreen_request(
         &mut self,
         surface: ToplevelSurface,
@@ -1657,17 +1680,37 @@ impl FractionalScaleHandler for State {
 impl State {
     /// Decoration mode for a toplevel under the current policy.
     ///
-    /// Dialogs (child toplevels) always keep client-side decorations: their
-    /// toolkit draws the action buttons (a GTK file chooser's Open/Cancel) into
-    /// its own header bar, which vanishes under server-side decorations. Top-level
-    /// app windows follow `prefer_no_csd` — server-side (borderless) by default,
-    /// otherwise honoring whatever the client asked for.
+    /// Whether a toplevel is a dialog and so must keep client-side decorations.
+    ///
+    /// Two independent signals, either sufficient:
+    /// - `set_parent`: a child toplevel of another window (in-process dialogs).
+    /// - the xdg-dialog `dialog`/`modal` hint: how a portal file chooser — a
+    ///   separate process with no in-process parent — announces itself, so it's
+    ///   the only signal that catches those.
+    fn is_dialog(toplevel: &ToplevelSurface) -> bool {
+        if toplevel.parent().is_some() {
+            return true;
+        }
+        smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .map(|d| d.lock().unwrap().dialog_hint != ToplevelDialogHint::Unknown)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Dialogs always keep client-side decorations: their toolkit draws the
+    /// action buttons (a GTK file chooser's Open/Cancel) into its own header bar,
+    /// which vanishes under server-side decorations. Top-level app windows follow
+    /// `prefer_no_csd` — server-side (borderless) by default, otherwise honoring
+    /// whatever the client asked for.
     fn decoration_for(
         &self,
         toplevel: &ToplevelSurface,
         requested: Option<DecorationMode>,
     ) -> DecorationMode {
-        if toplevel.parent().is_some() {
+        if Self::is_dialog(toplevel) {
             DecorationMode::ClientSide
         } else if self.prefer_no_csd {
             DecorationMode::ServerSide
@@ -1724,9 +1767,20 @@ impl XdgDecorationHandler for State {
     }
 }
 
+impl XdgDialogHandler for State {
+    fn dialog_hint_changed(&mut self, toplevel: ToplevelSurface, _hint: ToplevelDialogHint) {
+        // A client (often a portal file chooser with no in-process parent) just
+        // flagged this toplevel as a dialog/modal. Like `parent_changed`, the
+        // initial configure predates the hint, so reconfigure to flip the
+        // decoration policy to client-side and restore its action buttons.
+        self.configure_maximized(&toplevel);
+    }
+}
+
 delegate_compositor!(State);
 smithay::delegate_dmabuf!(State);
 delegate_xdg_shell!(State);
+delegate_xdg_dialog!(State);
 delegate_seat!(State);
 delegate_shm!(State);
 delegate_data_device!(State);
