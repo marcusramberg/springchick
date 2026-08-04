@@ -16,7 +16,7 @@ pub enum NavTarget {
     BackToApp,
     Home,
     Switcher,
-    QuickSwitch(i32), // -1 = previous app (swipe right), +1 = next (swipe left)
+    QuickSwitch(i32), // -1 = previous/more-recent (swipe left), +1 = next/older (swipe right)
 }
 
 /// Live phase from the current tracker (called each frame during a grab).
@@ -42,7 +42,10 @@ pub fn classify_release(t: &Tracker) -> NavTarget {
         && (t.dx().abs() >= th::QUICK_SWITCH_PROGRESS
             || t.velocity.x.abs() >= th::QUICK_SWITCH_VELOCITY)
     {
-        return NavTarget::QuickSwitch(if t.dx() < 0.0 { 1 } else { -1 });
+        // Handedness matches the carousel (most-recent on the right): swipe
+        // right (dx > 0) walks to the older/next app, swipe left to the
+        // more-recent/previous app.
+        return NavTarget::QuickSwitch(if t.dx() < 0.0 { -1 } else { 1 });
     }
 
     let progress = t.up_progress();
@@ -162,13 +165,15 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_flick_quick_switches_next() {
+    fn horizontal_flick_left_quick_switches_to_previous() {
+        // Leftward flick (dx < 0) walks to the more-recent/previous app (-1),
+        // matching the carousel handedness (most-recent on the right).
         let t = t_with(
             Pt { x: 0.5, y: 0.95 },
             Pt { x: 0.2, y: 0.93 },
             Pt { x: -2.0, y: 0.0 },
         );
-        assert_eq!(classify_release(&t), NavTarget::QuickSwitch(1));
+        assert_eq!(classify_release(&t), NavTarget::QuickSwitch(-1));
     }
 
     #[test]

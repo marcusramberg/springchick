@@ -23,7 +23,8 @@ const FRONT_SCALE_PX_FRAC: f32 = 0.42;
 const ICON_TAP_SLOP: f32 = 12.0;
 /// Fraction of screen width the quick-switch slide must reach at release to
 /// commit to the neighbour app; short of it the swipe is rejected (springs back).
-const BAR_QS_COMMIT_FRAC: f32 = 0.3;
+/// Kept low so a short, deliberate swipe commits instead of bouncing.
+const BAR_QS_COMMIT_FRAC: f32 = 0.2;
 
 /// A finger held on an app icon, waiting to see if it becomes a tap (launch)
 /// or a page swipe. Cleared once movement exceeds `ICON_TAP_SLOP`.
@@ -211,13 +212,16 @@ fn settle_quick_switch(state: &mut State) {
         UiState::QuickSwitch { offset, .. } => offset.value,
         _ => return,
     };
-    // dir: -1 = committed to previous (offset > 0), +1 = next (offset < 0).
+    // The `prev` slot (rightward slide, offset > 0) now holds the older/next
+    // app, so committing it walks the cursor forward (+1); the `next` slot
+    // (leftward slide) holds the more-recent/previous app (-1). `target` follows
+    // the slide direction, not the app.
     let (commit, target, dir) = match &state.ui {
         UiState::QuickSwitch { prev, next, .. } => {
             if f >= BAR_QS_COMMIT_FRAC && prev.is_some() {
-                (prev.clone(), 1.0f32, -1)
+                (prev.clone(), 1.0f32, 1)
             } else if f <= -BAR_QS_COMMIT_FRAC && next.is_some() {
-                (next.clone(), -1.0f32, 1)
+                (next.clone(), -1.0f32, -1)
             } else {
                 (None, 0.0, 0)
             }
@@ -265,8 +269,11 @@ fn enter_quick_switch(state: &mut State, start_x: f32, origin: sc_input::Pt) {
         | UiState::App { toplevel, app_id } => (*toplevel, app_id.clone()),
         _ => return,
     };
-    let prev = state.history.peek(-1).and_then(|t| app_id_of(state, t));
-    let next = state.history.peek(1).and_then(|t| app_id_of(state, t));
+    // Handedness matches the carousel (most-recent on the right): a rightward
+    // slide (`offset > 0`, the `prev` slot) reveals the older/next app; a
+    // leftward slide (the `next` slot) reveals the more-recent/previous app.
+    let prev = state.history.peek(1).and_then(|t| app_id_of(state, t));
+    let next = state.history.peek(-1).and_then(|t| app_id_of(state, t));
     state.ui = UiState::QuickSwitch {
         current,
         current_app,
@@ -685,6 +692,15 @@ pub fn on_release(state: &mut State) {
                         if let Some(card) = state.switcher_cards.get(idx).copied() {
                             let origin =
                                 ZoomOrigin::card((card.center_x, card.center_y), card.scale);
+                            // Resolve the real app_id from the toplevel (the deck
+                            // tracks only ids); otherwise the App state carries a
+                            // fabricated `app_{id}` placeholder.
+                            let app_id = state
+                                .toplevels
+                                .get(card.toplevel)
+                                .and_then(|t| t.as_ref())
+                                .map(|t| t.app_id.clone())
+                                .unwrap_or_default();
                             // Selecting a card makes it the most-recent app, so
                             // the next switcher shows it as the front card.
                             state.history.push_foreground(card.toplevel);
@@ -692,6 +708,7 @@ pub fn on_release(state: &mut State) {
                                 &mut state.ui,
                                 UiEvent::SwitcherTapCard {
                                     toplevel: card.toplevel,
+                                    app_id,
                                     origin,
                                 },
                             );

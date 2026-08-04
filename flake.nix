@@ -55,6 +55,7 @@
         # since cross-building the guest under qemu-user emulation crashes rustc.
         checks = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           vm-boot = import ./nix/vm-test.nix { inherit self pkgs; };
+          vm-switcher = import ./nix/vm-switcher-test.nix { inherit self pkgs; };
         };
 
         devShells.default = pkgs.mkShell {

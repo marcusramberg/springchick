@@ -201,6 +201,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let main_device = device_fd.dev_id().ok();
     state.init_dmabuf_global(&display.handle(), renderer.dmabuf_formats(), main_device);
 
+    // Optional debug input socket (dev/test harness), same as the winit backend.
+    // Lets the VM tests drive synthetic touch/swipe/key over a unix socket.
+    // Inert unless SPRINGCHICK_DEBUG_SOCK is set.
+    let debug_chan = match std::env::var("SPRINGCHICK_DEBUG_SOCK") {
+        Ok(path) => match crate::debug_input::spawn(
+            &path,
+            state.output_size.0 as f32,
+            state.output_size.1 as f32,
+        ) {
+            Ok(chan) => {
+                info!(path = %path, "debug input socket listening");
+                Some(chan)
+            }
+            Err(e) => {
+                error!(%e, "failed to bind debug input socket");
+                None
+            }
+        },
+        Err(_) => None,
+    };
+
     // Screencopy dmabuf constraints: the render node + format/modifier set a
     // recorder must allocate its capture buffers with, so we can blit into them
     // zero-copy. Falls back to shm-only if the node can't be resolved.
@@ -352,8 +373,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // The 2ms timeout wakes the loop to accept + dispatch wayland clients even
     // when no DRM/input event fires.
-    event_loop.run(Some(Duration::from_millis(2)), &mut app, |app| {
+    event_loop.run(Some(Duration::from_millis(2)), &mut app, move |app| {
         app.dispatch_wayland();
+        // Drain the debug-input socket (dev harness) before housekeeping so a
+        // synthetic gesture takes effect this tick. `is_animating` reports true
+        // while one is in flight, so the render below keeps advancing it.
+        if let Some(chan) = &debug_chan {
+            crate::debug_input::drain(&mut app.state, chan);
+        }
         // Long presses are polled here, not in `render`: page-flips stop when
         // nothing animates, so a frame-driven poll would never fire on an idle
         // screen.

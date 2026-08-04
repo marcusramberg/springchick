@@ -1,18 +1,73 @@
 ---
 name: run-springchick
-description: Build, launch, screenshot and drive springchick (the phone-shell wayland compositor) locally. Use when asked to run, start, screenshot, or interactively test springchick / sc-compositor, or to confirm a change works in the real running compositor rather than only in tests.
+description: Build, launch, screenshot and drive springchick (the phone-shell wayland compositor) locally or headless. Use when asked to run, start, screenshot, or interactively test springchick / sc-compositor, to boot it in a VM / on a clean machine / in CI, or to confirm a change works in the real running compositor rather than only in tests.
 ---
 
-springchick is a wayland compositor (phone shell). Locally it runs with the
-**winit** backend as a nested window inside a host wayland session (niri/sway),
-so it can be screenshotted with `grim` and driven headlessly. The driver script
-`.claude/skills/run-springchick/driver.sh` wraps the whole loop: launch, map a
-test client, send synthetic input over the debug socket, screenshot, and a
-**PID-safe** teardown.
+springchick is a wayland compositor (phone shell). There are **two** ways to
+drive it — pick by whether the machine has a host wayland session:
+
+- **Headless / clean machine / CI (no display): the nix VM test.** Boots
+  springchick on its real **DRM** backend inside a NixOS QEMU VM (virtio-gpu +
+  llvmpipe software GL), autologins the shipped session, launches a client, and
+  screenshots the framebuffer. This is the ONLY path that works with no host
+  wayland session. Harness = `nix/vm-test.nix` (committed), driven either as a
+  one-shot `nix build` check or live via the interactive driver. **Use this
+  path in this container** (and see [[nix-vm-tests]]).
+- **Local nested (host wayland session, e.g. niri/sway): `driver.sh`.** Runs
+  the **winit** backend as a nested window, screenshots with `grim`, drives
+  synthetic input over the debug socket. Faster iteration, but needs a display.
 
 All paths below are relative to the repo root.
 
-## Prerequisites
+## Headless (clean machine / CI) — the nix VM test
+
+Boots springchick end-to-end with no display. **Build for the host arch** —
+cross-building the other arch runs the release tree under qemu-user emulation,
+which SIGSEGVs rustc. This box is `aarch64`; substitute your `nix eval --impure
+--expr builtins.currentSystem` output.
+
+One-shot scripted smoke (boot → launch foot → assert app_id resolves → screenshots):
+
+```bash
+nix build .#checks.aarch64-linux.vm-boot -L --no-link
+# Screenshots land in the result: springchick-boot.png, springchick-foot.png
+```
+
+Drive it **live** (poke the running VM, no springchick recompile between probes):
+
+```bash
+nix build .#checks.aarch64-linux.vm-boot.driverInteractive \
+  --out-link /tmp/sc-driver-link
+# Pipe python to the driver; screenshots land in $CWD as <name>.png.
+cd /tmp && /tmp/sc-driver-link/bin/nixos-test-driver <<'PY'
+start_all()
+machine.wait_for_unit("multi-user.target")
+machine.wait_until_succeeds("systemctl --user -M tester@.host is-active springchick.service", timeout=90)
+machine.wait_until_succeeds("ls /run/user/1000/springchick-*.lock", timeout=30)
+machine.screenshot("sc-home")          # → /tmp/sc-home.png ; then Read it
+machine.shutdown()
+PY
+```
+
+`machine` exposes `succeed`/`fail`/`wait_until_succeeds`/`screenshot`/
+`send_key`/`shutdown`. The guest has `foot` installed (its `.desktop` files put
+Foot / Foot Server / Foot Client on the home grid). Launch a client from inside
+the session and screenshot the result:
+
+```python
+sock = machine.succeed("basename $(ls /run/user/1000/springchick-*.lock) .lock").strip()
+machine.succeed(f"systemd-run --user -M tester@.host --collect --setenv=WAYLAND_DISPLAY={sock} $(command -v foot) -e sleep 30")
+machine.wait_until_succeeds("journalctl -b _SYSTEMD_USER_UNIT=springchick.service | grep -F 'app_id=foot'", timeout=30)
+machine.screenshot("sc-foot")
+```
+
+Edit the scripted assertions in `nix/vm-test.nix`. The `src` filter in
+`nix/package.nix` means editing `nix/`, `tests/`, or `docs/` does NOT rebuild
+the compositor — only `crates/`, `Cargo.toml`, `Cargo.lock` do.
+
+## Prerequisites (local nested path only)
+
+The VM path needs only `nix` + KVM (`/dev/kvm`). For `driver.sh`:
 
 - A running host wayland session (niri here). `echo $XDG_RUNTIME_DIR` →
   `/run/user/<uid>`; the host display socket is `wayland-1` (override with
@@ -20,7 +75,13 @@ All paths below are relative to the repo root.
 - `foot` (wayland terminal) — the test client. Already on this box.
 - `nix` — build and `grim` both go through the flake devshell. No apt needed.
 
-## Build + run (agent path) — use the driver
+## Local nested (host wayland session) — driver.sh
+
+Needs a host wayland display (won't work in a display-less container — use the
+VM path above there). The driver script
+`.claude/skills/run-springchick/driver.sh` wraps the whole loop: launch, map a
+test client, send synthetic input over the debug socket, screenshot, and a
+**PID-safe** teardown.
 
 ```bash
 # Warm the devshell once (first build is slow; keep the whole thing < timeout).
@@ -78,6 +139,21 @@ nix develop --command cargo test         # unit tests; bare cargo can't (see Got
 
 ## Gotchas (battle scars)
 
+- **VM: build the host arch, never cross-build.** `nix build
+  .#checks.x86_64-linux.vm-boot` on this aarch64 box runs the whole release
+  tree under qemu-user emulation and SIGSEGVs rustc (`qemu: uncaught target
+  signal 11`). Always match `builtins.currentSystem`.
+- **VM: the interactive driver writes screenshots to `$CWD`**, not the store —
+  `machine.screenshot("foo")` → `./foo.png`. `cd` somewhere writable first.
+- **VM: don't grep the journal for bare `panic`.** The kernel cmdline
+  (`panic=1`) and virtio-gpu `drm panic` planes both match; assert
+  `panicked at|SIGSEGV|SIGABRT|stack backtrace|segfault` instead.
+- **VM: greetd needs `default_session`**, not just `initial_session`, or it
+  exits with `default_session contains no command` and nothing autologins.
+- **VM: DRM `Permission denied` errors at `machine.shutdown()` are benign** —
+  logind revokes DRM master as the seat tears down, so the compositor's final
+  page-flip/DPMS commit fails. They fire *after* any screenshot and don't match
+  the crash-signature grep. Boot-time rendering is unaffected.
 - **Never `pkill foot`.** The user's own terminal is usually a foot window; a
   broad kill takes down their session. The driver only ever kills PIDs it
   recorded. If you kill by hand, kill by PID.
@@ -107,6 +183,16 @@ nix develop --command cargo test         # unit tests; bare cargo can't (see Got
 
 ## Troubleshooting
 
+- **VM:** `springchick.service` never reaches active → the DRM/GL stack didn't
+  come up. Read the guest journal: `nix log <drv>` from the build output, or
+  live via the interactive driver
+  `machine.succeed("journalctl -b -u springchick.service")`. Common cause is
+  greetd not autologging in (missing `default_session`).
+- **VM:** rustc SIGSEGV / `qemu: uncaught target signal 11` during the build →
+  you're cross-building. Use the host arch (`aarch64-linux` here).
+- **VM:** `app_id=foot` assertion times out → the catalog didn't see
+  `foot.desktop` at scan time (springchick scans `XDG_DATA_DIRS` at startup);
+  confirm `pkgs.foot` is in the node's `environment.systemPackages`.
 - `up` prints `refuse: …/springchick-0 exists` → a prior instance is alive.
   `$D down`, confirm `ls /run/user/$(id -u)/springchick-*` is empty, retry.
 - `up` times out on `entering frame loop` → read `/tmp/sc-driver/compositor.log`;
