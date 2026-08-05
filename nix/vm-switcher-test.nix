@@ -12,6 +12,8 @@
 { self, pkgs }:
 
 let
+  inherit (import ./test-support.nix { inherit self pkgs; }) mkTest;
+
   # A foot launcher with a solid background colour and a matching app_id, plus a
   # .desktop file whose stem == app_id so the catalog resolves it (app_id fix).
   colorApp =
@@ -28,64 +30,19 @@ let
   greenApp = colorApp "green" "00aa00";
   blueApp = colorApp "blue" "0000cc";
 in
-pkgs.testers.runNixOSTest {
+mkTest {
   name = "springchick-switcher";
 
-  nodes.machine =
-    { config, lib, pkgs, ... }:
-    {
-      imports = [ self.nixosModules.springchick ];
-
-      programs.springchick.enable = true;
-
-      virtualisation.qemu.options = [
-        "-vga none"
-        "-device virtio-gpu-pci"
-      ];
-      boot.initrd.kernelModules = [ "virtio_gpu" ];
-
-      hardware.graphics.enable = true;
-      systemd.user.services.springchick.environment = {
-        LIBGL_ALWAYS_SOFTWARE = "1";
-        GALLIUM_DRIVER = "llvmpipe";
-      };
-      # No socket override: the compositor uses its default control-socket path,
-      # $XDG_RUNTIME_DIR/springchick-ipc.sock = /run/user/1000/springchick-ipc.sock
-      # (the tester's runtime dir). The root test driver reaches it by pointing
-      # the client there explicitly (root can read the tester's runtime socket).
-
-      services.greetd = {
-        enable = true;
-        settings = {
-          initial_session = {
-            command = "${config.programs.springchick.package}/bin/springchick-session";
-            user = "tester";
-          };
-          default_session = {
-            command = "${config.programs.springchick.package}/bin/springchick-session";
-            user = "tester";
-          };
-        };
-      };
-
-      users.users.tester = {
-        isNormalUser = true;
-        extraGroups = [ "video" "input" ];
-      };
-
-      # springchick itself is on PATH via the module (systemPackages), so the
-      # test drives gestures with the shipped `springchick ipc` client.
-      environment.systemPackages = [
-        pkgs.foot
-        redApp
-        greenApp
-        blueApp
-      ];
-      fonts.packages = [ pkgs.dejavu_fonts ];
-
-      virtualisation.memorySize = 2048;
-      virtualisation.cores = 2;
-    };
+  # springchick itself is on PATH via the module, so the test drives gestures
+  # with the shipped `springchick ipc` client. The control socket uses its
+  # default path ($XDG_RUNTIME_DIR/springchick-ipc.sock); the root test driver
+  # reaches it by pointing the client there explicitly.
+  packages = [
+    pkgs.foot
+    redApp
+    greenApp
+    blueApp
+  ];
 
   testScript = ''
     machine.wait_for_unit("multi-user.target")
@@ -141,17 +98,23 @@ pkgs.testers.runNixOSTest {
     wait_front("blue")
     machine.screenshot("01-launched-blue-front")
 
+    # Gesture coordinates are in physical output pixels. The output is the shared
+    # phone profile, 720x1440 portrait; the switcher card geometry is proportional
+    # to output size, so each coordinate below is a fixed fraction of that (noted
+    # inline) and would rescale cleanly if the profile ever changed.
+
     # --- Task switcher: picking a card promotes it to the front of the MRU ---
     # Enter the switcher deck: a slow upward bar swipe into the middle band
-    # (up_progress ~0.27, below the home threshold, no flick velocity).
-    dbg("swipe 640 788 640 570 800")
+    # (x=0.5W; y 0.985H -> 0.7125H, up_progress ~0.27, below the home threshold,
+    # no flick velocity).
+    dbg("swipe 360 1418 360 1026 800")
     machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'state changed to Switcher'", timeout=15)
     machine.screenshot("02-switcher-deck")  # blue front, green mid, red back
 
-    # Tap the GREEN card (its exposed strip; blue's front-card rect starts ~x=413,
-    # so x=290 unambiguously hits green). Selecting it calls push_foreground ->
-    # green to the front, MRU becomes [green, blue, red].
-    dbg("tap 290 400")
+    # Tap the GREEN card (its exposed strip; blue's front-card rect starts at
+    # ~0.32W ~= x=232, so x=163 (0.227W) unambiguously hits green). Selecting it
+    # calls push_foreground -> green to the front, MRU becomes [green, blue, red].
+    dbg("tap 163 720")
     wait_front("green")
     machine.screenshot("03-after-tap-green")
 
@@ -161,11 +124,11 @@ pkgs.testers.runNixOSTest {
     # swipe-right walks the (unchanged) stack [green, blue, red]:
     # green -> blue -> red. (Swiping left would rubber-band: nothing is more
     # recent than the front app.)
-    dbg("swipe 640 788 1080 788 500")
+    dbg("swipe 360 1418 608 1418 500")
     wait_front("blue")
     machine.screenshot("04-qs-blue")
 
-    dbg("swipe 640 788 1080 788 500")
+    dbg("swipe 360 1418 608 1418 500")
     wait_front("red")
     machine.screenshot("05-qs-red")
 
