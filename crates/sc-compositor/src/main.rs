@@ -2,6 +2,7 @@
 
 mod app_history;
 mod backend;
+mod background_effect;
 mod blank;
 mod content_type;
 mod debug_input;
@@ -352,6 +353,10 @@ struct State {
     /// wp_content_type_v1 state (holds the global; tags live per surface).
     #[allow(dead_code)]
     content_type: content_type::ContentType,
+    /// ext-background-effect-v1 state (holds the global; blur regions live per
+    /// surface).
+    #[allow(dead_code)]
+    background_effect: background_effect::BackgroundEffect,
     /// Whether the foreground app is fullscreen content that wants a landscape
     /// display (see [`content_type::wants_landscape`]). Nothing rotates yet —
     /// this is the signal the rotation work will read.
@@ -574,6 +579,9 @@ impl State {
         // wp_content_type: clients tag a surface photo/video/game. Used as the
         // auto-landscape hint.
         let content_type = content_type::ContentType::new(&dh);
+        // ext-background-effect: panels/OSKs can ask for their backdrop to be
+        // blurred. Advertised because `render` really blurs it.
+        let background_effect = background_effect::BackgroundEffect::new(&dh);
 
         // Load shell model + app catalog.
         let model = persist::load(&persist::state_path()).unwrap_or_default();
@@ -655,6 +663,7 @@ impl State {
             idle_notify,
             idle_inhibit,
             content_type,
+            background_effect,
             landscape_hint: false,
             skia: SkiaGl::new(),
             wayland_socket,

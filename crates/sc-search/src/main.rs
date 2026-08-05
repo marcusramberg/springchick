@@ -6,6 +6,8 @@
 //! It ranks the app catalog by frecency (read-only from the shared state file),
 //! filters by name as you type, and launches the pick (then exits).
 
+mod blur;
+
 use std::collections::HashMap;
 
 use eframe::egui;
@@ -22,7 +24,10 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id(APP_ID)
-            .with_fullscreen(true),
+            .with_fullscreen(true)
+            // Translucent so the compositor's blurred Home backdrop shows
+            // through (see `blur`).
+            .with_transparent(true),
         ..Default::default()
     };
     eframe::run_native(
@@ -39,10 +44,12 @@ struct SearchApp {
     results: Vec<String>,
     textures: HashMap<String, egui::TextureHandle>,
     focus_requested: bool,
+    /// Kept alive for the process lifetime: dropping it drops the blur.
+    _blur: Option<blur::ExtBackgroundEffectSurfaceV1>,
 }
 
 impl SearchApp {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let catalog: HashMap<String, AppEntry> =
             sc_catalog::scan_apps().into_iter().map(|e| (e.id.clone(), e)).collect();
         // Frecency is read-only here; the compositor stays the sole writer.
@@ -56,6 +63,7 @@ impl SearchApp {
             results: Vec::new(),
             textures: HashMap::new(),
             focus_requested: false,
+            _blur: blur::blur_whole_window(cc),
         };
         app.recompute();
         app
@@ -100,13 +108,23 @@ impl SearchApp {
 }
 
 impl eframe::App for SearchApp {
+    /// Transparent clear so the compositor composites us over the blurred Home
+    /// screen instead of over black.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             std::process::exit(0);
         }
         let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // Translucent panel over the blurred backdrop. Without the compositor's
+        // blur this is still legible, just a plain dark scrim.
+        let frame = egui::Frame::central_panel(&ctx.style())
+            .fill(egui::Color32::from_rgba_unmultiplied(12, 14, 18, 170));
+        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             ui.add_space(24.0);
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.query)

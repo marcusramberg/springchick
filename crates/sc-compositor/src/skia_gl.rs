@@ -14,9 +14,11 @@ use skia_safe::gpu::gl::{Format, FramebufferInfo, Interface};
 use skia_safe::gpu::{
     backend_render_targets, direct_contexts, surfaces, DirectContext, SurfaceOrigin,
 };
+use skia_safe::image_filters;
+use skia_safe::PathOp;
 use skia_safe::{
-    images, Color, ColorType, Font, FontMgr, FontStyle, Image, ImageInfo, Paint, RRect, Rect,
-    Surface, TextBlob,
+    images, Color, ColorType, Font, FontMgr, FontStyle, Image, ImageInfo, Paint, PathBuilder,
+    RRect, Rect, Surface, TextBlob, TileMode,
 };
 
 use std::collections::HashMap;
@@ -307,27 +309,21 @@ impl SkiaGl {
         }
     }
 
-    /// Acquire the cached GL-backed Skia surface and run `f` against its canvas,
-    /// applying the y-flip if needed and flushing afterward. Shared by the
-    /// overlay draws so they don't each repeat the surface-acquire dance.
-    fn with_overlay_canvas<F: FnOnce(&skia_safe::Canvas)>(
-        &mut self,
-        width: i32,
-        height: i32,
-        flip_y: bool,
-        f: F,
-    ) {
+    /// Acquire (or reuse) the Skia surface wrapping the currently bound
+    /// framebuffer. Returns false if the GL context or the wrap failed, in which
+    /// case `cached_surface` must not be touched.
+    fn ensure_surface(&mut self, width: i32, height: i32) -> bool {
         if width <= 0 || height <= 0 {
-            return;
+            return false;
         }
         if !self.ensure_context() {
-            return;
+            return false;
         }
 
         let fboid = self.current_fbo();
         let context = match self.context.as_mut() {
             Some(c) => c,
-            None => return,
+            None => return false,
         };
         context.reset(None);
 
@@ -351,7 +347,7 @@ impl SkiaGl {
                 None,
             ) else {
                 warn!("wrap_backend_render_target returned None");
-                return;
+                return false;
             };
             self.cached_surface = Some(CachedSurface {
                 surface,
@@ -359,6 +355,22 @@ impl SkiaGl {
                 width,
                 height,
             });
+        }
+        true
+    }
+
+    /// Acquire the cached GL-backed Skia surface and run `f` against its canvas,
+    /// applying the y-flip if needed and flushing afterward. Shared by the
+    /// overlay draws so they don't each repeat the surface-acquire dance.
+    fn with_overlay_canvas<F: FnOnce(&skia_safe::Canvas)>(
+        &mut self,
+        width: i32,
+        height: i32,
+        flip_y: bool,
+        f: F,
+    ) {
+        if !self.ensure_surface(width, height) {
+            return;
         }
 
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
@@ -409,6 +421,80 @@ impl SkiaGl {
         self.with_overlay_canvas(width, height, flip_y, |canvas| {
             draw_volume_osd(canvas, width as f32, height as f32, level, muted, alpha);
         });
+    }
+
+    /// Blur what is already in the framebuffer, inside `rects`
+    /// (ext-background-effect-v1). Call it after everything *behind* the
+    /// blurring surface is drawn and before the surface itself.
+    ///
+    /// Works by snapshotting the framebuffer and drawing that snapshot straight
+    /// back through a blur filter, clipped to the region. The snapshot lives in
+    /// the surface's own coordinate space, so it is drawn with no y-flip and the
+    /// clip rectangles are flipped into that space instead — flipping both would
+    /// mirror the blurred content against the pixels it came from.
+    pub fn blur_backdrop(
+        &mut self,
+        width: i32,
+        height: i32,
+        rects: &[crate::background_effect::BlurRect],
+        sigma: f32,
+        flip_y: bool,
+    ) {
+        if rects.is_empty() || sigma <= 0.0 {
+            return;
+        }
+        if !self.ensure_surface(width, height) {
+            return;
+        }
+
+        // Region → clip path: Add rects union, Subtract rects punch holes.
+        let to_canvas = |r: &crate::background_effect::BlurRect| {
+            let y = if flip_y { height as f32 - (r.y + r.h) } else { r.y };
+            Rect::from_xywh(r.x, y, r.w, r.h)
+        };
+        let mut add = PathBuilder::new();
+        let mut sub = PathBuilder::new();
+        let mut any_add = false;
+        let mut any_sub = false;
+        for r in rects {
+            if r.add {
+                add.add_rect(to_canvas(r), None, None);
+                any_add = true;
+            } else {
+                sub.add_rect(to_canvas(r), None, None);
+                any_sub = true;
+            }
+        }
+        if !any_add {
+            return;
+        }
+        let add = add.detach();
+        let clip = if any_sub {
+            skia_safe::op(&add, &sub.detach(), PathOp::Difference).unwrap_or(add)
+        } else {
+            add
+        };
+
+        let surface = &mut self.cached_surface.as_mut().unwrap().surface;
+        let snapshot = surface.image_snapshot();
+        let canvas = surface.canvas();
+
+        let mut paint = Paint::default();
+        paint.set_image_filter(image_filters::blur(
+            (sigma, sigma),
+            TileMode::Clamp,
+            None,
+            None,
+        ));
+
+        canvas.save();
+        canvas.clip_path(&clip, None, true);
+        canvas.draw_image(&snapshot, (0.0, 0.0), Some(&paint));
+        canvas.restore();
+
+        if let Some(ctx) = self.context.as_mut() {
+            ctx.flush_and_submit();
+        }
     }
 
     /// Draw the touch indicator marks on top of everything (demo recordings).
