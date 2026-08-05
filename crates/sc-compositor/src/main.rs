@@ -1776,6 +1776,15 @@ impl State {
         let w = (usable.w as f64 / self.dpi).round() as i32;
         let h = (usable.h as f64 / self.dpi).round() as i32;
         let deco = self.decoration_for(surface, None);
+        // Dialogs keep client-side decorations so the toolkit's action buttons
+        // stay on screen; top-level apps go borderless (server-side). Logged so
+        // the nix xdg-dialog test can assert the policy from the journal.
+        info!(
+            target: "springchick::debug",
+            "configure toplevel dialog={} decoration={:?}",
+            Self::is_dialog(surface),
+            deco,
+        );
         surface.with_pending_state(|state| {
             state.size = Some((w, h).into());
             state.decoration_mode = Some(deco);
@@ -1789,6 +1798,11 @@ impl State {
 
 impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        // A client created an xdg-decoration object — i.e. it speaks the protocol
+        // and will honor whatever mode we hand back (Qt does; GTK never gets
+        // here). Logged so the decoration nix test can tell "negotiated" from
+        // "self-decorated" apart.
+        info!(target: "springchick::debug", "xdg-decoration negotiated");
         self.apply_decoration(&toplevel, None);
     }
 
