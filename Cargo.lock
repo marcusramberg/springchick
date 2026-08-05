@@ -2732,9 +2732,12 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "raw-window-handle",
  "sc-catalog",
  "sc-icons",
  "sc-shell-model",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]

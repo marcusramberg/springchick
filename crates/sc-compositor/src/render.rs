@@ -35,6 +35,11 @@ use smithay::wayland::compositor::{
 
 use tracing::warn;
 
+/// Blur radius for ext-background-effect blur regions, in logical px (scaled by
+/// output dpi at use). Roughly matches the frosted-glass look phone panels draw
+/// against; the protocol leaves the algorithm entirely to the compositor.
+const BLUR_SIGMA_LOGICAL: f32 = 8.0;
+
 /// Background clear color.
 pub const CLEAR_COLOR: Color32F = Color32F::new(0.06, 0.10, 0.14, 1.0);
 
@@ -203,6 +208,30 @@ pub struct DrawCtx<'a> {
 
 /// Render a layer surface's tree at `origin` in its own pass. Used for both the
 /// below-app and above-app layers.
+/// Blur the backdrop of `surface` (ext-background-effect-v1), if it asked for
+/// one. Must run after everything behind the surface is drawn and before the
+/// surface itself, since it blurs whatever is currently in the framebuffer.
+fn blur_behind(
+    skia: &mut SkiaGl,
+    size: Size<i32, Physical>,
+    surface: &WlSurface,
+    origin: (i32, i32),
+    scale: f64,
+    flip_y: bool,
+) {
+    let rects = crate::background_effect::blur_rects(surface, origin, scale);
+    if rects.is_empty() {
+        return;
+    }
+    skia.blur_backdrop(
+        size.w,
+        size.h,
+        &rects,
+        BLUR_SIGMA_LOGICAL * scale as f32,
+        flip_y,
+    );
+}
+
 fn draw_layer(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -353,14 +382,36 @@ pub fn draw_scene(
 
     let app_fills_screen = is_fullscreen && !base_elements.is_empty();
 
+    // A fullscreen app that asked for a blurred backdrop (ext-background-effect)
+    // is translucent by definition, so — unlike an opaque fullscreen app — home
+    // must be drawn behind it, then blurred, then the app drawn on top. That
+    // splits the single background pass into two renderer passes.
+    let app_blur = ctx
+        .app_surface
+        .map(|s| crate::background_effect::blur_rects(s, ctx.app_origin, ctx.app_scale))
+        .unwrap_or_default();
+    let app_blurred = app_fills_screen && !app_blur.is_empty();
+
     // KMS page-flip damage hint. Default: the whole output (always correct —
     // drivers without FB_DAMAGE_CLIPS ignore it anyway). Narrow it only when the
     // backend says this is a quiet fullscreen app AND the app is a single render
     // element at the origin, so element-space damage equals output-space damage.
     // Anything else (subsurfaces, animation, chrome) stays full to avoid leaving
     // stale pixels the driver would skip.
+    // A blurred surface samples the pixels behind it, so damage below it must be
+    // repainted through the blur: any blur region on screen disqualifies the
+    // partial-damage fast path entirely.
+    let any_blur = app_blurred
+        || ctx
+        .layers_above
+        .iter()
+        .chain(ctx.app_popups)
+            .chain(ctx.layer_popups)
+            .any(|(surface, _)| crate::background_effect::has_blur_region(surface));
+
     let full_damage = Rectangle::from_size(size);
     let flip_damage: Vec<Rectangle<i32, Physical>> = if ctx.report_partial_damage
+        && !any_blur
         && app_fills_screen
         && base_elements.len() == 1
     {
@@ -386,6 +437,7 @@ pub fn draw_scene(
     };
 
     // Pass 1: clear background; draw the app here if fullscreen (no home behind).
+    // A blurred app waits for its own pass after home + blur.
     {
         let mut frame = renderer
             .render(&mut *framebuffer, size, ctx.transform)
@@ -401,7 +453,7 @@ pub fn draw_scene(
             }
         }
 
-        if app_fills_screen {
+        if app_fills_screen && !app_blurred {
             if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &base_elements, &[damage])
             {
                 warn!(?e, "failed to draw app elements");
@@ -419,7 +471,9 @@ pub fn draw_scene(
     // requiring content) blanks home instead of the app during the window
     // where the animation has reached fullscreen scale but the client hasn't
     // painted its first frame yet.
-    if scene.show_home && !app_fills_screen {
+    // A blurred app is translucent, so it needs a backdrop even in UiState::App
+    // (where `show_home` is false because an opaque app hides Home entirely).
+    if app_blurred || (scene.show_home && !app_fills_screen) {
         ctx.skia.draw_home(
             size.w,
             size.h,
@@ -438,6 +492,25 @@ pub fn draw_scene(
         );
     }
 
+    // Blurred fullscreen app: home is now behind it, so blur that backdrop and
+    // draw the app over it in its own pass.
+    if app_blurred {
+        ctx.skia.blur_backdrop(
+            size.w,
+            size.h,
+            &app_blur,
+            BLUR_SIGMA_LOGICAL * ctx.app_scale as f32,
+            ctx.skia_flip_y,
+        );
+        let mut frame = renderer
+            .render(&mut *framebuffer, size, ctx.transform)
+            .map_err(SwapBuffersError::from)?;
+        if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &base_elements, &[damage]) {
+            warn!(?e, "failed to draw blurred app elements");
+        }
+        let _sync = frame.finish().map_err(SwapBuffersError::from)?;
+    }
+
     // Pass 2: draw the scaled app ON TOP of home (no clear). Rounded corners
     // when the transform carries a non-zero radius (drag-up / zoom transitions).
     if !is_fullscreen && !base_elements.is_empty() {
@@ -446,6 +519,18 @@ pub fn draw_scene(
             let card_h = size.h as f32 * t.scale;
             let card_x = (t.center_x - card_w / 2.0) as i32;
             let card_y = (t.center_y - card_h / 2.0) as i32;
+            // Same blur, but the card is scaled: the surface-local region scales
+            // with it and lands at the card's origin.
+            if let Some(surface) = ctx.app_surface {
+                blur_behind(
+                    ctx.skia,
+                    size,
+                    surface,
+                    (card_x, card_y),
+                    ctx.app_scale * t.scale as f64,
+                    ctx.skia_flip_y,
+                );
+            }
             draw_scaled_card(
                 renderer,
                 framebuffer,
@@ -507,6 +592,7 @@ pub fn draw_scene(
     // tree at a physical origin, scaled by dpi. Ordered root→leaf so submenus
     // draw over their parents.
     for (surface, origin) in ctx.app_popups {
+        blur_behind(ctx.skia, size, surface, *origin, ctx.app_scale, ctx.skia_flip_y);
         draw_layer(
             renderer,
             framebuffer,
@@ -521,6 +607,7 @@ pub fn draw_scene(
     // Top/overlay layer surfaces (e.g. the on-screen keyboard) sit above the
     // app but below springchick's own chrome.
     for (surface, origin) in ctx.layers_above {
+        blur_behind(ctx.skia, size, surface, *origin, ctx.app_scale, ctx.skia_flip_y);
         draw_layer(
             renderer,
             framebuffer,
@@ -534,6 +621,7 @@ pub fn draw_scene(
 
     // Popups parented to a top/overlay layer surface sit just above it.
     for (surface, origin) in ctx.layer_popups {
+        blur_behind(ctx.skia, size, surface, *origin, ctx.app_scale, ctx.skia_flip_y);
         draw_layer(
             renderer,
             framebuffer,

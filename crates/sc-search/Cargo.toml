@@ -14,3 +14,10 @@ egui = "0.29"
 sc-catalog = { path = "../sc-catalog" }
 sc-shell-model = { path = "../sc-shell-model" }
 sc-icons = { path = "../sc-icons" }
+
+# Frosted-glass backdrop: eframe/winit owns the wl_surface, so the
+# ext-background-effect request is made on a second connection wrapped around
+# the same libwayland display (see `blur` in main.rs).
+raw-window-handle = "0.6"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
