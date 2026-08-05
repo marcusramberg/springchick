@@ -373,9 +373,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // Idle-blank once the timeout elapses. Reuses the power-button DPMS-off
         // path; a power-button press wakes it and resets the countdown (input
         // routes through handle_input → idle.activity).
-        if app.state.idle.should_blank(Instant::now()) && !app.state.blank.is_blanked() {
+        // A visible surface holding a zwp_idle_inhibitor (video playback) keeps
+        // the screen on and holds off client idle notifications alike.
+        let inhibited = app.state.is_idle_inhibited();
+        if inhibited {
+            // Keep the countdown fresh rather than merely skipping the check, so
+            // the screen doesn't blank the instant the inhibitor is released.
+            app.state.idle.activity(Instant::now());
+        } else if app.state.idle.should_blank(Instant::now()) && !app.state.blank.is_blanked() {
             app.state.blank.toggle();
         }
+        // ext-idle-notify timeouts: same poll, client-driven timeouts.
+        app.state.idle_notify.refresh(Instant::now(), inhibited);
         app.apply_blanking();
         app.apply_gamma();
         // Drive frames that no vblank is priming: a fresh commit/input
@@ -433,8 +442,11 @@ impl App {
         // Any input may change on-screen state (or the app it's forwarded to
         // will commit in response). Prime a render for the next loop wake.
         self.state.needs_render = true;
-        // Any input is activity: restart the idle-blank countdown.
-        self.state.idle.activity(Instant::now());
+        // Any input is activity: restart the idle-blank countdown and resume any
+        // client that we told had gone idle.
+        let now = Instant::now();
+        self.state.idle.activity(now);
+        self.state.idle_notify.activity(now);
         let (w, h) = (self.drm.output_size.w, self.drm.output_size.h);
         match event {
             InputEvent::TouchDown { event } => {
