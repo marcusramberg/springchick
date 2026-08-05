@@ -3,6 +3,7 @@
 mod app_history;
 mod backend;
 mod blank;
+mod content_type;
 mod debug_input;
 mod drm_backend;
 mod frame_stats;
@@ -348,6 +349,13 @@ struct State {
     idle_notify: idle_notify::IdleNotify,
     /// zwp_idle_inhibit_manager_v1 state: surfaces asking to hold off idle.
     idle_inhibit: idle_inhibit::IdleInhibit,
+    /// wp_content_type_v1 state (holds the global; tags live per surface).
+    #[allow(dead_code)]
+    content_type: content_type::ContentType,
+    /// Whether the foreground app is fullscreen content that wants a landscape
+    /// display (see [`content_type::wants_landscape`]). Nothing rotates yet —
+    /// this is the signal the rotation work will read.
+    landscape_hint: bool,
 
     // Rendering
     skia: SkiaGl,
@@ -563,6 +571,9 @@ impl State {
         // zwp_idle_inhibit: a visible surface can hold off idle entirely (video
         // playback keeping the screen on).
         let idle_inhibit = idle_inhibit::IdleInhibit::new(&dh);
+        // wp_content_type: clients tag a surface photo/video/game. Used as the
+        // auto-landscape hint.
+        let content_type = content_type::ContentType::new(&dh);
 
         // Load shell model + app catalog.
         let model = persist::load(&persist::state_path()).unwrap_or_default();
@@ -643,6 +654,8 @@ impl State {
             gamma,
             idle_notify,
             idle_inhibit,
+            content_type,
+            landscape_hint: false,
             skia: SkiaGl::new(),
             wayland_socket,
             last_pointer_pos: None,
@@ -1104,6 +1117,9 @@ impl State {
         self.focused_surface = want.clone();
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, want, SERIAL_COUNTER.next_serial());
+        // A different app is in front now; its content type is a different
+        // answer (and a backgrounded video stops counting).
+        self.refresh_landscape_hint();
     }
 
     /// The wl_surface of the currently focused foreground app, if any.
@@ -1112,6 +1128,30 @@ impl State {
             .and_then(|tid| self.toplevels.get(tid))
             .and_then(|slot| slot.as_ref())
             .map(|tl| tl.surface.wl_surface().clone())
+    }
+
+    /// Recompute [`Self::landscape_hint`] from the foreground app's content
+    /// type and fullscreen state. Cheap (two surface-state lookups), called on
+    /// commits by the foreground app and whenever focus moves.
+    fn refresh_landscape_hint(&mut self) {
+        let hint = ui_state::desired_focus(&self.ui)
+            .and_then(|tid| self.toplevels.get(tid))
+            .and_then(|slot| slot.as_ref())
+            .is_some_and(|tl| {
+                let fullscreen = tl.surface.with_committed_state(|state| {
+                    state.is_some_and(|s| s.states.contains(xdg_toplevel::State::Fullscreen))
+                });
+                content_type::wants_landscape(
+                    content_type::of(tl.surface.wl_surface()),
+                    fullscreen,
+                )
+            });
+        if hint != self.landscape_hint {
+            self.landscape_hint = hint;
+            // Logged (not acted on): the rotation path that consumes this hint
+            // isn't built yet, so this is how it's observable meanwhile.
+            info!(target: "springchick::debug", "landscape hint {hint}");
+        }
     }
 
     /// Whether the foreground app is holding an idle inhibitor (video playing,
@@ -1497,6 +1537,12 @@ impl CompositorHandler for State {
         if self.layers.handle_commit(surface) {
             self.recompute_layers();
         }
+
+        // A commit can carry a new wp_content_type tag (playback started or
+        // stopped), which is what the auto-landscape hint keys off.
+        if self.app_focus_surface().as_ref() == Some(surface) {
+            self.refresh_landscape_hint();
+        }
     }
 }
 
@@ -1868,6 +1914,7 @@ delegate_input_method_manager!(State);
 smithay::delegate_image_capture_source!(State);
 smithay::delegate_output_capture_source!(State);
 smithay::delegate_image_copy_capture!(State);
+smithay::delegate_content_type!(State);
 
 impl ImageCaptureSourceHandler for State {}
 
