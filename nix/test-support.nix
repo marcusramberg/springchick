@@ -30,6 +30,9 @@ let
       testScript,
       # OCR (tesseract) for tests that read text off a screenshot.
       enableOCR ? false,
+      # Python packages for the test driver, e.g. `p: [ p.pillow ]` for a test
+      # that inspects screenshot pixels rather than just saving them.
+      extraPythonPackages ? (_: [ ]),
       # Extra packages on the machine's PATH (apps the test launches).
       packages ? [ ],
       # Device profile; override width/height/dpi per test if ever needed.
@@ -40,7 +43,12 @@ let
       extraMachineConfig ? { },
     }:
     pkgs.testers.runNixOSTest {
-      inherit name enableOCR testScript;
+      inherit
+        name
+        enableOCR
+        extraPythonPackages
+        testScript
+        ;
 
       nodes.machine =
         {

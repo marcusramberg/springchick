@@ -20,6 +20,7 @@ mod layer_shell;
 mod osd;
 mod popups;
 mod render;
+mod rotation;
 pub mod scene;
 mod skia_gl;
 mod switcher;
@@ -289,8 +290,10 @@ struct State {
     /// popup) gets its own target here so one finger's up never clears another's
     /// grab, and a stray slot never leaks into the gesture funnel. Slots that
     /// start on empty space are absent (they drive the gesture funnel instead).
-    /// Value is the slot's coord scale (`dpi`); presence marks it client-routed.
-    touch_targets: std::collections::HashMap<smithay::backend::input::TouchSlot, f64>,
+    /// Value is `(coord scale, rotated)`: the slot's `dpi` scale and whether it
+    /// routes to the rotated fullscreen app (whose coords need turning first).
+    /// Presence marks the slot client-routed.
+    touch_targets: std::collections::HashMap<smithay::backend::input::TouchSlot, (f64, bool)>,
     /// The single slot currently driving the home-screen gesture funnel
     /// (`input_common`), which is inherently single-touch. Only this slot feeds
     /// press/motion/release; additional fingers on empty space are ignored until
@@ -357,6 +360,10 @@ struct State {
     /// surface).
     #[allow(dead_code)]
     background_effect: background_effect::BackgroundEffect,
+    /// Current app rotation. Set when a toplevel goes fullscreen, cleared when
+    /// it leaves fullscreen or unmaps. Only the app surface rotates — see
+    /// [`crate::rotation`].
+    rotation: rotation::Rotation,
     /// Whether the foreground app is fullscreen content that wants a landscape
     /// display (see [`content_type::wants_landscape`]). Nothing rotates yet —
     /// this is the signal the rotation work will read.
@@ -664,6 +671,7 @@ impl State {
             idle_inhibit,
             content_type,
             background_effect,
+            rotation: rotation::Rotation::None,
             landscape_hint: false,
             skia: SkiaGl::new(),
             wayland_socket,
@@ -1143,13 +1151,11 @@ impl State {
     /// type and fullscreen state. Cheap (two surface-state lookups), called on
     /// commits by the foreground app and whenever focus moves.
     fn refresh_landscape_hint(&mut self) {
+        let fullscreen = self.foreground_is_fullscreen();
         let hint = ui_state::desired_focus(&self.ui)
             .and_then(|tid| self.toplevels.get(tid))
             .and_then(|slot| slot.as_ref())
             .is_some_and(|tl| {
-                let fullscreen = tl.surface.with_committed_state(|state| {
-                    state.is_some_and(|s| s.states.contains(xdg_toplevel::State::Fullscreen))
-                });
                 content_type::wants_landscape(
                     content_type::of(tl.surface.wl_surface()),
                     fullscreen,
@@ -1157,9 +1163,42 @@ impl State {
             });
         if hint != self.landscape_hint {
             self.landscape_hint = hint;
-            // Logged (not acted on): the rotation path that consumes this hint
-            // isn't built yet, so this is how it's observable meanwhile.
+            // Logged, not acted on: rotation keys off fullscreen alone (see
+            // `refresh_rotation`); the content type is kept as the finer signal
+            // for policy that wants to tell video from a fullscreen text app.
             info!(target: "springchick::debug", "landscape hint {hint}");
+        }
+        self.refresh_rotation(fullscreen);
+    }
+
+    /// Whether the foreground app has *committed* the Fullscreen state — i.e.
+    /// acked our fullscreen configure and drawn at that size.
+    fn foreground_is_fullscreen(&self) -> bool {
+        ui_state::desired_focus(&self.ui)
+            .and_then(|tid| self.toplevels.get(tid))
+            .and_then(|slot| slot.as_ref())
+            .is_some_and(|tl| {
+                tl.surface.with_committed_state(|state| {
+                    state.is_some_and(|s| s.states.contains(xdg_toplevel::State::Fullscreen))
+                })
+            })
+    }
+
+    /// Rotation follows fullscreen: the foreground app is landscape while it is
+    /// fullscreen and portrait otherwise. Derived (rather than latched on the
+    /// fullscreen request) so it can only be on while a client is really drawing
+    /// at the rotated size — including when the app unmaps, is switched away
+    /// from, or leaves fullscreen without asking.
+    fn refresh_rotation(&mut self, fullscreen: bool) {
+        let want = if fullscreen {
+            rotation::Rotation::Landscape
+        } else {
+            rotation::Rotation::None
+        };
+        if want != self.rotation {
+            self.rotation = want;
+            self.needs_render = true;
+            info!(target: "springchick::debug", "rotation {want:?}");
         }
     }
 
@@ -1221,9 +1260,17 @@ impl State {
     /// routed into whichever popup it lands on regardless of grab; only a
     /// *grabbing* popup swallows an outside tap and dismisses — see
     /// `touch::popup_press`, which consults `popup_grabs` per popup.
+    /// Popups that are on screen right now, app-rooted first then layer-rooted.
+    ///
+    /// While the app is rotated the layer surfaces are not drawn (portrait
+    /// chrome over a landscape app), so their popups are not on screen either
+    /// and are left out — input routing uses this list, and an invisible popup
+    /// must not take taps.
     pub(crate) fn active_popups(&self) -> Vec<PopupRect> {
         let mut v = self.app_popups();
-        v.extend(self.layer_popups());
+        if !self.rotation.swaps_axes() {
+            v.extend(self.layer_popups());
+        }
         v
     }
 
@@ -1630,9 +1677,16 @@ impl XdgShellHandler for State {
         // whole output — not just the usable area — force server-side (= no)
         // decorations, and set the Fullscreen state so the toolkit hides its own
         // chrome. This is the only path that hides the OSK's exclusive zone.
-        let (ow, oh) = self.output_size;
+        //
+        // Fullscreen also means landscape, so the size we hand the client is the
+        // rotated (swapped) one. `self.rotation` is NOT set here: rendering only
+        // turns once the client has acked this configure and committed a
+        // landscape buffer, otherwise the app would be drawn sideways at its old
+        // portrait size for a frame or two. See [`crate::rotation`].
+        let (ow, oh) = rotation::Rotation::Landscape.app_size(self.output_size);
         let w = (ow as f64 / self.dpi).round() as i32;
         let h = (oh as f64 / self.dpi).round() as i32;
+        info!(target: "springchick::debug", "fullscreen request; configure {w}x{h} landscape");
         surface.with_pending_state(|state| {
             state.size = Some((w, h).into());
             state.decoration_mode = Some(DecorationMode::ServerSide);
@@ -1644,7 +1698,8 @@ impl XdgShellHandler for State {
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
-        // Back to the normal maximized app state.
+        // Back to the normal maximized app state; `refresh_rotation` turns the
+        // display back to portrait once the client commits the portrait size.
         self.configure_maximized(&surface);
     }
 
@@ -2346,6 +2401,7 @@ fn render_frame(
                 (u.x.round() as i32, u.y.round() as i32)
             },
             transform: Transform::Flipped180,
+            rotation: state.rotation,
             skia_flip_y: false,
             frame_time: prep.frame_time,
             osd: prep.osd_view,

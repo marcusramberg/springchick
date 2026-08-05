@@ -647,6 +647,7 @@ impl App {
                 (u.x.round() as i32, u.y.round() as i32)
             },
             transform: self.drm.transform,
+            rotation: self.state.rotation,
             skia_flip_y: true,
             frame_time: prep.frame_time,
             osd: prep.osd_view,
