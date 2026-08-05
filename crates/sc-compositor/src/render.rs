@@ -149,6 +149,9 @@ pub struct DrawCtx<'a> {
     pub app_origin: (i32, i32),
     /// Output transform (winit = Flipped180; DRM = connector transform).
     pub transform: Transform,
+    /// Rotation of the fullscreen app (see [`crate::rotation`]). Composed on top
+    /// of `transform` for the app pass only — chrome stays portrait.
+    pub rotation: crate::rotation::Rotation,
     /// Mirror the Skia home/bar vertically — the DRM/GBM scanout buffer has the
     /// opposite Y-origin from Skia's BottomLeft surface. winit presents
     /// already-correct, so false.
@@ -346,6 +349,9 @@ pub fn draw_scene(
     let window_transform = scene.window.as_ref().map(|(_, t)| *t);
     let is_fullscreen = scene.window_covers_screen();
 
+    // A rotated app covers the whole output, so it starts at the origin of its
+    // own (rotated) space rather than at the usable-area origin.
+    let rotated = ctx.rotation.swaps_axes();
     // Collect render elements for the app surface (if any).
     let base_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if let Some(wl_surface) =
         ctx.app_surface
@@ -353,7 +359,7 @@ pub fn draw_scene(
         render_elements_from_surface_tree(
             renderer,
             wl_surface,
-            if is_fullscreen { ctx.app_origin } else { (0, 0) },
+            if is_fullscreen && !rotated { ctx.app_origin } else { (0, 0) },
             ctx.app_scale,
             1.0,
             Kind::Unspecified,
@@ -453,7 +459,7 @@ pub fn draw_scene(
             }
         }
 
-        if app_fills_screen && !app_blurred {
+        if app_fills_screen && !app_blurred && !rotated {
             if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &base_elements, &[damage])
             {
                 warn!(?e, "failed to draw app elements");
@@ -490,6 +496,24 @@ pub fn draw_scene(
             ctx.dock_positions,
             ctx.app_origin.1 as f32,
         );
+    }
+
+    // Rotated fullscreen app: its own pass, with the rotation composed on top of
+    // the output transform. The renderer swaps the projection's axes for a
+    // quarter-turn transform, so element space is the landscape one the client
+    // was configured at, while the framebuffer stays portrait.
+    if app_fills_screen && rotated {
+        let app_size: Size<i32, Physical> = ctx.rotation.app_size((size.w, size.h)).into();
+        let app_damage = Rectangle::from_size(app_size);
+        let mut frame = renderer
+            .render(&mut *framebuffer, size, ctx.transform + ctx.rotation.transform())
+            .map_err(SwapBuffersError::from)?;
+        if let Err(e) =
+            draw_render_elements(&mut frame, ctx.app_scale, &base_elements, &[app_damage])
+        {
+            warn!(?e, "failed to draw rotated app elements");
+        }
+        let _sync = frame.finish().map_err(SwapBuffersError::from)?;
     }
 
     // Blurred fullscreen app: home is now behind it, so blur that backdrop and
@@ -604,9 +628,12 @@ pub fn draw_scene(
         )?;
     }
 
-    // Top/overlay layer surfaces (e.g. the on-screen keyboard) sit above the
-    // app but below springchick's own chrome.
-    for (surface, origin) in ctx.layers_above {
+    // Top/overlay layer surfaces (a status panel, the on-screen keyboard) sit
+    // above the app but below springchick's own chrome — except while the app is
+    // rotated, where portrait chrome across a landscape app is worse than no
+    // chrome. `touch::surface_under` skips them in the same condition, so a
+    // hidden panel never eats taps meant for the app.
+    for (surface, origin) in ctx.layers_above.iter().filter(|_| !rotated) {
         blur_behind(ctx.skia, size, surface, *origin, ctx.app_scale, ctx.skia_flip_y);
         draw_layer(
             renderer,
@@ -619,8 +646,9 @@ pub fn draw_scene(
         )?;
     }
 
-    // Popups parented to a top/overlay layer surface sit just above it.
-    for (surface, origin) in ctx.layer_popups {
+    // Popups parented to a top/overlay layer surface sit just above it — hidden
+    // with their parent while rotated.
+    for (surface, origin) in ctx.layer_popups.iter().filter(|_| !rotated) {
         blur_behind(ctx.skia, size, surface, *origin, ctx.app_scale, ctx.skia_flip_y);
         draw_layer(
             renderer,
@@ -633,12 +661,15 @@ pub fn draw_scene(
         )?;
     }
 
-    // Always draw the bar on top.
+    // Always draw the bar on top: it is the only way back out of a fullscreen
+    // app, so it stays even while rotated (where it reads as a side handle).
     ctx.skia
         .draw_bar_overlay(size.w, size.h, ctx.bar_alpha, ctx.skia_flip_y);
 
-    // Volume OSD sits above everything, including a fullscreen app.
-    if let Some((level, muted, alpha)) = ctx.osd {
+    // Volume OSD sits above everything, including a fullscreen app — but it is
+    // drawn portrait, so it is suppressed while the app is rotated rather than
+    // laid sideways across landscape video.
+    if let Some((level, muted, alpha)) = ctx.osd.filter(|_| !rotated) {
         ctx.skia
             .draw_osd_overlay(size.w, size.h, level, muted, alpha, ctx.skia_flip_y);
     }

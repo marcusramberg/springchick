@@ -22,17 +22,24 @@ use smithay::utils::{Point, SERIAL_COUNTER};
 /// divided by to reach the surface's logical space. Checks Top/Overlay layer
 /// surfaces (the OSK); everything else
 /// falls through to the gesture funnel by returning `None`.
-fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64), f64)> {
+fn surface_under(state: &State, x: f32, y: f32) -> Option<Target> {
     // 0. Open popups (menus, dropdowns) sit above everything and win, topmost
     //    first. They render at output scale `dpi`, same mapping as apps.
     if let Some(hit) = popup_under(state, x, y) {
         return Some(hit);
     }
-    // 1. Top/Overlay layer surfaces (the OSK) win. They render at fractional
-    //    scale `dpi`, so their logical coord space is physical/dpi — map input by
-    //    /dpi. The rect origin is physical, so surface-local = (input-origin)/dpi.
-    if let Some((surface, (ox, oy))) = state.layers.hit_test(x, y, state.dpi) {
-        return Some((surface, (ox as f64, oy as f64), state.dpi));
+    // 1. Top/Overlay layer surfaces (a status panel, the OSK) win. They render
+    //    at fractional scale `dpi`, so their logical coord space is physical/dpi
+    //    — map input by /dpi. The rect origin is physical, so surface-local =
+    //    (input-origin)/dpi.
+    //
+    //    While the app is rotated they are not drawn (see `render::draw_scene`),
+    //    so they must not be hit-tested either: an invisible panel swallowing
+    //    taps over landscape video is the worst of both.
+    if !state.rotation.swaps_axes() {
+        if let Some((surface, (ox, oy))) = state.layers.hit_test(x, y, state.dpi) {
+            return Some(Target::at(surface, (ox as f64, oy as f64), state.dpi));
+        }
     }
     // 2. The focused fullscreen app, except the bottom bar zone (home gesture).
     //    App surfaces render at `dpi`, so input maps into logical space by /dpi.
@@ -41,11 +48,25 @@ fn surface_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64)
     if let crate::ui_state::UiState::App { toplevel, .. } = &state.ui {
         let (w, h) = state.output_size_f();
         let bar = sc_layout::bar_rect(w, h);
+        // The bar zone stays where the user sees it (portrait, at the bottom)
+        // even while the app is rotated: it is springchick's own affordance, not
+        // the app's, and it is drawn unrotated.
         if !bar.contains(x, y) {
             if let Some(Some(tl)) = state.toplevels.get(*toplevel) {
+                // A rotated app fills the output and lives in its own rotated
+                // space, so input maps through the rotation instead of through
+                // the usable-area origin.
+                if state.rotation.swaps_axes() {
+                    return Some(Target {
+                        surface: tl.surface.wl_surface().clone(),
+                        origin: (0.0, 0.0),
+                        scale: state.dpi,
+                        rotated: true,
+                    });
+                }
                 let u = state.layers.usable(state.dpi);
                 let origin = (u.x as f64, u.y as f64);
-                return Some((tl.surface.wl_surface().clone(), origin, state.dpi));
+                return Some(Target::at(tl.surface.wl_surface().clone(), origin, state.dpi));
             }
         }
     }
@@ -59,7 +80,49 @@ fn slot_id(slot: TouchSlot) -> u64 {
 }
 
 /// Convert a physical output-pixel point into a surface's local logical space.
-fn to_local(x: f32, y: f32, scale: f64) -> Point<f64, smithay::utils::Logical> {
+/// Where an input event is routed: a client surface, its origin in physical
+/// global space, the scale mapping physical → its logical space, and whether it
+/// is the rotated fullscreen app (whose space is turned relative to the screen).
+struct Target {
+    surface: WlSurface,
+    origin: (f64, f64),
+    scale: f64,
+    rotated: bool,
+}
+
+impl Target {
+    /// An unrotated surface at `origin` — every target except a rotated app.
+    fn at(surface: WlSurface, origin: (f64, f64), scale: f64) -> Self {
+        Target {
+            surface,
+            origin,
+            scale,
+            rotated: false,
+        }
+    }
+
+    /// The focus point smithay subtracts from the event location to get
+    /// surface-local coordinates.
+    fn focus(&self) -> Point<f64, smithay::utils::Logical> {
+        Point::from((self.origin.0 / self.scale, self.origin.1 / self.scale))
+    }
+}
+
+/// Physical screen coords → a surface's logical space, turning them through the
+/// app rotation first when the target is the rotated app, so a tap reaches what
+/// the user sees under their finger.
+fn to_local(
+    state: &State,
+    scale: f64,
+    rotated: bool,
+    x: f32,
+    y: f32,
+) -> Point<f64, smithay::utils::Logical> {
+    let (x, y) = if rotated {
+        state.rotation.map_input(x, y, state.output_size)
+    } else {
+        (x, y)
+    };
     Point::from((x as f64 / scale, y as f64 / scale))
 }
 
@@ -70,13 +133,13 @@ fn rect_contains(origin: (i32, i32), size: (i32, i32), x: f32, y: f32) -> bool {
 }
 
 /// Topmost open popup under `(x, y)`, with its physical origin and coord scale.
-fn popup_under(state: &State, x: f32, y: f32) -> Option<(WlSurface, (f64, f64), f64)> {
+fn popup_under(state: &State, x: f32, y: f32) -> Option<Target> {
     let popups = state.active_popups();
     let i = popups
         .iter()
         .rposition(|(_, origin, size)| rect_contains(*origin, *size, x, y))?;
     let (kind, origin, _) = &popups[i];
-    Some((
+    Some(Target::at(
         kind.wl_surface().clone(),
         (origin.0 as f64, origin.1 as f64),
         state.dpi,
@@ -95,7 +158,7 @@ enum PopupPress {
     Consumed,
     /// The tap hit a popup; route input into it. Grabbing submenus above the hit
     /// popup were dismissed first.
-    Route(WlSurface, (f64, f64), f64),
+    Route(Target),
 }
 
 /// Resolve a press against open popups.
@@ -137,11 +200,11 @@ fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
     match hit {
         Some(i) => {
             let (kind, origin, _) = &popups[i];
-            PopupPress::Route(
+            PopupPress::Route(Target::at(
                 kind.wl_surface().clone(),
                 (origin.0 as f64, origin.1 as f64),
                 state.dpi,
-            )
+            ))
         }
         // Missed every popup. Only a modal (grabbing) popup consumes the tap;
         // if nothing grabbing was open, `dismiss` is empty and we fall through.
@@ -163,15 +226,15 @@ pub fn pointer_motion(state: &mut State, x: f32, y: f32, time: u32) {
         state.needs_render = true;
     }
     if state.pointer_grab {
-        if let Some((surface, origin, scale)) = surface_under(state, x, y) {
+        if let Some(target) = surface_under(state, x, y) {
             let ptr = state.seat.get_pointer().unwrap();
             let event = PointerMotionEvent {
-                location: to_local(x, y, scale),
+                location: to_local(state, target.scale, target.rotated, x, y),
                 serial: SERIAL_COUNTER.next_serial(),
                 time,
             };
-            let focus = Point::from((origin.0 / scale, origin.1 / scale));
-            ptr.motion(state, Some((surface, focus)), &event);
+            let focus = target.focus();
+            ptr.motion(state, Some((target.surface, focus)), &event);
             ptr.frame(state);
             return;
         }
@@ -197,18 +260,19 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
     if pressed {
         let target = match popup_press(state, x, y) {
             PopupPress::Consumed => return,
-            PopupPress::Route(surface, origin, scale) => Some((surface, origin, scale)),
+            PopupPress::Route(target) => Some(target),
             PopupPress::None => surface_under(state, x, y),
         };
-        if let Some((surface, origin, scale)) = target {
+        if let Some(target) = target {
             let ptr = state.seat.get_pointer().unwrap();
             // Enter/position the pointer, then press.
-            let focus = Point::from((origin.0 / scale, origin.1 / scale));
+            let focus = target.focus();
+            let location = to_local(state, target.scale, target.rotated, x, y);
             ptr.motion(
                 state,
-                Some((surface, focus)),
+                Some((target.surface, focus)),
                 &PointerMotionEvent {
-                    location: to_local(x, y, scale),
+                    location,
                     serial: SERIAL_COUNTER.next_serial(),
                     time,
                 },
@@ -260,22 +324,25 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
     }
     let target = match popup_press(state, x, y) {
         PopupPress::Consumed => return,
-        PopupPress::Route(surface, origin, scale) => Some((surface, origin, scale)),
+        PopupPress::Route(target) => Some(target),
         PopupPress::None => surface_under(state, x, y),
     };
-    if let Some((surface, origin, scale)) = target {
-        // Record only the coord scale per slot; presence marks the slot as
-        // client-routed. Smithay's TouchHandle tracks the focused surface itself.
-        state.touch_targets.insert(slot, scale);
+    if let Some(target) = target {
+        // Record how to map this slot's later motion: the coord scale and
+        // whether it goes to the rotated app. Presence marks the slot as
+        // client-routed; smithay's TouchHandle tracks the focused surface.
+        state
+            .touch_targets
+            .insert(slot, (target.scale, target.rotated));
         let touch = state.touch.clone();
         let event = DownEvent {
             slot,
-            location: to_local(x, y, scale),
+            location: to_local(state, target.scale, target.rotated, x, y),
             serial: SERIAL_COUNTER.next_serial(),
             time,
         };
-        let focus = Point::from((origin.0 / scale, origin.1 / scale));
-        touch.down(state, Some((surface, focus)), &event);
+        let focus = target.focus();
+        touch.down(state, Some((target.surface, focus)), &event);
         touch.frame(state);
         return;
     }
@@ -296,11 +363,12 @@ pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
             .contact(slot_id(slot), x, y, std::time::Instant::now());
         state.needs_render = true;
     }
-    if let Some(&scale) = state.touch_targets.get(&slot) {
+    if let Some(&(scale, rotated)) = state.touch_targets.get(&slot) {
         let touch = state.touch.clone();
+        let location = to_local(state, scale, rotated, x, y);
         let event = MotionEvent {
             slot,
-            location: to_local(x, y, scale),
+            location,
             time,
         };
         // Focus is only used for DnD during motion; we pass none.
