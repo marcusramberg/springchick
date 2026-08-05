@@ -4,7 +4,7 @@
 
 use sc_anim::Spring;
 use sc_input::{NavTarget, Tracker};
-use tracing::info;
+use tracing::debug;
 
 /// Opaque toplevel identifier (index into the compositor's toplevel vec).
 pub type ToplevelId = usize;
@@ -383,7 +383,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             } = state
             {
                 let target = sc_input::classify_release(tracker);
-                info!(target: "springchick::debug", "GrabRelease target={:?} progress={} vel={}", target, tracker.up_progress(), tracker.velocity.y);
+                debug!(target: "springchick::debug", "GrabRelease target={:?} progress={} vel={}", target, tracker.up_progress(), tracker.velocity.y);
                 let toplevel = *toplevel;
                 let app_id = app_id.clone();
                 // Keep the deck through the settle only when landing in the
@@ -473,7 +473,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 } => {
                     progress.step(dt);
                     if progress.is_settled() {
-                        info!(target: "springchick::debug", "Settling resolved target={:?}", target);
+                        debug!(target: "springchick::debug", "Settling resolved target={:?}", target);
                         match target {
                             NavTarget::BackToApp => {
                                 let toplevel = *toplevel;
@@ -538,7 +538,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             Effect::None
         }
         UiEvent::EnterSwitcher { cards } => {
-            info!(target: "springchick::debug", "EnterSwitcher cards={:?}", cards);
+            debug!(target: "springchick::debug", "EnterSwitcher cards={:?}", cards);
             // The settle already held the fan fully open (neighbours fanned
             // around the front card into their rest slots), so the deck is simply
             // presented at rest — there is no fan-in animation.
