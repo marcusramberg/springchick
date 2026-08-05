@@ -8,7 +8,7 @@ use crate::input_dispatch::{self, DownAction};
 use crate::switcher;
 use crate::ui_state::{transition, ToplevelId, UiEvent, UiState, ZoomOrigin};
 use crate::{DragItem, IconPress, State};
-use tracing::info;
+use tracing::debug;
 
 /// Upward travel (fraction of screen height) that drives close_progress from 0
 /// to 1. A release past `CLOSE_COMMIT_PROGRESS` closes the card.
@@ -751,7 +751,7 @@ pub fn on_release(state: &mut State) {
         None
     };
     if let Some((target, cur_tid, cur_app)) = release {
-        info!(target: "springchick::debug", "on_release grab target={:?}", target);
+        debug!(target: "springchick::debug", "on_release grab target={:?}", target);
         match target {
             sc_input::NavTarget::QuickSwitch(dir) => {
                 // Grab-based quick-switch: raise the adjacent app directly.

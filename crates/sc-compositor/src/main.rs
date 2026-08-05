@@ -1355,7 +1355,7 @@ impl State {
             }
             ui_state::Effect::EnterSwitcher => {
                 let cards = self.history.deck_order();
-                info!(target: "springchick::debug", "Effect::EnterSwitcher deck={:?}", cards);
+                debug!(target: "springchick::debug", "Effect::EnterSwitcher deck={:?}", cards);
                 transition(&mut self.ui, UiEvent::EnterSwitcher { cards });
             }
             _ => {}
@@ -1377,7 +1377,7 @@ impl State {
         let disc = std::mem::discriminant(&self.ui);
         if self.last_log_state != Some(disc) {
             self.last_log_state = Some(disc);
-            info!(target: "springchick::debug", "state changed to {:?} cards={}", self.ui, scene.cards.len());
+            debug!(target: "springchick::debug", "state changed to {:?} cards={}", self.ui, scene.cards.len());
         }
 
         let app_surface = scene.window.as_ref().and_then(|(tid, _)| {
@@ -1802,7 +1802,7 @@ impl XdgDecorationHandler for State {
         // and will honor whatever mode we hand back (Qt does; GTK never gets
         // here). Logged so the decoration nix test can tell "negotiated" from
         // "self-decorated" apart.
-        info!(target: "springchick::debug", "xdg-decoration negotiated");
+        debug!(target: "springchick::debug", "xdg-decoration negotiated");
         self.apply_decoration(&toplevel, None);
     }
 

@@ -86,6 +86,11 @@ let
           systemd.user.services.springchick.environment = {
             LIBGL_ALWAYS_SOFTWARE = "1";
             GALLIUM_DRIVER = "llvmpipe";
+            # The tests assert on the compositor's `springchick::debug`-target
+            # lines (state changes, decoration policy, xdg-decoration). Those are
+            # debug! now (kept out of the default info log), so raise just that
+            # target here — not `springchick::perf`, which fires per frame.
+            RUST_LOG = "info,springchick::debug=debug";
           };
 
           # Autologin the shipped session (springchick-session →
