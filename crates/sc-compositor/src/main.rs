@@ -7,6 +7,8 @@ mod debug_input;
 mod drm_backend;
 mod frame_stats;
 mod gamma_control;
+mod idle_inhibit;
+mod idle_notify;
 mod input_common;
 mod input_dispatch;
 mod ipc;
@@ -342,6 +344,10 @@ struct State {
     prefer_no_csd: bool,
     /// wlr-gamma-control state (night-light / color-temperature clients).
     gamma: gamma_control::GammaControl,
+    /// ext-idle-notify-v1 state: client idle timers, polled by both frame loops.
+    idle_notify: idle_notify::IdleNotify,
+    /// zwp_idle_inhibit_manager_v1 state: surfaces asking to hold off idle.
+    idle_inhibit: idle_inhibit::IdleInhibit,
 
     // Rendering
     skia: SkiaGl,
@@ -550,6 +556,14 @@ impl State {
         // real CRTC gamma_length before clients connect.
         let gamma = gamma_control::GammaControl::new(&dh, 256);
 
+        // ext-idle-notify: idle daemons (swayidle et al) ask to be told when the
+        // user has been inactive for N ms. Timeouts are polled per frame, not by
+        // calloop timers — see `idle_notify`.
+        let idle_notify = idle_notify::IdleNotify::new(&dh, std::time::Instant::now());
+        // zwp_idle_inhibit: a visible surface can hold off idle entirely (video
+        // playback keeping the screen on).
+        let idle_inhibit = idle_inhibit::IdleInhibit::new(&dh);
+
         // Load shell model + app catalog.
         let model = persist::load(&persist::state_path()).unwrap_or_default();
         let apps = sc_catalog::scan_apps();
@@ -627,6 +641,8 @@ impl State {
             card_radius: keybinds::load_card_radius(),
             prefer_no_csd: keybinds::load_prefer_no_csd(),
             gamma,
+            idle_notify,
+            idle_inhibit,
             skia: SkiaGl::new(),
             wayland_socket,
             last_pointer_pos: None,
@@ -1096,6 +1112,14 @@ impl State {
             .and_then(|tid| self.toplevels.get(tid))
             .and_then(|slot| slot.as_ref())
             .map(|tl| tl.surface.wl_surface().clone())
+    }
+
+    /// Whether the foreground app is holding an idle inhibitor (video playing,
+    /// navigation running). Inhibitors from backgrounded apps don't count — see
+    /// [`crate::idle_inhibit`].
+    fn is_idle_inhibited(&mut self) -> bool {
+        let visible = self.app_focus_surface();
+        self.idle_inhibit.is_inhibited(visible.as_ref())
     }
 
     /// Popups rooted at `root`, ordered root→leaf, as `(kind, phys_origin,
@@ -2146,6 +2170,10 @@ fn run_winit() {
             debug_input::drain(&mut state, chan);
         }
 
+        // ext-idle-notify timeouts (polled; see `idle_notify`).
+        let inhibited = state.is_idle_inhibited();
+        state.idle_notify.refresh(std::time::Instant::now(), inhibited);
+
         // Dispatch Wayland clients.
         display.dispatch_clients(&mut state).ok();
         display.flush_clients().ok();
@@ -2186,6 +2214,9 @@ fn handle_winit_input(
     event: smithay::backend::input::InputEvent<smithay::backend::winit::WinitInput>,
 ) {
     use smithay::backend::input::{AbsolutePositionEvent, ButtonState, PointerButtonEvent};
+
+    // Any input resumes clients we told had gone idle (ext-idle-notify).
+    state.idle_notify.activity(std::time::Instant::now());
 
     match event {
         InputEvent::Keyboard { event } => {

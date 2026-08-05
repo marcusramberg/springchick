@@ -266,6 +266,12 @@ pub fn drain(state: &mut State, chan: &DebugChannel) {
 }
 
 fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
+    // Injected input counts as user activity, so ext-idle-notify clients see a
+    // resume from a scripted tap the same way they would from a real one.
+    // `settle` is a query, not input, and must not reset the countdown.
+    if !matches!(cmd, DebugCmd::Settle { .. }) {
+        state.idle_notify.activity(Instant::now());
+    }
     match cmd {
         DebugCmd::Down(x, y) => {
             input_common::on_motion(state, x, y); // seed last_pointer_pos first
