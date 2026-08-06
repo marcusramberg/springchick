@@ -586,13 +586,17 @@ fn pass_rotated_app(
     ctx: &DrawCtx<'_>,
     plan: &ScenePlan,
 ) -> Result<(), SwapBuffersError> {
-    if !(plan.app_fills_screen && plan.rotated) {
+    // A blurred app is drawn by `pass_blurred_app` instead — it has to wait for
+    // Home and the blur to land underneath it first. Skipping it here is what
+    // keeps the three fullscreen-app passes mutually exclusive: an app that was
+    // both rotated *and* blurred used to be drawn by both, leaving a rotated
+    // ghost of it on screen next to the upright copy.
+    if !(plan.app_fills_screen && plan.rotated) || plan.app_blurred {
         return Ok(());
     }
-    let app_size: Size<i32, Physical> = ctx.rotation.app_size((size.w, size.h)).into();
-    let app_damage = Rectangle::from_size(app_size);
+    let (transform, app_damage) = app_pass_geometry(size, ctx, plan);
     let mut frame = renderer
-        .render(framebuffer, size, ctx.transform + ctx.rotation.transform())
+        .render(framebuffer, size, transform)
         .map_err(SwapBuffersError::from)?;
     if let Err(e) =
         draw_render_elements(&mut frame, ctx.app_scale, &plan.app_elements, &[app_damage])
@@ -601,6 +605,25 @@ fn pass_rotated_app(
     }
     let _sync = frame.finish().map_err(SwapBuffersError::from)?;
     Ok(())
+}
+
+/// The transform and damage a fullscreen app pass draws with. A rotated app
+/// composes its quarter-turn on top of the output transform and lives in the
+/// (axis-swapped) space it was configured at, so its damage is that size too.
+fn app_pass_geometry(
+    size: Size<i32, Physical>,
+    ctx: &DrawCtx<'_>,
+    plan: &ScenePlan,
+) -> (Transform, Rectangle<i32, Physical>) {
+    if plan.rotated {
+        let app_size: Size<i32, Physical> = ctx.rotation.app_size((size.w, size.h)).into();
+        (
+            ctx.transform + ctx.rotation.transform(),
+            Rectangle::from_size(app_size),
+        )
+    } else {
+        (ctx.transform, Rectangle::from_size(size))
+    }
 }
 
 /// Blurred fullscreen app: home is behind it by now, so blur that backdrop and
@@ -615,7 +638,6 @@ fn pass_blurred_app(
     if !plan.app_blurred {
         return Ok(());
     }
-    let damage = Rectangle::from_size(size);
     ctx.skia.blur_backdrop(
         size.w,
         size.h,
@@ -623,8 +645,11 @@ fn pass_blurred_app(
         BLUR_SIGMA_LOGICAL * ctx.app_scale as f32,
         ctx.skia_flip_y,
     );
+    // Carries the rotation too, since this is now the only pass that draws a
+    // blurred fullscreen app whether or not it is turned.
+    let (transform, damage) = app_pass_geometry(size, ctx, plan);
     let mut frame = renderer
-        .render(framebuffer, size, ctx.transform)
+        .render(framebuffer, size, transform)
         .map_err(SwapBuffersError::from)?;
     if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &plan.app_elements, &[damage]) {
         warn!(?e, "failed to draw blurred app elements");
