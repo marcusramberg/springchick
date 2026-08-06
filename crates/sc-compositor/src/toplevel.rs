@@ -386,7 +386,18 @@ impl State {
             // for policy that wants to tell video from a fullscreen text app.
             info!(target: "springchick::debug", "landscape hint {hint}");
         }
-        self.refresh_rotation(fullscreen);
+        // A rotation change here means the app only just became (or stopped
+        // being) fullscreen while the device was already turned, so it is still
+        // drawing at the old size — re-configure it.
+        if self.refresh_rotation(fullscreen) {
+            if let Some(surface) = self.foreground_toplevel_surface() {
+                if fullscreen {
+                    self.configure_fullscreen(&surface);
+                } else {
+                    self.configure_maximized(&surface);
+                }
+            }
+        }
     }
 
     /// Whether the foreground app has *committed* the Fullscreen state — i.e.
@@ -402,22 +413,47 @@ impl State {
             })
     }
 
-    /// Rotation follows fullscreen: the foreground app is landscape while it is
-    /// fullscreen and portrait otherwise. Derived (rather than latched on the
+    /// Rotation follows the device, but only while an app is fullscreen — see
+    /// [`rotation::desired_rotation`]. Derived (rather than latched on the
     /// fullscreen request) so it can only be on while a client is really drawing
     /// at the rotated size — including when the app unmaps, is switched away
     /// from, or leaves fullscreen without asking.
-    fn refresh_rotation(&mut self, fullscreen: bool) {
-        let want = if fullscreen {
-            rotation::Rotation::Landscape
-        } else {
-            rotation::Rotation::None
-        };
-        if want != self.rotation {
-            self.rotation = want;
-            self.needs_render = true;
-            info!(target: "springchick::debug", "rotation {want:?}");
+    ///
+    /// Returns whether the rotation changed, so the caller can re-configure the
+    /// app: turning the phone changes the size the client must draw at.
+    fn refresh_rotation(&mut self, fullscreen: bool) -> bool {
+        let want = rotation::desired_rotation(self.device_orientation, fullscreen);
+        if want == self.rotation {
+            return false;
         }
+        self.rotation = want;
+        self.needs_render = true;
+        info!(target: "springchick::debug", "rotation {want:?}");
+        true
+    }
+
+    /// The device was turned. Re-derive the rotation and, if it changed, hand
+    /// the fullscreen app its new size — it is drawing at the old one.
+    pub(crate) fn set_device_orientation(&mut self, orientation: rotation::DeviceOrientation) {
+        if orientation == self.device_orientation {
+            return;
+        }
+        info!(target: "springchick::debug", "device orientation {orientation:?}");
+        self.device_orientation = orientation;
+        let fullscreen = self.foreground_is_fullscreen();
+        if self.refresh_rotation(fullscreen) {
+            if let Some(surface) = self.foreground_toplevel_surface() {
+                self.configure_fullscreen(&surface);
+            }
+        }
+    }
+
+    /// The foreground app's `ToplevelSurface`, if there is one.
+    fn foreground_toplevel_surface(&self) -> Option<ToplevelSurface> {
+        ui_state::desired_focus(&self.ui)
+            .and_then(|tid| self.toplevels.get(tid))
+            .and_then(|slot| slot.as_ref())
+            .map(|tl| tl.surface.clone())
     }
 
     /// Whether the foreground app is holding an idle inhibitor (video playing,
@@ -514,13 +550,19 @@ impl State {
     }
 
     /// Configure a toplevel truly fullscreen: the whole output, no decorations,
-    /// and at the rotated (landscape) size. See `XdgShellHandler::
-    /// fullscreen_request` for why `self.rotation` is not set here.
+    /// and at whatever size the *current* device orientation implies.
+    ///
+    /// The size follows [`Self::rotation`] rather than assuming landscape. An
+    /// upright phone gives a fullscreen app the portrait output size, which is
+    /// what it is about to be drawn at; handing it the swapped size instead is
+    /// what left the pull-down search wider than the screen and its blur region
+    /// short of the bottom.
     pub(crate) fn configure_fullscreen(&self, surface: &ToplevelSurface) {
-        let (ow, oh) = rotation::Rotation::Landscape.app_size(self.output_size);
+        let (ow, oh) = self.rotation.app_size(self.output_size);
         let w = (ow as f64 / self.dpi).round() as i32;
         let h = (oh as f64 / self.dpi).round() as i32;
-        info!(target: "springchick::debug", "fullscreen request; configure {w}x{h} landscape");
+        let orientation = self.rotation;
+        info!(target: "springchick::debug", "fullscreen request; configure {w}x{h} {orientation:?}");
         surface.with_pending_state(|state| {
             state.size = Some((w, h).into());
             state.decoration_mode = Some(DecorationMode::ServerSide);

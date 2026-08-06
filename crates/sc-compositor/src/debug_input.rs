@@ -30,6 +30,9 @@ pub enum DebugCmd {
     /// A real touch-down+up tap at `(x, y)` through the surface-routing path
     /// (`touch::down`/`up`), for exercising layer-surface/app input.
     Touch(f32, f32),
+    /// Pretend the device was turned. Drives the same path the accelerometer
+    /// will, so rotation policy is testable with no sensor.
+    Orientation(crate::rotation::DeviceOrientation),
 }
 
 /// Parse one command line. `w`/`h` are the logical output bounds used for the
@@ -89,6 +92,19 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
                 return Err("range".to_string());
             }
             DebugCmd::Touch(x, y)
+        }
+        "orientation" => {
+            let name = tok
+                .next()
+                .ok_or_else(|| "parse: missing orientation".to_string())?;
+            done(tok)?;
+            // Same spelling as iio-sensor-proxy's AccelerometerOrientation, so
+            // a test drives exactly what the sensor would report.
+            let o = crate::rotation::DeviceOrientation::from_sensor(name);
+            if o == crate::rotation::DeviceOrientation::Undefined && name != "undefined" {
+                return Err(format!("parse: unknown orientation {name}"));
+            }
+            DebugCmd::Orientation(o)
         }
         "up" => {
             done(tok)?;
@@ -326,6 +342,10 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
                 release_at: Instant::now() + std::time::Duration::from_millis(hold_ms as u64),
                 reply,
             });
+        }
+        DebugCmd::Orientation(o) => {
+            state.set_device_orientation(o);
+            let _ = reply.send("ok\n".into());
         }
         DebugCmd::Touch(x, y) => {
             // Real touch tap through the surface-routing path, held ~120ms so
