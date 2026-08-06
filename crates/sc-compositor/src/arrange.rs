@@ -214,6 +214,24 @@ impl State {
         self.dock_anim.retain(|app, _| targets.contains_key(app));
     }
 
+    /// Abandon an in-flight page drag, springing the grid back to the page it
+    /// started on.
+    ///
+    /// Dropping `page_drag_start` on its own is not enough: the drag drives the
+    /// spring by setting `value` *and* `target` together (so it tracks the finger
+    /// with no physics), which means a half-dragged spring reports `is_settled()`
+    /// and will never return by itself. Whoever cancels the drag has to retarget
+    /// it, or the home grid stays parked a fraction of a page off for good.
+    pub(crate) fn cancel_page_drag(&mut self) {
+        self.page_drag_start = None;
+        if let UiState::Home {
+            page, page_spring, ..
+        } = &mut self.ui
+        {
+            page_spring.retarget(*page as f32);
+        }
+    }
+
     /// Long-press hold: an icon held past HOLD_MS without moving into a swipe or
     /// launch engages arrange mode, picking up the same icon as the initial drag
     /// item so the finger doesn't need to move first.

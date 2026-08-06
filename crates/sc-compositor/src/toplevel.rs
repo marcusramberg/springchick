@@ -37,7 +37,7 @@ impl State {
     /// raise it instead of spawning a second copy.
     pub(crate) fn open_search(&mut self) {
         self.search_arm = None;
-        self.page_drag_start = None;
+        self.cancel_page_drag();
         self.pending_launch = None;
         for (idx, slot) in self.toplevels.iter().enumerate() {
             if slot.as_ref().is_some_and(|tl| tl.app_id == SEARCH_APP_ID) {

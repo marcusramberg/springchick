@@ -119,24 +119,34 @@ host_layers() {
 #
 # `niri msg action power-on-monitors` does NOT clear it: the overlay is dms's,
 # and dms only retracts it on real seat activity (ext-idle-notify resume). So
-# synthesise one harmless keystroke (a bare Shift, no side effect on the focused
-# app) through the virtual-keyboard protocol.
+# synthesise seat activity.
+#
 # Two independent wake levers, because two different things blank the screen:
 #   - DPMS off (niri's own): cleared by `power-on-monitors`.
-#   - dms's black `fade-to-dpms` overlay: only retracted on real seat activity,
-#     so synthesise a bare Shift (no side effect on the focused app).
+#   - dms's black `fade-to-dpms` overlay: only retracted on real seat activity.
+#
+# The activity is a POINTER NUDGE, not a keystroke. A keystroke is not harmless
+# here: wtype uploads its own keymap, the host forwards the raw KEYCODE, and
+# springchick resolves that keycode through *its* keymap — wtype's scratch
+# keycode lands on 9, which is Escape in the default layout, which springchick
+# binds to `home`. So `shot` would silently kick the compositor out of whatever
+# state the test had just set up. A pointer move wakes dms the same way and is
+# genuinely inert: with no button held, springchick only records the position.
 poke_seat() {
   local ns; ns=$(niri_sock)
   [ -n "$ns" ] && NIRI_SOCKET="$ns" niri msg action power-on-monitors >/dev/null 2>&1
+  # Nudge and return, so the cursor ends where it started.
   WAYLAND_DISPLAY="$HOST_WL" XDG_RUNTIME_DIR="$RUNTIME" \
-    nix run nixpkgs#wtype -- -k Shift_L >/dev/null 2>&1
+    nix run nixpkgs#wlrctl -- pointer move 1 0 >/dev/null 2>&1
+  WAYLAND_DISPLAY="$HOST_WL" XDG_RUNTIME_DIR="$RUNTIME" \
+    nix run nixpkgs#wlrctl -- pointer move -1 0 >/dev/null 2>&1
 }
 
 cmd_wake() {
   host_layers >/dev/null 2>&1 || {
-    # Non-niri host: can't inspect layers, so just poke the seat blind — a bare
-    # Shift is harmless whether or not the screen was faded.
-    echo "wake: not a niri host — sending a Shift keystroke blind"
+    # Non-niri host: can't inspect layers, so poke the seat blind — a pointer
+    # nudge is inert whether or not the screen was faded.
+    echo "wake: not a niri host — nudging the pointer blind"
     poke_seat
     return 0
   }
@@ -144,7 +154,7 @@ cmd_wake() {
     echo "wake: screen already awake"
     return 0
   fi
-  echo "wake: fade-to-dpms overlay present — sending a Shift keystroke"
+  echo "wake: fade-to-dpms overlay present — nudging the pointer"
   for _ in 1 2 3; do
     poke_seat
     sleep 1

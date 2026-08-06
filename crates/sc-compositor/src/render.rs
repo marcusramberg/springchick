@@ -239,14 +239,15 @@ fn draw_layer(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
     size: Size<i32, Physical>,
-    transform: Transform,
+    ctx: &DrawCtx<'_>,
     surface: &WlSurface,
     origin: (i32, i32),
-    scale: f64,
 ) -> Result<(), SwapBuffersError> {
-    // `origin` is physical; `scale` (= output `dpi`) scales the surface's logical
-    // geometry to physical. Layer clients render at fractional scale `dpi`, so
-    // their buffer is physical-sized and lands 1:1 — same model as app surfaces.
+    // `origin` is physical; `app_scale` (= output `dpi`) scales the surface's
+    // logical geometry to physical. Layer clients render at fractional scale
+    // `dpi`, so their buffer is physical-sized and lands 1:1 — same model as app
+    // surfaces.
+    let scale = ctx.app_scale;
     let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
         render_elements_from_surface_tree(renderer, surface, origin, scale, 1.0, Kind::Unspecified);
     if elements.is_empty() {
@@ -254,13 +255,55 @@ fn draw_layer(
     }
     let damage = Rectangle::from_size(size);
     let mut frame = renderer
-        .render(framebuffer, size, transform)
+        .render(framebuffer, size, ctx.transform)
         .map_err(SwapBuffersError::from)?;
     if let Err(e) = draw_render_elements(&mut frame, scale, &elements, &[damage]) {
         warn!(?e, "failed to draw layer surface");
     }
     let _sync = frame.finish().map_err(SwapBuffersError::from)?;
     Ok(())
+}
+
+/// Where a shrunken app card lands, in physical output pixels. Both card
+/// producers (the drag-up/zoom window and the switcher deck) derive the same
+/// four numbers from a centre + scale, so the arithmetic lives here once.
+#[derive(Clone, Copy, Debug)]
+struct Card {
+    /// Top-left corner.
+    x: i32,
+    y: i32,
+    /// Uniform scale applied to the surface tree (1.0 = fullscreen).
+    scale: f32,
+    /// Corner radius in physical px. `0` draws through the default program.
+    corner_radius: f32,
+    /// Drawn size, needed by the rounded-rect SDF in the shader.
+    size: (f32, f32),
+}
+
+impl Card {
+    /// A card of `scale` × the output, centred on `(center_x, center_y)`.
+    fn centered(
+        output: Size<i32, Physical>,
+        center_x: f32,
+        center_y: f32,
+        scale: f32,
+        corner_radius: f32,
+    ) -> Self {
+        let w = output.w as f32 * scale;
+        let h = output.h as f32 * scale;
+        Card {
+            x: (center_x - w / 2.0) as i32,
+            y: (center_y - h / 2.0) as i32,
+            scale,
+            corner_radius,
+            size: (w, h),
+        }
+    }
+
+    /// Top-left as a render-element point.
+    fn origin(&self) -> Point<i32, Physical> {
+        Point::<i32, Physical>::from((self.x, self.y))
+    }
 }
 
 /// Draw a shrunken app "card" (drag-up window or switcher-deck card): relocate +
@@ -271,53 +314,44 @@ fn draw_layer(
 /// texture program so the card's outer shape is rounded; any subsurfaces
 /// (`elements[1..]`, interior content) draw unrounded. At `corner_radius == 0`
 /// the whole tree draws through the default program unchanged.
-#[allow(clippy::too_many_arguments)]
 fn draw_scaled_card(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
     size: Size<i32, Physical>,
-    transform: Transform,
-    app_scale: f64,
+    ctx: &DrawCtx<'_>,
     elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
-    card_x: i32,
-    card_y: i32,
-    scale: f32,
-    corner_radius: f32,
-    card_size: (f32, f32),
-    rounded_tex_shader: &GlesTexProgram,
+    card: Card,
 ) -> Result<(), SwapBuffersError> {
     if elements.is_empty() {
         return Ok(());
     }
+    let app_scale = ctx.app_scale;
     let damage = Rectangle::from_size(size);
     let scaled: Vec<
         RescaleRenderElement<RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
     > = elements
         .into_iter()
         .map(|e| {
-            let relocated = RelocateRenderElement::from_element(
-                e,
-                Point::<i32, Physical>::from((card_x, card_y)),
-                Relocate::Relative,
-            );
+            let relocated =
+                RelocateRenderElement::from_element(e, card.origin(), Relocate::Relative);
             RescaleRenderElement::from_element(
                 relocated,
-                Point::<i32, Physical>::from((card_x, card_y)),
-                Scale::from(scale as f64),
+                card.origin(),
+                Scale::from(card.scale as f64),
             )
         })
         .collect();
 
     let mut frame = renderer
-        .render(framebuffer, size, transform)
+        .render(framebuffer, size, ctx.transform)
         .map_err(SwapBuffersError::from)?;
 
-    if corner_radius > 0.5 {
+    if card.corner_radius > 0.5 {
         let uniforms = vec![
-            Uniform::new("corner_radius", corner_radius),
-            Uniform::new("card_size", card_size),
+            Uniform::new("corner_radius", card.corner_radius),
+            Uniform::new("card_size", card.size),
         ];
-        frame.override_default_tex_program(rounded_tex_shader.clone(), uniforms);
+        frame.override_default_tex_program(ctx.rounded_tex_shader.clone(), uniforms);
         if let Err(e) = draw_render_elements(&mut frame, app_scale, &scaled[..1], &[damage]) {
             warn!(?e, "failed to draw rounded card root surface");
         }
@@ -335,25 +369,42 @@ fn draw_scaled_card(
     Ok(())
 }
 
-/// Execute the full two-pass scene draw against an already-bound framebuffer.
-/// Presentation (`submit`/page-flip) is the caller's job.
-pub fn draw_scene(
-    renderer: &mut GlesRenderer,
-    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
-    size: Size<i32, Physical>,
-    ctx: &mut DrawCtx<'_>,
-) -> Result<Vec<Rectangle<i32, Physical>>, SwapBuffersError> {
-    let damage = Rectangle::from_size(size);
+/// Render elements and derived facts about one frame, collected once before any
+/// pass runs — element collection borrows the renderer, so it cannot be
+/// interleaved with the render passes that also borrow it.
+struct ScenePlan {
+    /// The app surface's tree. Empty when there is no app surface.
+    app_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+    /// Background/bottom layer-shell trees, one entry per non-empty surface.
+    below_elements: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>>,
+    /// The app's card placement while it is scaled (drag-up / zoom). `None` when
+    /// the app is fullscreen or absent.
+    window_transform: Option<crate::scene::WindowTransform>,
+    /// The scene says the window covers the screen.
+    is_fullscreen: bool,
+    /// The app is turned a quarter-turn (landscape video).
+    rotated: bool,
+    /// Fullscreen *and* the client actually has something to draw. The extra
+    /// condition matters: a fullscreen-scaled window with no content yet must
+    /// still show Home behind it.
+    app_fills_screen: bool,
+    /// Blur regions a fullscreen app asked for via ext-background-effect.
+    app_blur: Vec<crate::background_effect::BlurRect>,
+    /// Fullscreen app with a blurred backdrop — translucent, so it needs Home
+    /// drawn and blurred behind it instead of the usual single opaque pass.
+    app_blurred: bool,
+}
+
+/// Collect every surface tree this frame needs and derive the flags the passes
+/// branch on.
+fn plan_scene(renderer: &mut GlesRenderer, ctx: &DrawCtx<'_>) -> ScenePlan {
     let scene = ctx.scene;
-
-    let window_transform = scene.window.as_ref().map(|(_, t)| *t);
     let is_fullscreen = scene.window_covers_screen();
-
     // A rotated app covers the whole output, so it starts at the origin of its
     // own (rotated) space rather than at the usable-area origin.
     let rotated = ctx.rotation.swaps_axes();
-    // Collect render elements for the app surface (if any).
-    let base_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+
+    let app_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
         if let Some(wl_surface) = ctx.app_surface {
             render_elements_from_surface_tree(
                 renderer,
@@ -371,8 +422,6 @@ pub fn draw_scene(
             Vec::new()
         };
 
-    // Layer-shell surface elements, pre-collected before any render pass (they
-    // borrow the renderer). Each is positioned at its computed rect origin.
     let below_elements: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> = ctx
         .layers_below
         .iter()
@@ -389,28 +438,41 @@ pub fn draw_scene(
         .filter(|e| !e.is_empty())
         .collect();
 
-    let app_fills_screen = is_fullscreen && !base_elements.is_empty();
-
-    // A fullscreen app that asked for a blurred backdrop (ext-background-effect)
-    // is translucent by definition, so — unlike an opaque fullscreen app — home
-    // must be drawn behind it, then blurred, then the app drawn on top. That
-    // splits the single background pass into two renderer passes.
+    let app_fills_screen = is_fullscreen && !app_elements.is_empty();
     let app_blur = ctx
         .app_surface
         .map(|s| crate::background_effect::blur_rects(s, ctx.app_origin, ctx.app_scale))
         .unwrap_or_default();
-    let app_blurred = app_fills_screen && !app_blur.is_empty();
 
-    // KMS page-flip damage hint. Default: the whole output (always correct —
-    // drivers without FB_DAMAGE_CLIPS ignore it anyway). Narrow it only when the
-    // backend says this is a quiet fullscreen app AND the app is a single render
-    // element at the origin, so element-space damage equals output-space damage.
-    // Anything else (subsurfaces, animation, chrome) stays full to avoid leaving
-    // stale pixels the driver would skip.
-    // A blurred surface samples the pixels behind it, so damage below it must be
-    // repainted through the blur: any blur region on screen disqualifies the
-    // partial-damage fast path entirely.
-    let any_blur = app_blurred
+    ScenePlan {
+        app_blurred: app_fills_screen && !app_blur.is_empty(),
+        app_elements,
+        below_elements,
+        window_transform: scene.window.as_ref().map(|(_, t)| *t),
+        is_fullscreen,
+        rotated,
+        app_fills_screen,
+        app_blur,
+    }
+}
+
+/// The KMS page-flip damage hint.
+///
+/// Default: the whole output (always correct — drivers without FB_DAMAGE_CLIPS
+/// ignore it anyway). Narrow it only when the backend says this is a quiet
+/// fullscreen app AND the app is a single render element at the origin, so
+/// element-space damage equals output-space damage. Anything else (subsurfaces,
+/// animation, chrome) stays full to avoid leaving stale pixels the driver would
+/// skip. A blurred surface samples the pixels behind it, so damage below it must
+/// be repainted through the blur: any blur region on screen disqualifies the
+/// fast path entirely.
+fn flip_damage(
+    size: Size<i32, Physical>,
+    ctx: &mut DrawCtx<'_>,
+    plan: &ScenePlan,
+) -> Vec<Rectangle<i32, Physical>> {
+    let full_damage = Rectangle::from_size(size);
+    let any_blur = plan.app_blurred
         || ctx
             .layers_above
             .iter()
@@ -418,215 +480,247 @@ pub fn draw_scene(
             .chain(ctx.layer_popups)
             .any(|(surface, _)| crate::background_effect::has_blur_region(surface));
 
-    let full_damage = Rectangle::from_size(size);
-    let flip_damage: Vec<Rectangle<i32, Physical>> =
-        if ctx.report_partial_damage && !any_blur && app_fills_screen && base_elements.len() == 1 {
-            let app_wl = ctx
-                .app_surface
-                .expect("app_fills_screen implies app_surface");
-            let elem = &base_elements[0];
-            let same_surface = ctx.last_present.as_ref().is_some_and(|(s, _)| s == app_wl);
-            let since = same_surface
-                .then(|| ctx.last_present.as_ref().map(|(_, c)| *c))
-                .flatten();
-            let damage = elem.damage_since(Scale::from(ctx.app_scale), since);
-            *ctx.last_present = Some((app_wl.clone(), elem.current_commit()));
-            // First frame on a freshly-focused surface has no baseline: repaint all.
-            if same_surface {
-                damage.to_vec()
-            } else {
-                vec![full_damage]
-            }
-        } else {
-            vec![full_damage]
-        };
-
-    // Pass 1: clear background; draw the app here if fullscreen (no home behind).
-    // A blurred app waits for its own pass after home + blur.
+    if !(ctx.report_partial_damage
+        && !any_blur
+        && plan.app_fills_screen
+        && plan.app_elements.len() == 1)
     {
-        let mut frame = renderer
-            .render(&mut *framebuffer, size, ctx.transform)
-            .map_err(SwapBuffersError::from)?;
-        frame
-            .clear(CLEAR_COLOR, &[damage])
-            .map_err(SwapBuffersError::from)?;
-
-        // Background/bottom layer surfaces sit behind the app.
-        for elements in &below_elements {
-            if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, elements, &[damage]) {
-                warn!(?e, "failed to draw background layer surface");
-            }
-        }
-
-        if app_fills_screen && !app_blurred && !rotated {
-            if let Err(e) =
-                draw_render_elements(&mut frame, ctx.app_scale, &base_elements, &[damage])
-            {
-                warn!(?e, "failed to draw app elements");
-            }
-        }
-
-        let _sync = frame.finish().map_err(SwapBuffersError::from)?;
+        return vec![full_damage];
     }
 
-    // Skia: draw the home screen behind a shrinking window (during
-    // transitions). Skip only once the app has actually been drawn covering
-    // the screen above — painting home on top of that would flash home over
-    // the finished window for the last few frames before the state machine
-    // formally settles into UiState::App. Gating on scale alone (without
-    // requiring content) blanks home instead of the app during the window
-    // where the animation has reached fullscreen scale but the client hasn't
-    // painted its first frame yet.
-    // A blurred app is translucent, so it needs a backdrop even in UiState::App
-    // (where `show_home` is false because an opaque app hides Home entirely).
-    if app_blurred || (scene.show_home && !app_fills_screen) {
-        ctx.skia.draw_home(
-            size.w,
-            size.h,
-            scene.home_page,
-            ctx.model,
-            ctx.icon_cache,
-            ctx.app_catalog,
-            ctx.skia_flip_y,
-            ctx.pressed_app,
-            ctx.launching_app,
-            ctx.launching_elapsed,
-            ctx.arrange.as_ref(),
-            ctx.grid_positions,
-            ctx.dock_positions,
-            ctx.app_origin.1 as f32,
-        );
+    let app_wl = ctx
+        .app_surface
+        .expect("app_fills_screen implies app_surface");
+    let elem = &plan.app_elements[0];
+    let same_surface = ctx.last_present.as_ref().is_some_and(|(s, _)| s == app_wl);
+    let since = same_surface
+        .then(|| ctx.last_present.as_ref().map(|(_, c)| *c))
+        .flatten();
+    let damage = elem.damage_since(Scale::from(ctx.app_scale), since);
+    *ctx.last_present = Some((app_wl.clone(), elem.current_commit()));
+    // First frame on a freshly-focused surface has no baseline: repaint all.
+    if same_surface {
+        damage.to_vec()
+    } else {
+        vec![full_damage]
+    }
+}
+
+/// Pass 1: clear the background, draw the below-app layer surfaces, and draw the
+/// app itself when it is opaquely fullscreen (nothing goes behind it). A rotated
+/// or blurred app is skipped here — each gets its own pass further down.
+fn pass_background(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    ctx: &DrawCtx<'_>,
+    plan: &ScenePlan,
+) -> Result<(), SwapBuffersError> {
+    let damage = Rectangle::from_size(size);
+    let mut frame = renderer
+        .render(framebuffer, size, ctx.transform)
+        .map_err(SwapBuffersError::from)?;
+    frame
+        .clear(CLEAR_COLOR, &[damage])
+        .map_err(SwapBuffersError::from)?;
+
+    for elements in &plan.below_elements {
+        if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, elements, &[damage]) {
+            warn!(?e, "failed to draw background layer surface");
+        }
     }
 
-    // Rotated fullscreen app: its own pass, with the rotation composed on top of
-    // the output transform. The renderer swaps the projection's axes for a
-    // quarter-turn transform, so element space is the landscape one the client
-    // was configured at, while the framebuffer stays portrait.
-    if app_fills_screen && rotated {
-        let app_size: Size<i32, Physical> = ctx.rotation.app_size((size.w, size.h)).into();
-        let app_damage = Rectangle::from_size(app_size);
-        let mut frame = renderer
-            .render(
-                &mut *framebuffer,
-                size,
-                ctx.transform + ctx.rotation.transform(),
-            )
-            .map_err(SwapBuffersError::from)?;
+    if plan.app_fills_screen && !plan.app_blurred && !plan.rotated {
         if let Err(e) =
-            draw_render_elements(&mut frame, ctx.app_scale, &base_elements, &[app_damage])
+            draw_render_elements(&mut frame, ctx.app_scale, &plan.app_elements, &[damage])
         {
-            warn!(?e, "failed to draw rotated app elements");
+            warn!(?e, "failed to draw app elements");
         }
-        let _sync = frame.finish().map_err(SwapBuffersError::from)?;
     }
 
-    // Blurred fullscreen app: home is now behind it, so blur that backdrop and
-    // draw the app over it in its own pass.
-    if app_blurred {
-        ctx.skia.blur_backdrop(
-            size.w,
-            size.h,
-            &app_blur,
-            BLUR_SIGMA_LOGICAL * ctx.app_scale as f32,
+    let _sync = frame.finish().map_err(SwapBuffersError::from)?;
+    Ok(())
+}
+
+/// Skia: the home screen, drawn behind a shrinking window during transitions.
+///
+/// Skipped once the app has actually been drawn covering the screen — painting
+/// home on top of that would flash home over the finished window for the last
+/// few frames before the state machine formally settles into `UiState::App`.
+/// Gating on scale alone (without requiring content) blanks home instead of the
+/// app during the window where the animation has reached fullscreen scale but
+/// the client hasn't painted its first frame yet. A blurred app is translucent,
+/// so it needs a backdrop even in `UiState::App` (where `show_home` is false
+/// because an opaque app hides Home entirely).
+fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan) {
+    let scene = ctx.scene;
+    if !(plan.app_blurred || (scene.show_home && !plan.app_fills_screen)) {
+        return;
+    }
+    ctx.skia.draw_home(
+        size.w,
+        size.h,
+        scene.home_page,
+        ctx.model,
+        ctx.icon_cache,
+        ctx.app_catalog,
+        ctx.skia_flip_y,
+        ctx.pressed_app,
+        ctx.launching_app,
+        ctx.launching_elapsed,
+        ctx.arrange.as_ref(),
+        ctx.grid_positions,
+        ctx.dock_positions,
+        ctx.app_origin.1 as f32,
+    );
+}
+
+/// Rotated fullscreen app: its own pass, with the rotation composed on top of
+/// the output transform. The renderer swaps the projection's axes for a
+/// quarter-turn transform, so element space is the landscape one the client was
+/// configured at, while the framebuffer stays portrait.
+fn pass_rotated_app(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    ctx: &DrawCtx<'_>,
+    plan: &ScenePlan,
+) -> Result<(), SwapBuffersError> {
+    if !(plan.app_fills_screen && plan.rotated) {
+        return Ok(());
+    }
+    let app_size: Size<i32, Physical> = ctx.rotation.app_size((size.w, size.h)).into();
+    let app_damage = Rectangle::from_size(app_size);
+    let mut frame = renderer
+        .render(framebuffer, size, ctx.transform + ctx.rotation.transform())
+        .map_err(SwapBuffersError::from)?;
+    if let Err(e) =
+        draw_render_elements(&mut frame, ctx.app_scale, &plan.app_elements, &[app_damage])
+    {
+        warn!(?e, "failed to draw rotated app elements");
+    }
+    let _sync = frame.finish().map_err(SwapBuffersError::from)?;
+    Ok(())
+}
+
+/// Blurred fullscreen app: home is behind it by now, so blur that backdrop and
+/// draw the app over it in its own pass.
+fn pass_blurred_app(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    ctx: &mut DrawCtx<'_>,
+    plan: &ScenePlan,
+) -> Result<(), SwapBuffersError> {
+    if !plan.app_blurred {
+        return Ok(());
+    }
+    let damage = Rectangle::from_size(size);
+    ctx.skia.blur_backdrop(
+        size.w,
+        size.h,
+        &plan.app_blur,
+        BLUR_SIGMA_LOGICAL * ctx.app_scale as f32,
+        ctx.skia_flip_y,
+    );
+    let mut frame = renderer
+        .render(framebuffer, size, ctx.transform)
+        .map_err(SwapBuffersError::from)?;
+    if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &plan.app_elements, &[damage]) {
+        warn!(?e, "failed to draw blurred app elements");
+    }
+    let _sync = frame.finish().map_err(SwapBuffersError::from)?;
+    Ok(())
+}
+
+/// Pass 2: draw the scaled app card ON TOP of home (no clear), with rounded
+/// corners when the transform carries a non-zero radius (drag-up / zoom).
+/// Consumes `plan.app_elements` — no later pass uses them.
+fn pass_app_card(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    ctx: &mut DrawCtx<'_>,
+    plan: &mut ScenePlan,
+) -> Result<(), SwapBuffersError> {
+    if plan.is_fullscreen || plan.app_elements.is_empty() {
+        return Ok(());
+    }
+    let Some(t) = plan.window_transform else {
+        return Ok(());
+    };
+    let card = Card::centered(size, t.center_x, t.center_y, t.scale, t.corner_radius);
+    // Same blur as a layer surface, but the card is scaled: the surface-local
+    // region scales with it and lands at the card's origin.
+    if let Some(surface) = ctx.app_surface {
+        blur_behind(
+            ctx.skia,
+            size,
+            surface,
+            (card.x, card.y),
+            ctx.app_scale * t.scale as f64,
             ctx.skia_flip_y,
         );
-        let mut frame = renderer
-            .render(&mut *framebuffer, size, ctx.transform)
-            .map_err(SwapBuffersError::from)?;
-        if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &base_elements, &[damage]) {
-            warn!(?e, "failed to draw blurred app elements");
-        }
-        let _sync = frame.finish().map_err(SwapBuffersError::from)?;
     }
+    let elements = std::mem::take(&mut plan.app_elements);
+    draw_scaled_card(renderer, framebuffer, size, ctx, elements, card)
+}
 
-    // Pass 2: draw the scaled app ON TOP of home (no clear). Rounded corners
-    // when the transform carries a non-zero radius (drag-up / zoom transitions).
-    if !is_fullscreen && !base_elements.is_empty() {
-        if let Some(t) = window_transform {
-            let card_w = size.w as f32 * t.scale;
-            let card_h = size.h as f32 * t.scale;
-            let card_x = (t.center_x - card_w / 2.0) as i32;
-            let card_y = (t.center_y - card_h / 2.0) as i32;
-            // Same blur, but the card is scaled: the surface-local region scales
-            // with it and lands at the card's origin.
-            if let Some(surface) = ctx.app_surface {
-                blur_behind(
-                    ctx.skia,
-                    size,
-                    surface,
-                    (card_x, card_y),
-                    ctx.app_scale * t.scale as f64,
-                    ctx.skia_flip_y,
-                );
-            }
-            draw_scaled_card(
+/// Switcher deck: each card back-to-front (the scene sorts them ascending z).
+/// `close_progress` lifts a card upward via the layout as it slides off-screen
+/// to close, so the deck itself needs no extra scaling here.
+fn pass_switcher_cards(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    ctx: &DrawCtx<'_>,
+) -> Result<(), SwapBuffersError> {
+    for card in &ctx.scene.cards {
+        let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) else {
+            continue;
+        };
+        let placement = Card::centered(
+            size,
+            card.center_x,
+            card.center_y,
+            card.scale,
+            card.corner_radius,
+        );
+        let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+            render_elements_from_surface_tree(
                 renderer,
-                framebuffer,
-                size,
-                ctx.transform,
+                tl.surface.wl_surface(),
+                (0, 0),
                 ctx.app_scale,
-                base_elements,
-                card_x,
-                card_y,
-                t.scale,
-                t.corner_radius,
-                (card_w, card_h),
-                ctx.rounded_tex_shader,
-            )?;
-        }
+                card.alpha,
+                Kind::Unspecified,
+            );
+        draw_scaled_card(renderer, framebuffer, size, ctx, elements, placement)?;
     }
+    Ok(())
+}
 
-    // Switcher cards: draw each card back-to-front (already sorted ascending z).
-    // close_progress lifts the card upward (via layout) as it slides off-screen
-    // to close; the deck itself needs no extra scaling here.
-    if !scene.cards.is_empty() {
-        for card in &scene.cards {
-            let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) else {
-                continue;
-            };
-            let card_w = size.w as f32 * card.scale;
-            let card_h = size.h as f32 * card.scale;
-            let card_x = (card.center_x - card_w / 2.0) as i32;
-            let card_y = (card.center_y - card_h / 2.0) as i32;
-
-            let card_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                render_elements_from_surface_tree(
-                    renderer,
-                    tl.surface.wl_surface(),
-                    (0, 0),
-                    ctx.app_scale,
-                    card.alpha,
-                    Kind::Unspecified,
-                );
-            draw_scaled_card(
-                renderer,
-                framebuffer,
-                size,
-                ctx.transform,
-                ctx.app_scale,
-                card_elements,
-                card_x,
-                card_y,
-                card.scale,
-                card.corner_radius,
-                (card_w, card_h),
-                ctx.rounded_tex_shader,
-            )?;
-        }
-    }
-
-    // Everything that draws above the app and below springchick's own chrome, in
-    // back-to-front order. Each renders like a layer surface: its tree at a
-    // physical origin, scaled by dpi, with its backdrop blurred first.
-    //
-    // 1. App-parented popups (menus, dropdowns), root→leaf so submenus draw over
-    //    their parents. Drawn whatever the rotation — they belong to the app.
-    // 2. Top/overlay layer surfaces (a status panel, the on-screen keyboard).
-    // 3. Popups parented to one of those layer surfaces.
-    //
-    // (2) and (3) are hidden while the app is rotated: portrait chrome across a
-    // landscape app is worse than no chrome. `touch::surface_under` skips them
-    // in the same condition, so a hidden panel never eats taps meant for the app.
+/// Everything that draws above the app and below springchick's own chrome, in
+/// back-to-front order. Each renders like a layer surface: its tree at a
+/// physical origin, scaled by dpi, with its backdrop blurred first.
+///
+/// 1. App-parented popups (menus, dropdowns), root→leaf so submenus draw over
+///    their parents. Drawn whatever the rotation — they belong to the app.
+/// 2. Top/overlay layer surfaces (a status panel, the on-screen keyboard).
+/// 3. Popups parented to one of those layer surfaces.
+///
+/// (2) and (3) are hidden while the app is rotated: portrait chrome across a
+/// landscape app is worse than no chrome. `touch::surface_under` skips them in
+/// the same condition, so a hidden panel never eats taps meant for the app.
+fn pass_overlays(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    ctx: &mut DrawCtx<'_>,
+    rotated: bool,
+) -> Result<(), SwapBuffersError> {
+    // Borrowed, not collected: this runs every frame, and `ctx.skia` below is a
+    // disjoint field from the three slices being chained.
     let overlays = ctx.app_popups.iter().chain(
         ctx.layers_above
             .iter()
@@ -642,23 +736,20 @@ pub fn draw_scene(
             ctx.app_scale,
             ctx.skia_flip_y,
         );
-        draw_layer(
-            renderer,
-            framebuffer,
-            size,
-            ctx.transform,
-            surface,
-            *origin,
-            ctx.app_scale,
-        )?;
+        draw_layer(renderer, framebuffer, size, ctx, surface, *origin)?;
     }
+    Ok(())
+}
 
+/// springchick's own chrome, drawn last: the home bar, the volume OSD, and the
+/// touch indicators.
+fn pass_chrome(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, rotated: bool) {
     // Always draw the bar on top: it is the only way back out of a fullscreen
     // app, so it stays even while rotated (where it reads as a side handle).
     ctx.skia
         .draw_bar_overlay(size.w, size.h, ctx.bar_alpha, ctx.skia_flip_y);
 
-    // Volume OSD sits above everything, including a fullscreen app — but it is
+    // The OSD sits above everything, including a fullscreen app — but it is
     // drawn portrait, so it is suppressed while the app is rotated rather than
     // laid sideways across landscape video.
     if let Some((level, muted, alpha)) = ctx.osd.filter(|_| !rotated) {
@@ -672,29 +763,63 @@ pub fn draw_scene(
         ctx.skia
             .draw_touches_overlay(size.w, size.h, ctx.touches, ctx.skia_flip_y);
     }
+}
 
-    // Send frame callbacks. The foreground app surface always gets one; in the
-    // switcher, every card surface must also be driven, otherwise backgrounded
-    // clients (which throttle drawing to frame callbacks) stop presenting and
-    // their card renders blank after the entry animation settles.
+/// Drive every client that drew this frame. The foreground app always gets a
+/// callback; in the switcher every card surface must also be driven, otherwise
+/// backgrounded clients (which throttle drawing to frame callbacks) stop
+/// presenting and their card renders blank after the entry animation settles.
+/// Layer surfaces and popups throttle the same way.
+fn send_frame_callbacks(ctx: &DrawCtx<'_>) {
     if let Some(wl_surface) = ctx.app_surface {
         send_frames_surface_tree(wl_surface, ctx.frame_time);
     }
-    for card in &scene.cards {
+    for card in &ctx.scene.cards {
         if let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) {
             send_frames_surface_tree(tl.surface.wl_surface(), ctx.frame_time);
         }
     }
-    // Layer surfaces (e.g. wvkbd) throttle to frame callbacks too.
-    for (surface, _) in ctx.layers_below.iter().chain(ctx.layers_above) {
+    for (surface, _) in ctx
+        .layers_below
+        .iter()
+        .chain(ctx.layers_above)
+        .chain(ctx.app_popups)
+        .chain(ctx.layer_popups)
+    {
         send_frames_surface_tree(surface, ctx.frame_time);
     }
-    // Popups throttle to frame callbacks like any client surface.
-    for (surface, _) in ctx.app_popups.iter().chain(ctx.layer_popups) {
-        send_frames_surface_tree(surface, ctx.frame_time);
-    }
+}
 
-    Ok(flip_damage)
+/// Execute the full scene draw against an already-bound framebuffer, returning
+/// the KMS page-flip damage hint. Presentation (`submit`/page-flip) is the
+/// caller's job.
+///
+/// The passes below run in strict back-to-front order and each one assumes the
+/// ones before it have already landed in the framebuffer — the blur passes in
+/// particular sample whatever is currently there, so moving one earlier would
+/// blur the wrong thing.
+pub fn draw_scene(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    ctx: &mut DrawCtx<'_>,
+) -> Result<Vec<Rectangle<i32, Physical>>, SwapBuffersError> {
+    let mut plan = plan_scene(renderer, ctx);
+    // Computed before drawing: it reads the app element's pre-draw commit
+    // counter and advances `last_present`.
+    let damage_hint = flip_damage(size, ctx, &plan);
+
+    pass_background(renderer, &mut *framebuffer, size, ctx, &plan)?;
+    pass_home(size, ctx, &plan);
+    pass_rotated_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
+    pass_blurred_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
+    pass_app_card(renderer, &mut *framebuffer, size, ctx, &mut plan)?;
+    pass_switcher_cards(renderer, &mut *framebuffer, size, ctx)?;
+    pass_overlays(renderer, &mut *framebuffer, size, ctx, plan.rotated)?;
+    pass_chrome(size, ctx, plan.rotated);
+
+    send_frame_callbacks(ctx);
+    Ok(damage_hint)
 }
 
 /// Send frame callbacks to all surfaces in the tree.

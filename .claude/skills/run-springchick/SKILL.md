@@ -199,12 +199,21 @@ nix develop --command cargo test         # unit tests; bare cargo can't (see Got
   `niri msg -j layers | grep fade-to-dpms` (needs `NIRI_SOCKET=$(ls
   /run/user/$(id -u)/niri.*.sock | head -1)` — it is NOT in the agent's env).
   `niri msg action power-on-monitors` does **not** clear it: the overlay is
-  dms's, and dms only retracts it on real seat activity. One synthetic keystroke
-  does — `nix run nixpkgs#wtype -- -k Shift_L` against the host display. `$D
-  wake` wraps all of this and `$D shot` calls it first, with a capture-size
-  backstop for a blank the layer check misses.
+  dms's, and dms only retracts it on real seat activity. A synthetic **pointer
+  nudge** does — `nix run nixpkgs#wlrctl -- pointer move 1 0` against the host
+  display. `$D wake` wraps all of this and `$D shot` calls it first, with a
+  capture-size backstop for a blank the layer check misses.
   Note niri's own DPMS-off does **not** break grim — screencopy still returns
   real content — so the dms overlay is the only thing that actually blacks a shot.
+- **Never wake with a synthetic KEYSTROKE.** `wake` used to send `wtype -k
+  Shift_L`, which looks harmless and is not: wtype uploads its own keymap, the
+  host forwards the raw **keycode**, and springchick resolves it through *its*
+  keymap. wtype's scratch keycode lands on 9 = `Escape`, which springchick binds
+  to `home` — so every `$D shot` silently returned the compositor to Home, and a
+  screenshot taken after a gesture showed the result of the screenshot, not the
+  gesture. Symptom: the journal shows `keybinding fired action="home"` at the
+  moment of the shot. This is why `poke_seat` nudges the pointer instead (inert
+  with no button held: springchick just records the position).
 - **Build/test must run inside `nix develop`.** rust-toolchain pins stable via
   rust-overlay; bare `cargo` tries to download stable and fails in the sandbox.
 - **dpi:** `[main].dpi` (default 3) makes apps render at output scale — a foot
