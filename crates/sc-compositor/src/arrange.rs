@@ -80,10 +80,15 @@ fn working_order(
         .cloned()
         .collect();
     if let Some((page, index)) = hover {
-        let gi = (page.saturating_mul(sc_shell_model::PAGE_CAP).saturating_add(index)).min(flat.len());
+        let gi = (page
+            .saturating_mul(sc_shell_model::PAGE_CAP)
+            .saturating_add(index))
+        .min(flat.len());
         flat.insert(gi, HOLE.to_string());
     }
-    flat.chunks(sc_shell_model::PAGE_CAP).map(|c| c.to_vec()).collect()
+    flat.chunks(sc_shell_model::PAGE_CAP)
+        .map(|c| c.to_vec())
+        .collect()
 }
 
 /// Reflow targets over an explicit page list (used for the live drag "working
@@ -96,7 +101,10 @@ fn reflow_targets_for(
     let mut out = std::collections::HashMap::new();
     for (page, apps) in pages.iter().enumerate() {
         for (index, app) in apps.iter().enumerate() {
-            out.insert(app.clone(), sc_layout::global_slot_pos(page, index, width, height));
+            out.insert(
+                app.clone(),
+                sc_layout::global_slot_pos(page, index, width, height),
+            );
         }
     }
     out
@@ -107,7 +115,9 @@ impl State {
     /// No frecency recompute — grid order is now manual.
     pub(crate) fn after_arrange_edit(&mut self) {
         self.model.repack();
-        if let Err(e) = sc_shell_model::persist::save(&self.model, &sc_shell_model::persist::state_path()) {
+        if let Err(e) =
+            sc_shell_model::persist::save(&self.model, &sc_shell_model::persist::state_path())
+        {
             warn!(%e, "failed to save shell model after arrange edit");
         }
         self.reflow_grid();
@@ -149,8 +159,10 @@ impl State {
                     sy.retarget(*ty);
                 }
                 None => {
-                    self.grid_anim
-                        .insert(app.clone(), (sc_anim::Spring::new(*tx), sc_anim::Spring::new(*ty)));
+                    self.grid_anim.insert(
+                        app.clone(),
+                        (sc_anim::Spring::new(*tx), sc_anim::Spring::new(*ty)),
+                    );
                 }
             }
         }
@@ -192,8 +204,10 @@ impl State {
                     sy.retarget(*ty);
                 }
                 None => {
-                    self.dock_anim
-                        .insert(app.clone(), (sc_anim::Spring::new(*tx), sc_anim::Spring::new(*ty)));
+                    self.dock_anim.insert(
+                        app.clone(),
+                        (sc_anim::Spring::new(*tx), sc_anim::Spring::new(*ty)),
+                    );
                 }
             }
         }
@@ -301,7 +315,9 @@ mod tests {
     #[test]
     fn reflow_targets_maps_pages_and_excludes_dock() {
         let mut m = ShellModel::default();
-        for i in 0..25 { m.place(format!("app{i:02}")); } // 24 on page 0, 1 on page 1
+        for i in 0..25 {
+            m.place(format!("app{i:02}"));
+        } // 24 on page 0, 1 on page 1
         let t = reflow_targets(&m, 1224.0, 2700.0);
         assert_eq!(t.len(), 25);
         let page1_app = &m.pages[1][0];
@@ -316,7 +332,10 @@ mod tests {
         // Drag "a", hover global index 2 -> order without "a" is [b,c,d];
         // hole at 2 -> [b, c, HOLE, d].
         let out = working_order(&pages, "a", Some((0, 2)));
-        assert_eq!(out[0], vec!["b".to_string(), "c".into(), HOLE.to_string(), "d".into()]);
+        assert_eq!(
+            out[0],
+            vec!["b".to_string(), "c".into(), HOLE.to_string(), "d".into()]
+        );
     }
 
     #[test]

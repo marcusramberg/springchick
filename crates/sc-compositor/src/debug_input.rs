@@ -195,7 +195,11 @@ pub fn spawn(path: &str, w: f32, h: f32) -> std::io::Result<DebugChannel> {
 /// returns `None` (logged) if the bind fails, which is non-fatal.
 pub fn spawn_listener(output_size: (i32, i32)) -> Option<DebugChannel> {
     let path = crate::ipc::socket_path();
-    match spawn(&path.to_string_lossy(), output_size.0 as f32, output_size.1 as f32) {
+    match spawn(
+        &path.to_string_lossy(),
+        output_size.0 as f32,
+        output_size.1 as f32,
+    ) {
         Ok(chan) => {
             tracing::info!(path = %path.display(), "ipc socket listening");
             Some(chan)

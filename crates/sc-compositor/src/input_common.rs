@@ -59,7 +59,12 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
 
     if state.pointer_down {
         // Arrange-mode drag: track the finger directly, no launch/swipe logic.
-        if state.arrange.as_ref().and_then(|a| a.drag.as_ref()).is_some() {
+        if state
+            .arrange
+            .as_ref()
+            .and_then(|a| a.drag.as_ref())
+            .is_some()
+        {
             let (w, h) = state.output_size_f();
             let page = state.current_home_page();
             let layout = sc_layout::compute(w, h, page, &state.model);
@@ -67,10 +72,21 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
             let hover = if over_dock {
                 None
             } else {
-                let app = state.arrange.as_ref().unwrap().drag.as_ref().unwrap().app_id.clone();
+                let app = state
+                    .arrange
+                    .as_ref()
+                    .unwrap()
+                    .drag
+                    .as_ref()
+                    .unwrap()
+                    .app_id
+                    .clone();
                 // Fill count on this page with the dragged app removed, so the
                 // nearest index maps against the hole-removed order.
-                let live_len = state.model.pages.get(page)
+                let live_len = state
+                    .model
+                    .pages
+                    .get(page)
                     .map_or(0, |p| p.iter().filter(|a| **a != app).count());
                 let idx = sc_layout::nearest_grid_index(w, h, x, y).min(live_len);
                 Some((page, idx))
@@ -337,10 +353,7 @@ fn revert_quick_switch(state: &mut State, x: f32, y: f32) {
         x: x / w,
         y: origin.y,
     });
-    tracker.current = sc_input::Pt {
-        x: x / w,
-        y: y / h,
-    };
+    tracker.current = sc_input::Pt { x: x / w, y: y / h };
     let cards = state.history.deck_order();
     state.ui = UiState::Grabbing {
         toplevel: current,
@@ -436,12 +449,7 @@ pub fn on_press(state: &mut State) {
 
     // Switcher deck input.
     if matches!(state.ui, UiState::Switcher { .. }) {
-        let hit = switcher::hit_test(
-            &state.switcher_cards,
-            x,
-            y,
-            state.output_size_f(),
-        );
+        let hit = switcher::hit_test(&state.switcher_cards, x, y, state.output_size_f());
         match hit {
             switcher::CardHit::Card(idx) => {
                 let toplevel = state.switcher_cards.get(idx).map(|c| c.toplevel);
@@ -670,12 +678,8 @@ pub fn on_release(state: &mut State) {
                 let dy = (y - start_y).abs();
                 if dx < 15.0 && dy < 15.0 {
                     // Tap: open the card.
-                    let hit = switcher::hit_test(
-                        &state.switcher_cards,
-                        x,
-                        y,
-                        state.output_size_f(),
-                    );
+                    let hit =
+                        switcher::hit_test(&state.switcher_cards, x, y, state.output_size_f());
                     if let switcher::CardHit::Card(idx) = hit {
                         // `idx` indexes the z-sorted render array; resolve it to
                         // the card's toplevel id so ordering can't desync.

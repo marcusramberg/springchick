@@ -59,9 +59,15 @@ impl FrecencyStore {
             return;
         }
         let stat = if first_run {
-            AppStat { score: 0.0, last_launch: 0 }
+            AppStat {
+                score: 0.0,
+                last_launch: 0,
+            }
         } else {
-            AppStat { score: 1.0, last_launch: now }
+            AppStat {
+                score: 1.0,
+                last_launch: now,
+            }
         };
         self.apps.insert(app.to_owned(), stat);
     }
@@ -93,7 +99,9 @@ impl ShellModel {
     /// `now`/`first_run` mirror the old startup seed loop (score 0 on a
     /// first-run empty store, 1.0 for a later install).
     pub fn reconcile(&mut self, catalog_ids: &[AppId], now: u64, first_run: bool) {
-        self.pages.iter_mut().for_each(|p| p.retain(|a| catalog_ids.contains(a)));
+        self.pages
+            .iter_mut()
+            .for_each(|p| p.retain(|a| catalog_ids.contains(a)));
         self.pages.retain(|p| !p.is_empty());
         self.dock.retain(|a| catalog_ids.contains(a));
         self.hidden.retain(|a| catalog_ids.contains(a));
@@ -135,7 +143,10 @@ impl ShellModel {
         let mut flat: Vec<AppId> = self.flat().into_iter().filter(|a| a != app).collect();
         self.dock.retain(|a| a != app);
         self.hidden.retain(|a| a != app);
-        let gi = page.saturating_mul(PAGE_CAP).saturating_add(index).min(flat.len());
+        let gi = page
+            .saturating_mul(PAGE_CAP)
+            .saturating_add(index)
+            .min(flat.len());
         flat.insert(gi, app.to_string());
         self.pages = flat.chunks(PAGE_CAP).map(|c| c.to_vec()).collect();
     }
@@ -236,7 +247,10 @@ mod tests {
     fn move_to_cross_page_lands_at_global_index() {
         // PAGE_CAP-1 on page0 + "x" on page1 = PAGE_CAP total -> repacks to one full page.
         let mut m = ShellModel {
-            pages: vec![(0..PAGE_CAP - 1).map(|i| format!("a{i:02}")).collect(), vec!["x".into()]],
+            pages: vec![
+                (0..PAGE_CAP - 1).map(|i| format!("a{i:02}")).collect(),
+                vec!["x".into()],
+            ],
             ..Default::default()
         };
         m.move_to("x", 0, 2); // global index 2
@@ -257,7 +271,10 @@ mod tests {
 
     #[test]
     fn eff_halves_after_one_half_life() {
-        let stat = AppStat { score: 8.0, last_launch: 0 };
+        let stat = AppStat {
+            score: 8.0,
+            last_launch: 0,
+        };
         let now = HALF_LIFE_SECS as u64;
         assert!((eff(&stat, now) - 4.0).abs() < 1e-6);
     }
@@ -283,12 +300,24 @@ mod tests {
     fn seed_first_run_is_zero_later_install_is_one() {
         let mut empty = FrecencyStore::default();
         empty.seed("a", 5000, true);
-        assert_eq!(empty.apps["a"], AppStat { score: 0.0, last_launch: 0 });
+        assert_eq!(
+            empty.apps["a"],
+            AppStat {
+                score: 0.0,
+                last_launch: 0
+            }
+        );
 
         let mut populated = FrecencyStore::default();
         populated.record_launch("x", 100);
         populated.seed("b", 5000, false);
-        assert_eq!(populated.apps["b"], AppStat { score: 1.0, last_launch: 5000 });
+        assert_eq!(
+            populated.apps["b"],
+            AppStat {
+                score: 1.0,
+                last_launch: 5000
+            }
+        );
     }
 
     #[test]
@@ -299,7 +328,13 @@ mod tests {
             s.seed(id, 5000, first_run);
         }
         for id in ["a", "b", "c"] {
-            assert_eq!(s.apps[id], AppStat { score: 0.0, last_launch: 0 });
+            assert_eq!(
+                s.apps[id],
+                AppStat {
+                    score: 0.0,
+                    last_launch: 0
+                }
+            );
         }
     }
 
@@ -341,7 +376,9 @@ mod tests {
     #[test]
     fn pin_fails_when_full_or_duplicate() {
         let mut m = ShellModel::default();
-        for i in 0..DOCK_CAP { assert!(m.pin(&format!("d{i}"))); }
+        for i in 0..DOCK_CAP {
+            assert!(m.pin(&format!("d{i}")));
+        }
         assert!(!m.pin("overflow"));
         assert_eq!(m.dock.len(), DOCK_CAP);
         let mut m2 = ShellModel::default();
@@ -428,7 +465,13 @@ mod tests {
     #[test]
     fn reconcile_seeds_frecency_for_new_apps() {
         let mut m = ShellModel::default();
-        m.frecency.apps.insert("existing".into(), AppStat { score: 5.0, last_launch: 0 });
+        m.frecency.apps.insert(
+            "existing".into(),
+            AppStat {
+                score: 5.0,
+                last_launch: 0,
+            },
+        );
         m.reconcile(&["existing".into(), "new".into()], 100, false);
         assert_eq!(m.frecency.apps["new"].score, 1.0);
         assert_eq!(m.frecency.apps["new"].last_launch, 100);
@@ -437,7 +480,9 @@ mod tests {
     #[test]
     fn reconcile_does_not_move_already_placed() {
         let mut m = ShellModel::default();
-        for n in ["a", "b", "c"] { m.place(n.into()); }
+        for n in ["a", "b", "c"] {
+            m.place(n.into());
+        }
         m.move_to("c", 0, 0); // user order: c, a, b
         m.reconcile(&["a".into(), "b".into(), "c".into()], 0, false);
         assert_eq!(m.pages[0], vec!["c", "a", "b"]);
@@ -478,7 +523,11 @@ mod tests {
     #[test]
     fn repack_cascades_overflow_and_drops_empty_tail() {
         let mut m = ShellModel {
-            pages: vec![(0..=PAGE_CAP).map(|i| format!("a{i}")).collect(), vec![], vec![]],
+            pages: vec![
+                (0..=PAGE_CAP).map(|i| format!("a{i}")).collect(),
+                vec![],
+                vec![],
+            ],
             ..Default::default()
         };
         m.repack();

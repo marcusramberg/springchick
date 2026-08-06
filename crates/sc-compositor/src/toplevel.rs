@@ -147,7 +147,10 @@ impl State {
         // fires once the real id arrives. The rare client that sets app_id
         // before mapping resolves here instead — log it either way.
         if self.app_catalog.contains_key(&app_id) {
-            info!(toplevel = self.toplevels.len(), app_id, "toplevel app_id resolved");
+            info!(
+                toplevel = self.toplevels.len(),
+                app_id, "toplevel app_id resolved"
+            );
         }
 
         // Enter the output so the client receives its scale factor (`[main].dpi`)
@@ -374,10 +377,7 @@ impl State {
             .and_then(|tid| self.toplevels.get(tid))
             .and_then(|slot| slot.as_ref())
             .is_some_and(|tl| {
-                content_type::wants_landscape(
-                    content_type::of(tl.surface.wl_surface()),
-                    fullscreen,
-                )
+                content_type::wants_landscape(content_type::of(tl.surface.wl_surface()), fullscreen)
             });
         if hint != self.landscape_hint {
             self.landscape_hint = hint;

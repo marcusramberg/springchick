@@ -353,20 +353,23 @@ pub fn draw_scene(
     // own (rotated) space rather than at the usable-area origin.
     let rotated = ctx.rotation.swaps_axes();
     // Collect render elements for the app surface (if any).
-    let base_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if let Some(wl_surface) =
-        ctx.app_surface
-    {
-        render_elements_from_surface_tree(
-            renderer,
-            wl_surface,
-            if is_fullscreen && !rotated { ctx.app_origin } else { (0, 0) },
-            ctx.app_scale,
-            1.0,
-            Kind::Unspecified,
-        )
-    } else {
-        Vec::new()
-    };
+    let base_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+        if let Some(wl_surface) = ctx.app_surface {
+            render_elements_from_surface_tree(
+                renderer,
+                wl_surface,
+                if is_fullscreen && !rotated {
+                    ctx.app_origin
+                } else {
+                    (0, 0)
+                },
+                ctx.app_scale,
+                1.0,
+                Kind::Unspecified,
+            )
+        } else {
+            Vec::new()
+        };
 
     // Layer-shell surface elements, pre-collected before any render pass (they
     // borrow the renderer). Each is positioned at its computed rect origin.
@@ -409,38 +412,34 @@ pub fn draw_scene(
     // partial-damage fast path entirely.
     let any_blur = app_blurred
         || ctx
-        .layers_above
-        .iter()
-        .chain(ctx.app_popups)
+            .layers_above
+            .iter()
+            .chain(ctx.app_popups)
             .chain(ctx.layer_popups)
             .any(|(surface, _)| crate::background_effect::has_blur_region(surface));
 
     let full_damage = Rectangle::from_size(size);
-    let flip_damage: Vec<Rectangle<i32, Physical>> = if ctx.report_partial_damage
-        && !any_blur
-        && app_fills_screen
-        && base_elements.len() == 1
-    {
-        let app_wl = ctx.app_surface.expect("app_fills_screen implies app_surface");
-        let elem = &base_elements[0];
-        let same_surface = ctx
-            .last_present
-            .as_ref()
-            .is_some_and(|(s, _)| s == app_wl);
-        let since = same_surface
-            .then(|| ctx.last_present.as_ref().map(|(_, c)| *c))
-            .flatten();
-        let damage = elem.damage_since(Scale::from(ctx.app_scale), since);
-        *ctx.last_present = Some((app_wl.clone(), elem.current_commit()));
-        // First frame on a freshly-focused surface has no baseline: repaint all.
-        if same_surface {
-            damage.to_vec()
+    let flip_damage: Vec<Rectangle<i32, Physical>> =
+        if ctx.report_partial_damage && !any_blur && app_fills_screen && base_elements.len() == 1 {
+            let app_wl = ctx
+                .app_surface
+                .expect("app_fills_screen implies app_surface");
+            let elem = &base_elements[0];
+            let same_surface = ctx.last_present.as_ref().is_some_and(|(s, _)| s == app_wl);
+            let since = same_surface
+                .then(|| ctx.last_present.as_ref().map(|(_, c)| *c))
+                .flatten();
+            let damage = elem.damage_since(Scale::from(ctx.app_scale), since);
+            *ctx.last_present = Some((app_wl.clone(), elem.current_commit()));
+            // First frame on a freshly-focused surface has no baseline: repaint all.
+            if same_surface {
+                damage.to_vec()
+            } else {
+                vec![full_damage]
+            }
         } else {
             vec![full_damage]
-        }
-    } else {
-        vec![full_damage]
-    };
+        };
 
     // Pass 1: clear background; draw the app here if fullscreen (no home behind).
     // A blurred app waits for its own pass after home + blur.
@@ -460,7 +459,8 @@ pub fn draw_scene(
         }
 
         if app_fills_screen && !app_blurred && !rotated {
-            if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &base_elements, &[damage])
+            if let Err(e) =
+                draw_render_elements(&mut frame, ctx.app_scale, &base_elements, &[damage])
             {
                 warn!(?e, "failed to draw app elements");
             }
@@ -506,7 +506,11 @@ pub fn draw_scene(
         let app_size: Size<i32, Physical> = ctx.rotation.app_size((size.w, size.h)).into();
         let app_damage = Rectangle::from_size(app_size);
         let mut frame = renderer
-            .render(&mut *framebuffer, size, ctx.transform + ctx.rotation.transform())
+            .render(
+                &mut *framebuffer,
+                size,
+                ctx.transform + ctx.rotation.transform(),
+            )
             .map_err(SwapBuffersError::from)?;
         if let Err(e) =
             draw_render_elements(&mut frame, ctx.app_scale, &base_elements, &[app_damage])
@@ -630,7 +634,14 @@ pub fn draw_scene(
             .filter(|_| !rotated),
     );
     for (surface, origin) in overlays {
-        blur_behind(ctx.skia, size, surface, *origin, ctx.app_scale, ctx.skia_flip_y);
+        blur_behind(
+            ctx.skia,
+            size,
+            surface,
+            *origin,
+            ctx.app_scale,
+            ctx.skia_flip_y,
+        );
         draw_layer(
             renderer,
             framebuffer,

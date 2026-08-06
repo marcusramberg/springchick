@@ -352,13 +352,12 @@ impl ImageCopyCaptureHandler for State {
             .to_buffer(1, smithay::utils::Transform::Normal);
         // Advertise dmabuf (zero-copy blit) when the DRM backend supplied formats,
         // plus shm as a universal fallback so a client can always allocate.
-        let dma = self
-            .capture_formats
-            .as_ref()
-            .map(|(node, formats)| smithay::wayland::image_copy_capture::DmabufConstraints {
+        let dma = self.capture_formats.as_ref().map(|(node, formats)| {
+            smithay::wayland::image_copy_capture::DmabufConstraints {
                 node: *node,
                 formats: formats.clone(),
-            });
+            }
+        });
         Some(BufferConstraints {
             size,
             shm: vec![

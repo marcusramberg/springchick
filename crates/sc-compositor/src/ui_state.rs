@@ -154,13 +154,31 @@ impl UiState {
     pub fn retag_app(&mut self, toplevel: ToplevelId, app_id: &str) {
         let set = |a: &mut String| *a = app_id.to_string();
         match self {
-            UiState::App { toplevel: t, app_id: a, .. }
-            | UiState::AppOpening { toplevel: t, app_id: a, .. }
-            | UiState::AppClosing { toplevel: t, app_id: a, .. }
-            | UiState::Grabbing { toplevel: t, app_id: a, .. }
-            | UiState::Settling { toplevel: t, app_id: a, .. }
-                if *t == toplevel =>
-            {
+            UiState::App {
+                toplevel: t,
+                app_id: a,
+                ..
+            }
+            | UiState::AppOpening {
+                toplevel: t,
+                app_id: a,
+                ..
+            }
+            | UiState::AppClosing {
+                toplevel: t,
+                app_id: a,
+                ..
+            }
+            | UiState::Grabbing {
+                toplevel: t,
+                app_id: a,
+                ..
+            }
+            | UiState::Settling {
+                toplevel: t,
+                app_id: a,
+                ..
+            } if *t == toplevel => {
                 set(a);
             }
             UiState::QuickSwitch {
@@ -208,7 +226,9 @@ impl UiState {
             UiState::Grabbing { .. } => true,
             // Dragging (not releasing) is finger-driven and repaints on move;
             // once releasing, the spring must tick until it settles.
-            UiState::QuickSwitch { releasing, offset, .. } => *releasing && !offset.is_settled(),
+            UiState::QuickSwitch {
+                releasing, offset, ..
+            } => *releasing && !offset.is_settled(),
             UiState::App { .. } => false,
             UiState::Switcher { scroll, close, .. } => {
                 !scroll.is_settled() || matches!(close, Some((_, _, true)))
@@ -497,11 +517,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 UiState::Home { page_spring, .. } => {
                     page_spring.step(dt);
                 }
-                UiState::Switcher {
-                    scroll,
-                    close,
-                    ..
-                } => {
+                UiState::Switcher { scroll, close, .. } => {
                     scroll.step(dt);
                     // Decay a cancelled close-swipe back to rest.
                     if let Some((_, progress, true)) = close {
@@ -549,7 +565,11 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             };
             Effect::None
         }
-        UiEvent::SwitcherTapCard { toplevel, app_id, origin } => {
+        UiEvent::SwitcherTapCard {
+            toplevel,
+            app_id,
+            origin,
+        } => {
             if let UiState::Switcher { cards, .. } = state {
                 if cards.contains(&toplevel) {
                     *state = UiState::AppOpening {
@@ -846,7 +866,8 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
-            close: None,        };
+            close: None,
+        };
         // Events carry the toplevel id, not a positional index — so the render
         // z-order and the MRU order can never desync (regression: tapping the
         // front card used to open the mirrored back card).
@@ -871,7 +892,8 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
-            close: None,        };
+            close: None,
+        };
         let eff = transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 2 });
         assert_eq!(eff, Effect::CloseToplevel { toplevel: 2 });
         if let UiState::Switcher { cards, .. } = &state {
@@ -886,7 +908,8 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
-            close: None,        };
+            close: None,
+        };
         transition(
             &mut state,
             UiEvent::SwitcherTapCard {
@@ -903,7 +926,8 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![9],
             scroll: Spring::new(0.0),
-            close: None,        };
+            close: None,
+        };
         transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 9 });
         assert!(matches!(state, UiState::Home { .. }));
     }
@@ -913,7 +937,8 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2],
             scroll: Spring::new(0.0),
-            close: None,        };
+            close: None,
+        };
         transition(&mut state, UiEvent::SwitcherDismiss);
         assert!(matches!(state, UiState::Home { .. }));
     }
@@ -923,7 +948,8 @@ mod tests {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
-            close: None,        };
+            close: None,
+        };
         transition(&mut state, UiEvent::ToplevelClosed { toplevel: 2 });
         if let UiState::Switcher { cards, .. } = &state {
             assert_eq!(cards, &vec![1, 3]);
@@ -939,7 +965,8 @@ mod tests {
         let state = UiState::Switcher {
             cards: vec![1],
             scroll: spring,
-            close: None,        };
+            close: None,
+        };
         assert!(state.needs_animation());
     }
 
@@ -948,7 +975,8 @@ mod tests {
         let state = UiState::Switcher {
             cards: vec![5, 3, 1],
             scroll: Spring::new(0.0),
-            close: None,        };
+            close: None,
+        };
         assert_eq!(state.foreground_toplevel(), Some(5));
     }
 }

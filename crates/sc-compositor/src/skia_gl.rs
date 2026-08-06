@@ -209,8 +209,7 @@ impl SkiaGl {
         // Grid icons: build the animated slot set once, in deterministic model
         // (page, slot) order — see `visible_grid_slots`. Reused below for arrange
         // badges so they track the sliding icons instead of the static layout.
-        let anim_slots =
-            visible_grid_slots(model, grid_positions, width as f32, height as f32);
+        let anim_slots = visible_grid_slots(model, grid_positions, width as f32, height as f32);
         for slot in &anim_slots {
             draw_icon_slot(
                 canvas,
@@ -412,7 +411,11 @@ impl SkiaGl {
 
         // Region → clip path: Add rects union, Subtract rects punch holes.
         let to_canvas = |r: &crate::background_effect::BlurRect| {
-            let y = if flip_y { height as f32 - (r.y + r.h) } else { r.y };
+            let y = if flip_y {
+                height as f32 - (r.y + r.h)
+            } else {
+                r.y
+            };
             Rect::from_xywh(r.x, y, r.w, r.h)
         };
         let mut add = PathBuilder::new();
@@ -780,7 +783,12 @@ fn draw_drag_ghost(
         .unwrap_or(64.0);
     let size = base_size * 1.2;
     let (cx, cy) = pos;
-    let dst = Rect::new(cx - size / 2.0, cy - size / 2.0, cx + size / 2.0, cy + size / 2.0);
+    let dst = Rect::new(
+        cx - size / 2.0,
+        cy - size / 2.0,
+        cx + size / 2.0,
+        cy + size / 2.0,
+    );
     canvas.draw_image_rect(image, None, dst, &Paint::default());
 }
 
@@ -805,7 +813,13 @@ pub(crate) fn visible_grid_slots(
                 if *sx < -width * 0.3 || *sx > width * 1.3 {
                     continue;
                 }
-                out.push(sc_layout::slot_at_center(app.clone(), *sx, *sy, width, height));
+                out.push(sc_layout::slot_at_center(
+                    app.clone(),
+                    *sx,
+                    *sy,
+                    width,
+                    height,
+                ));
             }
         }
     }
@@ -827,9 +841,9 @@ pub(crate) fn visible_dock_slots(
         .dock
         .iter()
         .filter_map(|slot| {
-            dock_positions
-                .get(&slot.app_id)
-                .map(|&(cx, cy)| sc_layout::slot_at_center(slot.app_id.clone(), cx, cy, width, height))
+            dock_positions.get(&slot.app_id).map(|&(cx, cy)| {
+                sc_layout::slot_at_center(slot.app_id.clone(), cx, cy, width, height)
+            })
         })
         .collect()
 }

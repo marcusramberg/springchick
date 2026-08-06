@@ -66,7 +66,11 @@ fn surface_under(state: &State, x: f32, y: f32) -> Option<Target> {
                 }
                 let u = state.layers.usable(state.dpi);
                 let origin = (u.x as f64, u.y as f64);
-                return Some(Target::at(tl.surface.wl_surface().clone(), origin, state.dpi));
+                return Some(Target::at(
+                    tl.surface.wl_surface().clone(),
+                    origin,
+                    state.dpi,
+                ));
             }
         }
     }
@@ -384,7 +388,9 @@ pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
 /// A finger lifted.
 pub fn up(state: &mut State, slot: TouchSlot, time: u32) {
     if state.show_touches {
-        state.touch_viz.release(slot_id(slot), std::time::Instant::now());
+        state
+            .touch_viz
+            .release(slot_id(slot), std::time::Instant::now());
         state.needs_render = true;
     }
     if state.touch_targets.remove(&slot).is_some() {

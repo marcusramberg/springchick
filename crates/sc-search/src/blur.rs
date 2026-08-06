@@ -12,9 +12,7 @@
 //! Everything here is best-effort: a compositor without the global (anything
 //! but springchick) just leaves the UI unblurred.
 
-use raw_window_handle::{
-    HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
-};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use wayland_client::backend::{Backend, ObjectId};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{
@@ -97,10 +95,9 @@ pub fn blur_whole_window(
     let compositor: WlCompositor = globals.bind(&qh, 1..=6, ()).ok()?;
 
     // SAFETY: the surface pointer is winit's live wl_surface for this window.
-    let surface_id = unsafe {
-        ObjectId::from_ptr(WlSurface::interface(), window.surface.as_ptr().cast())
-    }
-    .ok()?;
+    let surface_id =
+        unsafe { ObjectId::from_ptr(WlSurface::interface(), window.surface.as_ptr().cast()) }
+            .ok()?;
     let surface = WlSurface::from_id(&conn, surface_id).ok()?;
 
     let region = compositor.create_region(&qh, ());

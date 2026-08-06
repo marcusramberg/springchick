@@ -23,7 +23,9 @@ pub fn save(model: &ShellModel, path: &Path) -> std::io::Result<()> {
     }
     let tmp = path.with_file_name(format!(
         "{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("state.toml")
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("state.toml")
     ));
     std::fs::write(&tmp, s)?;
     std::fs::rename(&tmp, path)

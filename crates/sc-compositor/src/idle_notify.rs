@@ -161,6 +161,9 @@ impl Dispatch<ExtIdleNotificationV1, Arc<NotificationData>> for State {
         resource: &ExtIdleNotificationV1,
         _data: &Arc<NotificationData>,
     ) {
-        state.idle_notify.notifications.retain(|(r, _)| r != resource);
+        state
+            .idle_notify
+            .notifications
+            .retain(|(r, _)| r != resource);
     }
 }

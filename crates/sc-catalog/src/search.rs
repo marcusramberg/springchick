@@ -41,7 +41,11 @@ pub fn rank(
             .then_with(|| a.0.cmp(b.0))
     });
 
-    matches.into_iter().take(limit).map(|(id, _, _)| id.clone()).collect()
+    matches
+        .into_iter()
+        .take(limit)
+        .map(|(id, _, _)| id.clone())
+        .collect()
 }
 
 #[cfg(test)]

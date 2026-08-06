@@ -41,13 +41,19 @@ mod tests {
 
     #[test]
     fn clamp_leaves_on_screen_popup_untouched() {
-        assert_eq!(clamp_origin((100, 200), (300, 400), (1080, 2400)), (100, 200));
+        assert_eq!(
+            clamp_origin((100, 200), (300, 400), (1080, 2400)),
+            (100, 200)
+        );
     }
 
     #[test]
     fn clamp_shifts_popup_overflowing_right_and_bottom() {
         // Right edge 900+300=1200 > 1080 → x = 780. Bottom 2300+400=2700 > 2400 → y = 2000.
-        assert_eq!(clamp_origin((900, 2300), (300, 400), (1080, 2400)), (780, 2000));
+        assert_eq!(
+            clamp_origin((900, 2300), (300, 400), (1080, 2400)),
+            (780, 2000)
+        );
     }
 
     #[test]
