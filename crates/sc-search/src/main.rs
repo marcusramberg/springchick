@@ -1,4 +1,4 @@
-//! springchick pull-down search: a standalone fullscreen Wayland app.
+//! springchick pull-down search: a standalone screen-filling Wayland app.
 //!
 //! Launched by the compositor on the Home pull-down gesture. As a normal xdg
 //! toplevel it gets keyboard focus, touch, an on-screen keyboard (wvkbd/IME),
@@ -24,7 +24,14 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id(APP_ID)
-            .with_fullscreen(true)
+            // Deliberately NOT `.with_fullscreen(true)`. springchick maximizes
+            // every toplevel anyway, so fullscreen buys nothing — and it is
+            // actively harmful here: the compositor treats a fullscreen app as
+            // media wanting landscape, so it configures the *swapped* size and
+            // draws the window a quarter-turn round. That left search sized
+            // 2088x1902 on a 1901x2088 panel: its blur region (clipped to the
+            // surface) stopped short of the bottom of the screen, and a rotated
+            // ghost of the search field was drawn over Home.
             // Translucent so the compositor's blurred Home backdrop shows
             // through (see `blur`).
             .with_transparent(true),
