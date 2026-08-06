@@ -23,12 +23,22 @@ use smithay::utils::{Point, SERIAL_COUNTER};
 /// surfaces (the OSK); everything else
 /// falls through to the gesture funnel by returning `None`.
 fn surface_under(state: &State, x: f32, y: f32) -> Option<Target> {
-    // 0. Open popups (menus, dropdowns) sit above everything and win, topmost
+    // 0. A locked session routes everything to the lock surface and nothing
+    //    else — no popups, no layers, no app. With no lock surface (client
+    //    crashed, or hasn't made one yet) input goes nowhere at all; it must
+    //    never fall through to the shell underneath.
+    if state.session_lock.is_locked() {
+        return state
+            .session_lock
+            .wl_surface()
+            .map(|s| Target::at(s.clone(), (0.0, 0.0), state.dpi));
+    }
+    // 1. Open popups (menus, dropdowns) sit above everything and win, topmost
     //    first. They render at output scale `dpi`, same mapping as apps.
     if let Some(hit) = popup_under(state, x, y) {
         return Some(hit);
     }
-    // 1. Top/Overlay layer surfaces (a status panel, the OSK) win. They render
+    // 2. Top/Overlay layer surfaces (a status panel, the OSK) win. They render
     //    at fractional scale `dpi`, so their logical coord space is physical/dpi
     //    — map input by /dpi. The rect origin is physical, so surface-local =
     //    (input-origin)/dpi.
@@ -41,7 +51,7 @@ fn surface_under(state: &State, x: f32, y: f32) -> Option<Target> {
             return Some(Target::at(surface, (ox as f64, oy as f64), state.dpi));
         }
     }
-    // 2. The focused fullscreen app, except the bottom bar zone (home gesture).
+    // 3. The focused fullscreen app, except the bottom bar zone (home gesture).
     //    App surfaces render at `dpi`, so input maps into logical space by /dpi.
     //    The app is drawn at the usable-area origin (below a top bar / right of
     //    a left bar), so its input origin must match, not (0, 0).
@@ -174,6 +184,12 @@ enum PopupPress {
 /// steal or dismiss a tap they weren't hit by — that outside tap flows through
 /// to the app, matching what the client expects.
 fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
+    // Nothing of the session is on screen while locked, popups included, so
+    // there is nothing here to hit or dismiss; the press goes on to the lock
+    // surface (or nowhere) via `surface_under`.
+    if state.session_lock.is_locked() {
+        return PopupPress::None;
+    }
     let popups = state.active_popups();
     if popups.is_empty() {
         return PopupPress::None;
@@ -243,6 +259,9 @@ pub fn pointer_motion(state: &mut State, x: f32, y: f32, time: u32) {
             return;
         }
     }
+    if state.session_lock.is_locked() {
+        return;
+    }
     input_common::on_motion(state, x, y);
 }
 
@@ -294,6 +313,11 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
             state.pointer_grab = true;
             return;
         }
+        // Locked with no lock surface: the press is dropped, never funnelled
+        // into the shell's gestures.
+        if state.session_lock.is_locked() {
+            return;
+        }
         input_common::on_press(state);
     } else {
         if state.pointer_grab {
@@ -309,6 +333,9 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
             );
             ptr.frame(state);
             state.pointer_grab = false;
+            return;
+        }
+        if state.session_lock.is_locked() {
             return;
         }
         input_common::on_release(state);
@@ -352,7 +379,9 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
     }
     // Not on a client surface — drive the gesture system, but only from the one
     // slot that owns it. Extra fingers on empty space are ignored until it lifts.
-    if state.gesture_slot.is_none() {
+    // A locked session has no gestures at all: the shell is not on screen, so a
+    // swipe on the blank area must not open Home behind the lock.
+    if state.gesture_slot.is_none() && !state.session_lock.is_locked() {
         state.gesture_slot = Some(slot);
         input_common::on_motion(state, x, y);
         input_common::on_press(state);

@@ -544,7 +544,10 @@ impl App {
         // markers, and the bar not mid-fade. Any of these repaint via Skia
         // (untracked) and would leave stale pixels if excluded from the damage
         // hint — for the touch overlay that means the marks never reach scanout.
-        let report_partial = prep.scene.window_covers_screen()
+        // A locked session draws its own (full-damage) frame and never the app,
+        // so the app-shaped fast path does not apply to it.
+        let report_partial = prep.lock_view == crate::session_lock::LockView::Unlocked
+            && prep.scene.window_covers_screen()
             && prep.app_surface.is_some()
             && prep.scene.cards.is_empty()
             && !prep.scene.show_home

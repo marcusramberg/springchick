@@ -161,8 +161,29 @@ pub fn poll(state: &mut State) {
     state.keys.children = children;
 }
 
+/// Whether an action may still fire while the session is locked
+/// (`ext-session-lock`).
+///
+/// A lock screen is only a lock if the keyboard can't drive the session behind
+/// it, so anything that touches the shell (Home, close app) or spawns a process
+/// is dropped. Volume and the display toggle stay: neither reveals nor reaches
+/// session content, and a phone whose volume keys die while locked is broken.
+pub fn allowed_while_locked(action: &Action) -> bool {
+    match action {
+        Action::VolumeUp | Action::VolumeDown | Action::VolumeMute | Action::ToggleDisplay => true,
+        Action::Command(_) | Action::CloseApp | Action::Home => false,
+    }
+}
+
 /// Perform a fired action.
 pub fn run_action(state: &mut State, action: Action) {
+    if state.session_lock.is_locked() && !allowed_while_locked(&action) {
+        info!(
+            action = action_name(&action),
+            "keybinding suppressed (session locked)"
+        );
+        return;
+    }
     info!(action = action_name(&action), "keybinding fired");
     match action {
         Action::Command(cmd) => {
@@ -280,6 +301,19 @@ mod tests {
         );
         children[0].wait().unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "hi");
+    }
+
+    /// While the session is locked, only the actions that can't reach the shell
+    /// survive.
+    #[test]
+    fn session_lock_suppresses_shell_actions() {
+        assert!(!allowed_while_locked(&Action::Home));
+        assert!(!allowed_while_locked(&Action::CloseApp));
+        assert!(!allowed_while_locked(&Action::Command("foot".into())));
+        assert!(allowed_while_locked(&Action::VolumeUp));
+        assert!(allowed_while_locked(&Action::VolumeDown));
+        assert!(allowed_while_locked(&Action::VolumeMute));
+        assert!(allowed_while_locked(&Action::ToggleDisplay));
     }
 
     #[test]

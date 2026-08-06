@@ -36,6 +36,7 @@ mod rotation;
 pub mod scene;
 mod sensor;
 mod session;
+mod session_lock;
 mod skia_gl;
 mod state;
 mod switcher;

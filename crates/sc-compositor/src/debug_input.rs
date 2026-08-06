@@ -6,6 +6,11 @@
 //! and hands them to the render loop, which injects them through the existing
 //! `input_common` funnel. See
 //! `docs/superpowers/specs/2026-07-24-debug-input-socket-design.md`.
+//!
+//! The gesture verbs answer `ok locked` and do nothing while an
+//! `ext-session-lock` client holds the session (see [`crate::session_lock`]) —
+//! the harness gets exactly as far as a finger would. `key` still goes through:
+//! that is how a scripted password reaches the lock client.
 
 /// A parsed command from the debug socket.
 #[derive(Clone, Debug, PartialEq)]
@@ -292,6 +297,26 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
     if !matches!(cmd, DebugCmd::Settle { .. }) {
         state.idle_notify.activity(Instant::now());
     }
+    // The gesture verbs (`down`/`move`/`up`/`tap`/`swipe`) feed the shell's
+    // gesture funnel directly rather than going through `touch::down`, so the
+    // session lock has to be honoured here too: a locked session takes no shell
+    // input from a finger, and the harness must not be able to drive the UI
+    // behind a lock screen either. `touch` routes through the real path (which
+    // checks the lock itself), and `key` must keep working — that is how a
+    // password reaches the lock client.
+    if state.session_lock.is_locked()
+        && matches!(
+            cmd,
+            DebugCmd::Down(..)
+                | DebugCmd::Move(..)
+                | DebugCmd::Up
+                | DebugCmd::Tap(..)
+                | DebugCmd::Swipe { .. }
+        )
+    {
+        let _ = reply.send("ok locked\n".into());
+        return;
+    }
     match cmd {
         DebugCmd::Down(x, y) => {
             input_common::on_motion(state, x, y); // seed last_pointer_pos first
@@ -373,6 +398,13 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
 
 fn advance_gesture(state: &mut State) {
     let mut g = state.active_gesture.take().expect("advance with gesture");
+    // The session locked mid-swipe: abandon it rather than keep feeding motion
+    // into a shell the user can no longer see. `cancel_gestures` already dropped
+    // whatever the press had started.
+    if state.session_lock.is_locked() {
+        let _ = g.reply.send("ok locked\n".into());
+        return;
+    }
     let elapsed = g.start.elapsed().as_millis() as f32;
     let t = swipe_t(elapsed, g.dur_ms);
 

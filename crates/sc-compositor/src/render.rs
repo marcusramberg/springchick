@@ -163,6 +163,11 @@ pub struct DrawCtx<'a> {
     /// Touch indicator marks (physical coords) drawn on top of everything for
     /// demo recordings. Empty unless `[main].show_touches` is set.
     pub touches: &'a [crate::touch_viz::TouchMark],
+    /// Session-lock view. Anything but `Unlocked` replaces the entire scene —
+    /// see [`draw_locked`].
+    pub lock_view: crate::session_lock::LockView,
+    /// The lock client's surface, drawn when `lock_view` is `Surface`.
+    pub lock_surface: Option<&'a WlSurface>,
     /// Layer-shell surfaces below the app (background/bottom): `(surface, origin)`.
     pub layers_below: &'a [(WlSurface, (i32, i32))],
     /// Layer-shell surfaces above the app (top/overlay): `(surface, origin)`.
@@ -829,6 +834,13 @@ pub fn draw_scene(
     size: Size<i32, Physical>,
     ctx: &mut DrawCtx<'_>,
 ) -> Result<Vec<Rectangle<i32, Physical>>, SwapBuffersError> {
+    // The session lock replaces the scene entirely — no app, no shell, no
+    // layers. Checked before anything else is even planned so no client content
+    // can reach the framebuffer while locked.
+    if ctx.lock_view != crate::session_lock::LockView::Unlocked {
+        return draw_locked(renderer, framebuffer, size, ctx);
+    }
+
     let mut plan = plan_scene(renderer, ctx);
     // Computed before drawing: it reads the app element's pre-draw commit
     // counter and advances `last_present`.
@@ -845,6 +857,70 @@ pub fn draw_scene(
 
     send_frame_callbacks(ctx);
     Ok(damage_hint)
+}
+
+/// Draw the session lock: black, plus the lock client's surface if it has one.
+///
+/// Deliberately minimal — this is the whole frame. Nothing from the session is
+/// drawn, not even the home bar (the gesture it advertises does nothing while
+/// locked). The volume OSD and the touch indicators are the only overlays kept:
+/// neither shows session content, and volume keys still work while locked.
+///
+/// Damage is always the full output: the lock's own frames are rare, and the
+/// partial-damage fast path assumes a fullscreen *app* element it must not be
+/// handed here.
+fn draw_locked(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    ctx: &mut DrawCtx<'_>,
+) -> Result<Vec<Rectangle<i32, Physical>>, SwapBuffersError> {
+    let damage = Rectangle::from_size(size);
+
+    // The lock surface renders at `dpi` like any other client, and covers the
+    // whole output (it was configured at the output's logical size), so it draws
+    // from the origin rather than the usable area.
+    let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = ctx
+        .lock_surface
+        .map(|surface| {
+            render_elements_from_surface_tree(
+                renderer,
+                surface,
+                (0, 0),
+                ctx.app_scale,
+                1.0,
+                Kind::Unspecified,
+            )
+        })
+        .unwrap_or_default();
+
+    let mut frame = renderer
+        .render(framebuffer, size, ctx.transform)
+        .map_err(SwapBuffersError::from)?;
+    // Black, not `CLEAR_COLOR`: a lock surface that hasn't painted yet (or a
+    // dead lock client) must not leave the shell's tinted backdrop showing as if
+    // the session were merely idle.
+    frame
+        .clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage])
+        .map_err(SwapBuffersError::from)?;
+    if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &elements, &[damage]) {
+        warn!(?e, "failed to draw lock surface");
+    }
+    let _sync = frame.finish().map_err(SwapBuffersError::from)?;
+
+    if let Some((level, muted, alpha)) = ctx.osd {
+        ctx.skia
+            .draw_osd_overlay(size.w, size.h, level, muted, alpha, ctx.skia_flip_y);
+    }
+    if !ctx.touches.is_empty() {
+        ctx.skia
+            .draw_touches_overlay(size.w, size.h, ctx.touches, ctx.skia_flip_y);
+    }
+
+    if let Some(surface) = ctx.lock_surface {
+        send_frames_surface_tree(surface, ctx.frame_time);
+    }
+    Ok(vec![damage])
 }
 
 /// Send frame callbacks to all surfaces in the tree.
