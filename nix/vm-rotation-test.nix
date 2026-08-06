@@ -19,17 +19,20 @@
 # The client is `imv` showing a four-quadrant image, one saturated colour per
 # corner, at exactly the landscape aspect so it fills the rotated area with no
 # letterboxing. That makes the screenshot self-describing: sampling the four
-# screen quadrants says not just "something rotated" but *which way*. For a
-# quarter turn clockwise the image's top-left corner ends up at the screen's
-# top-right, so:
+# screen quadrants says not just "something rotated" but *which way*.
 #
-#     image            screen
-#     R G      ->      B R
-#     B Y              Y G
+# Turning the phone CLOCKWISE puts its left edge up (`left-up`) and turns the
+# app ANTICLOCKWISE, so the image's top-left corner ends up at the screen's
+# bottom-left:
 #
-# A counter-clockwise turn would put them at the mirrored corners, so this
-# catches a flipped `Rotation::transform()` — the failure mode that is invisible
-# to a "did it rotate?" assertion.
+#     image          screen (left-up)      screen (right-up)
+#     R G      ->        G Y                    B R
+#     B Y                R B                    Y G
+#
+# The two are 180° apart, so asserting both catches the failure that a "did it
+# rotate?" check cannot see: turning the app the same way as the phone, which
+# renders video upside down. That is not hypothetical — it shipped, and was
+# caught on device rather than here.
 #
 # It also covers the chrome rule: springchick's portrait chrome is suppressed
 # while the app is rotated. wvkbd stands in for it as a real layer surface — the
@@ -225,12 +228,15 @@ mkTest {
     machine.screenshot("02-landscape")
 
     got = quadrant_colours("02-landscape")
-    # Clockwise quarter turn: image top-left lands at the screen's top-right.
+    # left-up = the phone turned CLOCKWISE, which turns the app ANTICLOCKWISE:
+    # the image's top-left corner lands at the screen's bottom-left. Turning it
+    # the same way as the phone would put the image 180° out — how this looked
+    # on device before the transforms were swapped.
     want = {
-        "top-left": "blue",
-        "top-right": "red",
-        "bottom-left": "yellow",
-        "bottom-right": "green",
+        "top-left": "green",
+        "top-right": "yellow",
+        "bottom-left": "red",
+        "bottom-right": "blue",
     }
     for corner, expected in want.items():
         name, px = got[corner]
@@ -244,8 +250,8 @@ mkTest {
     # Portrait chrome is suppressed while rotated: the strip that was keyboard a
     # moment ago is now the app's own bottom-left quadrant colour.
     rotated_px = pixel("02-landscape", *KEYBOARD_PROBE)
-    assert rotated_px == COLOURS["yellow"], (
-        f"expected app content (yellow) at {KEYBOARD_PROBE} while rotated, "
+    assert rotated_px == COLOURS["red"], (
+        f"expected app content (red) at {KEYBOARD_PROBE} while rotated, "
         f"found {rotated_px} — the layer surface is still being drawn over the "
         "rotated app"
     )
@@ -259,10 +265,10 @@ mkTest {
     machine.screenshot("04-right-up")
     got = quadrant_colours("04-right-up")
     for corner, expected in {
-        "top-left": "green",
-        "top-right": "yellow",
-        "bottom-left": "red",
-        "bottom-right": "blue",
+        "top-left": "blue",
+        "top-right": "red",
+        "bottom-left": "yellow",
+        "bottom-right": "green",
     }.items():
         name, px = got[corner]
         assert name == expected, (

@@ -332,6 +332,19 @@ impl State {
     /// Push `desired_focus` into the seat keyboard when it changed. Cheap enough
     /// to call every frame; the comparison keeps it from re-sending focus.
     pub(crate) fn sync_keyboard_focus(&mut self) {
+        // A locked session gives the keyboard to the lock surface — that is how
+        // a password reaches the lock client and, just as importantly, how it
+        // stops reaching the app underneath. Locked with no surface means no
+        // keyboard focus at all rather than a fallback to the app.
+        if self.session_lock.is_locked() {
+            let want = self.session_lock.wl_surface().cloned();
+            if want != self.focused_surface {
+                self.focused_surface = want.clone();
+                let keyboard = self.keyboard.clone();
+                keyboard.set_focus(self, want, SERIAL_COUNTER.next_serial());
+            }
+            return;
+        }
         let app = self.app_focus_surface();
         // Only a *grabbing* popup takes keyboard focus — a real menu that
         // requested the grab and drives keyboard nav from it. Redirecting focus

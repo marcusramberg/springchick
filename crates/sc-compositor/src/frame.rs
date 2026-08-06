@@ -124,6 +124,10 @@ impl State {
             || self.launching.is_some()
             || self.osd.is_active(now)
             || self.bar_fading()
+            // A lock is engaged but not yet confirmed to the client: keep
+            // page-flipping so the locked frame it is waiting on is actually
+            // presented (see `session_lock::SessionLock::tick`).
+            || self.session_lock.needs_frame()
             // A finger held on an icon, waiting to become a long-press. The hold
             // is checked in `advance_frame`, so without this the timer only
             // advances while some *other* input keeps the loop awake: a
@@ -160,6 +164,11 @@ impl State {
     /// by the winit and DRM backends, which differ only in how they present the
     /// resulting frame.
     pub(crate) fn advance_frame(&mut self, dt: f32) -> FramePrep {
+        // Confirm a pending lock once the frame that hid the session has been
+        // presented. Done first so the snapshot below reflects the same lock
+        // state the confirmation is about.
+        self.session_lock.tick();
+
         self.maybe_engage_arrange_hold();
 
         // Lazy-seed the grid-reflow springs on first use so they snap to the
@@ -300,6 +309,8 @@ impl State {
             app_popups,
             layer_popups,
             touch_marks,
+            lock_view: self.session_lock.view(),
+            lock_surface: self.session_lock.wl_surface().cloned(),
             grid_positions,
             dock_positions,
         }
@@ -367,6 +378,8 @@ impl State {
             frame_time: prep.frame_time,
             osd: prep.osd_view,
             touches: &prep.touch_marks,
+            lock_view: prep.lock_view,
+            lock_surface: prep.lock_surface.as_ref(),
             layers_below: &prep.layers_below,
             layers_above: &prep.layers_above,
             app_popups: &prep.app_popups,

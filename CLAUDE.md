@@ -25,7 +25,7 @@ Binary: `target/debug/springchick`. Backend chosen by `SPRINGCHICK_BACKEND` (`dr
 ### VM tests (headless, real DRM path)
 
 ```bash
-nix build .#checks.aarch64-linux.vm-boot -L      # also: vm-switcher, vm-dialog, vm-rotation
+nix build .#checks.aarch64-linux.vm-boot -L      # also: vm-switcher, vm-dialog, vm-rotation, vm-arrange, vm-lock
 ```
 
 Always build the check matching `builtins.currentSystem` — cross-building runs the release tree under qemu-user emulation and SIGSEGVs rustc. `nix/package.nix` filters `src` to `Cargo.toml`/`Cargo.lock`/`crates/`, so edits under `nix/`, `tests/`, `docs/` don't rebuild the compositor.
@@ -74,7 +74,7 @@ All pure crates are `#![forbid(unsafe_code)]`.
 - `skia_gl.rs` — Skia-on-Smithay-GLES context sharing.
 - `winit_backend.rs` / `drm_backend.rs` — the two ways to present; `session.rs` is the Wayland display/socket plumbing they share.
 - `debug_input.rs` + `ipc.rs` — synthetic-input socket and its CLI client.
-- Protocol extras: `layer_shell.rs`, `popups.rs`, `idle_notify.rs`, `idle_inhibit.rs`, `gamma_control.rs`, `background_effect.rs`, `content_type.rs`, `rotation.rs`, `blank.rs`, `osd.rs`, `touch_viz.rs`, `switcher.rs`, `frame_stats.rs`.
+- Protocol extras: `layer_shell.rs`, `popups.rs`, `idle_notify.rs`, `idle_inhibit.rs`, `gamma_control.rs`, `background_effect.rs`, `content_type.rs`, `session_lock.rs`, `rotation.rs`, `blank.rs`, `osd.rs`, `touch_viz.rs`, `switcher.rs`, `frame_stats.rs`.
 
 ### Render pipeline (`render.rs`)
 

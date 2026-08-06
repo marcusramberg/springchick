@@ -47,7 +47,7 @@ use crate::arrange::ArrangeState;
 use crate::ui_state::{UiState, ZoomOrigin};
 use crate::{
     background_effect, blank, content_type, debug_input, frame_stats, gamma_control, idle_inhibit,
-    idle_notify, input_common, keybinds, layer_shell, osd, rotation, scene, sensor,
+    idle_notify, input_common, keybinds, layer_shell, osd, rotation, scene, sensor, session_lock,
     skia_gl::SkiaGl, switcher, touch_viz,
 };
 
@@ -84,6 +84,11 @@ pub(crate) struct FramePrep {
     pub layer_popups: layer_shell::RenderList,
     /// Touch indicator marks to overlay (empty unless `show_touches`).
     pub touch_marks: Vec<touch_viz::TouchMark>,
+    /// What the session lock wants on screen. Anything but
+    /// [`session_lock::LockView::Unlocked`] replaces the whole scene.
+    pub lock_view: session_lock::LockView,
+    /// The lock surface to draw when `lock_view` is `Surface`.
+    pub lock_surface: Option<WlSurface>,
     /// Screen-space animated center `(x, y)` per grid app: the reflow spring
     /// position minus the current page scroll, so the grid pass can render
     /// sliding icons without knowing about pages.
@@ -276,6 +281,9 @@ pub(crate) struct State {
     /// surface).
     #[allow(dead_code)]
     pub background_effect: background_effect::BackgroundEffect,
+    /// ext-session-lock-v1 state: whether the session is locked and the lock
+    /// client's surface. See [`crate::session_lock`].
+    pub session_lock: session_lock::SessionLock,
     /// Current app rotation, derived from [`Self::device_orientation`] and
     /// whether the foreground app is fullscreen. Only the app surface rotates —
     /// see [`crate::rotation`].
@@ -480,6 +488,9 @@ impl State {
         // ext-background-effect: panels/OSKs can ask for their backdrop to be
         // blurred. Advertised because `render` really blurs it.
         let background_effect = background_effect::BackgroundEffect::new(&dh);
+        // ext-session-lock: an external lock client (dms) blanks the session and
+        // draws its own lock screen over it. See `session_lock`.
+        let session_lock = session_lock::SessionLock::new(&dh);
 
         // Load shell model + app catalog.
         let model = persist::load(&persist::state_path()).unwrap_or_default();
@@ -566,6 +577,7 @@ impl State {
             idle_inhibit,
             content_type,
             background_effect,
+            session_lock,
             rotation: rotation::Rotation::None,
             device_orientation: rotation::DeviceOrientation::Normal,
             sensor: sensor::spawn(),
@@ -625,6 +637,29 @@ impl State {
             None => self.dmabuf_state.create_global::<Self>(dh, formats),
         };
         self.dmabuf_global = Some(global);
+    }
+
+    /// Drop every in-flight touch/pointer gesture without acting on it.
+    ///
+    /// Used when something takes the screen away mid-gesture (the session lock).
+    /// The finger that was down is gone as far as the shell is concerned: no
+    /// launch fires on release, no page drag resumes, and the next press starts
+    /// a fresh sequence. Client-routed slots are dropped too, so their `up`
+    /// never re-enters the funnel.
+    pub(crate) fn cancel_gestures(&mut self) {
+        self.pointer_down = false;
+        self.pointer_grab = false;
+        self.gesture_slot = None;
+        self.touch_targets.clear();
+        self.page_drag_start = None;
+        self.bar_drag_start = None;
+        self.pending_launch = None;
+        self.icon_press = None;
+        self.search_arm = None;
+        self.switcher_drag = input_common::SwitcherDrag::None;
+        if let Some(arrange) = self.arrange.as_mut() {
+            arrange.drag = None;
+        }
     }
 
     /// Output size as floats — shorthand for the `(w, h)` pair every geometry

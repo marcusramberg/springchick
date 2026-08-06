@@ -50,7 +50,7 @@ IPC client, then picks a backend from `SPRINGCHICK_BACKEND`.
 | `debug_input.rs`, `ipc.rs` | Synthetic-input socket + its CLI client |
 | `app_history.rs`, `switcher.rs` | MRU stack and the task-switcher deck |
 | `launcher.rs` | Process spawning (strip field codes, set env) |
-| `layer_shell.rs`, `popups.rs`, `idle_notify.rs`, `idle_inhibit.rs`, `gamma_control.rs`, `background_effect.rs`, `content_type.rs`, `rotation.rs`, `blank.rs`, `osd.rs`, `touch_viz.rs` | Protocol extras and shell chrome |
+| `layer_shell.rs`, `popups.rs`, `idle_notify.rs`, `idle_inhibit.rs`, `gamma_control.rs`, `background_effect.rs`, `content_type.rs`, `session_lock.rs`, `rotation.rs`, `blank.rs`, `osd.rs`, `touch_viz.rs` | Protocol extras and shell chrome |
 | `backend.rs`, `frame_stats.rs` | Backend selection/dev-window size; frame timing (`SPRINGCHICK_PERF`) |
 
 ## Building
@@ -120,6 +120,7 @@ nix build .#checks.aarch64-linux.vm-boot -L      # boot + client render + app_id
 nix build .#checks.aarch64-linux.vm-switcher -L  # gesture semantics (MRU, quick-switch)
 nix build .#checks.aarch64-linux.vm-dialog -L    # xdg-dialog / CSD child windows
 nix build .#checks.aarch64-linux.vm-rotation -L  # rotation / content-type hints
+nix build .#checks.aarch64-linux.vm-lock -L      # ext-session-lock (swaylock)
 ```
 
 - **Build the host arch, never cross-build.** Cross-building runs the whole
