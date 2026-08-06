@@ -607,94 +607,15 @@ impl App {
     ) -> Option<Vec<Rectangle<i32, Physical>>> {
         let size = self.drm.output_size;
 
-        // Screen-space animated grid centers: global spring position minus the
-        // current page scroll, so the grid pass in draw_home can render
-        // sliding icons without knowing about pages itself.
-        let page_scroll = if let crate::ui_state::UiState::Home { page_spring, .. } = &self.state.ui
-        {
-            page_spring.value
-        } else {
-            0.0
-        };
-        let gp_w = self.state.output_size.0 as f32;
-        let grid_positions: std::collections::HashMap<String, (f32, f32)> = self
-            .state
-            .grid_anim
-            .iter()
-            .map(|(app, (sx, sy))| (app.clone(), (sx.value - page_scroll * gp_w, sy.value)))
-            .collect();
-        let dock_positions: std::collections::HashMap<String, (f32, f32)> = self
-            .state
-            .dock_anim
-            .iter()
-            .map(|(a, (sx, sy))| (a.clone(), (sx.value, sy.value)))
-            .collect();
-
-        // Hoisted so the `arrange` closure captures a plain `usize`, not a
-        // borrow of `self.state` (which clashes with `skia: &mut ...skia`).
-        let cur_home_page = self.state.current_home_page();
-        let mut ctx = crate::render::DrawCtx {
-            scene: &prep.scene,
-            app_surface: prep.app_surface.as_ref(),
-            skia: &mut self.state.skia,
-            model: &self.state.model,
-            icon_cache: &self.state.icon_cache,
-            app_catalog: &self.state.app_catalog,
-            toplevels: &self.state.toplevels,
-            app_scale: self.state.dpi,
-            app_origin: {
-                let u = self.state.layers.usable(self.state.dpi);
-                (u.x.round() as i32, u.y.round() as i32)
-            },
-            transform: self.drm.transform,
-            rotation: self.state.rotation,
-            skia_flip_y: true,
-            frame_time: prep.frame_time,
-            osd: prep.osd_view,
-            touches: &prep.touch_marks,
-            layers_below: &prep.layers_below,
-            layers_above: &prep.layers_above,
-            app_popups: &prep.app_popups,
-            layer_popups: &prep.layer_popups,
-            bar_alpha: prep.bar_alpha,
-            pressed_app: self
-                .state
-                .pending_launch
-                .as_ref()
-                .map(|p| p.app_id.as_str()),
-            launching_app: self.state.launching.as_ref().map(|l| l.app_id.as_str()),
-            launching_elapsed: self
-                .state
-                .launching
-                .as_ref()
-                .map_or(0.0, |l| l.started.elapsed().as_secs_f32()),
-            arrange: self.state.arrange.as_ref().map(|a| {
-                let drag_app = a.drag.as_ref().map(|d| d.app_id.as_str());
-                let drag_pos = a.drag.as_ref().map(|d| d.cur);
-                let over_dock = a
-                    .drag
-                    .as_ref()
-                    .map(|d| {
-                        let (w, h) = (
-                            self.state.output_size.0 as f32,
-                            self.state.output_size.1 as f32,
-                        );
-                        let layout = sc_layout::compute(w, h, cur_home_page, &self.state.model);
-                        layout.dock_zone.contains(d.cur.0, d.cur.1)
-                    })
-                    .unwrap_or(false);
-                crate::render::ArrangeView {
-                    drag_app,
-                    drag_pos,
-                    over_dock,
-                }
-            }),
-            report_partial_damage: report_partial,
-            last_present: &mut self.state.last_present,
-            grid_positions: &grid_positions,
-            dock_positions: &dock_positions,
-            rounded_tex_shader: &self.drm.rounded_tex_shader,
-        };
+        // The GBM scanout buffer has the opposite Y-origin from Skia's
+        // BottomLeft surface, hence `skia_flip_y`.
+        let mut ctx = self.state.draw_ctx(
+            prep,
+            self.drm.transform,
+            true,
+            report_partial,
+            &self.drm.rounded_tex_shader,
+        );
         match crate::render::draw_scene(&mut self.drm.renderer, framebuffer, size, &mut ctx) {
             Ok(damage) => Some(damage),
             Err(e) => {

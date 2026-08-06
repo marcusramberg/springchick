@@ -20,8 +20,7 @@ use tracing::{error, info, warn};
 
 use crate::session::{accept_client, create_display, publish_wayland_display};
 use crate::state::State;
-use crate::ui_state::UiState;
-use crate::{backend, debug_input, input_dispatch, ipc, keybinds, render, touch};
+use crate::{backend, debug_input, ipc, keybinds, render, touch};
 
 pub(crate) fn run_winit() {
     let (win_w, win_h) = backend::dev_window_size();
@@ -180,89 +179,10 @@ fn render_frame(
     state.sync_keyboard_focus();
 
     let (renderer, mut framebuffer) = backend.bind()?;
-    // Screen-space animated grid centers: global spring position minus the
-    // current page scroll, so the grid pass in draw_home can render sliding
-    // icons without knowing about pages itself.
-    let page_scroll = if let UiState::Home { page_spring, .. } = &state.ui {
-        page_spring.value
-    } else {
-        0.0
-    };
-    let gp_w = state.output_size.0 as f32;
-    let grid_positions: std::collections::HashMap<String, (f32, f32)> = state
-        .grid_anim
-        .iter()
-        .map(|(app, (sx, sy))| (app.clone(), (sx.value - page_scroll * gp_w, sy.value)))
-        .collect();
-    let dock_positions: std::collections::HashMap<String, (f32, f32)> = state
-        .dock_anim
-        .iter()
-        .map(|(a, (sx, sy))| (a.clone(), (sx.value, sy.value)))
-        .collect();
     {
-        // Hoisted so the `arrange` closure below captures a plain `usize`, not a
-        // borrow of `state` (which would clash with `skia: &mut state.skia`).
-        let cur_home_page = state.current_home_page();
-        let mut ctx = render::DrawCtx {
-            scene: &prep.scene,
-            app_surface: prep.app_surface.as_ref(),
-            skia: &mut state.skia,
-            model: &state.model,
-            icon_cache: &state.icon_cache,
-            app_catalog: &state.app_catalog,
-            toplevels: &state.toplevels,
-            app_scale: state.dpi,
-            app_origin: {
-                let u = state.layers.usable(state.dpi);
-                (u.x.round() as i32, u.y.round() as i32)
-            },
-            transform: Transform::Flipped180,
-            rotation: state.rotation,
-            skia_flip_y: false,
-            frame_time: prep.frame_time,
-            osd: prep.osd_view,
-            touches: &prep.touch_marks,
-            layers_below: &prep.layers_below,
-            layers_above: &prep.layers_above,
-            app_popups: &prep.app_popups,
-            layer_popups: &prep.layer_popups,
-            bar_alpha: prep.bar_alpha,
-            pressed_app: state.pending_launch.as_ref().map(|p| p.app_id.as_str()),
-            launching_app: state.launching.as_ref().map(|l| l.app_id.as_str()),
-            launching_elapsed: state
-                .launching
-                .as_ref()
-                .map_or(0.0, |l| l.started.elapsed().as_secs_f32()),
-            arrange: state.arrange.as_ref().map(|a| {
-                let drag_app = a.drag.as_ref().map(|d| d.app_id.as_str());
-                let drag_pos = a.drag.as_ref().map(|d| d.cur);
-                let over_dock = a
-                    .drag
-                    .as_ref()
-                    .map(|d| {
-                        // Only a grid-sourced drag can pin, so only highlight the
-                        // dock drop target for those (a dock->dock drag is a no-op).
-                        if d.source != input_dispatch::IconSource::Grid {
-                            return false;
-                        }
-                        let (w, h) = (state.output_size.0 as f32, state.output_size.1 as f32);
-                        let layout = sc_layout::compute(w, h, cur_home_page, &state.model);
-                        layout.dock_zone.contains(d.cur.0, d.cur.1)
-                    })
-                    .unwrap_or(false);
-                render::ArrangeView {
-                    drag_app,
-                    drag_pos,
-                    over_dock,
-                }
-            }),
-            // winit dev backend submits full damage; no partial hint.
-            report_partial_damage: false,
-            last_present: &mut state.last_present,
-            grid_positions: &grid_positions,
-            dock_positions: &dock_positions,
-            rounded_tex_shader,
-        };
+        // winit presents an already-correct framebuffer (no Skia y-flip) and
+        // submits full damage, so no partial hint.
+        let mut ctx = state.draw_ctx(&prep, Transform::Flipped180, false, false, rounded_tex_shader);
         render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }
 

@@ -611,44 +611,25 @@ pub fn draw_scene(
         }
     }
 
-    // App-parented popups (menus, dropdowns) sit above the app but below the
-    // top/overlay layers. Each popup surface renders like a layer surface: its
-    // tree at a physical origin, scaled by dpi. Ordered root→leaf so submenus
-    // draw over their parents.
-    for (surface, origin) in ctx.app_popups {
-        blur_behind(ctx.skia, size, surface, *origin, ctx.app_scale, ctx.skia_flip_y);
-        draw_layer(
-            renderer,
-            framebuffer,
-            size,
-            ctx.transform,
-            surface,
-            *origin,
-            ctx.app_scale,
-        )?;
-    }
-
-    // Top/overlay layer surfaces (a status panel, the on-screen keyboard) sit
-    // above the app but below springchick's own chrome — except while the app is
-    // rotated, where portrait chrome across a landscape app is worse than no
-    // chrome. `touch::surface_under` skips them in the same condition, so a
-    // hidden panel never eats taps meant for the app.
-    for (surface, origin) in ctx.layers_above.iter().filter(|_| !rotated) {
-        blur_behind(ctx.skia, size, surface, *origin, ctx.app_scale, ctx.skia_flip_y);
-        draw_layer(
-            renderer,
-            framebuffer,
-            size,
-            ctx.transform,
-            surface,
-            *origin,
-            ctx.app_scale,
-        )?;
-    }
-
-    // Popups parented to a top/overlay layer surface sit just above it — hidden
-    // with their parent while rotated.
-    for (surface, origin) in ctx.layer_popups.iter().filter(|_| !rotated) {
+    // Everything that draws above the app and below springchick's own chrome, in
+    // back-to-front order. Each renders like a layer surface: its tree at a
+    // physical origin, scaled by dpi, with its backdrop blurred first.
+    //
+    // 1. App-parented popups (menus, dropdowns), root→leaf so submenus draw over
+    //    their parents. Drawn whatever the rotation — they belong to the app.
+    // 2. Top/overlay layer surfaces (a status panel, the on-screen keyboard).
+    // 3. Popups parented to one of those layer surfaces.
+    //
+    // (2) and (3) are hidden while the app is rotated: portrait chrome across a
+    // landscape app is worse than no chrome. `touch::surface_under` skips them
+    // in the same condition, so a hidden panel never eats taps meant for the app.
+    let overlays = ctx.app_popups.iter().chain(
+        ctx.layers_above
+            .iter()
+            .chain(ctx.layer_popups)
+            .filter(|_| !rotated),
+    );
+    for (surface, origin) in overlays {
         blur_behind(ctx.skia, size, surface, *origin, ctx.app_scale, ctx.skia_flip_y);
         draw_layer(
             renderer,
