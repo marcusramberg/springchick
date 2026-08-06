@@ -54,167 +54,210 @@ pub enum SwitcherDrag {
 }
 
 /// Absolute pointer/touch position update (output pixels).
+///
+/// An ordered chain, but of two different kinds of step — the return type says
+/// which is which:
+///
+/// - **Claimants** (`-> Stage`) can own the movement outright: an arrange drag,
+///   a switcher-card drag, or a pull-down that has crossed into a search. Once
+///   one returns [`Stage::Done`] nothing below it runs.
+/// - **Unconditional steps** (`-> ()`) never consume anything; they just run if
+///   the chain reaches them. Cancelling a pending launch past the tap slop,
+///   tracking the page drag, and feeding the live grab are all in this group.
+///
+/// The mix is deliberate rather than an accident of ordering. A press on empty
+/// Home space arms *both* a pull-down search and a page drag, and the finger
+/// decides between them as it moves: until the drag turns dominantly downward,
+/// `motion_pull_down_search` falls through and `motion_page_drag` still pages.
+/// Likewise a movement that cancels a pending launch has, by definition, become
+/// some other gesture — so the stages below it must still get to interpret it.
 pub fn on_motion(state: &mut State, x: f32, y: f32) {
     state.last_pointer_pos = Some((x, y));
+    if !state.pointer_down {
+        return;
+    }
 
-    if state.pointer_down {
-        // Arrange-mode drag: track the finger directly, no launch/swipe logic.
-        if state
-            .arrange
-            .as_ref()
-            .and_then(|a| a.drag.as_ref())
-            .is_some()
+    if motion_arrange_drag(state, x, y) == Stage::Done {
+        return;
+    }
+    if motion_switcher_card(state, x, y) == Stage::Done {
+        return;
+    }
+    motion_cancel_icon_press(state, x, y);
+    if motion_pull_down_search(state, x, y) == Stage::Done {
+        return;
+    }
+    motion_page_drag(state, x);
+    motion_live_gesture(state, x, y);
+}
+
+/// Arrange-mode drag: track the finger directly, no launch/swipe logic. The
+/// hover slot is the grid index the icon would drop into, computed against the
+/// page with the dragged app removed so it maps to the hole-removed order.
+fn motion_arrange_drag(state: &mut State, x: f32, y: f32) -> Stage {
+    let Some(app) = state
+        .arrange
+        .as_ref()
+        .and_then(|a| a.drag.as_ref())
+        .map(|d| d.app_id.clone())
+    else {
+        return Stage::Fallthrough;
+    };
+    let (w, h) = state.output_size_f();
+    let page = state.current_home_page();
+    let layout = sc_layout::compute(w, h, page, &state.model);
+    let hover = if layout.dock_zone.contains(x, y) {
+        None
+    } else {
+        let live_len = state
+            .model
+            .pages
+            .get(page)
+            .map_or(0, |p| p.iter().filter(|a| **a != app).count());
+        let idx = sc_layout::nearest_grid_index(w, h, x, y).min(live_len);
+        Some((page, idx))
+    };
+    if let Some(drag) = state.arrange.as_mut().and_then(|a| a.drag.as_mut()) {
+        drag.cur = (x, y);
+        drag.hover = hover;
+    }
+    Stage::Done
+}
+
+/// Switcher card drag: a dominant upward drag tracks that card's close
+/// progress, anything else carousel-pans the deck. Falls through when the UI
+/// has already left the switcher under us.
+fn motion_switcher_card(state: &mut State, x: f32, y: f32) -> Stage {
+    let SwitcherDrag::OnCard {
+        start_x,
+        start_y,
+        start_scroll,
+        toplevel,
+    } = state.switcher_drag
+    else {
+        return Stage::Fallthrough;
+    };
+    let dx = x - start_x;
+    let dy = y - start_y;
+    let h = state.output_size.1 as f32;
+
+    if dy < 0.0 && dy.abs() > dx.abs() {
+        let progress = ((-dy) / (h * CLOSE_FULL_RISE)).clamp(0.0, 1.0);
+        if let UiState::Switcher { close, .. } = &mut state.ui {
+            *close = Some((toplevel, progress, false));
+            return Stage::Done;
+        }
+    } else if let UiState::Switcher { scroll, close, .. } = &mut state.ui {
+        // Dragging right advances the focus (active card slides off right, next
+        // comes forward). One card advances per ~front-card width of travel.
+        *close = None;
+        let per_index = state.output_size.0 as f32 * FRONT_SCALE_PX_FRAC;
+        scroll.value = start_scroll + dx / per_index;
+        scroll.target = scroll.value;
+        scroll.velocity = 0.0;
+        return Stage::Done;
+    }
+    Stage::Fallthrough
+}
+
+/// Cancel a pending launch (and its press highlight) once the finger travels
+/// past the tap slop — the gesture is a swipe, not a tap. Never consumes the
+/// movement: the swipe it just became still needs the stages below.
+fn motion_cancel_icon_press(state: &mut State, x: f32, y: f32) {
+    let Some(p) = &state.pending_launch else {
+        return;
+    };
+    let dx = x - p.start_x;
+    let dy = y - p.start_y;
+    if (dx * dx + dy * dy).sqrt() > ICON_TAP_SLOP {
+        state.pending_launch = None;
+        // The gesture became a swipe — cancel the long-press hold too.
+        state.icon_press = None;
+    }
+}
+
+/// Pull-down to open search: a dominant downward drag on empty Home space
+/// launches the search app. A sideways drag falls through to the page drag
+/// (still pages); an upward drag does nothing.
+fn motion_pull_down_search(state: &mut State, x: f32, y: f32) -> Stage {
+    if !matches!(state.ui, UiState::Home { .. }) {
+        return Stage::Fallthrough;
+    }
+    let Some((sx, sy)) = state.search_arm else {
+        return Stage::Fallthrough;
+    };
+    let (_, h) = state.output_size_f();
+    let dy = y - sy;
+    let dx = (x - sx).abs();
+    if dy > h * 0.08 && dy > dx {
+        state.open_search();
+        return Stage::Done;
+    }
+    Stage::Fallthrough
+}
+
+/// Page drag: drive the page spring straight off the finger (no spring physics
+/// while dragging), rubber-banding past either edge.
+fn motion_page_drag(state: &mut State, x: f32) {
+    let Some(start_x) = state.page_drag_start else {
+        return;
+    };
+    let dx = x - start_x;
+    let w = state.output_size.0 as f32;
+    if let UiState::Home {
+        page,
+        page_spring,
+        page_count,
+        ..
+    } = &mut state.ui
+    {
+        let raw_target = *page as f32 - dx / w;
+        let max_page = (*page_count).saturating_sub(1) as f32;
+        page_spring.value = if raw_target < 0.0 {
+            raw_target * 0.3 // rubber-band left
+        } else if raw_target > max_page {
+            max_page + (raw_target - max_page) * 0.3 // rubber-band right
+        } else {
+            raw_target
+        };
+        page_spring.target = page_spring.value;
+        page_spring.velocity = 0.0;
+    }
+}
+
+/// Feed the movement to the live in-app gesture, and handle crossing between
+/// the two gestures a bar drag can become.
+fn motion_live_gesture(state: &mut State, x: f32, y: f32) {
+    let dt = 1.0 / 90.0;
+    if let Some(ev) = input_dispatch::on_move(&state.ui, x, y, dt, state.output_size) {
+        transition(&mut state.ui, ev);
+    }
+
+    // A grab that turns clearly horizontal — while still low on the screen —
+    // becomes the live quick-switch slide: the current app slides sideways
+    // revealing the adjacent app. Once the finger has risen past the reveal
+    // point it is a vertical gesture (fan), so don't hijack it into a slide.
+    if let UiState::Grabbing { tracker, .. } = &state.ui {
+        if tracker.up_progress() < sc_input::thresholds::SWITCHER_REVEAL_PROGRESS
+            && sc_input::live_state(tracker) == sc_input::NavState::QuickSwitching
         {
-            let (w, h) = state.output_size_f();
-            let page = state.current_home_page();
-            let layout = sc_layout::compute(w, h, page, &state.model);
-            let over_dock = layout.dock_zone.contains(x, y);
-            let hover = if over_dock {
-                None
-            } else {
-                let app = state
-                    .arrange
-                    .as_ref()
-                    .unwrap()
-                    .drag
-                    .as_ref()
-                    .unwrap()
-                    .app_id
-                    .clone();
-                // Fill count on this page with the dragged app removed, so the
-                // nearest index maps against the hole-removed order.
-                let live_len = state
-                    .model
-                    .pages
-                    .get(page)
-                    .map_or(0, |p| p.iter().filter(|a| **a != app).count());
-                let idx = sc_layout::nearest_grid_index(w, h, x, y).min(live_len);
-                Some((page, idx))
-            };
-            if let Some(drag) = state.arrange.as_mut().unwrap().drag.as_mut() {
-                drag.cur = (x, y);
-                drag.hover = hover;
-            }
-            return;
+            let (w, _) = state.output_size_f();
+            let start_x = x - tracker.dx() * w; // screen-x where the drag began
+            let origin = tracker.start;
+            enter_quick_switch(state, start_x, origin);
         }
-
-        // Card drag: dominant-up closes that card, otherwise horizontal scroll.
-        if let SwitcherDrag::OnCard {
-            start_x,
-            start_y,
-            start_scroll,
-            toplevel,
-        } = state.switcher_drag
-        {
-            let dx = x - start_x;
-            let dy = y - start_y;
-            let h = state.output_size.1 as f32;
-            if dy < 0.0 && dy.abs() > dx.abs() {
-                // Swiping the card up to close: track finger via close_progress.
-                let progress = ((-dy) / (h * CLOSE_FULL_RISE)).clamp(0.0, 1.0);
-                if let UiState::Switcher { close, .. } = &mut state.ui {
-                    *close = Some((toplevel, progress, false));
-                    return;
-                }
-            } else if let UiState::Switcher { scroll, close, .. } = &mut state.ui {
-                // Horizontal: carousel-pan the deck. Dragging right advances the
-                // focus (active card slides off right, next comes forward). One
-                // card advances per ~front-card width of travel.
-                *close = None;
-                let per_index = state.output_size.0 as f32 * FRONT_SCALE_PX_FRAC;
-                scroll.value = start_scroll + dx / per_index;
-                scroll.target = scroll.value;
-                scroll.velocity = 0.0;
-                return;
-            }
-        }
-
-        // Icon press: cancel the pending launch (and its highlight) once the
-        // finger travels past the tap slop — the gesture is a page swipe.
-        if let Some(p) = &state.pending_launch {
-            let dx = x - p.start_x;
-            let dy = y - p.start_y;
-            if (dx * dx + dy * dy).sqrt() > ICON_TAP_SLOP {
-                state.pending_launch = None;
-                // The gesture became a swipe — cancel the long-press hold too.
-                state.icon_press = None;
-            }
-        }
-
-        // Pull-down to open search: a dominant downward drag on empty Home
-        // space launches the search app. A sideways drag falls through to the
-        // page drag below (still pages); an upward drag does nothing.
-        if matches!(state.ui, UiState::Home { .. }) {
-            if let Some((sx, sy)) = state.search_arm {
-                let (_, h) = state.output_size_f();
-                let dy = y - sy;
-                let dx = (x - sx).abs();
-                if dy > h * 0.08 && dy > dx {
-                    state.open_search();
-                    return;
-                }
-            }
-        }
-
-        // Page drag: update spring value to follow finger.
-        if let Some(start_x) = state.page_drag_start {
-            let dx = x - start_x;
-            let w = state.output_size.0 as f32;
-            if let UiState::Home {
-                page,
-                page_spring,
-                page_count,
-                ..
-            } = &mut state.ui
-            {
-                // Directly set spring value to track finger (no spring physics during drag).
-                let raw_target = *page as f32 - dx / w;
-                // Rubber-band past edges.
-                let max_page = (*page_count).saturating_sub(1) as f32;
-                page_spring.value = if raw_target < 0.0 {
-                    raw_target * 0.3 // rubber-band left
-                } else if raw_target > max_page {
-                    max_page + (raw_target - max_page) * 0.3 // rubber-band right
-                } else {
-                    raw_target
-                };
-                page_spring.target = page_spring.value;
-                page_spring.velocity = 0.0;
-            }
-        }
-
-        // Feed movement to grab if active.
-        let dt = 1.0 / 90.0;
-        if let Some(ev) = input_dispatch::on_move(&state.ui, x, y, dt, state.output_size) {
-            transition(&mut state.ui, ev);
-        }
-
-        // A grab that turns clearly horizontal — while still low on the screen —
-        // becomes the live quick-switch slide: the current app slides sideways
-        // revealing the adjacent app. Once the finger has risen past the reveal
-        // point it is a vertical gesture (fan), so don't hijack it into a slide.
-        if let UiState::Grabbing { tracker, .. } = &state.ui {
-            if tracker.up_progress() < sc_input::thresholds::SWITCHER_REVEAL_PROGRESS
-                && sc_input::live_state(tracker) == sc_input::NavState::QuickSwitching
-            {
-                let (w, _) = state.output_size_f();
-                let start_x = x - tracker.dx() * w; // screen-x where the drag began
-                let origin = tracker.start;
-                enter_quick_switch(state, start_x, origin);
-            }
-        }
-        // Within a quick-switch, pulling up past the reveal point lifts into the
-        // vertical grab gesture (fan / switcher / home) — you can start a
-        // left/right slide and then curve upward into the switcher. Otherwise
-        // keep tracking the horizontal slide.
-        if let UiState::QuickSwitch { origin, .. } = &state.ui {
-            let (_, h) = state.output_size_f();
-            let up = (origin.y - y / h).max(0.0);
-            if up > sc_input::thresholds::SWITCHER_REVEAL_PROGRESS {
-                revert_quick_switch(state, x, y);
-            } else {
-                update_quick_switch(state, x);
-            }
+    }
+    // Within a quick-switch, pulling up past the reveal point lifts back into
+    // the vertical grab gesture (fan / switcher / home) — you can start a
+    // left/right slide and then curve upward into the switcher. Otherwise keep
+    // tracking the horizontal slide.
+    if let UiState::QuickSwitch { origin, .. } = &state.ui {
+        let (_, h) = state.output_size_f();
+        let up = (origin.y - y / h).max(0.0);
+        if up > sc_input::thresholds::SWITCHER_REVEAL_PROGRESS {
+            revert_quick_switch(state, x, y);
+        } else {
+            update_quick_switch(state, x);
         }
     }
 }
@@ -393,87 +436,110 @@ fn update_quick_switch(state: &mut State, x: f32) {
 }
 
 /// Touch-down / button-press at the last known position.
+///
+/// Arrange mode and the switcher deck are modal — each owns every press while it
+/// is up — so they come first and claim the event outright. Anything else falls
+/// through to the normal Home/app hit-testing in [`input_dispatch::on_press`],
+/// which only *arms* things: what the press eventually meant is decided by the
+/// motion and release chains.
 pub fn on_press(state: &mut State) {
     let Some((x, y)) = state.last_pointer_pos else {
         return;
     };
     state.pointer_down = true;
 
-    // Arrange-mode input: badges, Done button, and picking up a new drag all
-    // take priority over the normal Home hit-testing below.
-    if state.arrange.is_some() {
-        let (w, h) = state.output_size_f();
-        let page = state.current_home_page();
-        let mut layout = sc_layout::compute(w, h, page, &state.model);
-        // Match the render path: Done button is shifted below a top
-        // exclusive-zone bar, so the tap target must move with it.
-        layout.shift_done_below(state.layers.usable(state.dpi).y);
-        match sc_layout::hit_test_arrange(&layout, x, y) {
-            sc_layout::Hit::RemoveBadge { app_id } => {
-                state.model.hide(&app_id);
-                state.after_arrange_edit();
-            }
-            sc_layout::Hit::DoneButton | sc_layout::Hit::Bar => {
-                state.arrange = None;
-            }
-            sc_layout::Hit::Miss => {
-                // Empty-area press in arrange: arm a page drag. A swipe pages
-                // (resolved in on_release); a still tap exits.
-                state.page_drag_start = Some(x);
-            }
-            sc_layout::Hit::GridIcon { app_id, .. } => {
-                if let Some(a) = &mut state.arrange {
-                    a.drag = Some(DragItem {
-                        app_id,
-                        source: input_dispatch::IconSource::Grid,
-                        cur: (x, y),
-                        hover: None,
-                        edge_since: None,
-                    });
-                }
-            }
-            sc_layout::Hit::DockIcon { app_id, .. } => {
-                if let Some(a) = &mut state.arrange {
-                    a.drag = Some(DragItem {
-                        app_id,
-                        source: input_dispatch::IconSource::Dock,
-                        cur: (x, y),
-                        hover: None,
-                        edge_since: None,
-                    });
-                }
-            }
-        }
+    if press_arrange(state, x, y) == Stage::Done {
         return;
     }
+    if press_switcher(state, x, y) == Stage::Done {
+        return;
+    }
+    press_arm_gesture(state, x, y);
+}
 
-    // Switcher deck input.
-    if matches!(state.ui, UiState::Switcher { .. }) {
-        let hit = switcher::hit_test(&state.switcher_cards, x, y, state.output_size_f());
-        match hit {
-            switcher::CardHit::Card(idx) => {
-                let toplevel = state.switcher_cards.get(idx).map(|c| c.toplevel);
-                if let (UiState::Switcher { scroll, .. }, Some(toplevel)) = (&state.ui, toplevel) {
-                    state.switcher_drag = SwitcherDrag::OnCard {
-                        start_x: x,
-                        start_y: y,
-                        start_scroll: scroll.value,
-                        toplevel,
-                    };
-                }
+/// Arrange-mode press: remove badges, the Done button, and picking up a new drag
+/// all take priority over normal Home hit-testing.
+fn press_arrange(state: &mut State, x: f32, y: f32) -> Stage {
+    if state.arrange.is_none() {
+        return Stage::Fallthrough;
+    }
+    let (w, h) = state.output_size_f();
+    let page = state.current_home_page();
+    let mut layout = sc_layout::compute(w, h, page, &state.model);
+    // Match the render path: the Done button is shifted below a top
+    // exclusive-zone bar, so the tap target must move with it.
+    layout.shift_done_below(state.layers.usable(state.dpi).y);
+
+    match sc_layout::hit_test_arrange(&layout, x, y) {
+        sc_layout::Hit::RemoveBadge { app_id } => {
+            state.model.hide(&app_id);
+            state.after_arrange_edit();
+        }
+        sc_layout::Hit::DoneButton | sc_layout::Hit::Bar => {
+            state.arrange = None;
+        }
+        sc_layout::Hit::Miss => {
+            // Empty-area press in arrange: arm a page drag. A swipe pages
+            // (resolved in on_release); a still tap exits.
+            state.page_drag_start = Some(x);
+        }
+        sc_layout::Hit::GridIcon { app_id, .. } => {
+            if let Some(a) = &mut state.arrange {
+                a.drag = Some(lift(app_id, input_dispatch::IconSource::Grid, (x, y)));
             }
-            switcher::CardHit::Empty => {
-                state.switcher_drag = SwitcherDrag::InEmpty {
+        }
+        sc_layout::Hit::DockIcon { app_id, .. } => {
+            if let Some(a) = &mut state.arrange {
+                a.drag = Some(lift(app_id, input_dispatch::IconSource::Dock, (x, y)));
+            }
+        }
+    }
+    Stage::Done
+}
+
+/// Pick an icon up under the finger, ready to be dragged to a new slot.
+fn lift(app_id: String, source: input_dispatch::IconSource, at: (f32, f32)) -> DragItem {
+    DragItem {
+        app_id,
+        source,
+        cur: at,
+        hover: None,
+        edge_since: None,
+    }
+}
+
+/// Switcher deck press: start either a card drag (scroll / swipe-to-close) or an
+/// empty-area press that may become a dismiss tap.
+fn press_switcher(state: &mut State, x: f32, y: f32) -> Stage {
+    if !matches!(state.ui, UiState::Switcher { .. }) {
+        return Stage::Fallthrough;
+    }
+    match switcher::hit_test(&state.switcher_cards, x, y, state.output_size_f()) {
+        switcher::CardHit::Card(idx) => {
+            let toplevel = state.switcher_cards.get(idx).map(|c| c.toplevel);
+            if let (UiState::Switcher { scroll, .. }, Some(toplevel)) = (&state.ui, toplevel) {
+                state.switcher_drag = SwitcherDrag::OnCard {
                     start_x: x,
                     start_y: y,
+                    start_scroll: scroll.value,
+                    toplevel,
                 };
             }
         }
-        return;
+        switcher::CardHit::Empty => {
+            state.switcher_drag = SwitcherDrag::InEmpty {
+                start_x: x,
+                start_y: y,
+            };
+        }
     }
+    Stage::Done
+}
 
-    let action = input_dispatch::on_press(&state.ui, x, y, &state.model, state.output_size);
-    match action {
+/// Normal press: hit-test Home/the app and arm whatever the gesture might turn
+/// into. Nothing is committed here — the release decides.
+fn press_arm_gesture(state: &mut State, x: f32, y: f32) {
+    match input_dispatch::on_press(&state.ui, x, y, &state.model, state.output_size) {
         DownAction::Event(ev) => {
             transition(&mut state.ui, ev);
             // Seed the live switcher-preview fan with the MRU deck (front =
@@ -524,12 +590,13 @@ pub fn on_press(state: &mut State) {
     }
 }
 
-/// Whether a release stage consumed the gesture.
+/// Whether a gesture stage consumed the event. Shared by the press, motion, and
+/// release chains, which are all ordered sequences of these.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[must_use]
-enum Release {
-    /// The gesture is fully resolved: later stages and the trailing page-count
-    /// refresh are skipped.
+enum Stage {
+    /// The event is fully handled: later stages (and, for a release, the
+    /// trailing page-count refresh) are skipped.
     Done,
     /// Not this stage's gesture (or this stage only did part of the work);
     /// keep going down the chain.
@@ -548,10 +615,14 @@ const SWITCHER_TAP_SLOP: f32 = 15.0;
 /// - Ordering: an armed icon tap outranks the page swipe armed from the same
 ///   press (`on_press` arms both and lets the release pick); the bar-drag
 ///   classification must run before the page swipe consumes `page_drag_start`.
-/// - Termination: a stage returning [`Release::Done`] skips everything after it,
+/// - Termination: a stage returning [`Stage::Done`] skips everything after it,
 ///   *including* the trailing `page_count` refresh — which is why the quick-switch,
 ///   arrange, icon-tap, and switcher-tap paths don't touch it, while the bar-drag,
 ///   page-swipe, and grab paths (which can land on Home) do.
+///
+/// As in [`on_motion`], only the stages returning [`Stage`] can claim the event;
+/// the ones returning `()` (bar drag, page swipe, grab release) always run if
+/// the chain reaches them and always fall through.
 pub fn on_release(state: &mut State) {
     let Some((x, y)) = state.last_pointer_pos else {
         return;
@@ -560,18 +631,18 @@ pub fn on_release(state: &mut State) {
     // A completed (or abandoned) gesture disarms the pull-down.
     state.search_arm = None;
 
-    if release_quick_switch(state) == Release::Done {
+    if release_quick_switch(state) == Stage::Done {
         return;
     }
-    if release_arrange(state, x) == Release::Done {
+    if release_arrange(state, x) == Stage::Done {
         return;
     }
-    if release_icon_tap(state) == Release::Done {
+    if release_icon_tap(state) == Stage::Done {
         return;
     }
     release_bar_drag(state, x, y);
     release_page_swipe(state, x);
-    if release_switcher(state, x, y) == Release::Done {
+    if release_switcher(state, x, y) == Stage::Done {
         return;
     }
     release_grab(state);
@@ -585,25 +656,25 @@ pub fn on_release(state: &mut State) {
 /// Live quick-switch release: commit to the revealed neighbour past the
 /// threshold, otherwise spring back (reject). Every later stage is irrelevant in
 /// this state.
-fn release_quick_switch(state: &mut State) -> Release {
+fn release_quick_switch(state: &mut State) -> Stage {
     if !matches!(state.ui, UiState::QuickSwitch { .. }) {
-        return Release::Fallthrough;
+        return Stage::Fallthrough;
     }
     state.bar_drag_start = None;
     settle_quick_switch(state);
-    Release::Done
+    Stage::Done
 }
 
 /// Arrange-mode release: resolve the drag (if any) to pin/unpin/snap-back, then
 /// stay in arrange mode — only Done or an empty-area tap exits it.
-fn release_arrange(state: &mut State, x: f32) -> Release {
+fn release_arrange(state: &mut State, x: f32) -> Stage {
     if state.arrange.is_none() {
-        return Release::Fallthrough;
+        return Stage::Fallthrough;
     }
     // Take the drag out (if any) without holding a &mut borrow across the body.
     if let Some(drag) = state.arrange.as_mut().and_then(|a| a.drag.take()) {
         resolve_arrange_drop(state, drag);
-        return Release::Done;
+        return Stage::Done;
     }
     // No icon drag: empty-area release. A swipe commits a page flip and stays in
     // arrange; a still tap exits.
@@ -619,7 +690,7 @@ fn release_arrange(state: &mut State, x: f32) -> Release {
         }
         None => state.arrange = None,
     }
-    Release::Done
+    Stage::Done
 }
 
 /// Apply a dropped arrange-mode icon: pin to the dock, reorder within the grid,
@@ -674,16 +745,19 @@ fn resolve_arrange_drop(state: &mut State, drag: DragItem) {
 /// Icon tap: the pending launch survived (the finger never passed the tap slop),
 /// so this was a tap, not a swipe. Launch and drop the page drag armed from the
 /// same press.
-fn release_icon_tap(state: &mut State) -> Release {
+fn release_icon_tap(state: &mut State) -> Stage {
     if let Some(p) = state.pending_launch.take() {
-        state.page_drag_start = None;
+        // The page drag armed by the same press is abandoned, not committed —
+        // it has to be settled, or the grid stays parked up to a tap-slop's
+        // worth off-page behind the opening app. See `State::cancel_page_drag`.
+        state.cancel_page_drag();
         state.icon_press = None;
         state.launch_or_raise(&p.app_id, p.origin);
-        return Release::Done;
+        return Stage::Done;
     }
     // Not a tap — the long-press hold is over either way.
     state.icon_press = None;
-    Release::Fallthrough
+    Stage::Fallthrough
 }
 
 /// Bar drag from Home: classify the swipe direction and raise an app.
@@ -721,9 +795,9 @@ fn release_page_swipe(state: &mut State, x: f32) {
 
 /// Switcher release: commit or cancel a card close, open a tapped card, dismiss
 /// on an empty tap, or settle the carousel scroll.
-fn release_switcher(state: &mut State, x: f32, y: f32) -> Release {
+fn release_switcher(state: &mut State, x: f32, y: f32) -> Stage {
     if !matches!(state.ui, UiState::Switcher { .. }) {
-        return Release::Fallthrough;
+        return Stage::Fallthrough;
     }
     let tapped =
         |sx: f32, sy: f32| (x - sx).abs() < SWITCHER_TAP_SLOP && (y - sy).abs() < SWITCHER_TAP_SLOP;
@@ -739,7 +813,7 @@ fn release_switcher(state: &mut State, x: f32, y: f32) -> Release {
             };
             if let Some((ct, progress, _)) = closing {
                 resolve_card_close(state, ct, progress);
-                return Release::Done;
+                return Stage::Done;
             }
 
             if tapped(start_x, start_y) {
@@ -755,12 +829,12 @@ fn release_switcher(state: &mut State, x: f32, y: f32) -> Release {
         SwitcherDrag::InEmpty { start_x, start_y } => {
             if tapped(start_x, start_y) {
                 transition(&mut state.ui, UiEvent::SwitcherDismiss);
-                return Release::Done;
+                return Stage::Done;
             }
         }
         SwitcherDrag::None => {}
     }
-    Release::Fallthrough
+    Stage::Fallthrough
 }
 
 /// Finish a card-close drag: past [`CLOSE_COMMIT_PROGRESS`] remove the card from
@@ -779,16 +853,16 @@ fn resolve_card_close(state: &mut State, toplevel: ToplevelId, progress: f32) {
 
 /// Open the switcher card under `(x, y)`, if the tap actually hit one.
 /// A tap that misses every card falls through to the remaining release stages.
-fn open_tapped_card(state: &mut State, x: f32, y: f32) -> Release {
+fn open_tapped_card(state: &mut State, x: f32, y: f32) -> Stage {
     let switcher::CardHit::Card(idx) =
         switcher::hit_test(&state.switcher_cards, x, y, state.output_size_f())
     else {
-        return Release::Fallthrough;
+        return Stage::Fallthrough;
     };
     // `idx` indexes the z-sorted render array; resolve it to the card's toplevel
     // id so ordering can't desync.
     let Some(card) = state.switcher_cards.get(idx).copied() else {
-        return Release::Fallthrough;
+        return Stage::Fallthrough;
     };
     let origin = ZoomOrigin::card((card.center_x, card.center_y), card.scale);
     // Resolve the real app_id from the toplevel (the deck tracks only ids);
@@ -810,7 +884,7 @@ fn open_tapped_card(state: &mut State, x: f32, y: f32) -> Release {
             origin,
         },
     );
-    Release::Done
+    Stage::Done
 }
 
 /// Release an in-app grab: classify the gesture and either quick-switch to the
