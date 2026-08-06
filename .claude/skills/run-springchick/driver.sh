@@ -16,7 +16,10 @@
 #                      command fills the terminal with a test pattern. Tracks PID.
 #   send "tap X Y"     Send one debug-input line (down/move/up/tap/swipe/settle)
 #                      to the compositor over its unix socket; prints the reply.
-#   shot FILE          grim-screenshot the whole host output to FILE.
+#   wake               Clear an idle-faded host screen (dms's fade-to-dpms
+#                      overlay) so a capture shows real content, not black.
+#   shot FILE          grim-screenshot to FILE. Wakes the screen first, and
+#                      scopes to the output springchick is on when it can tell.
 #   down               Kill the compositor + every client THIS driver launched,
 #                      by PID, and remove springchick sockets. Never pkills.
 #
@@ -97,10 +100,104 @@ print(s.recv(256).decode().strip())
 PY
 }
 
+# Path to the running niri's IPC socket, or empty on a non-niri host.
+niri_sock() {
+  [ -n "${NIRI_SOCKET:-}" ] && { echo "$NIRI_SOCKET"; return; }
+  ls "${RUNTIME}"/niri.*.sock 2>/dev/null | head -1
+}
+
+# Namespaces of the host's layer-shell surfaces (niri only).
+host_layers() {
+  local ns; ns=$(niri_sock); [ -n "$ns" ] || return 1
+  NIRI_SOCKET="$ns" niri msg -j layers 2>/dev/null \
+    | python3 -c 'import json,sys;[print(l["namespace"]) for l in json.load(sys.stdin)]' 2>/dev/null
+}
+
+# Wake a faded/idle host screen. dms (the user shell) covers the output with a
+# black `dms:fade-to-dpms` OVERLAY layer before DPMS — grim then captures that
+# overlay, not the springchick window, so shots come back solid black.
+#
+# `niri msg action power-on-monitors` does NOT clear it: the overlay is dms's,
+# and dms only retracts it on real seat activity (ext-idle-notify resume). So
+# synthesise one harmless keystroke (a bare Shift, no side effect on the focused
+# app) through the virtual-keyboard protocol.
+# Two independent wake levers, because two different things blank the screen:
+#   - DPMS off (niri's own): cleared by `power-on-monitors`.
+#   - dms's black `fade-to-dpms` overlay: only retracted on real seat activity,
+#     so synthesise a bare Shift (no side effect on the focused app).
+poke_seat() {
+  local ns; ns=$(niri_sock)
+  [ -n "$ns" ] && NIRI_SOCKET="$ns" niri msg action power-on-monitors >/dev/null 2>&1
+  WAYLAND_DISPLAY="$HOST_WL" XDG_RUNTIME_DIR="$RUNTIME" \
+    nix run nixpkgs#wtype -- -k Shift_L >/dev/null 2>&1
+}
+
+cmd_wake() {
+  host_layers >/dev/null 2>&1 || {
+    # Non-niri host: can't inspect layers, so just poke the seat blind — a bare
+    # Shift is harmless whether or not the screen was faded.
+    echo "wake: not a niri host — sending a Shift keystroke blind"
+    poke_seat
+    return 0
+  }
+  if ! host_layers | grep -q "fade-to-dpms"; then
+    echo "wake: screen already awake"
+    return 0
+  fi
+  echo "wake: fade-to-dpms overlay present — sending a Shift keystroke"
+  for _ in 1 2 3; do
+    poke_seat
+    sleep 1
+    host_layers | grep -q "fade-to-dpms" || { echo "wake: screen awake"; return 0; }
+  done
+  echo "wake: overlay still present — shot will likely be black" >&2
+  return 1
+}
+
+# Name of the host output the springchick window is on (niri only).
+springchick_output() {
+  local ns; ns=$(niri_sock); [ -n "$ns" ] || return 1
+  # Exported, not a per-command prefix: the python below shells out to niri again.
+  export NIRI_SOCKET="$ns"
+  niri msg -j windows 2>/dev/null | python3 -c '
+import json,subprocess,sys,os
+ws=json.load(sys.stdin)
+w=next((w for w in ws if (w.get("title") or "")=="springchick"), None)
+if not w: sys.exit(1)
+sp=json.loads(subprocess.check_output(["niri","msg","-j","workspaces"]))
+o=next((s["output"] for s in sp if s["id"]==w["workspace_id"]), None)
+print(o or "", end="")
+sys.exit(0 if o else 1)
+' 2>/dev/null
+}
+
 cmd_shot() {
   local out="${1:-${STATE}/shot.png}"
-  WAYLAND_DISPLAY="$HOST_WL" XDG_RUNTIME_DIR="$RUNTIME" nix run nixpkgs#grim -- "$out"
-  echo "wrote $out"
+  # An idle-faded host renders a black overlay over everything; wake it first or
+  # the capture is worthless.
+  cmd_wake >&2
+  # Scope to the output springchick is on when we can work it out — a multi-head
+  # full capture buries the nested window in the user's desktop.
+  local o; o=$(springchick_output)
+  grab() {
+    if [ -n "$o" ]; then
+      WAYLAND_DISPLAY="$HOST_WL" XDG_RUNTIME_DIR="$RUNTIME" nix run nixpkgs#grim -- -o "$o" "$1"
+    else
+      WAYLAND_DISPLAY="$HOST_WL" XDG_RUNTIME_DIR="$RUNTIME" nix run nixpkgs#grim -- "$1"
+    fi
+  }
+  grab "$out"
+  # Backstop for a blanked screen the layer check didn't catch (plain DPMS off,
+  # a different shell's overlay). A solid-black PNG compresses to a few tens of
+  # KB where real content runs into the megabytes — crude, but it costs nothing
+  # and the retry is harmless when the screen really is that dark.
+  local sz; sz=$(stat -c %s "$out" 2>/dev/null || echo 0)
+  if [ "$sz" -lt 102400 ]; then
+    echo "shot: capture is ${sz}B — suspiciously uniform, poking the seat and retrying" >&2
+    poke_seat; sleep 1; grab "$out"
+    sz=$(stat -c %s "$out" 2>/dev/null || echo 0)
+  fi
+  echo "wrote $out (${o:-all outputs}, ${sz}B)"
 }
 
 cmd_down() {
@@ -124,7 +221,8 @@ case "${1:-}" in
   up)     shift; cmd_up "$@" ;;
   client) shift; cmd_client "$@" ;;
   send)   shift; cmd_send "$@" ;;
+  wake)   shift; cmd_wake "$@" ;;
   shot)   shift; cmd_shot "$@" ;;
   down)   shift; cmd_down "$@" ;;
-  *) echo "usage: $0 {build|up|client [CMD...]|send \"tap X Y\"|shot FILE|down}" >&2; exit 1 ;;
+  *) echo "usage: $0 {build|up|client [CMD...]|send \"tap X Y\"|wake|shot FILE|down}" >&2; exit 1 ;;
 esac
