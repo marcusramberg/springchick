@@ -3,7 +3,7 @@
 
 use sc_shell_model::ShellModel;
 
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::input_dispatch;
 use crate::state::State;
@@ -230,6 +230,13 @@ impl State {
                     hover: None,
                     edge_since: None,
                 };
+                // Logged so the VM test can assert arrange mode from the journal:
+                // engaging it changes no `UiState` discriminant (Home stays
+                // Home), so the `state changed to ...` line never fires for it.
+                debug!(
+                    target: "springchick::debug",
+                    "arrange engaged app_id={} source={:?}", drag.app_id, drag.source
+                );
                 self.arrange = Some(ArrangeState { drag: Some(drag) });
                 self.pending_launch = None;
                 self.page_drag_start = None;
