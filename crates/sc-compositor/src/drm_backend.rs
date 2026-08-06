@@ -25,9 +25,7 @@ use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev;
 use smithay::reexports::calloop::signals::{Signal, Signals};
 use smithay::reexports::calloop::EventLoop;
-use smithay::reexports::drm::control::{
-    connector, crtc, property, Device as ControlDevice, ModeTypeFlags,
-};
+use smithay::reexports::drm::control::{connector, crtc, property, Device as ControlDevice};
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::{Display, ListeningSocket};
@@ -43,9 +41,16 @@ use crate::{accept_client, create_display, State};
 type FlipData = ();
 
 struct Drm {
-    _device: DrmDevice,
+    device: DrmDevice,
     gbm_surface: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, FlipData>,
     renderer: GlesRenderer,
+    /// GBM device, kept so a hotplugged external display can get its own
+    /// swapchain without re-opening the node.
+    gbm: GbmDevice<DrmDeviceFd>,
+    /// Every *other* connected connector, mirroring the primary. See
+    /// [`crate::mirror`]. Empty on a phone with nothing plugged in, which is
+    /// the path that must stay free of extra work.
+    mirrors: Vec<crate::mirror::MirrorOutput>,
     /// Rounded-corner texture program, compiled once, passed to `draw_scene`.
     rounded_tex_shader: GlesTexProgram,
     output_size: Size<i32, Physical>,
@@ -77,20 +82,29 @@ const DPMS_ON: property::RawValue = 0;
 const DPMS_OFF: property::RawValue = 3;
 
 impl Drm {
-    /// Drive the connector's DPMS property. No-op if the driver exposes none.
+    /// Drive the primary connector's DPMS property, and every mirror's along
+    /// with it — blanking the phone must not leave an external panel lit with
+    /// the last frame. No-op per connector if the driver exposes no property.
     fn set_dpms(&self, on: bool) {
-        let Some(prop) = self.dpms_prop else {
-            return;
-        };
         let value = if on { DPMS_ON } else { DPMS_OFF };
-        if let Err(e) = self.device_fd.set_property(self.connector, prop, value) {
-            warn!("set DPMS {}: {e}", if on { "on" } else { "off" });
+        let set = |conn, prop: Option<property::Handle>| {
+            let Some(prop) = prop else { return };
+            if let Err(e) = self.device_fd.set_property(conn, prop, value) {
+                warn!("set DPMS {}: {e}", if on { "on" } else { "off" });
+            }
+        };
+        set(self.connector, self.dpms_prop);
+        for m in &self.mirrors {
+            set(m.connector, m.dpms);
         }
     }
 }
 
 /// Find the `DPMS` property handle on a connector, if the driver exposes it.
-fn find_dpms_prop(device: &DrmDeviceFd, connector: connector::Handle) -> Option<property::Handle> {
+pub fn find_dpms_prop(
+    device: &DrmDeviceFd,
+    connector: connector::Handle,
+) -> Option<property::Handle> {
     let props = device.get_properties(connector).ok()?;
     let handles: Vec<property::Handle> = props.as_props_and_values().0.to_vec();
     handles.into_iter().find(|handle| {
@@ -236,10 +250,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         warn!("CRTC exposes no gamma LUT; gamma-control uploads will be ignored");
     }
 
+    // Any additional connected connector mirrors the panel from the first
+    // frame; hotplug after this is handled by the udev source below.
+    let mut mirrors = Vec::new();
+    crate::mirror::refresh(
+        &mut mirrors,
+        &mut drm_device,
+        &gbm,
+        &renderer,
+        connector_handle,
+        crtc_handle,
+    );
+
     let drm = Drm {
         _session: session,
-        _device: drm_device,
+        device: drm_device,
         gbm_surface,
+        gbm,
+        mirrors,
         renderer,
         rounded_tex_shader,
         output_size,
@@ -272,7 +300,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     event_loop
         .handle()
         .insert_source(drm_notifier, |event, _meta, app| match event {
-            DrmEvent::VBlank(_crtc) => {
+            DrmEvent::VBlank(crtc) => {
+                // A mirror's vblank only releases its own buffer — mirrors are
+                // driven by the primary's render, never the other way round.
+                if crtc != app.drm.crtc {
+                    if let Some(m) = app.drm.mirrors.iter_mut().find(|m| m.crtc == crtc) {
+                        if let Err(e) = m.surface.frame_submitted() {
+                            warn!("mirror frame_submitted error: {e}");
+                        }
+                        m.pending_flip = false;
+                    }
+                    return;
+                }
                 if let Err(e) = app.drm.gbm_surface.frame_submitted() {
                     warn!("frame_submitted error: {e}");
                 }
@@ -304,7 +343,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(|e| format!("insert libinput source: {e}"))?;
 
-    // 3. Session activate/deactivate (VT-switch).
+    // 3. udev: display hotplug. A connector coming or going on our GPU raises a
+    // `Changed` event for the node; anything else on the seat is ignored. The
+    // rescan is cheap and idempotent, so a spurious event costs nothing.
+    let gpu_dev_id = device_fd.dev_id().ok();
+    let udev_backend = udev::UdevBackend::new(&seat_name).map_err(|e| format!("udev: {e}"))?;
+    event_loop
+        .handle()
+        .insert_source(udev_backend, move |event, _, app| {
+            if let udev::UdevEvent::Changed { device_id } = event {
+                if gpu_dev_id.is_some_and(|id| id != device_id) {
+                    return;
+                }
+                app.refresh_outputs();
+            }
+        })
+        .map_err(|e| format!("insert udev source: {e}"))?;
+
+    // 4. Session activate/deactivate (VT-switch).
     event_loop
         .handle()
         .insert_source(session_notifier, |event, _, app| match event {
@@ -317,6 +373,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 app.drm.active = true;
                 app.drm.gbm_surface.reset_buffers();
                 app.drm.pending_flip = false;
+                for m in &mut app.drm.mirrors {
+                    m.surface.reset_buffers();
+                    m.pending_flip = false;
+                }
                 app.render();
             }
         })
@@ -492,12 +552,19 @@ impl App {
         if blanked {
             info!("blanking panel");
             self.drm.pending_flip = false;
+            for m in &mut self.drm.mirrors {
+                m.pending_flip = false;
+            }
             self.drm.set_dpms(false);
         } else {
             info!("unblanking panel");
             self.drm.set_dpms(true);
             self.drm.gbm_surface.reset_buffers();
             self.drm.pending_flip = false;
+            for m in &mut self.drm.mirrors {
+                m.surface.reset_buffers();
+                m.pending_flip = false;
+            }
             self.render();
         }
     }
@@ -594,11 +661,72 @@ impl App {
             Err(e) => warn!("queue_buffer failed: {e}"),
         }
 
+        // Mirror the frame we just composited onto every external display. Done
+        // after the primary's flip is queued so an external panel can never
+        // delay the phone's, and after `finish_gpu` so the texture we sample is
+        // complete. `dmabuf` is still the buffer we rendered into — queueing the
+        // flip does not invalidate it for reading.
+        self.present_mirrors(&dmabuf);
+
         self.state.record_and_log_frame(frame_start);
 
         // Screencopy: satisfy any pending capture requests from the same scene.
         self.capture_pending_frames(&prep);
         self.wlr_capture_pending_frames(&prep);
+    }
+
+    /// Copy the primary's just-composited scanout buffer onto every external
+    /// display. No-op when nothing is plugged in, which is the common case.
+    ///
+    /// All mirrors are drawn first, then fenced once, then flipped — a single
+    /// `finish_gpu` covers the batch. A mirror still waiting on its own vblank
+    /// skips this frame rather than holding the phone back.
+    fn present_mirrors(&mut self, src: &smithay::backend::allocator::dmabuf::Dmabuf) {
+        if self.drm.mirrors.is_empty() {
+            return;
+        }
+        let size = self.drm.output_size;
+        let mut drawn = false;
+        for i in 0..self.drm.mirrors.len() {
+            if self.drm.mirrors[i].pending_flip {
+                continue;
+            }
+            match self.drm.mirrors[i].render_into(&mut self.drm.renderer, src, size) {
+                Ok(()) => drawn = true,
+                Err(e) => warn!("mirror render failed: {e}"),
+            }
+        }
+        if !drawn {
+            return;
+        }
+        self.state.skia.finish_gpu();
+        for m in &mut self.drm.mirrors {
+            if m.pending_flip {
+                continue;
+            }
+            if let Err(e) = m.queue() {
+                warn!("mirror queue_buffer failed: {e}");
+            }
+        }
+    }
+
+    /// Re-derive the mirror set after a display hotplug, then repaint so a
+    /// freshly attached panel shows the current frame instead of staying black
+    /// until something else animates.
+    fn refresh_outputs(&mut self) {
+        let before = self.drm.mirrors.len();
+        crate::mirror::refresh(
+            &mut self.drm.mirrors,
+            &mut self.drm.device,
+            &self.drm.gbm,
+            &self.drm.renderer,
+            self.drm.connector,
+            self.drm.crtc,
+        );
+        if self.drm.mirrors.len() != before {
+            self.state.needs_render = true;
+            self.render();
+        }
     }
 
     /// Compose the current scene (`prep`) into `framebuffer`. Shared by the
@@ -780,31 +908,9 @@ fn find_output(
     ),
     Box<dyn std::error::Error>,
 > {
-    let res = drm.resource_handles()?;
-
-    for &conn_handle in res.connectors() {
-        let conn = drm.get_connector(conn_handle, false)?;
-        if conn.state() != connector::State::Connected {
-            continue;
-        }
-        if conn.modes().is_empty() {
-            continue;
-        }
-        // Preferred mode, else the first.
-        let mode = conn
-            .modes()
-            .iter()
-            .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
-            .copied()
-            .unwrap_or_else(|| conn.modes()[0]);
-
-        // Find a crtc reachable from one of the connector's encoders.
-        for &enc_handle in conn.encoders() {
-            let enc = drm.get_encoder(enc_handle)?;
-            if let Some(crtc_handle) = res.filter_crtcs(enc.possible_crtcs()).into_iter().next() {
-                return Ok((conn_handle, crtc_handle, mode));
-            }
-        }
-    }
-    Err("no connected connector with a usable crtc".into())
+    let first = crate::mirror::scan(drm, &[], &[])?
+        .into_iter()
+        .next()
+        .ok_or("no connected connector with a usable crtc")?;
+    Ok((first.connector, first.crtc, first.mode))
 }
