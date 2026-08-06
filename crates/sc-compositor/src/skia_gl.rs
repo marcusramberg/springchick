@@ -176,6 +176,8 @@ impl SkiaGl {
         grid_positions: &HashMap<String, (f32, f32)>,
         dock_positions: &HashMap<String, (f32, f32)>,
         top_inset: f32,
+        lift: f32,
+        shift: f32,
     ) {
         self.ensure_font();
 
@@ -201,6 +203,12 @@ impl SkiaGl {
         // upside-down on the panel. Mirror vertically for the DRM path.
         // Save/restore so the cached surface's matrix doesn't accumulate.
         canvas.save();
+        // Whole-screen offsets: the bounce lift and the sideways drag-out.
+        // Applied *before* the flip so they compose in screen space and move
+        // home up/right on the panel whichever way Y runs.
+        if lift != 0.0 || shift != 0.0 {
+            canvas.translate((shift, -lift));
+        }
         if flip_y {
             canvas.translate((0.0, height as f32));
             canvas.scale((1.0, -1.0));

@@ -71,6 +71,25 @@ impl WindowTransform {
         }
     }
 
+    /// Slide in full-size from the left edge, as Home is dragged off to the
+    /// right: the stack sits to the *left* of Home, so pushing Home rightwards
+    /// pulls its top card in behind it. `progress`: 0 = fully off the left edge,
+    /// 1 = centered. Held just under fullscreen scale for the same reason as
+    /// [`Self::slide_up`]: it keeps the card path (drawn over home, rounded)
+    /// until the state settles to `App`.
+    ///
+    /// Paired with [`home_slide_out`], which moves Home the other way by the
+    /// same eased amount so the two travel as one sheet.
+    pub fn slide_in_from_left(progress: f32, width: f32, height: f32, card_radius: f32) -> Self {
+        let ease = sc_anim::ease_out_cubic(progress);
+        Self {
+            scale: 0.98,
+            center_x: width * 0.5 - (1.0 - ease) * width,
+            center_y: height / 2.0,
+            corner_radius: card_radius * (1.0 - ease),
+        }
+    }
+
     /// Freeform grab: window follows finger, pivoting from the bottom.
     /// The finger stays at the bottom edge of the scaled window.
     /// Scale shrinks aggressively so the top moves down toward the finger.
@@ -106,6 +125,14 @@ impl WindowTransform {
     }
 }
 
+/// How far Home has been dragged off to the right, in pixels, for a slide onto
+/// the top card of the stack. Rides the same eased curve as
+/// [`WindowTransform::slide_in_from_left`], one screen width in the opposite
+/// direction, so Home and the incoming card move as one sheet.
+fn home_slide_out(progress: f32, width: f32) -> f32 {
+    sc_anim::ease_out_cubic(progress) * width
+}
+
 /// Full scene state for one frame.
 #[derive(Clone, Debug)]
 pub struct Scene {
@@ -117,6 +144,13 @@ pub struct Scene {
     pub home_page: usize,
     /// Switcher deck cards (empty for non-switcher states), sorted ascending z.
     pub cards: Vec<switcher::CardRect>,
+    /// Vertical offset applied to the whole home screen, in pixels, positive =
+    /// drawn higher. Non-zero only while the Home bounce spring is ringing.
+    pub home_lift: f32,
+    /// Horizontal offset applied to the whole home screen, in pixels, positive =
+    /// drawn further right. Non-zero only while Home is being dragged off to the
+    /// right by a slide onto the top card of the stack.
+    pub home_shift: f32,
 }
 
 impl Scene {
@@ -142,15 +176,20 @@ pub fn compute_scene(
 ) -> Scene {
     let (w, h) = (output_size.0 as f32, output_size.1 as f32);
     match state {
-        UiState::Home { page, .. } => Scene {
+        UiState::Home { page, bounce, .. } => Scene {
             window: None,
             show_home: true,
+            // The bounce spring is in fractions of screen height.
+            home_lift: bounce.value * h,
+            home_shift: 0.0,
             home_page: *page,
             cards: Vec::new(),
         },
         UiState::App { toplevel, .. } => Scene {
             window: Some((*toplevel, WindowTransform::fullscreen(w, h))),
             show_home: false,
+            home_lift: 0.0,
+            home_shift: 0.0,
             home_page: 0,
             cards: Vec::new(),
         },
@@ -161,17 +200,29 @@ pub fn compute_scene(
             open_mode,
             ..
         } => {
+            let p = progress.value.clamp(0.0, 1.0);
             let transform = match open_mode {
                 crate::ui_state::OpenMode::SlideUp => {
-                    WindowTransform::slide_up(progress.value, w, h, card_radius)
+                    WindowTransform::slide_up(p, w, h, card_radius)
+                }
+                crate::ui_state::OpenMode::SlideFromLeft => {
+                    WindowTransform::slide_in_from_left(p, w, h, card_radius)
                 }
                 crate::ui_state::OpenMode::Zoom => {
-                    WindowTransform::from_zoom_progress(progress.value, *origin, w, h, card_radius)
+                    WindowTransform::from_zoom_progress(p, *origin, w, h, card_radius)
                 }
+            };
+            // Only the sideways slide takes Home with it; the zoom and the
+            // pull-down search both play over a stationary Home.
+            let home_shift = match open_mode {
+                crate::ui_state::OpenMode::SlideFromLeft => home_slide_out(p, w),
+                _ => 0.0,
             };
             Scene {
                 window: Some((*toplevel, transform)),
                 show_home: true,
+                home_lift: 0.0,
+                home_shift,
                 home_page: 0,
                 cards: Vec::new(),
             }
@@ -187,6 +238,8 @@ pub fn compute_scene(
                 WindowTransform::from_zoom_progress(progress.value, *origin, w, h, card_radius),
             )),
             show_home: true,
+            home_lift: 0.0,
+            home_shift: 0.0,
             home_page: 0,
             cards: Vec::new(),
         },
@@ -238,6 +291,8 @@ pub fn compute_scene(
                 Scene {
                     window: None,
                     show_home: true,
+                    home_lift: 0.0,
+                    home_shift: 0.0,
                     home_page: 0,
                     cards: card_rects,
                 }
@@ -245,6 +300,8 @@ pub fn compute_scene(
                 Scene {
                     window: Some((*toplevel, t)),
                     show_home: up > 0.05,
+                    home_lift: 0.0,
+                    home_shift: 0.0,
                     home_page: 0,
                     cards: Vec::new(),
                 }
@@ -324,6 +381,8 @@ pub fn compute_scene(
                 return Scene {
                     window: None,
                     show_home: true,
+                    home_lift: 0.0,
+                    home_shift: 0.0,
                     home_page: 0,
                     cards: card_rects,
                 };
@@ -331,6 +390,8 @@ pub fn compute_scene(
             Scene {
                 window: Some((*toplevel, transform)),
                 show_home: !matches!(target, NavTarget::BackToApp),
+                home_lift: 0.0,
+                home_shift: 0.0,
                 home_page: 0,
                 cards: Vec::new(),
             }
@@ -389,6 +450,8 @@ pub fn compute_scene(
             Scene {
                 window: None,
                 show_home: true,
+                home_lift: 0.0,
+                home_shift: 0.0,
                 home_page: 0,
                 cards,
             }
@@ -397,15 +460,27 @@ pub fn compute_scene(
             cards,
             scroll,
             close,
+            enter,
         } => {
             let close_geo = close.map(|(t, p, _)| (t, p));
             let mut card_rects =
                 switcher::layout(cards, scroll.value, (w, h), close_geo, card_radius);
+            // Entrance from Home: the whole deck rises from below the bottom
+            // edge into its rest layout. Entered from a grab the spring is
+            // already at 1 and this is a no-op.
+            let rise = (1.0 - enter.value.clamp(0.0, 1.0)) * h;
+            if rise > 0.0 {
+                for c in &mut card_rects {
+                    c.center_y += rise;
+                }
+            }
             // Sort ascending z for back-to-front draw order.
             card_rects.sort_by_key(|r| r.z);
             Scene {
                 window: None,
                 show_home: true,
+                home_lift: 0.0,
+                home_shift: 0.0,
                 home_page: 0,
                 cards: card_rects,
             }
@@ -468,6 +543,131 @@ mod tests {
         // UiState::App yet) — window_covers_screen() is what the renderer
         // must consult to avoid painting home over the finished window.
         assert!(scene.show_home);
+    }
+
+    #[test]
+    fn sideways_slide_drags_home_out_to_the_right() {
+        use crate::ui_state::{transition, OpenMode, UiEvent, ZoomOrigin};
+        let mut state = UiState::home(0, 1);
+        transition(
+            &mut state,
+            UiEvent::AppMapped {
+                toplevel: 1,
+                app_id: "x".into(),
+                origin: ZoomOrigin::icon((0.0, 0.0)),
+                open_mode: OpenMode::SlideFromLeft,
+            },
+        );
+        // Part-way through: home has moved right, the card is still left of centre.
+        transition(&mut state, UiEvent::Tick { dt: 1.0 / 30.0 });
+        let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
+        assert!(scene.show_home);
+        assert!(scene.home_shift > 0.0, "shift={}", scene.home_shift);
+        let (_, t) = scene.window.expect("card on screen");
+        assert!(
+            t.center_x < TEST_SIZE.0 as f32 / 2.0,
+            "card should still be entering from the left, cx={}",
+            t.center_x
+        );
+    }
+
+    #[test]
+    fn zoom_open_leaves_home_where_it_is() {
+        use crate::ui_state::{transition, OpenMode, UiEvent, ZoomOrigin};
+        let mut state = UiState::home(0, 1);
+        transition(
+            &mut state,
+            UiEvent::AppMapped {
+                toplevel: 1,
+                app_id: "x".into(),
+                origin: ZoomOrigin::icon((100.0, 200.0)),
+                open_mode: OpenMode::Zoom,
+            },
+        );
+        transition(&mut state, UiEvent::Tick { dt: 1.0 / 30.0 });
+        let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
+        assert_eq!(scene.home_shift, 0.0, "only the sideways slide moves home");
+    }
+
+    #[test]
+    fn home_bounce_lifts_the_whole_home_screen() {
+        use crate::ui_state::{transition, UiEvent};
+        let mut state = UiState::home(0, 1);
+        assert_eq!(
+            compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS).home_lift,
+            0.0
+        );
+        transition(&mut state, UiEvent::HomeBounce);
+        transition(&mut state, UiEvent::Tick { dt: 1.0 / 90.0 });
+        let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
+        assert!(scene.home_lift > 0.0, "lift={}", scene.home_lift);
+        assert!(scene.show_home);
+    }
+
+    #[test]
+    fn switcher_deck_rises_from_below_while_entering() {
+        let mut entering = sc_anim::Spring::new(0.0);
+        entering.retarget(1.0);
+        let state = UiState::Switcher {
+            cards: vec![0, 1],
+            scroll: sc_anim::Spring::new(0.0),
+            close: None,
+            enter: entering,
+        };
+        let rising = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
+        let at_rest = compute_scene(
+            &UiState::Switcher {
+                cards: vec![0, 1],
+                scroll: sc_anim::Spring::new(0.0),
+                close: None,
+                enter: sc_anim::Spring::new(1.0),
+            },
+            TEST_SIZE,
+            (0.0, 0.0),
+            TEST_RADIUS,
+        );
+        // Every card starts a full screen height below its rest slot.
+        for (r, rest) in rising.cards.iter().zip(at_rest.cards.iter()) {
+            assert_eq!(r.toplevel, rest.toplevel);
+            assert!(
+                (r.center_y - rest.center_y - TEST_SIZE.1 as f32).abs() < 1.0,
+                "card {} at {} vs rest {}",
+                r.toplevel,
+                r.center_y,
+                rest.center_y
+            );
+        }
+    }
+
+    #[test]
+    fn slide_enters_from_the_left_edge_as_home_leaves_right() {
+        let (w, h) = (TEST_SIZE.0 as f32, TEST_SIZE.1 as f32);
+        // Fully off the left edge at progress 0, with Home still in place …
+        let start = WindowTransform::slide_in_from_left(0.0, w, h, TEST_RADIUS);
+        assert!(
+            (start.center_x + w * 0.5).abs() < 1.0,
+            "cx={}",
+            start.center_x
+        );
+        assert_eq!(home_slide_out(0.0, w), 0.0);
+        assert!(start.corner_radius > 0.0, "rounded while travelling");
+        // … centered (and square) once arrived, Home a full width to the right.
+        let end = WindowTransform::slide_in_from_left(1.0, w, h, TEST_RADIUS);
+        assert!((end.center_x - w / 2.0).abs() < 1.0);
+        assert!((end.center_y - h / 2.0).abs() < 1.0);
+        assert!(end.corner_radius < 0.01);
+        assert!((home_slide_out(1.0, w) - w).abs() < 1.0);
+        // Home and the card stay exactly one screen apart the whole way: they
+        // travel as one sheet, no gap and no overlap.
+        for p in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let card = WindowTransform::slide_in_from_left(p, w, h, TEST_RADIUS);
+            let home_cx = w / 2.0 + home_slide_out(p, w);
+            assert!(
+                (home_cx - card.center_x - w).abs() < 0.01,
+                "p={p}: home {home_cx} vs card {}",
+                card.center_x
+            );
+        }
     }
 
     #[test]
@@ -618,6 +818,7 @@ mod tests {
             cards: vec![0, 1, 2],
             scroll: sc_anim::Spring::new(0.0),
             close: None,
+            enter: sc_anim::Spring::new(1.0),
         };
         let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert_eq!(scene.cards.len(), 3);

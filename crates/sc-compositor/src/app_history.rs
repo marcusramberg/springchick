@@ -39,11 +39,6 @@ impl AppHistory {
         }
     }
 
-    /// Get the previous app (for swipe-up-from-bar).
-    pub fn previous(&self) -> Option<ToplevelId> {
-        self.stack.get(1).copied()
-    }
-
     /// Peek the app one step from the cursor without moving it (`dir`: -1 =
     /// previous, +1 = next). Returns `None` at the stack ends — the live
     /// quick-switch uses this to know when to rubber-band. `quick_switch(dir)`
@@ -119,19 +114,13 @@ mod tests {
     }
 
     #[test]
-    fn previous_is_second() {
+    fn deck_order_of_a_single_app_is_that_app() {
+        // Regression: the Home bar used to reach for `stack[1]`, so with exactly
+        // one app running every bar gesture did nothing until a second app was
+        // launched. The deck the bar reaches for is front-first.
         let mut h = AppHistory::new();
         h.push_foreground(1);
-        h.push_foreground(2);
-        h.push_foreground(3);
-        assert_eq!(h.previous(), Some(2));
-    }
-
-    #[test]
-    fn previous_none_when_single() {
-        let mut h = AppHistory::new();
-        h.push_foreground(1);
-        assert_eq!(h.previous(), None);
+        assert_eq!(h.deck_order(), vec![1]);
     }
 
     #[test]

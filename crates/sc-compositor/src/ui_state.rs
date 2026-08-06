@@ -12,6 +12,11 @@ pub type ToplevelId = usize;
 /// Seconds for a cancelled close-swipe to spring back to rest.
 const CLOSE_SPRINGBACK_SECS: f32 = 0.18;
 
+/// Velocity kick (fractions of screen height per second) given to the Home
+/// bounce spring when a bar gesture has nowhere to go. Tuned against the
+/// bounce spring below for a ~3% lift that settles in under a third of a second.
+const HOME_BOUNCE_KICK: f32 = 1.1;
+
 /// Origin of a zoom animation: where the window grows from / shrinks to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ZoomOrigin {
@@ -38,6 +43,10 @@ pub enum OpenMode {
     /// Slide up full-size from below the bottom edge. Used by the pull-down
     /// search app, which has no icon origin.
     SlideUp,
+    /// Slide in full-size from the left edge as Home is dragged off to the
+    /// right. Used by the rightward Home-bar swipe: the stack sits to the left
+    /// of Home, so pushing Home away uncovers its top card.
+    SlideFromLeft,
 }
 
 /// The shell's UI states, including transition animations.
@@ -47,6 +56,10 @@ pub enum UiState {
         page: usize,
         page_spring: Spring,
         page_count: usize,
+        /// Rubber-band lift of the whole Home screen, in fractions of screen
+        /// height (positive = shifted up). Rests at 0; a bar gesture with
+        /// nothing to go to kicks it (see [`UiEvent::HomeBounce`]).
+        bounce: Spring,
     },
     App {
         toplevel: ToplevelId,
@@ -132,7 +145,21 @@ pub enum UiState {
         /// `releasing` = finger let go below the commit threshold, so `Tick`
         /// decays progress back to 0. `None` at rest.
         close: Option<(ToplevelId, f32, bool)>,
+        /// Entrance animation, 0 = deck still below the bottom edge, 1 = at
+        /// rest. Entered from a grab release the deck is *already* in place
+        /// (the settle animated it there), so that path starts settled at 1;
+        /// only the Home-bar swipe-up plays the rise.
+        enter: Spring,
     },
+}
+
+/// The Home bounce spring at rest: stiff and deliberately under-damped, so a
+/// velocity kick reads as a springy rebound rather than a slow drift back.
+fn bounce_spring() -> Spring {
+    let mut s = Spring::new(0.0);
+    s.stiffness = 500.0;
+    s.damping = 26.0;
+    s
 }
 
 impl UiState {
@@ -143,6 +170,7 @@ impl UiState {
             page,
             page_spring: spring,
             page_count,
+            bounce: bounce_spring(),
         }
     }
 
@@ -222,7 +250,11 @@ impl UiState {
             UiState::AppOpening { progress, .. } => !progress.is_settled(),
             UiState::AppClosing { progress, .. } => !progress.is_settled(),
             UiState::Settling { progress, .. } => !progress.is_settled(),
-            UiState::Home { page_spring, .. } => !page_spring.is_settled(),
+            UiState::Home {
+                page_spring,
+                bounce,
+                ..
+            } => !page_spring.is_settled() || !bounce.is_settled(),
             UiState::Grabbing { .. } => true,
             // Dragging (not releasing) is finger-driven and repaints on move;
             // once releasing, the spring must tick until it settles.
@@ -230,9 +262,12 @@ impl UiState {
                 releasing, offset, ..
             } => *releasing && !offset.is_settled(),
             UiState::App { .. } => false,
-            UiState::Switcher { scroll, close, .. } => {
-                !scroll.is_settled() || matches!(close, Some((_, _, true)))
-            }
+            UiState::Switcher {
+                scroll,
+                close,
+                enter,
+                ..
+            } => !scroll.is_settled() || !enter.is_settled() || matches!(close, Some((_, _, true))),
         }
     }
 }
@@ -266,8 +301,14 @@ pub enum UiEvent {
     Interrupt { point: sc_input::Pt },
     /// Animation tick — advance springs by dt.
     Tick { dt: f32 },
-    /// Enter switcher deck from grab release.
+    /// Enter switcher deck from grab release — already fanned open by the
+    /// settle, so it is presented at rest with no entrance animation.
     EnterSwitcher { cards: Vec<ToplevelId> },
+    /// Enter the switcher deck from Home (bar swipe-up): the deck rises into
+    /// place from below the bottom edge.
+    OpenSwitcherFromHome { cards: Vec<ToplevelId> },
+    /// A Home-bar gesture that had nowhere to go — rubber-band Home and stay.
+    HomeBounce,
     /// Tap a card to open that app. `app_id` is the real id resolved from the
     /// toplevel by the caller — the switcher deck tracks only toplevel ids.
     SwitcherTapCard {
@@ -514,11 +555,22 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                         }
                     }
                 }
-                UiState::Home { page_spring, .. } => {
+                UiState::Home {
+                    page_spring,
+                    bounce,
+                    ..
+                } => {
                     page_spring.step(dt);
+                    bounce.step(dt);
                 }
-                UiState::Switcher { scroll, close, .. } => {
+                UiState::Switcher {
+                    scroll,
+                    close,
+                    enter,
+                    ..
+                } => {
                     scroll.step(dt);
+                    enter.step(dt);
                     // Decay a cancelled close-swipe back to rest.
                     if let Some((_, progress, true)) = close {
                         *progress -= dt / CLOSE_SPRINGBACK_SECS;
@@ -562,7 +614,27 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 cards,
                 scroll: Spring::new(0.0),
                 close: None,
+                enter: Spring::new(1.0),
             };
+            Effect::None
+        }
+        UiEvent::OpenSwitcherFromHome { cards } => {
+            debug!(target: "springchick::debug", "OpenSwitcherFromHome cards={:?}", cards);
+            // Only from Home — the grab path has its own (already-open) entry.
+            if matches!(state, UiState::Home { .. }) && !cards.is_empty() {
+                *state = UiState::Switcher {
+                    cards,
+                    scroll: Spring::new(0.0),
+                    close: None,
+                    enter: Spring::zoom(0.0, 1.0),
+                };
+            }
+            Effect::None
+        }
+        UiEvent::HomeBounce => {
+            if let UiState::Home { bounce, .. } = state {
+                bounce.velocity = HOME_BOUNCE_KICK;
+            }
             Effect::None
         }
         UiEvent::SwitcherTapCard {
@@ -862,11 +934,110 @@ mod tests {
     }
 
     #[test]
+    fn home_bar_swipe_up_opens_the_switcher_rising_from_below() {
+        let mut state = UiState::home(0, 1);
+        transition(
+            &mut state,
+            UiEvent::OpenSwitcherFromHome { cards: vec![4, 2] },
+        );
+        let UiState::Switcher { cards, enter, .. } = &state else {
+            panic!("expected switcher, got {state:?}");
+        };
+        assert_eq!(cards, &vec![4, 2]);
+        assert_eq!(enter.value, 0.0, "deck starts below the bottom edge");
+        assert!(state.needs_animation(), "the rise must be ticked");
+
+        // And it settles in place.
+        for _ in 0..500 {
+            transition(&mut state, UiEvent::Tick { dt: 1.0 / 90.0 });
+            if !state.needs_animation() {
+                break;
+            }
+        }
+        let UiState::Switcher { enter, .. } = &state else {
+            panic!("left the switcher");
+        };
+        assert!((enter.value - 1.0).abs() < 0.01, "enter={}", enter.value);
+    }
+
+    #[test]
+    fn home_bar_swipe_up_with_one_app_still_opens_the_switcher() {
+        // Regression: a single running app used to leave the bar gesture inert.
+        let mut state = UiState::home(0, 1);
+        transition(&mut state, UiEvent::OpenSwitcherFromHome { cards: vec![7] });
+        assert!(matches!(state, UiState::Switcher { .. }));
+    }
+
+    #[test]
+    fn opening_an_empty_switcher_is_a_noop() {
+        let mut state = UiState::home(0, 1);
+        transition(&mut state, UiEvent::OpenSwitcherFromHome { cards: vec![] });
+        assert!(matches!(state, UiState::Home { .. }));
+    }
+
+    #[test]
+    fn home_bounce_rings_and_settles_back_to_rest() {
+        let mut state = UiState::home(0, 1);
+        assert!(!state.needs_animation());
+        transition(&mut state, UiEvent::HomeBounce);
+        assert!(state.needs_animation());
+
+        let mut peak = 0.0_f32;
+        for _ in 0..1000 {
+            transition(&mut state, UiEvent::Tick { dt: 1.0 / 90.0 });
+            let UiState::Home { bounce, .. } = &state else {
+                panic!("bounce must not leave Home");
+            };
+            peak = peak.max(bounce.value);
+            if !state.needs_animation() {
+                break;
+            }
+        }
+        assert!(!state.needs_animation(), "bounce never settled");
+        // A visible but modest lift: a few percent of screen height.
+        assert!((0.01..0.08).contains(&peak), "peak lift was {peak}");
+        let UiState::Home { bounce, .. } = &state else {
+            unreachable!()
+        };
+        assert!(bounce.value.abs() < 0.001, "returned to rest");
+    }
+
+    #[test]
+    fn home_bar_swipe_right_slides_in_from_the_side() {
+        let mut state = UiState::home(0, 1);
+        transition(
+            &mut state,
+            UiEvent::AppMapped {
+                toplevel: 3,
+                app_id: "x".into(),
+                origin: ZoomOrigin::icon((100.0, 200.0)),
+                open_mode: OpenMode::SlideFromLeft,
+            },
+        );
+        assert!(matches!(
+            state,
+            UiState::AppOpening {
+                toplevel: 3,
+                open_mode: OpenMode::SlideFromLeft,
+                ..
+            }
+        ));
+        for _ in 0..500 {
+            transition(&mut state, UiEvent::Tick { dt: 1.0 / 90.0 });
+            if matches!(state, UiState::App { .. }) {
+                break;
+            }
+        }
+        assert!(matches!(state, UiState::App { toplevel: 3, .. }));
+    }
+
+    #[test]
     fn tap_card_opens_that_toplevel() {
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
             close: None,
+            enter: Spring::new(1.0),
         };
         // Events carry the toplevel id, not a positional index — so the render
         // z-order and the MRU order can never desync (regression: tapping the
@@ -893,6 +1064,7 @@ mod tests {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
             close: None,
+            enter: Spring::new(1.0),
         };
         let eff = transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 2 });
         assert_eq!(eff, Effect::CloseToplevel { toplevel: 2 });
@@ -909,6 +1081,7 @@ mod tests {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
             close: None,
+            enter: Spring::new(1.0),
         };
         transition(
             &mut state,
@@ -927,6 +1100,7 @@ mod tests {
             cards: vec![9],
             scroll: Spring::new(0.0),
             close: None,
+            enter: Spring::new(1.0),
         };
         transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 9 });
         assert!(matches!(state, UiState::Home { .. }));
@@ -938,6 +1112,7 @@ mod tests {
             cards: vec![1, 2],
             scroll: Spring::new(0.0),
             close: None,
+            enter: Spring::new(1.0),
         };
         transition(&mut state, UiEvent::SwitcherDismiss);
         assert!(matches!(state, UiState::Home { .. }));
@@ -949,6 +1124,7 @@ mod tests {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),
             close: None,
+            enter: Spring::new(1.0),
         };
         transition(&mut state, UiEvent::ToplevelClosed { toplevel: 2 });
         if let UiState::Switcher { cards, .. } = &state {
@@ -966,6 +1142,7 @@ mod tests {
             cards: vec![1],
             scroll: spring,
             close: None,
+            enter: Spring::new(1.0),
         };
         assert!(state.needs_animation());
     }
@@ -976,6 +1153,7 @@ mod tests {
             cards: vec![5, 3, 1],
             scroll: Spring::new(0.0),
             close: None,
+            enter: Spring::new(1.0),
         };
         assert_eq!(state.foreground_toplevel(), Some(5));
     }

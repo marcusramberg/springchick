@@ -50,10 +50,10 @@ pub const ARRANGE_PAGE_SWIPE_FRAC: f32 = 0.15;
 /// the pull-down search. The drag must also be more vertical than horizontal.
 pub const PULL_DOWN_SEARCH_FRAC: f32 = 0.08;
 
-/// Upward travel (fraction of height) on the Home bar that raises the most
-/// recent app.
+/// Upward travel (fraction of height) on the Home bar that opens the switcher.
 pub const BAR_RAISE_FRAC: f32 = 0.08;
-/// Sideways travel (fraction of width) on the Home bar that quick-switches.
+/// Rightward travel (fraction of width) on the Home bar that slides onto the top
+/// card of the stack.
 pub const BAR_SWITCH_FRAC: f32 = 0.15;
 /// Fraction of screen width a live quick-switch slide must reach at release to
 /// commit to the neighbour app; short of it the swipe springs back. Kept low so

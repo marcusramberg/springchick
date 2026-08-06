@@ -16,13 +16,19 @@
 use crate::thresholds as th;
 
 /// What a released drag on the Home bar means.
+///
+/// The Home bar is the inverse of the in-app grab: from Home the deck is what
+/// you reach for, not an individual app. Swiping up opens the switcher, swiping
+/// right slides straight onto the app at the front of the stack. A leftward
+/// swipe has nothing behind it (the stack only extends one way from Home), so it
+/// is deliberately inert.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarRelease {
-    /// Swiped up: raise the most recent app (a deliberate jump).
-    RaiseRecent,
-    /// Swiped sideways: walk the MRU cursor. `-1` = more-recent/previous,
-    /// `+1` = older/next, matching [`crate::NavTarget::QuickSwitch`].
-    QuickSwitch(i32),
+    /// Swiped up: animate into the app switcher deck (or bounce if nothing is
+    /// running).
+    OpenSwitcher,
+    /// Swiped right: slide Home leftwards onto the top card of the stack.
+    SlideToTop,
     /// Neither threshold reached — the press was a tap or a stray wobble.
     None,
 }
@@ -106,10 +112,11 @@ pub fn is_switcher_tap(dx: f32, dy: f32) -> bool {
 /// Classify a released drag on the Home bar. `dy_up` is positive upward.
 pub fn classify_bar_release(dx: f32, dy_up: f32, width: f32, height: f32) -> BarRelease {
     if dy_up > height * th::BAR_RAISE_FRAC {
-        BarRelease::RaiseRecent
-    } else if dx.abs() > width * th::BAR_SWITCH_FRAC {
-        // Swiping left walks toward older apps (+1), matching the carousel.
-        BarRelease::QuickSwitch(if dx < 0.0 { 1 } else { -1 })
+        BarRelease::OpenSwitcher
+    } else if dx > width * th::BAR_SWITCH_FRAC {
+        // Only rightward: the stack sits to the right of Home (carousel
+        // handedness), so a leftward swipe would be walking off the near end.
+        BarRelease::SlideToTop
     } else {
         BarRelease::None
     }
@@ -273,10 +280,10 @@ mod tests {
     // --- home bar ---
 
     #[test]
-    fn bar_swipe_up_raises_the_recent_app() {
+    fn bar_swipe_up_opens_the_switcher() {
         assert_eq!(
             classify_bar_release(0.0, 200.0, W, H),
-            BarRelease::RaiseRecent
+            BarRelease::OpenSwitcher
         );
     }
 
@@ -285,21 +292,24 @@ mod tests {
         // Both thresholds cleared: up wins.
         assert_eq!(
             classify_bar_release(400.0, 200.0, W, H),
-            BarRelease::RaiseRecent
+            BarRelease::OpenSwitcher
         );
     }
 
     #[test]
-    fn bar_swipe_sideways_quick_switches_with_carousel_handedness() {
-        // Left (negative dx) walks toward older apps.
-        assert_eq!(
-            classify_bar_release(-200.0, 0.0, W, H),
-            BarRelease::QuickSwitch(1)
-        );
+    fn bar_swipe_right_slides_to_the_top_card() {
         assert_eq!(
             classify_bar_release(200.0, 0.0, W, H),
-            BarRelease::QuickSwitch(-1)
+            BarRelease::SlideToTop
         );
+        // Short of the threshold is still nothing.
+        assert_eq!(classify_bar_release(100.0, 0.0, W, H), BarRelease::None);
+    }
+
+    #[test]
+    fn bar_swipe_left_does_nothing() {
+        // Home is the near end of the stack — there is nothing to the left.
+        assert_eq!(classify_bar_release(-400.0, 0.0, W, H), BarRelease::None);
     }
 
     #[test]
