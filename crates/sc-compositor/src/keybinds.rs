@@ -23,12 +23,10 @@ pub struct Keys {
 }
 
 impl Keys {
-    /// Load the config from disk (or defaults) and resolve it.
-    pub fn load() -> Keys {
-        Keys::from_config(sc_config::load())
-    }
-
-    fn from_config(config: Config) -> Keys {
+    /// Resolve an already-loaded config into keysym-keyed bindings. `State::new`
+    /// reads `config.toml` once and hands the same `Config` here and to the
+    /// `[main]` settings, so one startup never sees two versions of the file.
+    pub fn from_config(config: Config) -> Keys {
         let long_press = Duration::from_millis(config.long_press_ms);
         let bindings = resolve(config);
         info!(
@@ -41,37 +39,6 @@ impl Keys {
             children: Vec::new(),
         }
     }
-}
-
-/// The output scale (`[main].dpi` in `config.toml`) to advertise to clients.
-/// Reads the same config file as [`Keys::load`]; called separately because
-/// the output is created before `Keys` is constructed.
-pub fn load_dpi() -> f64 {
-    sc_config::load().dpi
-}
-
-/// Seconds of inactivity before the panel idle-blanks (`[main].idle_blank_secs`;
-/// `0` disables). Reads the same config file as [`Keys::load`].
-pub fn load_idle_blank_secs() -> u64 {
-    sc_config::load().idle_blank_secs
-}
-
-/// Base card corner radius in logical px (`[main].card_radius`). Reads the same
-/// config file as [`Keys::load`].
-pub fn load_card_radius() -> f32 {
-    sc_config::load().card_radius
-}
-
-/// Whether to draw the touch indicator overlay (`[main].show_touches`). Reads
-/// the same config file as [`Keys::load`].
-pub fn load_show_touches() -> bool {
-    sc_config::load().show_touches
-}
-
-/// Whether app windows should prefer server-side (= no client) decorations
-/// (`[main].prefer_no_csd`). Reads the same config file as [`Keys::load`].
-pub fn load_prefer_no_csd() -> bool {
-    sc_config::load().prefer_no_csd
 }
 
 /// xkb keysym name → raw keysym value. Case-sensitive, as xkb defines them.

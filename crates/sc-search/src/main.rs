@@ -43,6 +43,8 @@ struct SearchApp {
     query: String,
     results: Vec<String>,
     textures: HashMap<String, egui::TextureHandle>,
+    /// Icon search path, built once at startup rather than per icon lookup.
+    icon_dirs: Vec<std::path::PathBuf>,
     focus_requested: bool,
     /// Kept alive for the process lifetime: dropping it drops the blur.
     _blur: Option<blur::ExtBackgroundEffectSurfaceV1>,
@@ -62,6 +64,7 @@ impl SearchApp {
             query: String::new(),
             results: Vec::new(),
             textures: HashMap::new(),
+            icon_dirs: sc_icons::theme_dirs(&sc_catalog::xdg_data_dirs()),
             focus_requested: false,
             _blur: blur::blur_whole_window(cc),
         };
@@ -80,7 +83,7 @@ impl SearchApp {
             return Some(t.clone());
         }
         let entry = self.catalog.get(id)?;
-        let px = sc_icons::resolve(&entry.icon);
+        let px = sc_icons::resolve_with_dirs(&entry.icon, &self.icon_dirs);
         if px.width == 0 || px.height == 0 {
             return None;
         }

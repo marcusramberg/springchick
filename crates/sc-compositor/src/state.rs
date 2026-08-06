@@ -84,6 +84,13 @@ pub(crate) struct FramePrep {
     pub layer_popups: layer_shell::RenderList,
     /// Touch indicator marks to overlay (empty unless `show_touches`).
     pub touch_marks: Vec<touch_viz::TouchMark>,
+    /// Screen-space animated center `(x, y)` per grid app: the reflow spring
+    /// position minus the current page scroll, so the grid pass can render
+    /// sliding icons without knowing about pages.
+    pub grid_positions: HashMap<String, (f32, f32)>,
+    /// Screen-space animated center `(x, y)` per dock app. Dock icons don't
+    /// scroll with pages, so these are the spring positions as-is.
+    pub dock_positions: HashMap<String, (f32, f32)>,
 }
 
 /// A popup and its clamped physical geometry: `(kind, origin, size)`. Chains are
@@ -351,6 +358,17 @@ impl State {
         let dh = display.handle();
         let (out_w, out_h) = output_size;
 
+        // `config.toml`, read exactly once. Both the `[main]` settings below and
+        // the `[keybinds]` table come from this same parse — reading it per
+        // setting meant six filesystem reads and six TOML parses at startup, and
+        // no guarantee they all saw the same file.
+        let config = sc_config::load();
+        let dpi = config.dpi.max(1.0);
+        let idle_blank_secs = config.idle_blank_secs;
+        let card_radius = config.card_radius;
+        let show_touches = config.show_touches;
+        let prefer_no_csd = config.prefer_no_csd;
+
         // v6 so clients like wvkbd that bind wl_compositor@6 can connect.
         let compositor_state = CompositorState::new_v6::<Self>(&dh);
         // Advertise only Fullscreen as a WM capability. Maximize/Minimize/
@@ -422,7 +440,6 @@ impl State {
             size: (out_w, out_h).into(),
             refresh: 90_000, // 90 Hz in mHz
         };
-        let dpi = keybinds::load_dpi().max(1.0);
         output.change_current_state(
             Some(mode),
             None,
@@ -469,10 +486,14 @@ impl State {
         let first_run = model.frecency.apps.is_empty();
         model.reconcile(&catalog_ids, now, first_run);
 
-        // Pre-resolve icons.
+        // Pre-resolve icons. The search path is built once, not per icon.
+        let icon_dirs = sc_icons::theme_dirs(&sc_catalog::xdg_data_dirs());
         let mut icon_cache = HashMap::new();
         for (id, entry) in &app_catalog {
-            icon_cache.insert(id.clone(), sc_icons::resolve(&entry.icon));
+            icon_cache.insert(
+                id.clone(),
+                sc_icons::resolve_with_dirs(&entry.icon, &icon_dirs),
+            );
         }
 
         let page_count = model.pages.len().max(1);
@@ -493,9 +514,9 @@ impl State {
             seat,
             keyboard,
             focused_surface: None,
-            keys: keybinds::Keys::load(),
+            keys: keybinds::Keys::from_config(config),
             blank: blank::Blank::new(),
-            idle: blank::Idle::new(keybinds::load_idle_blank_secs(), std::time::Instant::now()),
+            idle: blank::Idle::new(idle_blank_secs, std::time::Instant::now()),
             needs_render: false,
             last_present: None,
             osd: osd::Osd::new(),
@@ -515,7 +536,7 @@ impl State {
             pointer_grab: false,
             popup_grabs: std::collections::HashSet::new(),
             bar_alpha: 1.0,
-            show_touches: keybinds::load_show_touches(),
+            show_touches,
             touch_viz: touch_viz::TouchViz::new(),
             ui,
             model,
@@ -529,8 +550,8 @@ impl State {
             output_size,
             output,
             dpi,
-            card_radius: keybinds::load_card_radius(),
-            prefer_no_csd: keybinds::load_prefer_no_csd(),
+            card_radius,
+            prefer_no_csd,
             gamma,
             idle_notify,
             idle_inhibit,

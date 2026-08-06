@@ -22,38 +22,20 @@ const TARGET_SIZE: u32 = 128;
 /// Icon theme subdirectories to search under each XDG data dir's `icons/`.
 const ICON_THEMES: &[&str] = &["hicolor", "Adwaita"];
 
-/// Build the icon search directories from `$XDG_DATA_DIRS` (plus `$XDG_DATA_HOME`).
-/// For each data dir `<d>` we search `<d>/icons/<theme>` and `<d>/pixmaps`.
-fn theme_dirs() -> Vec<PathBuf> {
+/// Expand XDG base data directories into the icon search path: for each base
+/// `<d>`, `<d>/icons/<theme>` per theme and `<d>/pixmaps`.
+///
+/// Bases come from the caller (`sc_catalog::xdg_data_dirs`) rather than being
+/// read here, so the env walk happens once per process instead of once per
+/// icon — and there is only one implementation of the XDG lookup.
+pub fn theme_dirs(bases: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    for base in xdg_data_dirs() {
+    for base in bases {
         for theme in ICON_THEMES {
             dirs.push(base.join("icons").join(theme));
         }
         dirs.push(base.join("pixmaps"));
     }
-    dirs
-}
-
-/// XDG base data directories, highest precedence first: `$XDG_DATA_HOME`
-/// (default `~/.local/share`), then each `$XDG_DATA_DIRS` entry
-/// (default `/usr/local/share:/usr/share`) left-to-right.
-fn xdg_data_dirs() -> Vec<PathBuf> {
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
-    let data_dirs = std::env::var("XDG_DATA_DIRS")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
-
-    let mut dirs: Vec<PathBuf> = data_home.into_iter().collect();
-    dirs.extend(
-        data_dirs
-            .split(':')
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from),
-    );
     dirs
 }
 
@@ -67,12 +49,8 @@ const SIZE_SUBDIRS: &[&str] = &[
     "48x48/apps",
 ];
 
-/// Resolve an icon name to RGBA pixels. Falls back to a placeholder on failure.
-pub fn resolve(icon_name: &str) -> IconPixels {
-    resolve_with_dirs(icon_name, &theme_dirs())
-}
-
-/// Resolve with custom search directories (for testing).
+/// Resolve an icon name to RGBA pixels against `theme_dirs` (build them once
+/// with [`theme_dirs`]). Falls back to a placeholder on failure.
 pub fn resolve_with_dirs<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> IconPixels {
     // If icon_name is an absolute path, try it directly.
     if icon_name.starts_with('/') {

@@ -248,6 +248,32 @@ fn settle_quick_switch(state: &mut State) {
     }
 }
 
+/// Commit a released horizontal page drag: snap to the neighbouring page once
+/// the finger has travelled past 30% of the output width, else settle back to
+/// the current one. No-op outside `Home`. Shared by the normal release and the
+/// arrange-mode release, which differ only in what gates the call.
+fn commit_page_swipe(state: &mut State, dx: f32) {
+    let w = state.output_size.0 as f32;
+    let page_delta = -dx / w; // positive = swiping to next page
+    if let UiState::Home {
+        page,
+        page_spring,
+        page_count,
+        ..
+    } = &mut state.ui
+    {
+        let target_page = if page_delta > 0.3 && *page + 1 < *page_count {
+            *page + 1
+        } else if page_delta < -0.3 && *page > 0 {
+            *page - 1
+        } else {
+            *page
+        };
+        *page = target_page;
+        page_spring.retarget(target_page as f32);
+    }
+}
+
 /// App id for a live toplevel, if it exists.
 fn app_id_of(state: &State, tid: ToplevelId) -> Option<(ToplevelId, String)> {
     state
@@ -564,24 +590,7 @@ pub fn on_release(state: &mut State) {
             let dx = x - start_x;
             let w = state.output_size.0 as f32;
             if dx.abs() > w * 0.15 {
-                let page_delta = -dx / w; // positive = swiping to next page
-                if let UiState::Home {
-                    page,
-                    page_spring,
-                    page_count,
-                    ..
-                } = &mut state.ui
-                {
-                    let target_page = if page_delta > 0.3 && *page + 1 < *page_count {
-                        *page + 1
-                    } else if page_delta < -0.3 && *page > 0 {
-                        *page - 1
-                    } else {
-                        *page
-                    };
-                    *page = target_page;
-                    page_spring.retarget(target_page as f32);
-                }
+                commit_page_swipe(state, dx);
             } else {
                 state.arrange = None; // still tap -> exit
             }
@@ -625,26 +634,7 @@ pub fn on_release(state: &mut State) {
 
     // Page swipe: snap based on 30% threshold.
     if let Some(start_x) = state.page_drag_start.take() {
-        let dx = x - start_x;
-        let w = state.output_size.0 as f32;
-        let page_delta = -dx / w; // positive = swiping to next page
-        if let UiState::Home {
-            page,
-            page_spring,
-            page_count,
-            ..
-        } = &mut state.ui
-        {
-            let target_page = if page_delta > 0.3 && *page + 1 < *page_count {
-                *page + 1
-            } else if page_delta < -0.3 && *page > 0 {
-                *page - 1
-            } else {
-                *page
-            };
-            *page = target_page;
-            page_spring.retarget(target_page as f32);
-        }
+        commit_page_swipe(state, x - start_x);
     }
 
     // Switcher release: tap card or dismiss.

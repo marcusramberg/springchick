@@ -177,12 +177,6 @@ impl SkiaGl {
         dock_positions: &HashMap<String, (f32, f32)>,
         top_inset: f32,
     ) {
-        if width <= 0 || height <= 0 {
-            return;
-        }
-        if !self.ensure_context() {
-            return;
-        }
         self.ensure_font();
 
         // Upload any icons we haven't uploaded yet.
@@ -192,42 +186,11 @@ impl SkiaGl {
             }
         }
 
-        // Acquire surface.
-        let fboid = self.current_fbo();
-        let context = match self.context.as_mut() {
-            Some(c) => c,
-            None => return,
-        };
-        context.reset(None);
-
-        let needs_recreate = match &self.cached_surface {
-            Some(c) => c.fboid != fboid || c.width != width || c.height != height,
-            None => true,
-        };
-        if needs_recreate {
-            let fb_info = FramebufferInfo {
-                fboid,
-                format: Format::RGBA8.into(),
-                ..Default::default()
-            };
-            let render_target = backend_render_targets::make_gl((width, height), None, 8, fb_info);
-            let Some(surface) = surfaces::wrap_backend_render_target(
-                context,
-                &render_target,
-                SurfaceOrigin::BottomLeft,
-                ColorType::RGBA8888,
-                None,
-                None,
-            ) else {
-                warn!("wrap_backend_render_target returned None");
-                return;
-            };
-            self.cached_surface = Some(CachedSurface {
-                surface,
-                fboid,
-                width,
-                height,
-            });
+        // Same surface acquisition as the overlay draws; `with_overlay_canvas`
+        // isn't usable here because the body needs `&self.icon_images` and
+        // `&self.font` while the canvas holds `&mut self.cached_surface`.
+        if !self.ensure_surface(width, height) {
+            return;
         }
 
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;

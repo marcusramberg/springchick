@@ -9,6 +9,7 @@ use tracing::debug;
 
 use crate::layer_shell;
 use crate::popups;
+use crate::render;
 use crate::scene::compute_scene;
 use crate::state::{FramePrep, PopupRect, State};
 use crate::ui_state::{self, transition, UiEvent, UiState};
@@ -257,6 +258,24 @@ impl State {
             Vec::new()
         };
 
+        // Animated icon centers in screen space. Grid springs are global (page 0
+        // origin), so subtract the live page scroll here; the dock doesn't page.
+        let page_scroll = match &self.ui {
+            UiState::Home { page_spring, .. } => page_spring.value,
+            _ => 0.0,
+        };
+        let (out_w, _) = self.output_size_f();
+        let grid_positions = self
+            .grid_anim
+            .iter()
+            .map(|(app, (sx, sy))| (app.clone(), (sx.value - page_scroll * out_w, sy.value)))
+            .collect();
+        let dock_positions = self
+            .dock_anim
+            .iter()
+            .map(|(app, (sx, sy))| (app.clone(), (sx.value, sy.value)))
+            .collect();
+
         FramePrep {
             scene,
             app_surface,
@@ -268,6 +287,87 @@ impl State {
             app_popups,
             layer_popups,
             touch_marks,
+            grid_positions,
+            dock_positions,
+        }
+    }
+
+    /// Build the render context both backends feed to [`crate::render::draw_scene`].
+    ///
+    /// Everything here is backend-independent; the four parameters are the only
+    /// things the winit and DRM paths actually disagree about. Keeping one
+    /// builder is the point — when this was inlined in both backends the copies
+    /// drifted (the dock drop-zone highlight was guarded in one and not the
+    /// other).
+    pub(crate) fn draw_ctx<'a>(
+        &'a mut self,
+        prep: &'a FramePrep,
+        transform: smithay::utils::Transform,
+        skia_flip_y: bool,
+        report_partial_damage: bool,
+        rounded_tex_shader: &'a smithay::backend::renderer::gles::GlesTexProgram,
+    ) -> render::DrawCtx<'a> {
+        // Resolved before the struct literal so nothing here borrows `self`
+        // while `skia` and `last_present` hold mutable borrows of it.
+        let usable = self.layers.usable(self.dpi);
+        let app_origin = (usable.x.round() as i32, usable.y.round() as i32);
+        // Resolved to an owned rect first, so the `arrange` closure below borrows
+        // nothing but `self.arrange` itself.
+        let dock_zone = self.arrange.as_ref().map(|_| {
+            let (w, h) = self.output_size_f();
+            sc_layout::compute(w, h, self.current_home_page(), &self.model).dock_zone
+        });
+        let arrange = self.arrange.as_ref().map(|a| {
+            let drag = a.drag.as_ref();
+            // Only a grid-sourced drag can pin, so only highlight the dock drop
+            // target for those (a dock→dock drag is a no-op).
+            let over_dock = drag.is_some_and(|d| {
+                d.source == crate::input_dispatch::IconSource::Grid
+                    && dock_zone.is_some_and(|z| z.contains(d.cur.0, d.cur.1))
+            });
+            render::ArrangeView {
+                drag_app: drag.map(|d| d.app_id.as_str()),
+                drag_pos: drag.map(|d| d.cur),
+                over_dock,
+            }
+        });
+        let pressed_app = self.pending_launch.as_ref().map(|p| p.app_id.as_str());
+        let launching_app = self.launching.as_ref().map(|l| l.app_id.as_str());
+        let launching_elapsed = self
+            .launching
+            .as_ref()
+            .map_or(0.0, |l| l.started.elapsed().as_secs_f32());
+
+        render::DrawCtx {
+            scene: &prep.scene,
+            app_surface: prep.app_surface.as_ref(),
+            skia: &mut self.skia,
+            model: &self.model,
+            icon_cache: &self.icon_cache,
+            app_catalog: &self.app_catalog,
+            toplevels: &self.toplevels,
+            app_scale: self.dpi,
+            app_origin,
+            transform,
+            rotation: self.rotation,
+            skia_flip_y,
+            frame_time: prep.frame_time,
+            osd: prep.osd_view,
+            touches: &prep.touch_marks,
+            layers_below: &prep.layers_below,
+            layers_above: &prep.layers_above,
+            app_popups: &prep.app_popups,
+            layer_popups: &prep.layer_popups,
+            bar_alpha: prep.bar_alpha,
+            pressed_app,
+            launching_app,
+            launching_elapsed,
+            arrange,
+            report_partial_damage,
+            last_present: &mut self.last_present,
+            grid_positions: &prep.grid_positions,
+            dock_positions: &prep.dock_positions,
+            rounded_tex_shader,
         }
     }
 }
