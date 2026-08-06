@@ -3,31 +3,23 @@
 //! winit and libinput both decode their native events into these calls, so the
 //! gesture behavior is identical across backends. Keys take a different route:
 //! `keybinds` handles them for both backends via the seat keyboard on `State`.
+//!
+//! What a gesture *means* is not decided here. Every threshold and
+//! classification lives in [`sc_input::home`] (Home screen and switcher deck)
+//! and [`sc_input::nav`] (the in-app grab), which are pure and unit-tested. This
+//! module measures the finger, asks those functions for a verdict, and applies
+//! it to `State` — so the parts that are easy to get subtly wrong are testable
+//! without a compositor.
 
 use crate::input_dispatch::{self, DownAction};
 use crate::switcher;
 use crate::ui_state::{transition, ToplevelId, UiEvent, UiState, ZoomOrigin};
 use crate::{DragItem, IconPress, State};
+use sc_input::home;
 use tracing::debug;
 
-/// Upward travel (fraction of screen height) that drives close_progress from 0
-/// to 1. A release past `CLOSE_COMMIT_PROGRESS` closes the card.
-const CLOSE_FULL_RISE: f32 = 0.25;
-const CLOSE_COMMIT_PROGRESS: f32 = 0.4;
-/// Finger travel to advance the carousel one card, as a fraction of output
-/// width (≈ front card width * slide distance).
-const FRONT_SCALE_PX_FRAC: f32 = 0.42;
-/// Pixels a finger may travel from an icon press and still count as a tap
-/// (launch). Past this the press is cancelled and the gesture becomes a page
-/// swipe.
-const ICON_TAP_SLOP: f32 = 12.0;
-/// Fraction of screen width the quick-switch slide must reach at release to
-/// commit to the neighbour app; short of it the swipe is rejected (springs back).
-/// Kept low so a short, deliberate swipe commits instead of bouncing.
-const BAR_QS_COMMIT_FRAC: f32 = 0.2;
-
 /// A finger held on an app icon, waiting to see if it becomes a tap (launch)
-/// or a page swipe. Cleared once movement exceeds `ICON_TAP_SLOP`.
+/// or a page swipe. Cleared once movement exceeds the icon tap slop.
 #[derive(Clone, Debug)]
 pub struct PendingLaunch {
     pub app_id: String,
@@ -137,25 +129,24 @@ fn motion_switcher_card(state: &mut State, x: f32, y: f32) -> Stage {
     else {
         return Stage::Fallthrough;
     };
-    let dx = x - start_x;
-    let dy = y - start_y;
-    let h = state.output_size.1 as f32;
-
-    if dy < 0.0 && dy.abs() > dx.abs() {
-        let progress = ((-dy) / (h * CLOSE_FULL_RISE)).clamp(0.0, 1.0);
-        if let UiState::Switcher { close, .. } = &mut state.ui {
-            *close = Some((toplevel, progress, false));
-            return Stage::Done;
+    let (w, h) = state.output_size_f();
+    match home::classify_card_drag(x - start_x, y - start_y, w, h, start_scroll) {
+        home::CardDrag::Close { progress } => {
+            if let UiState::Switcher { close, .. } = &mut state.ui {
+                *close = Some((toplevel, progress, false));
+                return Stage::Done;
+            }
         }
-    } else if let UiState::Switcher { scroll, close, .. } = &mut state.ui {
-        // Dragging right advances the focus (active card slides off right, next
-        // comes forward). One card advances per ~front-card width of travel.
-        *close = None;
-        let per_index = state.output_size.0 as f32 * FRONT_SCALE_PX_FRAC;
-        scroll.value = start_scroll + dx / per_index;
-        scroll.target = scroll.value;
-        scroll.velocity = 0.0;
-        return Stage::Done;
+        home::CardDrag::Scroll { position } => {
+            if let UiState::Switcher { scroll, close, .. } = &mut state.ui {
+                *close = None;
+                // Track the finger directly — no spring physics mid-drag.
+                scroll.value = position;
+                scroll.target = position;
+                scroll.velocity = 0.0;
+                return Stage::Done;
+            }
+        }
     }
     Stage::Fallthrough
 }
@@ -167,9 +158,7 @@ fn motion_cancel_icon_press(state: &mut State, x: f32, y: f32) {
     let Some(p) = &state.pending_launch else {
         return;
     };
-    let dx = x - p.start_x;
-    let dy = y - p.start_y;
-    if (dx * dx + dy * dy).sqrt() > ICON_TAP_SLOP {
+    if home::exceeds_icon_tap_slop(x - p.start_x, y - p.start_y) {
         state.pending_launch = None;
         // The gesture became a swipe — cancel the long-press hold too.
         state.icon_press = None;
@@ -187,9 +176,7 @@ fn motion_pull_down_search(state: &mut State, x: f32, y: f32) -> Stage {
         return Stage::Fallthrough;
     };
     let (_, h) = state.output_size_f();
-    let dy = y - sy;
-    let dx = (x - sx).abs();
-    if dy > h * 0.08 && dy > dx {
+    if home::is_pull_down_search(x - sx, y - sy, h) {
         state.open_search();
         return Stage::Done;
     }
@@ -211,16 +198,12 @@ fn motion_page_drag(state: &mut State, x: f32) {
         ..
     } = &mut state.ui
     {
-        let raw_target = *page as f32 - dx / w;
-        let max_page = (*page_count).saturating_sub(1) as f32;
-        page_spring.value = if raw_target < 0.0 {
-            raw_target * 0.3 // rubber-band left
-        } else if raw_target > max_page {
-            max_page + (raw_target - max_page) * 0.3 // rubber-band right
-        } else {
-            raw_target
-        };
-        page_spring.target = page_spring.value;
+        // Track the finger directly — no spring physics mid-drag. Note this
+        // leaves `target == value`, so the spring reports settled: whoever
+        // abandons the drag must retarget it (`State::cancel_page_drag`).
+        let value = home::page_drag_value(dx, w, *page, *page_count);
+        page_spring.value = value;
+        page_spring.target = value;
         page_spring.velocity = 0.0;
     }
 }
@@ -271,18 +254,16 @@ fn settle_quick_switch(state: &mut State) {
         UiState::QuickSwitch { offset, .. } => offset.value,
         _ => return,
     };
-    // The `prev` slot (rightward slide, offset > 0) now holds the older/next
-    // app, so committing it walks the cursor forward (+1); the `next` slot
-    // (leftward slide) holds the more-recent/previous app (-1). `target` follows
-    // the slide direction, not the app.
     let (commit, target, dir) = match &state.ui {
         UiState::QuickSwitch { prev, next, .. } => {
-            if f >= BAR_QS_COMMIT_FRAC && prev.is_some() {
-                (prev.clone(), 1.0f32, 1)
-            } else if f <= -BAR_QS_COMMIT_FRAC && next.is_some() {
-                (next.clone(), -1.0f32, -1)
-            } else {
-                (None, 0.0, 0)
+            match home::classify_quick_switch_release(f, prev.is_some(), next.is_some()) {
+                home::QuickSwitchRelease::Commit { dir, target } => {
+                    // `dir` picks the slot the slide revealed: rightward (+1)
+                    // committed the `prev` slot, leftward (-1) the `next` one.
+                    let app = if dir > 0 { prev.clone() } else { next.clone() };
+                    (app, target, dir)
+                }
+                home::QuickSwitchRelease::Reject => (None, 0.0, 0),
             }
         }
         _ => return,
@@ -313,7 +294,6 @@ fn settle_quick_switch(state: &mut State) {
 /// arrange-mode release, which differ only in what gates the call.
 fn commit_page_swipe(state: &mut State, dx: f32) {
     let w = state.output_size.0 as f32;
-    let page_delta = -dx / w; // positive = swiping to next page
     if let UiState::Home {
         page,
         page_spring,
@@ -321,13 +301,7 @@ fn commit_page_swipe(state: &mut State, dx: f32) {
         ..
     } = &mut state.ui
     {
-        let target_page = if page_delta > 0.3 && *page + 1 < *page_count {
-            *page + 1
-        } else if page_delta < -0.3 && *page > 0 {
-            *page - 1
-        } else {
-            *page
-        };
+        let target_page = home::page_after_swipe(dx, w, *page, *page_count);
         *page = target_page;
         page_spring.retarget(target_page as f32);
     }
@@ -423,12 +397,8 @@ fn update_quick_switch(state: &mut State, x: f32) {
         if *releasing {
             return; // finger already lifted; let the spring finish
         }
-        let mut f = (x - *start_x) / w;
-        let at_end = (f > 0.0 && prev.is_none()) || (f < 0.0 && next.is_none());
-        if at_end {
-            f *= 0.3;
-        }
-        f = f.clamp(-1.0, 1.0);
+        // Track the finger directly — no spring physics mid-slide.
+        let f = home::quick_switch_offset(x - *start_x, w, prev.is_some(), next.is_some());
         offset.value = f;
         offset.target = f;
         offset.velocity = 0.0;
@@ -603,10 +573,6 @@ enum Stage {
     Fallthrough,
 }
 
-/// Finger travel (output px) a switcher press may drift and still count as a tap
-/// rather than a scroll.
-const SWITCHER_TAP_SLOP: f32 = 15.0;
-
 /// Touch-up / button-release at the last known position.
 ///
 /// A release is resolved by walking the stages below **in order**, which is
@@ -682,7 +648,7 @@ fn release_arrange(state: &mut State, x: f32) -> Stage {
         Some(start_x) => {
             let dx = x - start_x;
             let w = state.output_size.0 as f32;
-            if dx.abs() > w * 0.15 {
+            if home::is_arrange_page_swipe(dx, w) {
                 commit_page_swipe(state, dx);
             } else {
                 state.arrange = None; // still tap -> exit
@@ -773,16 +739,18 @@ fn release_bar_drag(state: &mut State, x: f32, y: f32) {
     let dy = start_y - y; // positive = swiped up
     let (w, h) = state.output_size_f();
 
-    if dy > h * 0.08 {
-        // Swiped up from bar → raise most recent app (deliberate jump).
-        if let Some(tid) = state.history.previous() {
-            state.raise_toplevel_centered(tid, true);
+    match home::classify_bar_release(dx, dy, w, h) {
+        home::BarRelease::RaiseRecent => {
+            if let Some(tid) = state.history.previous() {
+                state.raise_toplevel_centered(tid, true);
+            }
         }
-    } else if dx.abs() > w * 0.15 {
-        let dir = if dx < 0.0 { 1 } else { -1 };
-        if let Some(tid) = state.history.quick_switch(dir) {
-            state.raise_toplevel_centered(tid, false);
+        home::BarRelease::QuickSwitch(dir) => {
+            if let Some(tid) = state.history.quick_switch(dir) {
+                state.raise_toplevel_centered(tid, false);
+            }
         }
+        home::BarRelease::None => {}
     }
 }
 
@@ -799,8 +767,7 @@ fn release_switcher(state: &mut State, x: f32, y: f32) -> Stage {
     if !matches!(state.ui, UiState::Switcher { .. }) {
         return Stage::Fallthrough;
     }
-    let tapped =
-        |sx: f32, sy: f32| (x - sx).abs() < SWITCHER_TAP_SLOP && (y - sy).abs() < SWITCHER_TAP_SLOP;
+    let tapped = |sx: f32, sy: f32| home::is_switcher_tap(x - sx, y - sy);
     match std::mem::replace(&mut state.switcher_drag, SwitcherDrag::None) {
         SwitcherDrag::OnCard {
             start_x, start_y, ..
@@ -837,11 +804,11 @@ fn release_switcher(state: &mut State, x: f32, y: f32) -> Stage {
     Stage::Fallthrough
 }
 
-/// Finish a card-close drag: past [`CLOSE_COMMIT_PROGRESS`] remove the card from
+/// Finish a card-close drag: past the commit threshold remove the card from
 /// the deck and close the client, otherwise mark it releasing so `Tick` springs
 /// it back.
 fn resolve_card_close(state: &mut State, toplevel: ToplevelId, progress: f32) {
-    if progress >= CLOSE_COMMIT_PROGRESS {
+    if home::card_close_commits(progress) {
         let eff = transition(&mut state.ui, UiEvent::SwitcherCloseCard { toplevel });
         if let crate::ui_state::Effect::CloseToplevel { toplevel } = eff {
             state.detach_toplevel(toplevel);

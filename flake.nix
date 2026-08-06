@@ -42,7 +42,14 @@
             overlay
           ];
         };
-        rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        # The pinned toolchain, plus `llvm-tools-preview` for `cargo llvm-cov`.
+        # The extension is added here rather than in `rust-toolchain.toml` on
+        # purpose: coverage is a dev-shell concern, and extending the toolchain
+        # the *package* builds with would change its derivation and force every
+        # VM check to rebuild the release tree.
+        rust =
+          (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override
+            { extensions = [ "llvm-tools-preview" ]; };
       in
       {
         packages.springchick = pkgs.springchick;
@@ -80,6 +87,8 @@
             pkgs.freetype
             pkgs.clang
             pkgs.python3
+            # `cargo llvm-cov` — see the coverage note in CONTRIBUTING.md.
+            pkgs.cargo-llvm-cov
           ];
           # skia-safe's build script runs bindgen — point it at libclang up front.
           # winit's Wayland backend + EGL/GLES dlopen their libs at RUNTIME; in a nix
@@ -97,6 +106,12 @@
                 pkgs.libgbm
               ]
             }''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            # cargo-llvm-cov shells out to llvm-profdata/llvm-cov and finds them
+            # via rustup by default. There is no rustup here, so point it at the
+            # pinned toolchain's own copies — they must match the rustc that
+            # produced the instrumented binaries, or the profdata is unreadable.
+            export LLVM_COV="${rust}/lib/rustlib/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/bin/llvm-cov"
+            export LLVM_PROFDATA="${rust}/lib/rustlib/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/bin/llvm-profdata"
           '';
         };
       }
