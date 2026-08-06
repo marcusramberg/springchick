@@ -31,6 +31,7 @@ mod ipc;
 mod keybinds;
 mod launcher;
 mod layer_shell;
+mod mirror;
 mod osd;
 mod popups;
 mod provenance;
