@@ -1,9 +1,20 @@
-# Landscape-rotation test: fullscreen turns the app a quarter turn.
+# Landscape-rotation test: turning the device turns a fullscreen app.
 #
-# Policy under test (see crates/sc-compositor/src/rotation.rs): a toplevel that
-# goes fullscreen is configured at the *swapped* size and drawn rotated, and
-# goes back to portrait when it leaves fullscreen. springchick's own chrome
-# stays portrait.
+# Policy under test (see crates/sc-compositor/src/rotation.rs): a fullscreen
+# toplevel is configured at the size its orientation implies and drawn turned to
+# match how the device is held; it goes back to portrait when the device is
+# stood up again *or* when it stops being fullscreen. springchick's own chrome
+# always stays portrait.
+#
+# Both halves of that rule are asserted, because the interesting bug was the
+# first one: rotation used to key off fullscreen alone, so a fullscreen
+# *portrait* app (the pull-down search) was configured at the swapped size and
+# drawn with a rotated ghost of itself. Fullscreen-while-upright must therefore
+# stay portrait, and only turning the device may rotate it.
+#
+# The VM has no accelerometer, so orientation arrives through the `orientation`
+# control-socket verb — the same `set_device_orientation` entry point the
+# iio-sensor-proxy client will feed.
 #
 # The client is `imv` showing a four-quadrant image, one saturated colour per
 # corner, at exactly the landscape aspect so it fills the rotated area with no
@@ -79,6 +90,19 @@ mkTest {
     sock = machine.succeed("basename $(ls /run/user/1000/springchick-*.lock) .lock").strip()
 
     JOURNAL = "journalctl -b _SYSTEMD_USER_UNIT=springchick.service"
+    IPC_SOCK = "/run/user/1000/springchick-ipc.sock"
+    machine.wait_until_succeeds(f"ls {IPC_SOCK}", timeout=30)
+
+    def turn(orientation):
+        """Report a device orientation, exactly as the accelerometer would.
+
+        The VM has no accelerometer, so the `orientation` control verb stands in
+        for iio-sensor-proxy. It feeds the same `State::set_device_orientation`
+        the sensor will, so the policy under test is the real one.
+        """
+        return machine.succeed(
+            f"SPRINGCHICK_IPC_SOCK={IPC_SOCK} springchick ipc orientation {orientation}"
+        ).strip()
 
     W, H = ${toString phone.width}, ${toString phone.height}
     COLOURS = {
@@ -143,26 +167,58 @@ mkTest {
         "below would prove nothing"
     )
 
-    # --- Fullscreen -> landscape -----------------------------------------
-    # imv -f asks for fullscreen at map time, so the compositor's fullscreen
-    # path runs before the client has ever drawn portrait.
+    # --- Fullscreen on an UPRIGHT phone stays portrait --------------------
+    # The regression this policy exists for. springchick used to treat any
+    # fullscreen toplevel as video wanting landscape, which configured portrait
+    # apps at the swapped size and drew a rotated ghost of them. imv -f asks for
+    # fullscreen at map time, so the fullscreen path runs immediately.
     machine.succeed(
         "systemd-run --user -M tester@.host --collect --unit=imv "
         f"--setenv=WAYLAND_DISPLAY={sock} $(command -v imv) "
         "-f -i rotation-test ${quadrants}"
     )
 
-    # The configure carries the SWAPPED logical size: the output is W x H
+    portrait_w = int(W / ${toString phone.dpi})
+    portrait_h = int(H / ${toString phone.dpi})
+    machine.wait_until_succeeds(
+        f"{JOURNAL} | grep -qF 'fullscreen request; configure {portrait_w}x{portrait_h} None'",
+        timeout=30,
+    )
+    machine.fail(f"{JOURNAL} | grep -qE 'rotation (LeftUp|RightUp)'")
+    machine.sleep(2)
+    machine.screenshot("02-fullscreen-upright")
+
+    # Quadrant sampling is useless here: the test image is landscape-aspect on
+    # purpose (it fills the *rotated* area exactly), so shown unrotated in a
+    # portrait window it is letterboxed to a band across the middle and the
+    # screen quadrant centres land on background, not image. Probe inside the
+    # band instead — scaled to fit the width, it is W wide and W/2 tall,
+    # centred vertically.
+    band_top = (H - W // 2) // 2
+    upright_probes = {
+        # (x, y) -> the image quadrant it must land in.
+        (W // 4, band_top + W // 8): "red",  # image top-left
+        (3 * W // 4, band_top + 3 * W // 8): "yellow",  # image bottom-right
+    }
+    for (px, py), expected in upright_probes.items():
+        got_px = pixel("02-fullscreen-upright", px, py)
+        assert got_px == COLOURS[expected], (
+            f"at ({px}, {py}) expected the unrotated image's {expected} "
+            f"{COLOURS[expected]}, found {got_px}. A fullscreen app on an "
+            "upright phone must not be rotated."
+        )
+
+    # --- Turning the device rotates it ------------------------------------
+    turn("left-up")
+    # The configure now carries the SWAPPED logical size: the output is W x H
     # physical at dpi ${toString phone.dpi}, so landscape logical is H/dpi x W/dpi.
     want_w = int(H / ${toString phone.dpi})
     want_h = int(W / ${toString phone.dpi})
     machine.wait_until_succeeds(
-        f"{JOURNAL} | grep -qF 'fullscreen request; configure {want_w}x{want_h} landscape'",
+        f"{JOURNAL} | grep -qF 'fullscreen request; configure {want_w}x{want_h} LeftUp'",
         timeout=30,
     )
-    # Rotation only engages once the client has ACKED that configure and drawn
-    # at the landscape size — never on the request alone.
-    machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation Landscape'", timeout=30)
+    machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation LeftUp'", timeout=30)
 
     # Let the client paint the full-size buffer before sampling.
     machine.sleep(3)
@@ -194,9 +250,38 @@ mkTest {
         "rotated app"
     )
 
-    # --- Leaving fullscreen -> portrait ----------------------------------
+    # --- The other way up is the opposite turn ----------------------------
+    # Guards the second landscape direction: right-up must be a 180° turn of
+    # left-up, not the same transform (which would show it upside down).
+    turn("right-up")
+    machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation RightUp'", timeout=30)
+    machine.sleep(3)
+    machine.screenshot("04-right-up")
+    got = quadrant_colours("04-right-up")
+    for corner, expected in {
+        "top-left": "green",
+        "top-right": "yellow",
+        "bottom-left": "red",
+        "bottom-right": "blue",
+    }.items():
+        name, px = got[corner]
+        assert name == expected, (
+            f"screen {corner} is {name} {px}, expected {expected} for right-up. "
+            f"All corners: { {k: v[0] for k, v in got.items()} }. "
+            "right-up should be left-up turned 180°."
+        )
+
+    # --- Standing the phone up again -> portrait --------------------------
+    turn("normal")
+    machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation None'", timeout=30)
+    machine.screenshot("05-upright-again")
+
+    # --- Leaving fullscreen while turned -> portrait ----------------------
     # Quitting the client is the same path as an app exiting fullscreen from the
-    # compositor's side: the foreground toplevel stops being fullscreen.
+    # compositor's side: the foreground toplevel stops being fullscreen. Turn the
+    # device first, so this proves fullscreen (not orientation) ended it.
+    turn("left-up")
+    machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation LeftUp'", timeout=30)
     machine.succeed("systemctl --user -M tester@.host stop imv")
     machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation None'", timeout=30)
     machine.screenshot("03-back-to-portrait")

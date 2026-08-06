@@ -276,10 +276,15 @@ pub(crate) struct State {
     /// surface).
     #[allow(dead_code)]
     pub background_effect: background_effect::BackgroundEffect,
-    /// Current app rotation. Set when a toplevel goes fullscreen, cleared when
-    /// it leaves fullscreen or unmaps. Only the app surface rotates — see
-    /// [`crate::rotation`].
+    /// Current app rotation, derived from [`Self::device_orientation`] and
+    /// whether the foreground app is fullscreen. Only the app surface rotates —
+    /// see [`crate::rotation`].
     pub rotation: rotation::Rotation,
+    /// How the device is physically held. Fed by the accelerometer (and by the
+    /// `orientation` control-socket verb, which is how the tests drive it);
+    /// `Normal` until something says otherwise, so a device with no sensor
+    /// behaves exactly as if it were held upright.
+    pub device_orientation: rotation::DeviceOrientation,
     /// Whether the foreground app is fullscreen content that wants a landscape
     /// display (see [`content_type::wants_landscape`]). Nothing rotates yet —
     /// this is the signal the rotation work will read.
@@ -558,6 +563,7 @@ impl State {
             content_type,
             background_effect,
             rotation: rotation::Rotation::None,
+            device_orientation: rotation::DeviceOrientation::Normal,
             landscape_hint: false,
             skia: SkiaGl::new(),
             wayland_socket,
