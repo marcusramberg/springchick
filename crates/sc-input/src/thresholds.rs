@@ -13,9 +13,18 @@ pub const SWITCHER_REVEAL_PROGRESS: f32 = 0.12;
 /// release settles in the switcher stack.
 pub const HOME_MIN_PROGRESS: f32 = 0.35;
 /// Upward velocity (fraction of screen height per second) above which a flick
-/// always flings home regardless of distance. Negative = upward. Only decisive
-/// flicks should go home, so the fan stack stays easy to reach.
-pub const HOME_FLICK_VELOCITY: f32 = -2.6;
+/// always flings home regardless of distance. Negative = upward.
+///
+/// This is the flick/drag divide, not a "very fast" gate: any quick upward
+/// flick off an app card means home, and only a *slow* drag settles in the fan
+/// stack.
+///
+/// Compared against the [`VELOCITY_SMOOTHING`] low-passed velocity, which lags
+/// the true speed badly on a gesture this short — a flick covering 20% of the
+/// screen in 120ms (1.7 screens/s in truth) reports about 1.0. So the bar has to
+/// sit near that reported figure, not near the real one; a deliberate slow drag
+/// reports ~0.3-0.5 and stays comfortably under.
+pub const HOME_FLICK_VELOCITY: f32 = -0.9;
 /// Horizontal travel fraction (of screen width) that commits a quick-switch.
 pub const QUICK_SWITCH_PROGRESS: f32 = 0.15;
 /// Horizontal velocity (fraction of screen width/s) that commits a quick-switch.

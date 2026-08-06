@@ -53,7 +53,8 @@ pub fn classify_release(t: &Tracker) -> NavTarget {
     if progress < th::BACK_TO_APP_MAX_PROGRESS {
         return NavTarget::BackToApp;
     }
-    // Home only two ways: a decisive upward flick, or dragging all the way up.
+    // Home two ways: any quick upward flick, or dragging all the way up. The
+    // fan stack is what a *slow* drag settles into — speed is the divide.
     if t.velocity.y <= th::HOME_FLICK_VELOCITY {
         return NavTarget::Home;
     }
@@ -95,6 +96,31 @@ mod tests {
             Pt { x: 0.0, y: -3.0 },
         );
         assert_eq!(classify_release(&t), NavTarget::Home);
+    }
+
+    #[test]
+    fn quick_flick_goes_home_not_to_the_switcher() {
+        // A short, quick flick off the card — the travel lands squarely in the
+        // fan band, so only the speed distinguishes it from a slow drag. The
+        // velocity here is what the low-pass actually reports for a 20%-of-screen
+        // flick in ~120ms, not its true instantaneous speed.
+        let t = t_with(
+            Pt { x: 0.5, y: 0.95 },
+            Pt { x: 0.5, y: 0.75 }, // up_progress 0.20 (band B)
+            Pt { x: 0.0, y: -1.0 },
+        );
+        assert_eq!(classify_release(&t), NavTarget::Home);
+    }
+
+    #[test]
+    fn a_drag_just_under_flick_speed_still_settles_in_the_fan() {
+        // The divide has to stay a divide: below it, the fan is still reachable.
+        let t = t_with(
+            Pt { x: 0.5, y: 0.95 },
+            Pt { x: 0.5, y: 0.75 },
+            Pt { x: 0.0, y: -0.6 },
+        );
+        assert_eq!(classify_release(&t), NavTarget::Switcher);
     }
 
     #[test]
