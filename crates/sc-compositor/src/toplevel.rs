@@ -263,6 +263,31 @@ impl State {
         );
     }
 
+    /// Slide an already-running app in from the right edge — the Home-bar
+    /// rightward swipe. Unlike [`Self::raise_toplevel_centered`] this plays an
+    /// entrance animation (Home travels leftwards off the app), and it counts as
+    /// a deliberate activation, so it reorders the MRU stack.
+    pub(crate) fn slide_toplevel_from_home(&mut self, tid: ToplevelId) {
+        let Some(Some(tl)) = self.toplevels.get(tid) else {
+            return;
+        };
+        let app_id = tl.app_id.clone();
+        let (w, h) = self.output_size_f();
+        self.last_origin = ZoomOrigin::icon((w / 2.0, h / 2.0));
+        self.history.push_foreground(tid);
+        transition(
+            &mut self.ui,
+            UiEvent::AppMapped {
+                toplevel: tid,
+                app_id,
+                // Unused by the slide, but the state carries an origin for the
+                // return trip home.
+                origin: self.last_origin,
+                open_mode: crate::ui_state::OpenMode::SlideFromLeft,
+            },
+        );
+    }
+
     /// Retag a mapped toplevel once its real xdg `app_id` arrives, recording the
     /// launch in frecency. See `XdgShellHandler::app_id_changed`.
     pub(crate) fn resolve_app_id(&mut self, surface: &ToplevelSurface) {

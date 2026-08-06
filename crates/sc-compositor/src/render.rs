@@ -577,6 +577,8 @@ fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan)
         ctx.grid_positions,
         ctx.dock_positions,
         ctx.app_origin.1 as f32,
+        scene.home_lift,
+        scene.home_shift,
     );
 }
 

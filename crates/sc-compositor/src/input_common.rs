@@ -726,11 +726,12 @@ fn release_icon_tap(state: &mut State) -> Stage {
     Stage::Fallthrough
 }
 
-/// Bar drag from Home: classify the swipe direction and raise an app.
+/// Bar drag from Home: swipe up into the switcher deck, or swipe right onto the
+/// top card of the stack.
 ///
-/// From the Home bar there is no foreground app to slide, so the horizontal
-/// switch stays a release-classified instant raise. (The live slide is the
-/// in-app grab gesture — see [`enter_quick_switch`].)
+/// Both are release-classified (the live, finger-tracked versions are the in-app
+/// grab gestures — see [`enter_quick_switch`]) and both bounce Home instead of
+/// doing nothing when there is no app to reach.
 fn release_bar_drag(state: &mut State, x: f32, y: f32) {
     let Some((start_x, start_y)) = state.bar_drag_start.take() else {
         return;
@@ -739,18 +740,32 @@ fn release_bar_drag(state: &mut State, x: f32, y: f32) {
     let dy = start_y - y; // positive = swiped up
     let (w, h) = state.output_size_f();
 
-    match home::classify_bar_release(dx, dy, w, h) {
-        home::BarRelease::RaiseRecent => {
-            if let Some(tid) = state.history.previous() {
-                state.raise_toplevel_centered(tid, true);
-            }
+    let verdict = home::classify_bar_release(dx, dy, w, h);
+    if matches!(verdict, home::BarRelease::None) {
+        return;
+    }
+    // The deck the gesture is reaching for: MRU order, minus any toplevel that
+    // has since gone away.
+    let cards: Vec<_> = state
+        .history
+        .deck_order()
+        .into_iter()
+        .filter(|tid| matches!(state.toplevels.get(*tid), Some(Some(_))))
+        .collect();
+    debug!(target: "springchick::debug", "bar release {:?} cards={:?}", verdict, cards);
+
+    match (verdict, cards.first().copied()) {
+        // Nothing running: rubber-band Home so the gesture is still acknowledged.
+        (_, None) => {
+            transition(&mut state.ui, UiEvent::HomeBounce);
         }
-        home::BarRelease::QuickSwitch(dir) => {
-            if let Some(tid) = state.history.quick_switch(dir) {
-                state.raise_toplevel_centered(tid, false);
-            }
+        (home::BarRelease::OpenSwitcher, Some(_)) => {
+            transition(&mut state.ui, UiEvent::OpenSwitcherFromHome { cards });
         }
-        home::BarRelease::None => {}
+        (home::BarRelease::SlideToTop, Some(tid)) => {
+            state.slide_toplevel_from_home(tid);
+        }
+        (home::BarRelease::None, _) => unreachable!("returned above"),
     }
 }
 
