@@ -386,6 +386,11 @@ impl State {
             // for policy that wants to tell video from a fullscreen text app.
             info!(target: "springchick::debug", "landscape hint {hint}");
         }
+        // The accelerometer is only worth powering while something can act on
+        // it, which is exactly while an app is fullscreen.
+        if let Some(sensor) = &mut self.sensor {
+            sensor.set_wanted(fullscreen);
+        }
         // A rotation change here means the app only just became (or stopped
         // being) fullscreen while the device was already turned, so it is still
         // drawing at the old size — re-configure it.
@@ -446,6 +451,15 @@ impl State {
                 self.configure_fullscreen(&surface);
             }
         }
+    }
+
+    /// Apply whatever the accelerometer last reported. Called once a tick by
+    /// both frame loops; a no-op when there is no sensor, or nothing changed.
+    pub(crate) fn drain_sensor(&mut self) {
+        let Some(latest) = self.sensor.as_ref().and_then(crate::sensor::Sensor::latest) else {
+            return;
+        };
+        self.set_device_orientation(latest);
     }
 
     /// The foreground app's `ToplevelSurface`, if there is one.

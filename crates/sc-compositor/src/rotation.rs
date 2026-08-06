@@ -82,11 +82,18 @@ pub enum Rotation {
     /// Portrait: the app follows the output, no extra transform.
     #[default]
     None,
-    /// The device's left edge is up, so the app is turned a quarter turn
-    /// clockwise on screen: its top edge runs down the screen's right side.
+    /// The device's left edge is up (it was turned clockwise), so the app is
+    /// turned a quarter turn *anticlockwise* on screen — its top edge runs up
+    /// the screen's left side.
+    ///
+    /// Turning the phone clockwise swings the panel's +x axis to point at the
+    /// ground, so world-up is panel −x: the image's top edge has to lie along
+    /// the screen's left edge to read upright. Turning the app the same way as
+    /// the phone would land it 180° out, which is exactly how this looked on
+    /// device before the two transforms were swapped.
     LeftUp,
     /// The device's right edge is up — the opposite quarter turn, so the app's
-    /// top edge runs up the screen's left side.
+    /// top edge runs down the screen's right side.
     RightUp,
 }
 
@@ -95,8 +102,8 @@ impl Rotation {
     pub fn transform(self) -> Transform {
         match self {
             Rotation::None => Transform::Normal,
-            Rotation::LeftUp => Transform::_90,
-            Rotation::RightUp => Transform::_270,
+            Rotation::LeftUp => Transform::_270,
+            Rotation::RightUp => Transform::_90,
         }
     }
 
@@ -119,16 +126,18 @@ impl Rotation {
     /// where the user sees it. The inverse of what [`Self::transform`] does to
     /// the pixels.
     ///
-    /// `output` is the physical output size (portrait). For `LeftUp`, screen x
-    /// runs *up* the app's y axis and screen y runs along the app's x axis;
-    /// `RightUp` is the same idea mirrored through both axes.
+    /// `output` is the physical output size (portrait). Each arm is the inverse
+    /// of the matching [`Self::transform`], so the two must always be changed as
+    /// a pair — a mismatch leaves taps landing somewhere other than what the
+    /// user is looking at.
     pub fn map_input(self, x: f32, y: f32, output: (i32, i32)) -> (f32, f32) {
         match self {
             Rotation::None => (x, y),
-            // App origin sits at the screen's top-right.
-            Rotation::LeftUp => (y, output.0 as f32 - x),
-            // App origin sits at the screen's bottom-left.
-            Rotation::RightUp => (output.1 as f32 - y, x),
+            // Turned anticlockwise: the app's origin sits at the screen's
+            // bottom-left.
+            Rotation::LeftUp => (output.1 as f32 - y, x),
+            // Turned clockwise: the app's origin sits at the screen's top-right.
+            Rotation::RightUp => (y, output.0 as f32 - x),
         }
     }
 }
@@ -151,19 +160,18 @@ mod tests {
     }
 
     #[test]
-    fn landscape_input_maps_corners_to_corners() {
-        let app = Rotation::LeftUp.app_size(OUTPUT);
-        // Screen top-left is the app's bottom-left: the app's origin sits at the
-        // screen's top-right, since the app is turned clockwise.
-        assert_eq!(Rotation::LeftUp.map_input(0.0, 0.0, OUTPUT), (0.0, 1000.0));
+    fn right_up_input_maps_corners_to_corners() {
+        let app = Rotation::RightUp.app_size(OUTPUT);
+        // Turned clockwise, so the app's origin sits at the screen's top-right.
+        assert_eq!(Rotation::RightUp.map_input(0.0, 0.0, OUTPUT), (0.0, 1000.0));
         // Screen top-right → app origin.
         assert_eq!(
-            Rotation::LeftUp.map_input(OUTPUT.0 as f32, 0.0, OUTPUT),
+            Rotation::RightUp.map_input(OUTPUT.0 as f32, 0.0, OUTPUT),
             (0.0, 0.0)
         );
         // Screen bottom-right → app's far x edge, y = 0.
         assert_eq!(
-            Rotation::LeftUp.map_input(OUTPUT.0 as f32, OUTPUT.1 as f32, OUTPUT),
+            Rotation::RightUp.map_input(OUTPUT.0 as f32, OUTPUT.1 as f32, OUTPUT),
             (app.0 as f32, 0.0)
         );
     }
@@ -179,25 +187,27 @@ mod tests {
     }
 
     #[test]
-    fn right_up_is_the_opposite_quarter_turn() {
-        assert_eq!(Rotation::RightUp.app_size(OUTPUT), (2000, 1000));
-        assert_eq!(Rotation::RightUp.transform(), Transform::_270);
+    fn left_up_is_the_anticlockwise_quarter_turn() {
+        // Turning the phone CLOCKWISE (left edge up) turns the app
+        // ANTICLOCKWISE, or it reads upside down — confirmed on device.
+        assert_eq!(Rotation::LeftUp.app_size(OUTPUT), (2000, 1000));
+        assert_eq!(Rotation::LeftUp.transform(), Transform::_270);
         // The app's origin sits at the screen's bottom-left — the mirror of
-        // LeftUp, whose origin is the top-right.
+        // RightUp, whose origin is the top-right.
         assert_eq!(
-            Rotation::RightUp.map_input(0.0, OUTPUT.1 as f32, OUTPUT),
+            Rotation::LeftUp.map_input(0.0, OUTPUT.1 as f32, OUTPUT),
             (0.0, 0.0)
         );
         // Screen top-left → the app's far x edge at y = 0.
-        let app = Rotation::RightUp.app_size(OUTPUT);
+        let app = Rotation::LeftUp.app_size(OUTPUT);
         assert_eq!(
-            Rotation::RightUp.map_input(0.0, 0.0, OUTPUT),
+            Rotation::LeftUp.map_input(0.0, 0.0, OUTPUT),
             (app.0 as f32, 0.0)
         );
     }
 
     #[test]
-    fn right_up_input_stays_in_bounds() {
+    fn left_up_input_stays_in_bounds_too() {
         let app = Rotation::RightUp.app_size(OUTPUT);
         for (x, y) in [(0.0, 0.0), (999.0, 1999.0), (500.0, 1000.0)] {
             let (ax, ay) = Rotation::RightUp.map_input(x, y, OUTPUT);

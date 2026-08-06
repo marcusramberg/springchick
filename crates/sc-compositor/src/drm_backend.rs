@@ -369,6 +369,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // screen.
         crate::keybinds::poll(&mut app.state);
         app.state.poll_launching();
+        app.state.drain_sensor();
         app.state.sync_keyboard_focus();
         // Idle-blank once the timeout elapses. Reuses the power-button DPMS-off
         // path; a power-button press wakes it and resets the countdown (input

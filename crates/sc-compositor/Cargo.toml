@@ -40,6 +40,11 @@ smithay = { git = "https://code.bas.es/marcus/smithay.git", rev = "ed8f054605ff1
 # (smithay::reexports::{input, drm, gbm, ...}) to avoid version skew.
 libc = "0.2"
 
+# iio-sensor-proxy client (accelerometer orientation) over the system bus.
+# Bindings to libdbus rather than a pure-Rust stack: 3 transitive crates against
+# zbus's 142, for one interface read from one worker thread.
+dbus = "0.9"
+
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
