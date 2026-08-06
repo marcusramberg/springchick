@@ -524,7 +524,34 @@ pub fn on_press(state: &mut State) {
     }
 }
 
+/// Whether a release stage consumed the gesture.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[must_use]
+enum Release {
+    /// The gesture is fully resolved: later stages and the trailing page-count
+    /// refresh are skipped.
+    Done,
+    /// Not this stage's gesture (or this stage only did part of the work);
+    /// keep going down the chain.
+    Fallthrough,
+}
+
+/// Finger travel (output px) a switcher press may drift and still count as a tap
+/// rather than a scroll.
+const SWITCHER_TAP_SLOP: f32 = 15.0;
+
 /// Touch-up / button-release at the last known position.
+///
+/// A release is resolved by walking the stages below **in order**, which is
+/// load-bearing in both directions:
+///
+/// - Ordering: an armed icon tap outranks the page swipe armed from the same
+///   press (`on_press` arms both and lets the release pick); the bar-drag
+///   classification must run before the page swipe consumes `page_drag_start`.
+/// - Termination: a stage returning [`Release::Done`] skips everything after it,
+///   *including* the trailing `page_count` refresh — which is why the quick-switch,
+///   arrange, icon-tap, and switcher-tap paths don't touch it, while the bar-drag,
+///   page-swipe, and grab paths (which can land on Home) do.
 pub fn on_release(state: &mut State) {
     let Some((x, y)) = state.last_pointer_pos else {
         return;
@@ -533,68 +560,55 @@ pub fn on_release(state: &mut State) {
     // A completed (or abandoned) gesture disarms the pull-down.
     state.search_arm = None;
 
-    // Live quick-switch release: commit to the revealed neighbour past the
-    // threshold, otherwise spring back (reject). Everything below is irrelevant
-    // in this state.
-    if matches!(state.ui, UiState::QuickSwitch { .. }) {
-        state.bar_drag_start = None;
-        settle_quick_switch(state);
+    if release_quick_switch(state) == Release::Done {
         return;
     }
+    if release_arrange(state, x) == Release::Done {
+        return;
+    }
+    if release_icon_tap(state) == Release::Done {
+        return;
+    }
+    release_bar_drag(state, x, y);
+    release_page_swipe(state, x);
+    if release_switcher(state, x, y) == Release::Done {
+        return;
+    }
+    release_grab(state);
 
-    // Arrange-mode release: resolve the drag (if any) to pin/unpin/snap-back,
-    // then stay in arrange mode (only Done/empty-tap exits it).
-    if state.arrange.is_some() {
-        // Take the drag out (if any) without holding a &mut borrow across the
-        // body below.
-        let drag = state.arrange.as_mut().and_then(|a| a.drag.take());
-        if let Some(drag) = drag {
-            let (w, h) = state.output_size_f();
-            let page = if let UiState::Home { page, .. } = &state.ui {
-                *page
-            } else {
-                0
-            };
-            let page_len = state.model.pages.get(page).map_or(0, |p| p.len());
-            let layout = sc_layout::compute(w, h, page, &state.model);
-            let edited = match input_dispatch::resolve_drop(
-                drag.cur.0,
-                drag.cur.1,
-                &layout,
-                drag.source,
-                page,
-                page_len,
-                w,
-                h,
-            ) {
-                input_dispatch::DropAction::Pin => state.model.pin(&drag.app_id),
-                input_dispatch::DropAction::Reorder { page, index } => {
-                    // `page` is the current Home page (edge-dwell flips update
-                    // it); use it, not `drag.hover.page` which the flip does not
-                    // refresh. `hover.index` is computed against the working
-                    // (hole-removed) order, so prefer it to avoid a slot skew.
-                    let ix = drag.hover.map_or(index, |h| h.1);
-                    state.model.move_to(&drag.app_id, page, ix);
-                    true
-                }
-                input_dispatch::DropAction::SnapBack => false,
-            };
-            if edited {
-                state.after_arrange_edit();
-            } else {
-                // No model edit, but a drag may have created a trailing empty
-                // page via edge-dwell flip — drop it (no save needed). Also
-                // re-seed the dock so a snapped-back dock icon (dropped from
-                // dock_anim during the lift) springs back into place.
-                state.model.repack();
-                state.reflow_grid();
-                state.reflow_dock();
-            }
-            return;
-        }
-        // No icon drag: empty-area release. A swipe commits a page flip and
-        // stays in arrange; a still tap exits.
-        if let Some(start_x) = state.page_drag_start.take() {
+    // Update page_count after returning home.
+    if let UiState::Home { page_count, .. } = &mut state.ui {
+        *page_count = state.model.pages.len().max(1);
+    }
+}
+
+/// Live quick-switch release: commit to the revealed neighbour past the
+/// threshold, otherwise spring back (reject). Every later stage is irrelevant in
+/// this state.
+fn release_quick_switch(state: &mut State) -> Release {
+    if !matches!(state.ui, UiState::QuickSwitch { .. }) {
+        return Release::Fallthrough;
+    }
+    state.bar_drag_start = None;
+    settle_quick_switch(state);
+    Release::Done
+}
+
+/// Arrange-mode release: resolve the drag (if any) to pin/unpin/snap-back, then
+/// stay in arrange mode — only Done or an empty-area tap exits it.
+fn release_arrange(state: &mut State, x: f32) -> Release {
+    if state.arrange.is_none() {
+        return Release::Fallthrough;
+    }
+    // Take the drag out (if any) without holding a &mut borrow across the body.
+    if let Some(drag) = state.arrange.as_mut().and_then(|a| a.drag.take()) {
+        resolve_arrange_drop(state, drag);
+        return Release::Done;
+    }
+    // No icon drag: empty-area release. A swipe commits a page flip and stays in
+    // arrange; a still tap exits.
+    match state.page_drag_start.take() {
+        Some(start_x) => {
             let dx = x - start_x;
             let w = state.output_size.0 as f32;
             if dx.abs() > w * 0.15 {
@@ -602,202 +616,252 @@ pub fn on_release(state: &mut State) {
             } else {
                 state.arrange = None; // still tap -> exit
             }
-        } else {
-            state.arrange = None;
         }
-        return;
+        None => state.arrange = None,
     }
+    Release::Done
+}
 
-    // Icon tap: the pending launch survived (finger never passed the tap slop),
-    // so this was a tap, not a swipe. Launch and drop the page drag.
+/// Apply a dropped arrange-mode icon: pin to the dock, reorder within the grid,
+/// or snap back untouched.
+fn resolve_arrange_drop(state: &mut State, drag: DragItem) {
+    let (w, h) = state.output_size_f();
+    let page = state.current_home_page();
+    let page_len = state.model.pages.get(page).map_or(0, |p| p.len());
+    let layout = sc_layout::compute(w, h, page, &state.model);
+    let action = input_dispatch::resolve_drop(
+        drag.cur.0,
+        drag.cur.1,
+        &layout,
+        drag.source,
+        page,
+        page_len,
+        w,
+        h,
+    );
+    // Logged so the VM test can assert the drop resolved the way the gesture
+    // intended, separately from whether the model edit then landed.
+    debug!(
+        target: "springchick::debug",
+        "arrange drop app_id={} action={:?}", drag.app_id, action
+    );
+    let edited = match action {
+        input_dispatch::DropAction::Pin => state.model.pin(&drag.app_id),
+        input_dispatch::DropAction::Reorder { page, index } => {
+            // `page` is the current Home page (edge-dwell flips update it); use
+            // it, not `drag.hover.page` which the flip does not refresh.
+            // `hover.index` is computed against the working (hole-removed)
+            // order, so prefer it to avoid a slot skew.
+            let ix = drag.hover.map_or(index, |h| h.1);
+            state.model.move_to(&drag.app_id, page, ix);
+            true
+        }
+        input_dispatch::DropAction::SnapBack => false,
+    };
+    if edited {
+        state.after_arrange_edit();
+    } else {
+        // No model edit, but a drag may have created a trailing empty page via
+        // edge-dwell flip — drop it (no save needed). Also re-seed the dock so a
+        // snapped-back dock icon (dropped from dock_anim during the lift)
+        // springs back into place.
+        state.model.repack();
+        state.reflow_grid();
+        state.reflow_dock();
+    }
+}
+
+/// Icon tap: the pending launch survived (the finger never passed the tap slop),
+/// so this was a tap, not a swipe. Launch and drop the page drag armed from the
+/// same press.
+fn release_icon_tap(state: &mut State) -> Release {
     if let Some(p) = state.pending_launch.take() {
         state.page_drag_start = None;
         state.icon_press = None;
         state.launch_or_raise(&p.app_id, p.origin);
-        return;
+        return Release::Done;
     }
+    // Not a tap — the long-press hold is over either way.
     state.icon_press = None;
+    Release::Fallthrough
+}
 
-    // Bar drag from Home: classify swipe direction.
-    if let Some((start_x, start_y)) = state.bar_drag_start.take() {
-        let dx = x - start_x;
-        let dy = start_y - y; // positive = swiped up
-        let (w, h) = state.output_size_f();
+/// Bar drag from Home: classify the swipe direction and raise an app.
+///
+/// From the Home bar there is no foreground app to slide, so the horizontal
+/// switch stays a release-classified instant raise. (The live slide is the
+/// in-app grab gesture — see [`enter_quick_switch`].)
+fn release_bar_drag(state: &mut State, x: f32, y: f32) {
+    let Some((start_x, start_y)) = state.bar_drag_start.take() else {
+        return;
+    };
+    let dx = x - start_x;
+    let dy = start_y - y; // positive = swiped up
+    let (w, h) = state.output_size_f();
 
-        // From the Home bar there is no foreground app to slide, so the
-        // horizontal switch stays a release-classified instant raise. (The live
-        // slide is the in-app grab gesture — see `enter_quick_switch`.)
-        if dy > h * 0.08 {
-            // Swiped up from bar → raise most recent app (deliberate jump).
-            if let Some(tid) = state.history.previous() {
-                state.raise_toplevel_centered(tid, true);
-            }
-        } else if dx.abs() > w * 0.15 {
-            let dir = if dx < 0.0 { 1 } else { -1 };
-            if let Some(tid) = state.history.quick_switch(dir) {
-                state.raise_toplevel_centered(tid, false);
-            }
+    if dy > h * 0.08 {
+        // Swiped up from bar → raise most recent app (deliberate jump).
+        if let Some(tid) = state.history.previous() {
+            state.raise_toplevel_centered(tid, true);
+        }
+    } else if dx.abs() > w * 0.15 {
+        let dir = if dx < 0.0 { 1 } else { -1 };
+        if let Some(tid) = state.history.quick_switch(dir) {
+            state.raise_toplevel_centered(tid, false);
         }
     }
+}
 
-    // Page swipe: snap based on 30% threshold.
+/// Page swipe: snap based on the 30% threshold.
+fn release_page_swipe(state: &mut State, x: f32) {
     if let Some(start_x) = state.page_drag_start.take() {
         commit_page_swipe(state, x - start_x);
     }
+}
 
-    // Switcher release: tap card or dismiss.
-    if matches!(state.ui, UiState::Switcher { .. }) {
-        let drag = std::mem::replace(&mut state.switcher_drag, SwitcherDrag::None);
-        match drag {
-            SwitcherDrag::OnCard {
-                start_x, start_y, ..
-            } => {
-                // If this drag was closing a card, commit past the threshold or
-                // snap it back.
-                let closing = if let UiState::Switcher { close, .. } = &state.ui {
-                    *close
-                } else {
-                    None
-                };
-                if let Some((ct, progress, _)) = closing {
-                    if progress >= CLOSE_COMMIT_PROGRESS {
-                        // Remove the card from the deck, then close the client.
-                        let eff =
-                            transition(&mut state.ui, UiEvent::SwitcherCloseCard { toplevel: ct });
-                        if let crate::ui_state::Effect::CloseToplevel { toplevel } = eff {
-                            state.detach_toplevel(toplevel);
-                        }
-                    } else if let UiState::Switcher { close, .. } = &mut state.ui {
-                        // Cancelled — mark releasing so Tick springs it back.
-                        *close = Some((ct, progress, true));
-                    }
-                    return;
-                }
-
-                let dx = (x - start_x).abs();
-                let dy = (y - start_y).abs();
-                if dx < 15.0 && dy < 15.0 {
-                    // Tap: open the card.
-                    let hit =
-                        switcher::hit_test(&state.switcher_cards, x, y, state.output_size_f());
-                    if let switcher::CardHit::Card(idx) = hit {
-                        // `idx` indexes the z-sorted render array; resolve it to
-                        // the card's toplevel id so ordering can't desync.
-                        if let Some(card) = state.switcher_cards.get(idx).copied() {
-                            let origin =
-                                ZoomOrigin::card((card.center_x, card.center_y), card.scale);
-                            // Resolve the real app_id from the toplevel (the deck
-                            // tracks only ids); otherwise the App state carries a
-                            // fabricated `app_{id}` placeholder.
-                            let app_id = state
-                                .toplevels
-                                .get(card.toplevel)
-                                .and_then(|t| t.as_ref())
-                                .map(|t| t.app_id.clone())
-                                .unwrap_or_default();
-                            // Selecting a card makes it the most-recent app, so
-                            // the next switcher shows it as the front card.
-                            state.history.push_foreground(card.toplevel);
-                            transition(
-                                &mut state.ui,
-                                UiEvent::SwitcherTapCard {
-                                    toplevel: card.toplevel,
-                                    app_id,
-                                    origin,
-                                },
-                            );
-                            return;
-                        }
-                    }
-                } else if let UiState::Switcher { cards, scroll, .. } = &mut state.ui {
-                    // Carousel scroll released: settle to the nearest card.
-                    let max = cards.len().saturating_sub(1) as f32;
-                    let target = scroll.value.round().clamp(0.0, max);
-                    scroll.retarget(target);
-                }
-            }
-            SwitcherDrag::InEmpty { start_x, start_y } => {
-                let dx = (x - start_x).abs();
-                let dy = (y - start_y).abs();
-                if dx < 15.0 && dy < 15.0 {
-                    transition(&mut state.ui, UiEvent::SwitcherDismiss);
-                    return;
-                }
-            }
-            SwitcherDrag::None => {}
-        }
+/// Switcher release: commit or cancel a card close, open a tapped card, dismiss
+/// on an empty tap, or settle the carousel scroll.
+fn release_switcher(state: &mut State, x: f32, y: f32) -> Release {
+    if !matches!(state.ui, UiState::Switcher { .. }) {
+        return Release::Fallthrough;
     }
+    let tapped =
+        |sx: f32, sy: f32| (x - sx).abs() < SWITCHER_TAP_SLOP && (y - sy).abs() < SWITCHER_TAP_SLOP;
+    match std::mem::replace(&mut state.switcher_drag, SwitcherDrag::None) {
+        SwitcherDrag::OnCard {
+            start_x, start_y, ..
+        } => {
+            // If this drag was closing a card, commit past the threshold or snap
+            // it back — either way the release is spent.
+            let closing = match &state.ui {
+                UiState::Switcher { close, .. } => *close,
+                _ => None,
+            };
+            if let Some((ct, progress, _)) = closing {
+                resolve_card_close(state, ct, progress);
+                return Release::Done;
+            }
 
-    // Release grab if active.
-    let release = if let UiState::Grabbing {
+            if tapped(start_x, start_y) {
+                return open_tapped_card(state, x, y);
+            }
+            if let UiState::Switcher { cards, scroll, .. } = &mut state.ui {
+                // Carousel scroll released: settle to the nearest card.
+                let max = cards.len().saturating_sub(1) as f32;
+                let target = scroll.value.round().clamp(0.0, max);
+                scroll.retarget(target);
+            }
+        }
+        SwitcherDrag::InEmpty { start_x, start_y } => {
+            if tapped(start_x, start_y) {
+                transition(&mut state.ui, UiEvent::SwitcherDismiss);
+                return Release::Done;
+            }
+        }
+        SwitcherDrag::None => {}
+    }
+    Release::Fallthrough
+}
+
+/// Finish a card-close drag: past [`CLOSE_COMMIT_PROGRESS`] remove the card from
+/// the deck and close the client, otherwise mark it releasing so `Tick` springs
+/// it back.
+fn resolve_card_close(state: &mut State, toplevel: ToplevelId, progress: f32) {
+    if progress >= CLOSE_COMMIT_PROGRESS {
+        let eff = transition(&mut state.ui, UiEvent::SwitcherCloseCard { toplevel });
+        if let crate::ui_state::Effect::CloseToplevel { toplevel } = eff {
+            state.detach_toplevel(toplevel);
+        }
+    } else if let UiState::Switcher { close, .. } = &mut state.ui {
+        *close = Some((toplevel, progress, true));
+    }
+}
+
+/// Open the switcher card under `(x, y)`, if the tap actually hit one.
+/// A tap that misses every card falls through to the remaining release stages.
+fn open_tapped_card(state: &mut State, x: f32, y: f32) -> Release {
+    let switcher::CardHit::Card(idx) =
+        switcher::hit_test(&state.switcher_cards, x, y, state.output_size_f())
+    else {
+        return Release::Fallthrough;
+    };
+    // `idx` indexes the z-sorted render array; resolve it to the card's toplevel
+    // id so ordering can't desync.
+    let Some(card) = state.switcher_cards.get(idx).copied() else {
+        return Release::Fallthrough;
+    };
+    let origin = ZoomOrigin::card((card.center_x, card.center_y), card.scale);
+    // Resolve the real app_id from the toplevel (the deck tracks only ids);
+    // otherwise the App state carries a fabricated `app_{id}` placeholder.
+    let app_id = state
+        .toplevels
+        .get(card.toplevel)
+        .and_then(|t| t.as_ref())
+        .map(|t| t.app_id.clone())
+        .unwrap_or_default();
+    // Selecting a card makes it the most-recent app, so the next switcher shows
+    // it as the front card.
+    state.history.push_foreground(card.toplevel);
+    transition(
+        &mut state.ui,
+        UiEvent::SwitcherTapCard {
+            toplevel: card.toplevel,
+            app_id,
+            origin,
+        },
+    );
+    Release::Done
+}
+
+/// Release an in-app grab: classify the gesture and either quick-switch to the
+/// adjacent app or start the settle animation toward Home / the switcher.
+fn release_grab(state: &mut State) {
+    let UiState::Grabbing {
         tracker,
         toplevel,
         app_id,
         ..
     } = &state.ui
-    {
-        Some((
-            sc_input::classify_release(tracker),
-            *toplevel,
-            app_id.clone(),
-        ))
-    } else {
-        None
+    else {
+        return;
     };
-    if let Some((target, cur_tid, cur_app)) = release {
-        debug!(target: "springchick::debug", "on_release grab target={:?}", target);
-        match target {
-            sc_input::NavTarget::QuickSwitch(dir) => {
-                // Grab-based quick-switch: raise the adjacent app directly.
-                let adj = state
-                    .history
-                    .quick_switch(dir)
-                    .filter(|tid| matches!(state.toplevels.get(*tid), Some(Some(_))));
-                match adj {
-                    Some(tid) => {
-                        // Browse without reordering — same rule as the bar swipe.
-                        let app_id = state.toplevels[tid].as_ref().unwrap().app_id.clone();
-                        transition(
-                            &mut state.ui,
-                            UiEvent::RaiseApp {
-                                toplevel: tid,
-                                app_id,
-                            },
-                        );
-                    }
-                    // No adjacent app — snap back to the current one.
-                    None => {
-                        transition(
-                            &mut state.ui,
-                            UiEvent::RaiseApp {
-                                toplevel: cur_tid,
-                                app_id: cur_app,
-                            },
-                        );
-                    }
-                }
-            }
-            _ => {
-                let last_origin = state.last_origin;
-                let size = state.output_size_f();
-                transition(&mut state.ui, UiEvent::GrabRelease);
-                // Settling toward Home zooms back to the launcher icon; toward
-                // the switcher it settles into the front-card slot so the shrink
-                // flows straight into the fan (no shrink-to-point then pop).
-                if let UiState::Settling { origin, target, .. } = &mut state.ui {
-                    *origin = if matches!(target, sc_input::NavTarget::Switcher) {
-                        let (cx, cy, s) = switcher::front_slot(size);
-                        ZoomOrigin::card((cx, cy), s)
-                    } else {
-                        last_origin
-                    };
-                }
+    let (target, cur_tid, cur_app) = (
+        sc_input::classify_release(tracker),
+        *toplevel,
+        app_id.clone(),
+    );
+    debug!(target: "springchick::debug", "on_release grab target={:?}", target);
+
+    match target {
+        sc_input::NavTarget::QuickSwitch(dir) => {
+            // Grab-based quick-switch: raise the adjacent app directly, browsing
+            // without reordering — same rule as the bar swipe. With no adjacent
+            // app, snap back to the current one.
+            let adj = state
+                .history
+                .quick_switch(dir)
+                .filter(|tid| matches!(state.toplevels.get(*tid), Some(Some(_))));
+            let (toplevel, app_id) = match adj {
+                Some(tid) => (tid, state.toplevels[tid].as_ref().unwrap().app_id.clone()),
+                None => (cur_tid, cur_app),
+            };
+            transition(&mut state.ui, UiEvent::RaiseApp { toplevel, app_id });
+        }
+        _ => {
+            let last_origin = state.last_origin;
+            let size = state.output_size_f();
+            transition(&mut state.ui, UiEvent::GrabRelease);
+            // Settling toward Home zooms back to the launcher icon; toward the
+            // switcher it settles into the front-card slot so the shrink flows
+            // straight into the fan (no shrink-to-point then pop).
+            if let UiState::Settling { origin, target, .. } = &mut state.ui {
+                *origin = if matches!(target, sc_input::NavTarget::Switcher) {
+                    let (cx, cy, s) = switcher::front_slot(size);
+                    ZoomOrigin::card((cx, cy), s)
+                } else {
+                    last_origin
+                };
             }
         }
-    }
-
-    // Update page_count after returning home.
-    if let UiState::Home { page_count, .. } = &mut state.ui {
-        *page_count = state.model.pages.len().max(1);
     }
 }

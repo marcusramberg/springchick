@@ -65,7 +65,7 @@ mkTest {
         ).strip()
 
     # Toplevels are numbered in map order, so launching red, green, blue fixes a
-    # stable identity per window. The toplevel id is the assertion oracle: it is
+    # stable identity per window. The toplevel id is what the assertions key on: it is
     # correct across every path (launch, switcher-tap, quick-switch) regardless
     # of app_id-resolution timing, and never races the zoom animation.
     TID = {"red": 0, "green": 1, "blue": 2}
@@ -91,7 +91,7 @@ mkTest {
 
     # Launch order fixes the MRU: red, green, blue -> stack [blue, green, red],
     # front = blue. Distinct colours make the front app obvious in screenshots;
-    # distinct app_ids make the journal the assertion oracle.
+    # distinct app_ids make the journal lines self-describing.
     launch("red", "cc0000")
     launch("green", "00aa00")
     launch("blue", "0000cc")

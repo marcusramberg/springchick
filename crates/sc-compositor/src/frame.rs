@@ -124,6 +124,19 @@ impl State {
             || self.launching.is_some()
             || self.osd.is_active(now)
             || self.bar_fading()
+            // A finger held on an icon, waiting to become a long-press. The hold
+            // is checked in `advance_frame`, so without this the timer only
+            // advances while some *other* input keeps the loop awake: a
+            // perfectly still finger emits no further events, page-flips stop,
+            // and arrange mode never engages. Real panels jitter enough to hide
+            // this most of the time; synthetic input (the debug socket) does not
+            // jitter at all, so it fails there every time.
+            //
+            // Gated on `pointer_down` — the same guard `maybe_engage_arrange_hold`
+            // uses — so this can only spin while a finger is actually down. A
+            // stale `icon_press` left behind by a lost touch-up would otherwise
+            // pin the render loop on for good, which on a phone is a battery bug.
+            || (self.pointer_down && self.icon_press.is_some())
             // A debug-input gesture/key/touch/settle in flight must keep the DRM
             // loop rendering each tick so it advances (page-flips otherwise stop
             // on an idle screen). Inert in normal runs — these are always None.

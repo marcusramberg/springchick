@@ -11,7 +11,7 @@
 #     toolkit's action buttons (a GTK dialog's OK/Cancel) on screen.
 #
 # The compositor logs `configure toplevel dialog=<bool> decoration=<mode>` on
-# every (re)configure, so the journal is the assertion oracle for the policy;
+# every (re)configure, so the journal is what the policy is asserted against;
 # OCR then reads the two button labels off a screenshot to prove they are
 # actually visible (not clipped by server-side decorations or off the bottom).
 #
