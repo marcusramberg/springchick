@@ -90,6 +90,25 @@ spring convergence + interruptibility, gesture classification + nav targets,
 `sc-compositor`'s own `#[cfg(test)]` modules (`ui_state`, `scene`,
 `app_history`, `backend`, …) do link and run inside the devshell.
 
+### Coverage
+
+```bash
+nix develop --command bash -c 'cargo llvm-cov --workspace --summary-only'
+nix develop --command bash -c 'cargo llvm-cov --workspace --html'  # target/llvm-cov/html
+```
+
+The dev shell provides `cargo-llvm-cov` and adds `llvm-tools-preview` to the
+pinned toolchain (in `flake.nix`, deliberately not in `rust-toolchain.toml` —
+see the comment there).
+
+**Read the number with its blind spot in mind: it instruments the unit tests
+only, so it cannot see the VM checks at all.** Everything that talks to Wayland,
+DRM, or the GPU — `render`, `toplevel`, `touch`, `state`, `handlers`, the two
+backends — reports 0% while actually being exercised end-to-end by `checks`.
+The figure is useful for the pure logic, where it is meaningful and high (the
+pure crates sit at 89–99%); treat 0% on a wiring module as "no unit tests here,
+by design", not as "unverified".
+
 ### VM tests (headless, real DRM path)
 
 The `checks` in `flake.nix` boot springchick on its **DRM** backend inside a
