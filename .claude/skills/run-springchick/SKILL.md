@@ -109,7 +109,8 @@ $D build                   # compile ONLY — do this first (see warning below)
 $D up                      # launch nested compositor, wait for frame loop
 $D client                  # map a foot client filled with a test pattern (prints PID)
 $D send "settle 1000"      # drive input over the debug socket; prints "ok"
-$D shot /tmp/sc.png        # grim the host output; then Read /tmp/sc.png
+$D wake                    # clear an idle-faded host screen (shot does this too)
+$D shot /tmp/sc.png        # grim springchick's output; then Read /tmp/sc.png
 $D down                    # kill compositor + every client it launched, by PID
 ```
 
@@ -189,8 +190,21 @@ nix develop --command cargo test         # unit tests; bare cargo can't (see Got
   beginning on an app icon can classify as a tap and launch it. Enter the
   switcher only from an App (swipe up from an app), not from Home.
 - **`grim` needs the HOST display**, not springchick's: the driver sets
-  `WAYLAND_DISPLAY=wayland-1` for it. It captures the whole host output; the
-  springchick window is one tile within it.
+  `WAYLAND_DISPLAY=wayland-1` for it. `shot` scopes the capture to the output
+  springchick is on (resolved via `niri msg windows` → `workspaces`), so the
+  window is one tile within that output, not within the whole multi-head desktop.
+- **A solid-black screenshot means the host screen idled out, not a render
+  regression.** dms covers the output with a black `dms:fade-to-dpms` **Overlay**
+  layer before DPMS; grim captures that overlay. Detect it with
+  `niri msg -j layers | grep fade-to-dpms` (needs `NIRI_SOCKET=$(ls
+  /run/user/$(id -u)/niri.*.sock | head -1)` — it is NOT in the agent's env).
+  `niri msg action power-on-monitors` does **not** clear it: the overlay is
+  dms's, and dms only retracts it on real seat activity. One synthetic keystroke
+  does — `nix run nixpkgs#wtype -- -k Shift_L` against the host display. `$D
+  wake` wraps all of this and `$D shot` calls it first, with a capture-size
+  backstop for a blank the layer check misses.
+  Note niri's own DPMS-off does **not** break grim — screencopy still returns
+  real content — so the dms overlay is the only thing that actually blacks a shot.
 - **Build/test must run inside `nix develop`.** rust-toolchain pins stable via
   rust-overlay; bare `cargo` tries to download stable and fails in the sandbox.
 - **dpi:** `[main].dpi` (default 3) makes apps render at output scale — a foot
