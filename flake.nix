@@ -79,6 +79,8 @@
             pkgs.mesa
             pkgs.udev
             pkgs.seatd
+            # libdbus: the iio-sensor-proxy client (accelerometer orientation).
+            pkgs.dbus
             pkgs.libgbm
             pkgs.libx11
             pkgs.libxcursor

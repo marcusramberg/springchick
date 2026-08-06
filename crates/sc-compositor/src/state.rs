@@ -47,8 +47,8 @@ use crate::arrange::ArrangeState;
 use crate::ui_state::{UiState, ZoomOrigin};
 use crate::{
     background_effect, blank, content_type, debug_input, frame_stats, gamma_control, idle_inhibit,
-    idle_notify, input_common, keybinds, layer_shell, osd, rotation, scene, skia_gl::SkiaGl,
-    switcher, touch_viz,
+    idle_notify, input_common, keybinds, layer_shell, osd, rotation, scene, sensor,
+    skia_gl::SkiaGl, switcher, touch_viz,
 };
 
 /// A running app's toplevel state.
@@ -285,6 +285,10 @@ pub(crate) struct State {
     /// `Normal` until something says otherwise, so a device with no sensor
     /// behaves exactly as if it were held upright.
     pub device_orientation: rotation::DeviceOrientation,
+    /// iio-sensor-proxy client. `None` on anything without an accelerometer (a
+    /// dev box, the VM), where orientation only ever arrives over the control
+    /// socket. See [`crate::sensor`].
+    pub sensor: Option<sensor::Sensor>,
     /// Whether the foreground app is fullscreen content that wants a landscape
     /// display (see [`content_type::wants_landscape`]). Nothing rotates yet —
     /// this is the signal the rotation work will read.
@@ -564,6 +568,7 @@ impl State {
             background_effect,
             rotation: rotation::Rotation::None,
             device_orientation: rotation::DeviceOrientation::Normal,
+            sensor: sensor::spawn(),
             landscape_hint: false,
             skia: SkiaGl::new(),
             wayland_socket,

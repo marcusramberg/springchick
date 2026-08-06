@@ -34,6 +34,7 @@ mod popups;
 mod render;
 mod rotation;
 pub mod scene;
+mod sensor;
 mod session;
 mod skia_gl;
 mod state;

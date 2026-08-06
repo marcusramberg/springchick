@@ -15,6 +15,7 @@
   mesa,
   udev,
   seatd,
+  dbus,
   fontconfig,
   freetype,
   expat,
@@ -117,6 +118,8 @@ rustPlatform.buildRustPackage {
     mesa
     udev
     seatd
+    # libdbus: the iio-sensor-proxy client (accelerometer orientation).
+    dbus
     fontconfig
     freetype
     expat

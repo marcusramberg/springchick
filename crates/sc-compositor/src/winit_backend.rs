@@ -183,6 +183,7 @@ fn render_frame(
 
     keybinds::poll(state);
     state.poll_launching();
+    state.drain_sensor();
     state.sync_keyboard_focus();
 
     let (renderer, mut framebuffer) = backend.bind()?;
