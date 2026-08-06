@@ -57,9 +57,17 @@ pub(crate) fn run_winit() {
 
     let actual_size = gfx_backend.window_size();
     info!(w = actual_size.w, h = actual_size.h, "actual output size");
-    let mut state = State::new(&display, socket_name.clone(), (actual_size.w, actual_size.h));
+    let mut state = State::new(
+        &display,
+        socket_name.clone(),
+        (actual_size.w, actual_size.h),
+    );
     // Winit has no DRM main device; a version-3 global is fine (no recording).
-    state.init_dmabuf_global(&display.handle(), gfx_backend.renderer().dmabuf_formats(), None);
+    state.init_dmabuf_global(
+        &display.handle(),
+        gfx_backend.renderer().dmabuf_formats(),
+        None,
+    );
 
     // Control/IPC socket (`springchick ipc …`). Always listening; the client
     // connects to the same path. Shared setup with the DRM backend.
@@ -98,7 +106,9 @@ pub(crate) fn run_winit() {
 
         // ext-idle-notify timeouts (polled; see `idle_notify`).
         let inhibited = state.is_idle_inhibited();
-        state.idle_notify.refresh(std::time::Instant::now(), inhibited);
+        state
+            .idle_notify
+            .refresh(std::time::Instant::now(), inhibited);
 
         // Dispatch Wayland clients.
         display.dispatch_clients(&mut state).ok();
@@ -135,10 +145,7 @@ pub(crate) fn run_winit() {
 }
 
 /// Handle input events from the winit backend.
-fn handle_winit_input(
-    state: &mut State,
-    event: InputEvent<smithay::backend::winit::WinitInput>,
-) {
+fn handle_winit_input(state: &mut State, event: InputEvent<smithay::backend::winit::WinitInput>) {
     use smithay::backend::input::{AbsolutePositionEvent, ButtonState, PointerButtonEvent};
 
     // Any input resumes clients we told had gone idle (ext-idle-notify).
@@ -182,7 +189,13 @@ fn render_frame(
     {
         // winit presents an already-correct framebuffer (no Skia y-flip) and
         // submits full damage, so no partial hint.
-        let mut ctx = state.draw_ctx(&prep, Transform::Flipped180, false, false, rounded_tex_shader);
+        let mut ctx = state.draw_ctx(
+            &prep,
+            Transform::Flipped180,
+            false,
+            false,
+            rounded_tex_shader,
+        );
         render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }
 

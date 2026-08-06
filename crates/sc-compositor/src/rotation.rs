@@ -88,7 +88,10 @@ mod tests {
         let app = Rotation::Landscape.app_size(OUTPUT);
         // Screen top-left is the app's bottom-left: the app's origin sits at the
         // screen's top-right, since the app is turned clockwise.
-        assert_eq!(Rotation::Landscape.map_input(0.0, 0.0, OUTPUT), (0.0, 1000.0));
+        assert_eq!(
+            Rotation::Landscape.map_input(0.0, 0.0, OUTPUT),
+            (0.0, 1000.0)
+        );
         // Screen top-right → app origin.
         assert_eq!(
             Rotation::Landscape.map_input(OUTPUT.0 as f32, 0.0, OUTPUT),

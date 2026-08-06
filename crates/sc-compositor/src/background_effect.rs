@@ -13,13 +13,13 @@
 //! the blur is really implemented — a client that sees the capability draws
 //! thinner, more translucent chrome on the assumption the blur is there.
 
-use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::DisplayHandle;
+use smithay::utils::Rectangle;
 use smithay::wayland::background_effect::{
     BackgroundEffectState, BackgroundEffectSurfaceCachedState, Capability,
     ExtBackgroundEffectHandler,
 };
-use smithay::utils::Rectangle;
 use smithay::wayland::compositor::RectangleKind;
 
 use tracing::debug;
@@ -65,11 +65,11 @@ impl BackgroundEffect {
 /// Empty when the surface set no region, which is the common case — callers use
 /// that to skip the whole blur pass.
 pub fn blur_rects(surface: &WlSurface, origin: (i32, i32), scale: f64) -> Vec<BlurRect> {
-    let surface_size = smithay::backend::renderer::utils::with_renderer_surface_state(
-        surface,
-        |state| state.surface_size(),
-    )
-    .flatten();
+    let surface_size =
+        smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
+            state.surface_size()
+        })
+        .flatten();
     smithay::wayland::compositor::with_states(surface, |states| {
         let region = states
             .cached_state

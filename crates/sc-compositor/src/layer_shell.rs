@@ -100,11 +100,7 @@ impl LayerShell {
     pub fn destroyed(&mut self, surface: &WlrLayerSurface) -> bool {
         self.unmapped.remove(surface.wl_surface());
         let mut map = layer_map_for_output(&self.output);
-        let Some(layer) = map
-            .layers()
-            .find(|l| l.layer_surface() == surface)
-            .cloned()
-        else {
+        let Some(layer) = map.layers().find(|l| l.layer_surface() == surface).cloned() else {
             return false;
         };
         map.unmap_layer(&layer);
@@ -232,8 +228,11 @@ impl LayerShell {
         for wanted in [Layer::Overlay, Layer::Top] {
             // Collect (ending the `layers()` borrow), then `.rev()` on insertion
             // order gives the topmost (latest-created) match within the layer.
-            let candidates: Vec<LayerSurface> =
-                map.layers().filter(|l| l.layer() == wanted).cloned().collect();
+            let candidates: Vec<LayerSurface> = map
+                .layers()
+                .filter(|l| l.layer() == wanted)
+                .cloned()
+                .collect();
             for layer in candidates.iter().rev() {
                 if let Some(geo) = map.layer_geometry(layer) {
                     let rect = self.shift_docked(to_physical(geo, dpi));

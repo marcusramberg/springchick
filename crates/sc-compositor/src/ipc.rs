@@ -40,10 +40,7 @@ pub fn run_client(args: &[String]) -> ExitCode {
     let stream = match UnixStream::connect(&path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "springchick ipc: cannot connect to {}: {e}",
-                path.display()
-            );
+            eprintln!("springchick ipc: cannot connect to {}: {e}", path.display());
             eprintln!("(is the compositor running?)");
             return ExitCode::from(1);
         }

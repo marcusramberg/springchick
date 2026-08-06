@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::{Fourcc, Modifier};
-use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, GbmBufferedSurface, NodeType};
+use smithay::backend::drm::{
+    DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, GbmBufferedSurface, NodeType,
+};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
     AbsolutePositionEvent, Event as InputEventTrait, InputEvent, KeyboardKeyEvent,
@@ -136,9 +138,7 @@ fn open_drm_node(
                 std::thread::sleep(BACKOFF);
                 attempt += 1;
             }
-            Err(e) => {
-                return Err(format!("open DRM node after {attempt} attempts: {e}").into())
-            }
+            Err(e) => return Err(format!("open DRM node after {attempt} attempts: {e}").into()),
         }
     }
 }
@@ -194,10 +194,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     crate::publish_wayland_display(&socket_name, true);
     let mut state = State::new(&display, socket_name, (output_size.w, output_size.h));
     state.perf_log = true; // perf logging is the point of this backend
-    // Advertise zwp_linux_dmabuf so GL clients (GTK4, etc.) share buffers
-    // zero-copy instead of falling back to slow shm software upload. Passing the
-    // main device binds version 4 with default feedback, which wl-screenrec
-    // requires to allocate capture buffers.
+                           // Advertise zwp_linux_dmabuf so GL clients (GTK4, etc.) share buffers
+                           // zero-copy instead of falling back to slow shm software upload. Passing the
+                           // main device binds version 4 with default feedback, which wl-screenrec
+                           // requires to allocate capture buffers.
     let main_device = device_fd.dev_id().ok();
     state.init_dmabuf_global(&display.handle(), renderer.dmabuf_formats(), main_device);
 
@@ -682,11 +682,7 @@ fn group_formats(
 /// Snapshot the CRTC's current gamma ramp so it can be restored when a
 /// gamma-control client releases the output. Returns `None` if the CRTC has no
 /// LUT or the read fails.
-fn capture_gamma(
-    device: &DrmDeviceFd,
-    crtc: crtc::Handle,
-    size: u32,
-) -> Option<[Vec<u16>; 3]> {
+fn capture_gamma(device: &DrmDeviceFd, crtc: crtc::Handle, size: u32) -> Option<[Vec<u16>; 3]> {
     if size == 0 {
         return None;
     }

@@ -277,20 +277,23 @@ pub fn compute_scene(
                     // than letting `from_zoom_progress` collapse it toward 0 (which
                     // flashed the card square at release before the deck popped it
                     // back to rounded).
-                    let mut t =
-                        WindowTransform::from_zoom_progress(1.0 - progress.value, *origin, w, h, card_radius);
-                    t.corner_radius = card_radius;
-                    t
-                }
-                NavTarget::Home | NavTarget::QuickSwitch(_) => {
-                    WindowTransform::from_zoom_progress(
+                    let mut t = WindowTransform::from_zoom_progress(
                         1.0 - progress.value,
                         *origin,
                         w,
                         h,
                         card_radius,
-                    )
+                    );
+                    t.corner_radius = card_radius;
+                    t
                 }
+                NavTarget::Home | NavTarget::QuickSwitch(_) => WindowTransform::from_zoom_progress(
+                    1.0 - progress.value,
+                    *origin,
+                    w,
+                    h,
+                    card_radius,
+                ),
             };
             // Settling into the switcher keeps the neighbour fan on screen the
             // whole way: neighbours fan around the front card as it zooms into
@@ -530,7 +533,10 @@ mod tests {
     /// Neighbour opacity at a given up_progress (0 if there is no fan).
     fn fan_neighbour_alpha(up: f32) -> Option<f32> {
         let mut tracker = Tracker::begin(sc_input::Pt { x: 0.5, y: 0.95 });
-        tracker.current = sc_input::Pt { x: 0.5, y: 0.95 - up };
+        tracker.current = sc_input::Pt {
+            x: 0.5,
+            y: 0.95 - up,
+        };
         let state = UiState::Grabbing {
             toplevel: 7,
             app_id: "x".into(),
@@ -538,7 +544,11 @@ mod tests {
             cards: vec![7, 3, 1],
         };
         let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
-        scene.cards.iter().find(|c| c.toplevel == 3).map(|c| c.alpha)
+        scene
+            .cards
+            .iter()
+            .find(|c| c.toplevel == 3)
+            .map(|c| c.alpha)
     }
 
     #[test]
@@ -591,7 +601,10 @@ mod tests {
         let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert_eq!(scene.cards.len(), 2, "current + revealed neighbour");
         // Full-height on a pure horizontal slide, but rounded (not a sharp pop).
-        assert!(scene.cards.iter().all(|c| (c.scale - 1.0).abs() < 1e-6 && c.corner_radius > 0.0));
+        assert!(scene
+            .cards
+            .iter()
+            .all(|c| (c.scale - 1.0).abs() < 1e-6 && c.corner_radius > 0.0));
         // Neighbour separated from the current card by more than a card width
         // (there is a visible margin, not a flush seam).
         let cur = scene.cards.iter().find(|c| c.toplevel == 1).unwrap();

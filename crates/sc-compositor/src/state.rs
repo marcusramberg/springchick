@@ -11,13 +11,14 @@ use std::collections::HashMap;
 use std::process::Child;
 use std::time::Duration;
 
+use smithay::backend::allocator::Format as DrmFormat;
 use smithay::backend::allocator::{Fourcc, Modifier};
 use smithay::backend::drm::DrmNode;
-use smithay::backend::allocator::Format as DrmFormat;
 use smithay::desktop::{PopupKind, PopupManager};
 use smithay::input::keyboard::XkbConfig;
 use smithay::input::{Seat, SeatState};
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
@@ -29,12 +30,11 @@ use smithay::wayland::image_copy_capture::{Frame as CaptureFrame, ImageCopyCaptu
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::selection::data_device::DataDeviceState;
 use smithay::wayland::selection::ext_data_control::DataControlState;
-use smithay::wayland::shell::xdg::{ToplevelSurface, XdgShellState};
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shell::xdg::dialog::XdgDialogState;
+use smithay::wayland::shell::xdg::{ToplevelSurface, XdgShellState};
 use smithay::wayland::shm::ShmState;
 use smithay::wayland::viewporter::ViewporterState;
-use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 
 use sc_catalog::AppEntry;
 use sc_icons::IconPixels;
@@ -47,8 +47,8 @@ use crate::arrange::ArrangeState;
 use crate::ui_state::{UiState, ZoomOrigin};
 use crate::{
     background_effect, blank, content_type, debug_input, frame_stats, gamma_control, idle_inhibit,
-    idle_notify, input_common, keybinds, layer_shell, osd, rotation, scene,
-    skia_gl::SkiaGl, switcher, touch_viz,
+    idle_notify, input_common, keybinds, layer_shell, osd, rotation, scene, skia_gl::SkiaGl,
+    switcher, touch_viz,
 };
 
 /// A running app's toplevel state.
@@ -602,8 +602,11 @@ impl State {
         main_device: Option<libc::dev_t>,
     ) {
         let formats: Vec<DrmFormat> = formats.into_iter().collect();
-        let feedback = main_device
-            .and_then(|dev| DmabufFeedbackBuilder::new(dev, formats.iter().copied()).build().ok());
+        let feedback = main_device.and_then(|dev| {
+            DmabufFeedbackBuilder::new(dev, formats.iter().copied())
+                .build()
+                .ok()
+        });
         let global = match feedback {
             Some(feedback) => self
                 .dmabuf_state

@@ -52,8 +52,10 @@ struct SearchApp {
 
 impl SearchApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let catalog: HashMap<String, AppEntry> =
-            sc_catalog::scan_apps().into_iter().map(|e| (e.id.clone(), e)).collect();
+        let catalog: HashMap<String, AppEntry> = sc_catalog::scan_apps()
+            .into_iter()
+            .map(|e| (e.id.clone(), e))
+            .collect();
         // Frecency is read-only here; the compositor stays the sole writer.
         let frecency = sc_shell_model::persist::load(&sc_shell_model::persist::state_path())
             .map(|m| m.frecency)
@@ -73,8 +75,18 @@ impl SearchApp {
     }
 
     fn recompute(&mut self) {
-        let limit = if self.query.is_empty() { DEFAULT_LIMIT } else { FILTER_LIMIT };
-        self.results = sc_catalog::rank(&self.catalog, &self.frecency, unix_now(), &self.query, limit);
+        let limit = if self.query.is_empty() {
+            DEFAULT_LIMIT
+        } else {
+            FILTER_LIMIT
+        };
+        self.results = sc_catalog::rank(
+            &self.catalog,
+            &self.frecency,
+            unix_now(),
+            &self.query,
+            limit,
+        );
     }
 
     /// Lazily upload an app's icon into an egui texture.
@@ -149,7 +161,11 @@ impl eframe::App for SearchApp {
             let mut launch: Option<String> = None;
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for id in &ids {
-                    let name = self.catalog.get(id).map(|e| e.name.clone()).unwrap_or_default();
+                    let name = self
+                        .catalog
+                        .get(id)
+                        .map(|e| e.name.clone())
+                        .unwrap_or_default();
                     let tex = self.icon(ctx, id);
                     let resp = ui.add(row_widget(tex.as_ref(), &name));
                     if resp.clicked() {
@@ -175,10 +191,13 @@ impl eframe::App for SearchApp {
 fn row_widget<'a>(tex: Option<&'a egui::TextureHandle>, name: &'a str) -> impl egui::Widget + 'a {
     move |ui: &mut egui::Ui| {
         let row_h = 64.0;
-        let (rect, resp) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), row_h),
+            egui::Sense::click(),
+        );
         if resp.hovered() {
-            ui.painter().rect_filled(rect, 8.0, ui.visuals().widgets.hovered.bg_fill);
+            ui.painter()
+                .rect_filled(rect, 8.0, ui.visuals().widgets.hovered.bg_fill);
         }
         let icon_side = 44.0;
         let icon_rect = egui::Rect::from_min_size(

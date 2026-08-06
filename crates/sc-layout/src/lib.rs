@@ -222,10 +222,10 @@ pub fn global_slot_pos(page: usize, index: usize, width: f32, height: f32) -> (f
 /// to the page's fill length. `x` is screen-space (0..width), not page-global.
 pub fn nearest_grid_index(width: f32, height: f32, x: f32, y: f32) -> usize {
     let gm = grid_metrics(width, height);
-    let col = (((x - gm.grid_left) / gm.cell_w).floor() as isize)
-        .clamp(0, COLS as isize - 1) as usize;
-    let row = (((y - gm.grid_top) / gm.cell_h).floor() as isize)
-        .clamp(0, ROWS as isize - 1) as usize;
+    let col =
+        (((x - gm.grid_left) / gm.cell_w).floor() as isize).clamp(0, COLS as isize - 1) as usize;
+    let row =
+        (((y - gm.grid_top) / gm.cell_h).floor() as isize).clamp(0, ROWS as isize - 1) as usize;
     row * COLS + col
 }
 
@@ -567,7 +567,9 @@ mod tests {
         let m = sample_model();
         let l = compute(1224.0, 2700.0, 0, &m);
         let d = &l.dock[0];
-        assert!(l.dock_zone.contains(d.icon_rect.center_x(), d.icon_rect.center_y()));
+        assert!(l
+            .dock_zone
+            .contains(d.icon_rect.center_x(), d.icon_rect.center_y()));
         assert!(!l.dock_zone.contains(612.0, 100.0));
     }
 
@@ -577,7 +579,9 @@ mod tests {
         let l = compute(1224.0, 2700.0, 0, &m);
         assert!(l.done_button.w > 0.0 && l.done_button.h > 0.0);
         for s in &l.grid {
-            assert!(!l.done_button.contains(s.icon_rect.center_x(), s.icon_rect.center_y()));
+            assert!(!l
+                .done_button
+                .contains(s.icon_rect.center_x(), s.icon_rect.center_y()));
         }
     }
 
@@ -592,14 +596,20 @@ mod tests {
         assert_eq!(hit, Hit::DoneButton);
         let far_x = s.icon_rect.x + s.icon_rect.w * 0.9;
         let far_y = s.icon_rect.y + s.icon_rect.h * 0.9;
-        assert!(matches!(hit_test_arrange(&l, far_x, far_y), Hit::GridIcon { .. }));
+        assert!(matches!(
+            hit_test_arrange(&l, far_x, far_y),
+            Hit::GridIcon { .. }
+        ));
     }
 
     #[test]
     fn normal_hit_test_ignores_badge_and_done() {
         let m = sample_model();
         let l = compute(1224.0, 2700.0, 0, &m);
-        assert_eq!(hit_test(&l, l.done_button.center_x(), l.done_button.center_y()), Hit::Miss);
+        assert_eq!(
+            hit_test(&l, l.done_button.center_x(), l.done_button.center_y()),
+            Hit::Miss
+        );
     }
 
     #[test]

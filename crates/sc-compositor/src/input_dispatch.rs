@@ -47,9 +47,10 @@ pub fn resolve_drop(
 ) -> DropAction {
     let over_dock = layout.dock_zone.contains(x, y);
     match (source, over_dock) {
-        (IconSource::Grid, true) => DropAction::Pin,        // grid -> dock: pin
-        (IconSource::Dock, true) => DropAction::SnapBack,   // dock -> dock: no-op
-        (_, false) => {                                     // any -> grid: reorder
+        (IconSource::Grid, true) => DropAction::Pin, // grid -> dock: pin
+        (IconSource::Dock, true) => DropAction::SnapBack, // dock -> dock: no-op
+        (_, false) => {
+            // any -> grid: reorder
             let idx = sc_layout::nearest_grid_index(w, h, x, y).min(page_len);
             DropAction::Reorder { page, index: idx }
         }

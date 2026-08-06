@@ -159,7 +159,7 @@ mod tests {
         h.push_foreground(1);
         h.push_foreground(2);
         h.push_foreground(3); // stack: [3, 2, 1], cursor 0
-        // Already at the front — swiping back rejects.
+                              // Already at the front — swiping back rejects.
         assert_eq!(h.quick_switch(-1), None);
         assert_eq!(h.quick_switch(1), Some(2));
         assert_eq!(h.quick_switch(-1), Some(3));
@@ -183,7 +183,7 @@ mod tests {
         h.push_foreground(1);
         h.push_foreground(2);
         h.push_foreground(3); // stack [3,2,1], cursor 0
-        // No browse: current is the front already.
+                              // No browse: current is the front already.
         assert_eq!(h.deck_order(), vec![3, 2, 1]);
         // Browse to the second app (cursor -> 1, current = 2). The deck must
         // lead with 2 and list each app exactly once — no duplicate front card.
