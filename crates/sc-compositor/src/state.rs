@@ -46,7 +46,7 @@ use tracing::debug;
 
 use crate::app_history::AppHistory;
 use crate::arrange::ArrangeState;
-use crate::ui_state::{UiState, ZoomOrigin};
+use crate::ui_state::{ToplevelId, UiState, ZoomOrigin};
 use crate::{
     background_effect, blank, content_type, debug_input, frame_stats, gamma_control, idle_inhibit,
     idle_notify, input_common, keybinds, layer_shell, osd, rotation, scene, sensor, session_lock,
@@ -354,8 +354,12 @@ pub(crate) struct State {
     pub active_touch: Option<debug_input::ActiveTouch>,
     /// Pending debug `settle`: reply channel + deadline.
     pub pending_settle: Option<(std::sync::mpsc::SyncSender<String>, std::time::Instant)>,
-    /// Last logged UI state discriminant (to avoid spam).
-    pub last_log_state: Option<std::mem::Discriminant<UiState>>,
+    /// Last logged UI state: variant plus which toplevel is in front (to avoid
+    /// spam without hiding real changes). The variant alone is not enough —
+    /// swapping the foreground app leaves it in `App` either way, so a
+    /// dismissed dialog handing the screen back, or a quick-switch between two
+    /// apps, would log nothing at all.
+    pub last_log_state: Option<(std::mem::Discriminant<UiState>, Option<ToplevelId>)>,
     /// Per-app grid-reflow springs (x, y), keyed by app id. Drives icons
     /// sliding to their new slot when the grid order changes (launch reorder,
     /// arrange-mode edits). Seeded lazily on first `advance_frame` and kept in

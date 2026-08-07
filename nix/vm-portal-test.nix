@@ -117,6 +117,68 @@ let
     '';
   };
 
+  # Maps a window, then a modal dialog over it, then destroys the dialog again —
+  # all on timers, so phase C needs no synthetic input at all.
+  #
+  # Phase C is about the *compositor's* close handling: a dismissed dialog hands
+  # the screen back to the app underneath, an app closing goes Home. Driving it
+  # with an in-process GTK dialog keeps that isolated. Tapping the portal
+  # picker's own Cancel would drag phrosh's input handling into the assertion,
+  # and phrosh does not reliably act on a synthetic tap for its second request
+  # in a process. The portal-specific half is already covered by phases A and B.
+  windowPy = pkgs.writeText "gtk-window-demo.py" ''
+    import gi
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import Gtk, GLib
+
+    def on_activate(app):
+        win = Gtk.ApplicationWindow(application=app, title="requesting-app")
+        win.set_child(Gtk.Label(label="requesting app"))
+        win.present()
+
+        def close_window():
+            # Phase D: the app itself goes away -> Home. A clean client-side
+            # destroy, so the client still commits afterwards and the compositor
+            # repaints; a SIGTERM'd client never commits again, which leaves
+            # needs_render unset and no frame to observe.
+            win.destroy()
+            return False
+
+        def close_dialog(dlg):
+            dlg.destroy()
+            # Then, a beat later, the app itself.
+            GLib.timeout_add(4000, close_window)
+            return False
+
+        def open_dialog():
+            # transient_for + modal => set_parent + the xdg-dialog hint, which is
+            # what State::is_dialog keys off (see nix/vm-dialog-test.nix).
+            dlg = Gtk.Window(transient_for=win, modal=True, title="a-dialog")
+            dlg.set_child(Gtk.Label(label="dialog"))
+            dlg.present()
+            # Close it again, unprompted, a few seconds later.
+            GLib.timeout_add(4000, close_dialog, dlg)
+            return False
+
+        GLib.timeout_add(3000, open_dialog)
+
+    app = Gtk.Application(application_id="org.springchick.WindowDemo")
+    app.connect("activate", on_activate)
+    app.run(None)
+  '';
+
+  gtkWindowApp = pkgs.writeShellApplication {
+    name = "gtk-window-demo";
+    runtimeInputs = [ pythonEnv ];
+    text = ''
+      export GI_TYPELIB_PATH="${giEnv}/lib/girepository-1.0"
+      export GSETTINGS_SCHEMA_DIR="${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}/glib-2.0/schemas"
+      export GDK_BACKEND=wayland
+      export GSK_RENDERER=cairo
+      exec python3 ${windowPy}
+    '';
+  };
+
   gtkChooserApp = pkgs.writeShellApplication {
     name = "gtk-chooser-demo";
     runtimeInputs = [ pythonEnv ];
@@ -141,6 +203,7 @@ mkTest {
 
   packages = [
     gtkChooserApp
+    gtkWindowApp
     portalOpenApp
   ];
 
@@ -155,8 +218,26 @@ mkTest {
 
     def since_now():
         """A journalctl --since bound of 'right now', so each phase only ever
-        matches lines its own windows produced."""
-        return machine.succeed("date '+%Y-%m-%d %H:%M:%S'").strip()
+        matches lines its own windows produced.
+
+        Microseconds, not whole seconds: --since is inclusive, so a
+        second-granularity bound also matches everything logged earlier in the
+        same second — which is long enough for a phase to be satisfied by the
+        previous phase's log lines and pass without testing anything."""
+        return machine.succeed("date '+%Y-%m-%d %H:%M:%S.%6N'").strip()
+
+    def ipc(cmd):
+        """Drive the compositor's synthetic-input socket as the session user.
+        Coordinates are physical output px (720x1440 here).
+
+        Note `touch`, not `tap`, for anything inside a client window: `tap` only
+        runs the shell's own hit-testing (Home grid, switcher, bar gestures),
+        while `touch` goes through the surface-routing path and actually
+        reaches the client."""
+        machine.succeed(
+            "runuser -u tester -- env XDG_RUNTIME_DIR=/run/user/1000 "
+            f"springchick ipc {cmd}"
+        )
 
     def user_run(unit, cmd, extra=""):
         machine.succeed(
@@ -219,6 +300,78 @@ mkTest {
     # ...and nothing in this phase overflowed.
     machine.fail(f"{UNIT} --since '{phase_b}' | grep -qE 'toplevel size .* oversize=true'")
     machine.screenshot("02-portal-chooser-fits")
+
+    # Dismiss it before moving on. Stopping the requesting client is NOT enough:
+    # phrosh keeps its window mapped when the peer dies, and a picker left on
+    # screen goes on emitting `dialog=true` every time the compositor
+    # reconfigures its toplevels — which is enough to satisfy phase C's wait
+    # before phase C's own picker has even mapped.
+    ipc("touch 100 45")
+    machine.wait_until_succeeds(
+        f"{UNIT} --since '{phase_b}' | grep -qE 'state changed to Home '", timeout=90
+    )
+    machine.succeed("systemctl --user -M tester@.host stop portal-open.service || true")
+
+    # --- Phase C: a dismissed dialog returns to the app underneath -----------
+    # A dialog is a transient thing on another app's behalf, so closing one must
+    # hand the screen back rather than drop to Home. An app closing must still go
+    # Home; phase D covers that half. gtk-window-demo maps a window, then a modal
+    # dialog over it, then destroys the dialog — all on its own timers.
+    phase_c = since_now()
+    user_run("gtk-window", "$(command -v gtk-window-demo)")
+
+    # The app's own toplevel, pinned so the assertion after the dialog closes
+    # cannot be satisfied by the dialog's own App state.
+    machine.wait_until_succeeds(
+        f"{UNIT} --since '{phase_c}' | grep -qE 'state changed to App '", timeout=90
+    )
+    app_state = machine.succeed(
+        f"{UNIT} --since '{phase_c}' | grep -oE 'state changed to App \\{{ toplevel: [0-9]+' | tail -1"
+    ).strip()
+    app_toplevel = app_state.rsplit(" ", 1)[1]
+    print(f"app is toplevel {app_toplevel}")
+
+    # The dialog must be *detected* as one, or the fallback never engages.
+    opened = since_now()
+    machine.wait_until_succeeds(
+        f"{UNIT} --since '{opened}' | grep -qF 'configure toplevel dialog=true'",
+        timeout=90,
+    )
+    dialog_state = machine.wait_until_succeeds(
+        f"{UNIT} --since '{opened}' | grep -oE 'state changed to App \\{{ toplevel: [0-9]+' | tail -1",
+        timeout=90,
+    ).strip()
+    dialog_toplevel = dialog_state.rsplit(" ", 1)[1]
+    assert (
+        dialog_toplevel != app_toplevel
+    ), f"dialog never came forward (still toplevel {app_toplevel})"
+    print(f"dialog is toplevel {dialog_toplevel}")
+    machine.screenshot("03-dialog-over-app")
+
+    # Bound the next assertion to *after* the dialog is established, so it cannot
+    # be satisfied by the App state the app already had before the dialog mapped.
+    dismissed = since_now()
+
+    # The app destroys the dialog on its own timer; the compositor must land back
+    # on the app's toplevel specifically, not Home and not the dialog.
+    machine.wait_until_succeeds(
+        f"{UNIT} --since '{dismissed}' | "
+        f"grep -qE 'state changed to App \\{{ toplevel: {app_toplevel},'",
+        timeout=90,
+    )
+    machine.fail(f"{UNIT} --since '{dismissed}' | grep -qE 'state changed to Home '")
+    machine.screenshot("04-back-to-app")
+
+    # --- Phase D: closing an actual app still goes Home ----------------------
+    # The fallback is gated on the dialog hint precisely so this stays true.
+    #
+    # gtk-window-demo destroys its own window shortly after the dialog, so this
+    # is a clean client-side close with no synthetic input involved.
+    phase_d = since_now()
+    machine.wait_until_succeeds(
+        f"{UNIT} --since '{phase_d}' | grep -qE 'state changed to Home '", timeout=90
+    )
+    machine.screenshot("05-app-closed-goes-home")
 
     machine.fail(
         "journalctl -b | grep -iE 'panicked at|SIGSEGV|SIGABRT|stack backtrace|segfault'"
