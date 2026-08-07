@@ -144,6 +144,42 @@ pub(crate) fn run_winit() {
     info!("compositor shut down");
 }
 
+/// Draw the just-presented scene into an offscreen texture and read it back
+/// into a client's shm capture buffer. `None` = not usable shm.
+fn capture_frame_shm(
+    backend: &mut WinitGraphicsBackend<GlesRenderer>,
+    state: &mut State,
+    prep: &crate::FramePrep,
+    buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
+    rounded_tex_shader: &GlesTexProgram,
+) -> Option<bool> {
+    use smithay::backend::renderer::Bind;
+
+    let size = backend.window_size();
+    let target = crate::capture::shm_target(buffer)?;
+    let renderer = backend.renderer();
+    let mut tex = crate::capture::offscreen(renderer, &target)?;
+    let mut fb = match renderer.bind(&mut tex) {
+        Ok(fb) => fb,
+        Err(e) => {
+            warn!("screencopy: offscreen bind failed: {e}");
+            return Some(false);
+        }
+    };
+    {
+        // Rendering to our own FBO flips Y relative to winit's presented
+        // surface, so this matches the DRM path's Skia flip instead.
+        let mut ctx = state.draw_ctx(prep, Transform::Flipped180, true, false, rounded_tex_shader);
+        if let Err(e) = render::draw_scene(renderer, &mut fb, size, &mut ctx) {
+            warn!("screencopy: draw_scene failed: {e}");
+            return Some(false);
+        }
+    }
+    Some(crate::capture::readback_into_shm(
+        renderer, &fb, buffer, &target,
+    ))
+}
+
 /// Handle input events from the winit backend.
 fn handle_winit_input(state: &mut State, event: InputEvent<smithay::backend::winit::WinitInput>) {
     use smithay::backend::input::{AbsolutePositionEvent, ButtonState, PointerButtonEvent};
@@ -206,11 +242,24 @@ fn render_frame(
     // Record + periodically log frame timing.
     state.record_and_log_frame(frame_start);
 
-    // The winit backend has no dmabuf capture path, so fail any pending
-    // screencopy frames rather than leave a recorder waiting forever. Real
-    // capture is the DRM backend's job.
+    // Screencopy: nested winit has no dmabuf blit path, but shm readback works
+    // the same as on DRM, which is what grim/wl-screenrec fall back to.
+    if state.pending_captures.is_empty() {
+        return result;
+    }
+    let present = smithay::utils::Clock::<smithay::utils::Monotonic>::new().now();
     for frame in std::mem::take(&mut state.pending_captures) {
-        frame.fail(smithay::wayland::image_copy_capture::CaptureFailureReason::Unknown);
+        let buffer = frame.buffer();
+        let done = capture_frame_shm(backend, state, &prep, &buffer, rounded_tex_shader);
+        match done {
+            Some(true) => frame.success(Transform::Normal, None, present),
+            Some(false) => {
+                frame.fail(smithay::wayland::image_copy_capture::CaptureFailureReason::Unknown)
+            }
+            None => frame.fail(
+                smithay::wayland::image_copy_capture::CaptureFailureReason::BufferConstraints,
+            ),
+        }
     }
 
     result

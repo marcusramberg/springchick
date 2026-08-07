@@ -26,7 +26,9 @@ use smithay::wayland::compositor::{CompositorClientState, CompositorState};
 use smithay::wayland::dmabuf::{DmabufFeedbackBuilder, DmabufGlobal, DmabufState};
 use smithay::wayland::fractional_scale::FractionalScaleManagerState;
 use smithay::wayland::image_capture_source::{ImageCaptureSourceState, OutputCaptureSourceState};
-use smithay::wayland::image_copy_capture::{Frame as CaptureFrame, ImageCopyCaptureState};
+use smithay::wayland::image_copy_capture::{
+    Frame as CaptureFrame, ImageCopyCaptureState, Session as CaptureSession,
+};
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::selection::data_device::DataDeviceState;
 use smithay::wayland::selection::ext_data_control::DataControlState;
@@ -200,8 +202,12 @@ pub(crate) struct State {
     /// renderer exists: `(render node, [(fourcc, modifiers)])`. `None` on the
     /// winit backend (no dmabuf capture there).
     pub capture_formats: Option<CaptureFormats>,
-    /// Capture frames awaiting a blit; drained by the DRM render loop each frame.
+    /// Capture frames awaiting a blit; drained by the render loop each frame.
     pub pending_captures: Vec<CaptureFrame>,
+    /// Live screencopy sessions. Held because dropping a `Session` sends
+    /// `stopped` and fails the client's frames (that dropped-on-arrival session
+    /// is what made `grim` print "failed to copy output").
+    pub capture_sessions: Vec<CaptureSession>,
     /// Tracked layer surfaces + reserved-area bookkeeping.
     pub layers: layer_shell::LayerShell,
     /// Seat touch handle, for forwarding taps to layer surfaces.
@@ -549,6 +555,7 @@ impl State {
             image_copy_capture,
             capture_formats: None,
             pending_captures: Vec::new(),
+            capture_sessions: Vec::new(),
             layers: layer_shell::LayerShell::new(output.clone(), out_w as f32, out_h as f32),
             touch,
             touch_targets: HashMap::new(),

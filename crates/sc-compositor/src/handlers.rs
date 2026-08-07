@@ -13,7 +13,7 @@ use smithay::reexports::wayland_server::protocol::wl_buffer;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Client;
-use smithay::utils::{Rectangle, Serial};
+use smithay::utils::{IsAlive, Rectangle, Serial};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     with_states, CompositorClientState, CompositorHandler, CompositorState,
@@ -368,8 +368,12 @@ impl ImageCopyCaptureHandler for State {
         })
     }
 
-    fn new_session(&mut self, _session: CaptureSession) {
-        // Sessions clean up on drop; we only act per-frame.
+    fn new_session(&mut self, session: CaptureSession) {
+        // `Session` is owned: dropping it sends `stopped` and fails every frame
+        // the client asks for, so it must be kept alive for the capture's
+        // lifetime. Drop the ones whose client object died while we're here.
+        self.capture_sessions.retain(|s| s.alive());
+        self.capture_sessions.push(session);
     }
 
     fn frame(&mut self, _session: &CaptureSessionRef, frame: CaptureFrame) {

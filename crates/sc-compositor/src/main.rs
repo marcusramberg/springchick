@@ -14,6 +14,7 @@ mod arrange;
 mod backend;
 mod background_effect;
 mod blank;
+mod capture;
 mod content_type;
 mod debug_input;
 mod drm_backend;
