@@ -645,7 +645,13 @@ impl App {
             let mut dmabuf = match get_dmabuf(&buffer) {
                 Ok(d) => d.clone(),
                 Err(_) => {
-                    frame.fail(CaptureFailureReason::BufferConstraints);
+                    // Not a dmabuf: grim and friends allocate shm, so take the
+                    // readback path rather than failing the frame.
+                    match self.capture_frame_shm(&buffer, prep) {
+                        Some(true) => frame.success(transform, None, present),
+                        Some(false) => frame.fail(CaptureFailureReason::Unknown),
+                        None => frame.fail(CaptureFailureReason::BufferConstraints),
+                    }
                     continue;
                 }
             };
@@ -667,6 +673,30 @@ impl App {
                 frame.fail(CaptureFailureReason::Unknown);
             }
         }
+    }
+
+    /// shm capture: draw the scene into an offscreen texture and read it back
+    /// into the client's pool. `None` means the buffer isn't usable shm at all
+    /// (report as a constraints failure), `Some(false)` a real failure.
+    fn capture_frame_shm(
+        &mut self,
+        buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
+        prep: &crate::FramePrep,
+    ) -> Option<bool> {
+        let target = crate::capture::shm_target(buffer)?;
+        let mut tex = crate::capture::offscreen(&mut self.drm.renderer, &target)?;
+        let mut fb = match self.drm.renderer.bind(&mut tex) {
+            Ok(fb) => fb,
+            Err(e) => {
+                warn!("screencopy: offscreen bind failed: {e}");
+                return Some(false);
+            }
+        };
+        if self.draw_scene_into(&mut fb, prep, false).is_none() {
+            return Some(false);
+        }
+        let ok = crate::capture::readback_into_shm(&mut self.drm.renderer, &fb, buffer, &target);
+        Some(ok)
     }
 }
 
