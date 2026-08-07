@@ -39,6 +39,23 @@ in
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
 
+    # GSettings schemas for the session's own helpers. nixpkgs installs schemas
+    # under share/gsettings-schemas/<name>/glib-2.0/schemas, which is not on
+    # XDG_DATA_DIRS by default — GUI apps normally get it baked in by
+    # wrapGAppsHook, but xdg-desktop-portal-phosh's libexec binaries are
+    # unwrapped ELFs and read the ambient environment. Without this the phrosh
+    # backend aborts at startup ("No GSettings schemas are installed on the
+    # system") the moment xdg-desktop-portal tries to activate it, which takes
+    # the FileChooser portal down with it. Same idiom as nixos/modules/programs/
+    # plotinus.nix.
+    environment.sessionVariables.XDG_DATA_DIRS = [
+      # mobi.phosh.FileSelector — the file selector's own settings.
+      "${pkgs.xdg-desktop-portal-phosh}/share/gsettings-schemas/${pkgs.xdg-desktop-portal-phosh.name}"
+      # org.gnome.desktop.{interface,privacy,sound,…} — read by libadwaita/GTK
+      # for theme, fonts and animation preferences.
+      "${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}"
+    ];
+
     # Puts share/wayland-sessions/springchick.desktop into the system profile so
     # greeters (greetd's regreet/gtkgreet, GDM, …) list springchick as a session.
     services.displayManager.sessionPackages = [ cfg.package ];
@@ -131,15 +148,50 @@ in
     # Mirrors niri.nix upstream.
     xdg.portal = {
       enable = true;
-      extraPortals = [ pkgs.xdg-desktop-portal-gnome ];
+      extraPortals = [
+        pkgs.xdg-desktop-portal-gnome
+        # Only for its `phrosh` backend (Account/AppChooser/FileChooser/
+        # Wallpaper) — see the FileChooser note below. The sibling `phosh`
+        # backend (Notification/Settings) is not selected anywhere here.
+        pkgs.xdg-desktop-portal-phosh
+      ];
       config.springchick = {
         default = [ "gnome" "gtk" ];
         # Secret portal only works with gnome backend (delegates to gnome-keyring).
         "org.freedesktop.impl.portal.Secret" = "gnome-keyring";
+        # GNOME's/GTK's file and app pickers have a widget minimum width well
+        # over the ~360 logical px a phone has, and a client may ignore the
+        # narrower size we configure — so they run off the screen edge and
+        # their action buttons become unreachable. phrosh (xdg-desktop-portal-
+        # phosh's Rust backend) is GTK4 + libadwaita and adaptive, built for
+        # exactly this width. Named explicitly because its .portal declares
+        # `UseIn=phosh`, which XDG_CURRENT_DESKTOP=springchick does not match;
+        # an explicit preference here overrides UseIn (xdg-desktop-portal ≥1.18).
+        "org.freedesktop.impl.portal.FileChooser" = "phrosh";
+        "org.freedesktop.impl.portal.AppChooser" = "phrosh";
       };
     };
 
     # Required for gnome-keyring Secret portal backend.
     services.gnome.gnome-keyring.enable = lib.mkDefault true;
+
+    # …but enabling the daemon is not enough for it to be *usable*. The Secret
+    # portal (and plain libsecret, which unsandboxed apps use directly) both end
+    # up at org.freedesktop.secrets, which serves nothing until the login
+    # keyring is unlocked. pam_gnome_keyring is what unlocks it, using the
+    # password from the PAM stack that started the session — and the
+    # gnome-keyring module wires that into `login` only. springchick sessions
+    # come from a greeter, so on greetd the module never ran and every secret
+    # lookup fails. GDM does this for itself; greetd does not.
+    #
+    # Note this can only work for a greetd that actually authenticates the user.
+    # Under autologin (initial_session) there is no password to hand over, so
+    # the keyring stays locked and gcr will prompt on first use instead.
+    # mkIf wraps the whole attrset, not just the value: defining
+    # `security.pam.services.greetd` at all would otherwise conjure an empty PAM
+    # service named greetd on systems not using it.
+    security.pam.services = lib.mkIf config.services.greetd.enable {
+      greetd.enableGnomeKeyring = lib.mkDefault true;
+    };
   };
 }

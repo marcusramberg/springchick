@@ -85,6 +85,11 @@ impl CompositorHandler for State {
             self.recompute_layers();
         }
 
+        // Report a toplevel's committed size against the space it was given.
+        // Cheap: it early-returns unless this is a tracked toplevel whose
+        // geometry actually changed.
+        self.log_toplevel_size(surface);
+
         // A commit can carry a new wp_content_type tag (playback started or
         // stopped), which is what the auto-landscape hint keys off.
         if self.app_focus_surface().as_ref() == Some(surface) {

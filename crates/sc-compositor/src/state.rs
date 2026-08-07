@@ -57,6 +57,9 @@ use crate::{
 pub(crate) struct AppToplevel {
     pub surface: ToplevelSurface,
     pub app_id: String,
+    /// Last client-set xdg window geometry logged for this toplevel, so the
+    /// size log fires on change instead of on every commit.
+    pub logged_size: Option<(i32, i32)>,
 }
 
 /// An app spawned from the launcher but not yet mapped to a toplevel. Its Home
