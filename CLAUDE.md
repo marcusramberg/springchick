@@ -34,7 +34,9 @@ Always build the check matching `builtins.currentSystem` — cross-building runs
 
 Use the `run-springchick` skill (`.claude/skills/run-springchick/SKILL.md`) — it covers the nested-winit driver (`driver.sh`: build/up/client/send/shot/down) and the interactive VM driver, plus a long list of gotchas. Key one: **never `pkill foot`** — the user's own terminal is a foot window; kill by recorded PID only.
 
-A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`, `down/move/up`, `settle [MS]`). Works nested, in the VM, and on-device.
+A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`, `down/move/up`, `settle [MS]`, `reload`). Works nested, in the VM, and on-device.
+
+`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `prefer_no_csd` (next window to negotiate decorations), `idle_blank_secs` (countdown restarts). `dpi` is ignored on reload — it needs a restart.
 
 `tests/integration.sh` is an older nested-winit smoke suite (sockets, multi-client, clean shutdown, keybinds); parts are being ported to the VM checks.
 

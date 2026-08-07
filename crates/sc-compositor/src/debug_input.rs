@@ -38,6 +38,8 @@ pub enum DebugCmd {
     /// Pretend the device was turned. Drives the same path the accelerometer
     /// will, so rotation policy is testable with no sensor.
     Orientation(crate::rotation::DeviceOrientation),
+    /// Re-read `config.toml` and apply the live-changeable settings.
+    Reload,
 }
 
 /// Parse one command line. `w`/`h` are the logical output bounds used for the
@@ -114,6 +116,10 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
         "up" => {
             done(tok)?;
             DebugCmd::Up
+        }
+        "reload" => {
+            done(tok)?;
+            DebugCmd::Reload
         }
         "swipe" => {
             let x1 = num(&mut tok)?;
@@ -293,8 +299,9 @@ pub fn drain(state: &mut State, chan: &DebugChannel) {
 fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
     // Injected input counts as user activity, so ext-idle-notify clients see a
     // resume from a scripted tap the same way they would from a real one.
-    // `settle` is a query, not input, and must not reset the countdown.
-    if !matches!(cmd, DebugCmd::Settle { .. }) {
+    // `settle` is a query and `reload` a control verb, not input: neither must
+    // reset the countdown.
+    if !matches!(cmd, DebugCmd::Settle { .. } | DebugCmd::Reload) {
         state.idle_notify.activity(Instant::now());
     }
     // The gesture verbs (`down`/`move`/`up`/`tap`/`swipe`) feed the shell's
@@ -384,6 +391,12 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
                 release_at: Instant::now() + std::time::Duration::from_millis(120),
                 reply,
             });
+        }
+        DebugCmd::Reload => {
+            // Allowed while locked: it takes no shell input, and a config reload
+            // is exactly the kind of thing a session may need behind the lock.
+            state.reload_config();
+            let _ = reply.send("ok\n".into());
         }
         DebugCmd::Settle { timeout_ms } => {
             if idle(state) {
@@ -602,6 +615,12 @@ mod tests {
             parse_line("settle", W, H),
             Ok(DebugCmd::Settle { timeout_ms: 2000 })
         );
+    }
+
+    #[test]
+    fn parses_reload() {
+        assert_eq!(parse_line("reload", W, H), Ok(DebugCmd::Reload));
+        assert!(parse_line("reload now", W, H).is_err()); // no args
     }
 
     #[test]
