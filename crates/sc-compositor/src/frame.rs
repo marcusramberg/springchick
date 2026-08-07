@@ -202,7 +202,7 @@ impl State {
         let effect = transition(&mut self.ui, UiEvent::Tick { dt });
         match effect {
             ui_state::Effect::CloseToplevel { toplevel } => {
-                self.close_toplevel(toplevel);
+                self.close_toplevel(toplevel, false);
             }
             ui_state::Effect::EnterSwitcher => {
                 let cards = self.history.deck_order();
@@ -225,7 +225,10 @@ impl State {
             self.card_radius,
         );
         self.switcher_cards = scene.cards.clone();
-        let disc = std::mem::discriminant(&self.ui);
+        let disc = (
+            std::mem::discriminant(&self.ui),
+            ui_state::desired_focus(&self.ui),
+        );
         if self.last_log_state != Some(disc) {
             self.last_log_state = Some(disc);
             debug!(target: "springchick::debug", "state changed to {:?} cards={}", self.ui, scene.cards.len());

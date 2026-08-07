@@ -290,7 +290,18 @@ pub enum UiEvent {
     /// Return-home (Esc shortcut in dev).
     ReturnHome { origin: ZoomOrigin },
     /// Foreground app's toplevel was destroyed.
-    ToplevelClosed { toplevel: ToplevelId },
+    /// A toplevel went away. `next` is the app to fall back to when the closed
+    /// one was in the foreground — the caller resolves it from the MRU history
+    /// (which it has already removed the closed id from), since this module has
+    /// no view of what else is alive.
+    ///
+    /// It is `Some` only when a *dialog* was dismissed; an app closing passes
+    /// `None` and goes Home, which is the Springboard model. See
+    /// `State::close_toplevel`.
+    ToplevelClosed {
+        toplevel: ToplevelId,
+        next: Option<(ToplevelId, String)>,
+    },
     /// Finger down on bar zone — start grab.
     GrabStart { point: sc_input::Pt },
     /// Finger moved during grab.
@@ -391,7 +402,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             }
             Effect::None
         }
-        UiEvent::ToplevelClosed { toplevel } => {
+        UiEvent::ToplevelClosed { toplevel, next } => {
             let is_foreground = match state {
                 UiState::App { toplevel: t, .. }
                 | UiState::AppOpening { toplevel: t, .. }
@@ -402,7 +413,18 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 _ => false,
             };
             if is_foreground {
-                *state = UiState::home(0, 1);
+                // A dismissed dialog hands the screen back to the app
+                // underneath; an app close passes None and lands Home. A portal
+                // file chooser is the case that makes this matter: it is a
+                // toplevel of its own, in another process, so dismissing it
+                // used to drop the app that asked for it.
+                *state = match next {
+                    Some((t, app_id)) => UiState::App {
+                        toplevel: t,
+                        app_id,
+                    },
+                    None => UiState::home(0, 1),
+                };
             }
             // Remove from switcher deck if present.
             if let UiState::Switcher { cards, .. } = state {
@@ -858,7 +880,56 @@ mod tests {
             tracker: Tracker::begin(Pt { x: 0.5, y: 0.9 }),
             cards: Vec::new(),
         };
-        transition(&mut state, UiEvent::ToplevelClosed { toplevel: 3 });
+        transition(
+            &mut state,
+            UiEvent::ToplevelClosed {
+                toplevel: 3,
+                next: None,
+            },
+        );
+        assert!(matches!(state, UiState::Home { .. }));
+    }
+
+    /// Dismissing a foreground toplevel returns to whatever the caller named as
+    /// next, not Home. This is the portal file chooser case: the picker is its
+    /// own toplevel in its own process, so closing it must hand the screen back
+    /// to the app that asked for it.
+    #[test]
+    fn toplevel_closed_returns_to_previous_app() {
+        let mut state = UiState::App {
+            toplevel: 7,
+            app_id: "org.example.Picker".into(),
+        };
+        transition(
+            &mut state,
+            UiEvent::ToplevelClosed {
+                toplevel: 7,
+                next: Some((2, "org.example.Editor".into())),
+            },
+        );
+        match state {
+            UiState::App { toplevel, app_id } => {
+                assert_eq!(toplevel, 2);
+                assert_eq!(app_id, "org.example.Editor");
+            }
+            other => panic!("expected App, got {other:?}"),
+        }
+    }
+
+    /// ...but with nothing left alive, Home is still the right answer.
+    #[test]
+    fn toplevel_closed_without_next_goes_home() {
+        let mut state = UiState::App {
+            toplevel: 7,
+            app_id: "org.example.Picker".into(),
+        };
+        transition(
+            &mut state,
+            UiEvent::ToplevelClosed {
+                toplevel: 7,
+                next: None,
+            },
+        );
         assert!(matches!(state, UiState::Home { .. }));
     }
 
@@ -1126,7 +1197,13 @@ mod tests {
             close: None,
             enter: Spring::new(1.0),
         };
-        transition(&mut state, UiEvent::ToplevelClosed { toplevel: 2 });
+        transition(
+            &mut state,
+            UiEvent::ToplevelClosed {
+                toplevel: 2,
+                next: None,
+            },
+        );
         if let UiState::Switcher { cards, .. } = &state {
             assert_eq!(cards, &vec![1, 3]);
         } else {

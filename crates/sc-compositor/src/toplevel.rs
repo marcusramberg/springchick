@@ -198,25 +198,43 @@ impl State {
     }
 
     pub(crate) fn unregister_toplevel(&mut self, surface: &WlSurface) {
-        let mut closed_id = None;
+        let mut closed = None;
         for (idx, slot) in self.toplevels.iter_mut().enumerate() {
             if let Some(tl) = slot {
                 if tl.surface.wl_surface() == surface {
-                    closed_id = Some(idx);
+                    // Read the dialog hint before dropping the slot — the xdg
+                    // resource is gone by the time close_toplevel runs.
+                    closed = Some((idx, Self::is_dialog(&tl.surface)));
                     *slot = None;
                     break;
                 }
             }
         }
-        if let Some(id) = closed_id {
-            self.close_toplevel(id);
+        if let Some((id, was_dialog)) = closed {
+            self.close_toplevel(id, was_dialog);
         }
     }
 
     /// Close a toplevel by id (remove from vec, notify UI state).
-    pub(crate) fn close_toplevel(&mut self, id: ToplevelId) {
+    ///
+    /// `was_dialog` decides where the screen goes if this was the foreground
+    /// toplevel. A dialog is a transient thing on behalf of another app — a
+    /// portal file chooser is a whole separate process, so dismissing it must
+    /// hand the screen back rather than drop the app that asked for it. A real
+    /// app closing still goes Home, which is the Springboard model.
+    pub(crate) fn close_toplevel(&mut self, id: ToplevelId, was_dialog: bool) {
         self.detach_toplevel(id);
-        transition(&mut self.ui, UiEvent::ToplevelClosed { toplevel: id });
+        let next = if was_dialog { self.mru_app() } else { None };
+        transition(&mut self.ui, UiEvent::ToplevelClosed { toplevel: id, next });
+    }
+
+    /// The app to fall back to when a dialog goes away: the front of the MRU
+    /// history, which `detach_toplevel` has already pruned of the closed id.
+    /// `None` when nothing is left to return to.
+    fn mru_app(&self) -> Option<(ToplevelId, String)> {
+        let id = *self.history.stack.first()?;
+        let tl = self.toplevels.get(id)?.as_ref()?;
+        Some((id, tl.app_id.clone()))
     }
 
     /// Ask the client to close, without emitting a `ToplevelClosed` UI
@@ -236,8 +254,16 @@ impl State {
         let Some(id) = ui_state::desired_focus(&self.ui) else {
             return;
         };
+        // Deliberately quitting the front app is an app close, not a dialog
+        // dismissal: go Home.
         self.detach_toplevel(id);
-        transition(&mut self.ui, UiEvent::ToplevelClosed { toplevel: id });
+        transition(
+            &mut self.ui,
+            UiEvent::ToplevelClosed {
+                toplevel: id,
+                next: None,
+            },
+        );
     }
 
     /// Raise `tid` to the foreground with a screen-centered zoom origin. Backs
