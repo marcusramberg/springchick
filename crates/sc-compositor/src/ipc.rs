@@ -3,9 +3,9 @@
 //!
 //! The compositor always listens on [`socket_path`]; `springchick ipc <verb>
 //! [args...]` connects there, sends one line, prints the reply, and exits
-//! non-zero if the reply is an error. Today the verbs are the debug-input
-//! gestures (`tap`, `swipe`, `key`, `settle`, …); future control verbs
-//! (`reload`, `state`, …) slot in the same way.
+//! non-zero if the reply is an error. The verbs are the debug-input gestures
+//! (`tap`, `swipe`, `key`, `settle`, …) plus control verbs (`reload`); further
+//! control verbs (`state`, …) slot in the same way.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -33,6 +33,7 @@ pub fn run_client(args: &[String]) -> ExitCode {
         eprintln!("usage: springchick ipc <command> [args...]");
         eprintln!("  e.g. springchick ipc tap 640 400");
         eprintln!("       springchick ipc swipe 640 788 1080 788 500");
+        eprintln!("       springchick ipc reload   # re-read config.toml");
         return ExitCode::from(2);
     }
 

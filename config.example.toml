@@ -8,11 +8,17 @@
 # Unknown keys are ignored; a bad keybinding is dropped with a warning and the
 # rest of the config still applies. Values below match the compiled-in defaults,
 # so this file changes nothing until you edit it.
+#
+# `springchick ipc reload` re-reads this file into a running compositor. Every
+# option below takes effect immediately except `dpi` (ignored on reload; needs a
+# restart) and `prefer_no_csd` (applies to the next window that negotiates
+# decorations).
 
 [main]
 # Output scale advertised to clients. The FP5 panel is dense enough that 1:1
 # rendering is illegibly small. Advertised via wp_fractional_scale, so a
 # fractional value (e.g. 2.5) is allowed, not just whole numbers.
+# NOT reloadable: a running compositor keeps the value it started with.
 dpi = 3
 
 # Seconds of no input before the panel idle-blanks. 0 disables idle blanking

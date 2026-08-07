@@ -684,6 +684,23 @@ impl State {
         }
     }
 
+    /// Re-read `config.toml` and re-apply it, for `springchick ipc reload`.
+    ///
+    /// `dpi` is deliberately not re-applied: it is baked into the output's
+    /// advertised fractional scale and into every buffer size clients have
+    /// already committed against. `prefer_no_csd` takes effect on the next
+    /// window that negotiates a decoration mode.
+    pub(crate) fn reload_config(&mut self) {
+        let config = sc_config::load();
+        self.card_radius = config.card_radius;
+        self.prefer_no_csd = config.prefer_no_csd;
+        self.show_touches = config.show_touches;
+        self.idle = blank::Idle::new(config.idle_blank_secs, std::time::Instant::now());
+        // Same path as startup; `children` (spawned binding commands, still to
+        // be reaped) stays on the existing `Keys`.
+        self.keys.tracker = keybinds::Keys::from_config(config).tracker;
+    }
+
     /// Output size as floats — shorthand for the `(w, h)` pair every geometry
     /// call needs.
     pub(crate) fn output_size_f(&self) -> (f32, f32) {

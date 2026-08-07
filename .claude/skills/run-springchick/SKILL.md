@@ -71,7 +71,8 @@ A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`
 (override with `SPRINGCHICK_IPC_SOCK`). The shipped `springchick ipc <verb>`
 client sends one line and prints the reply (exit non-zero on error). Verbs are
 the debug-input gestures: `tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`,
-`down/move/up`, `settle [MS]`. Used by `nix/vm-switcher-test.nix`; also works
+`down/move/up`, `settle [MS]`, plus the control verb `reload` (re-read
+`config.toml`). Used by `nix/vm-switcher-test.nix`; also works
 on-device. From the test driver (root reaching the tester's socket):
 
 ```python
