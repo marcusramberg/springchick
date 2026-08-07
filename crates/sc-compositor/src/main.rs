@@ -46,6 +46,7 @@ mod touch;
 mod touch_viz;
 pub mod ui_state;
 mod winit_backend;
+mod wlr_screencopy;
 
 // Re-exported so sibling modules can keep using the short `crate::State` path.
 pub(crate) use arrange::{DragItem, IconPress};

@@ -598,6 +598,7 @@ impl App {
 
         // Screencopy: satisfy any pending capture requests from the same scene.
         self.capture_pending_frames(&prep);
+        self.wlr_capture_pending_frames(&prep);
     }
 
     /// Compose the current scene (`prep`) into `framebuffer`. Shared by the
@@ -684,7 +685,22 @@ impl App {
         prep: &crate::FramePrep,
     ) -> Option<bool> {
         let target = crate::capture::shm_target(buffer)?;
-        let mut tex = crate::capture::offscreen(&mut self.drm.renderer, &target)?;
+        let src = Rectangle::from_size(target.size);
+        self.capture_region_shm(buffer, prep, &target, src)
+    }
+
+    /// The shared half of both capture protocols: compose the scene into an
+    /// offscreen texture the size of the output, then read `src` out of it into
+    /// the client's shm buffer.
+    fn capture_region_shm(
+        &mut self,
+        buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
+        prep: &crate::FramePrep,
+        target: &crate::capture::ShmTarget,
+        src: Rectangle<i32, smithay::utils::Buffer>,
+    ) -> Option<bool> {
+        let scene_size = (self.drm.output_size.w, self.drm.output_size.h).into();
+        let mut tex = crate::capture::offscreen(&mut self.drm.renderer, target.fourcc, scene_size)?;
         let mut fb = match self.drm.renderer.bind(&mut tex) {
             Ok(fb) => fb,
             Err(e) => {
@@ -695,8 +711,30 @@ impl App {
         if self.draw_scene_into(&mut fb, prep, false).is_none() {
             return Some(false);
         }
-        let ok = crate::capture::readback_into_shm(&mut self.drm.renderer, &fb, buffer, &target);
+        let ok =
+            crate::capture::readback_into_shm(&mut self.drm.renderer, &fb, buffer, target, src);
         Some(ok)
+    }
+
+    /// Serve pending wlr-screencopy copies from the same composited scene.
+    fn wlr_capture_pending_frames(&mut self, prep: &crate::FramePrep) {
+        if self.state.wlr_captures.is_empty() {
+            return;
+        }
+        let present = self.clock.now();
+        for frame in std::mem::take(&mut self.state.wlr_captures) {
+            let target = frame.target();
+            let ok = self
+                .capture_region_shm(&frame.buffer, prep, &target, frame.region)
+                .unwrap_or(false);
+            if ok {
+                // Fence so the client never maps a half-written buffer.
+                self.state.skia.finish_gpu();
+                frame.success(present);
+            } else {
+                frame.failed();
+            }
+        }
     }
 }
 

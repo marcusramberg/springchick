@@ -62,11 +62,24 @@ pub(crate) fn run_winit() {
         socket_name.clone(),
         (actual_size.w, actual_size.h),
     );
-    // Winit has no DRM main device; a version-3 global is fine (no recording).
+    // Advertise dmabuf v4 with feedback when the EGL display resolves to a real
+    // render node (it does under a normal host GPU session). Recorders —
+    // wf-recorder, wl-screenrec — bind v4 unconditionally and take a fatal
+    // protocol error against a v3 global, which would make them untestable
+    // nested. Falls back to v3 if the node can't be resolved (llvmpipe, etc).
+    let main_device = smithay::backend::egl::EGLDevice::device_for_display(
+        gfx_backend.renderer().egl_context().display(),
+    )
+    .ok()
+    .and_then(|device| device.try_get_render_node().ok().flatten())
+    .map(|node| node.dev_id());
+    if main_device.is_none() {
+        info!("no EGL render node; advertising zwp_linux_dmabuf v3");
+    }
     state.init_dmabuf_global(
         &display.handle(),
         gfx_backend.renderer().dmabuf_formats(),
-        None,
+        main_device,
     );
 
     // Control/IPC socket (`springchick ipc …`). Always listening; the client
@@ -153,12 +166,36 @@ fn capture_frame_shm(
     buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
     rounded_tex_shader: &GlesTexProgram,
 ) -> Option<bool> {
+    let target = crate::capture::shm_target(buffer)?;
+    let src = Rectangle::from_size(target.size);
+    capture_region_shm(
+        backend,
+        state,
+        prep,
+        buffer,
+        &target,
+        src,
+        rounded_tex_shader,
+    )
+}
+
+/// Shared by both capture protocols: compose the scene into an offscreen
+/// texture the size of the window, then read `src` out of it into the client's
+/// shm buffer.
+fn capture_region_shm(
+    backend: &mut WinitGraphicsBackend<GlesRenderer>,
+    state: &mut State,
+    prep: &crate::FramePrep,
+    buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
+    target: &crate::capture::ShmTarget,
+    src: Rectangle<i32, smithay::utils::Buffer>,
+    rounded_tex_shader: &GlesTexProgram,
+) -> Option<bool> {
     use smithay::backend::renderer::Bind;
 
     let size = backend.window_size();
-    let target = crate::capture::shm_target(buffer)?;
     let renderer = backend.renderer();
-    let mut tex = crate::capture::offscreen(renderer, &target)?;
+    let mut tex = crate::capture::offscreen(renderer, target.fourcc, (size.w, size.h).into())?;
     let mut fb = match renderer.bind(&mut tex) {
         Ok(fb) => fb,
         Err(e) => {
@@ -176,7 +213,7 @@ fn capture_frame_shm(
         }
     }
     Some(crate::capture::readback_into_shm(
-        renderer, &fb, buffer, &target,
+        renderer, &fb, buffer, target, src,
     ))
 }
 
@@ -244,6 +281,28 @@ fn render_frame(
 
     // Screencopy: nested winit has no dmabuf blit path, but shm readback works
     // the same as on DRM, which is what grim/wl-screenrec fall back to.
+    if !state.wlr_captures.is_empty() {
+        let present = smithay::utils::Clock::<smithay::utils::Monotonic>::new().now();
+        for frame in std::mem::take(&mut state.wlr_captures) {
+            let target = frame.target();
+            let ok = capture_region_shm(
+                backend,
+                state,
+                &prep,
+                &frame.buffer,
+                &target,
+                frame.region,
+                rounded_tex_shader,
+            )
+            .unwrap_or(false);
+            if ok {
+                frame.success(present);
+            } else {
+                frame.failed();
+            }
+        }
+    }
+
     if state.pending_captures.is_empty() {
         return result;
     }

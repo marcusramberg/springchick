@@ -24,6 +24,10 @@ mkTest {
   packages = [
     pkgs.grim
     pkgs.foot
+    # wlr-screencopy side: wf-recorder is the reason that protocol exists here,
+    # and ffprobe is how the resulting file is checked.
+    pkgs.wf-recorder
+    pkgs.ffmpeg
   ];
 
   # The captured PNG is inspected pixel-wise on the driver side.
@@ -102,6 +106,31 @@ mkTest {
     machine.sleep(3)
     app = assert_matches_framebuffer(grim("/tmp/app.png"), "capture-app")
     assert thumb(app) != thumb(home), "capture unchanged after launching an app"
+
+    # 3. wlr-screencopy, via the tool it was added for. wf-recorder negotiates
+    #    on its own (it asks for dmabuf first and falls back to the shm buffer
+    #    we advertise), records with copy_with_damage, and muxes on SIGINT.
+    # systemd-run gives the unit no PATH, so every binary is absolute; and
+    # `timeout` always exits 124 after signalling, so the recording is judged by
+    # the file it produced, not by the exit code.
+    machine.succeed(
+        "systemd-run --user -M tester@.host --collect --wait "
+        f"--setenv=WAYLAND_DISPLAY={socket} "
+        "${pkgs.bash}/bin/bash -c '"
+        "${pkgs.coreutils}/bin/timeout -s INT 8 ${pkgs.wf-recorder}/bin/wf-recorder "
+        "-c libx264 -x yuv420p -y -f /tmp/rec.mkv || true'"
+    )
+    machine.succeed("test -s /tmp/rec.mkv")
+    probe = machine.succeed(
+        "${pkgs.ffmpeg}/bin/ffprobe -v error -select_streams v:0 "
+        "-count_frames -show_entries stream=width,height,nb_read_frames "
+        "-of csv=p=0 /tmp/rec.mkv"
+    ).strip()
+    rec_width, rec_height, frames = (int(v) for v in probe.split(","))
+    # h264 rounds odd dimensions down to even; the output is 720x1440 here, so
+    # this is an exact check either way.
+    assert (rec_width, rec_height) == (720, 1440), f"recorded {rec_width}x{rec_height}"
+    assert frames > 0, "recording has no frames"
 
     # A repeat capture must still work: sessions are held for their client's
     # lifetime, and a stale one left behind would stop the next capture.
