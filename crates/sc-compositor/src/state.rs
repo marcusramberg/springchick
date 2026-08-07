@@ -204,6 +204,9 @@ pub(crate) struct State {
     pub capture_formats: Option<CaptureFormats>,
     /// Capture frames awaiting a blit; drained by the render loop each frame.
     pub pending_captures: Vec<CaptureFrame>,
+    /// wlr-screencopy copy requests awaiting the render loop. Separate from
+    /// `pending_captures` because the two protocols reply differently.
+    pub wlr_captures: Vec<crate::wlr_screencopy::PendingCopy>,
     /// Live screencopy sessions. Held because dropping a `Session` sends
     /// `stopped` and fails the client's frames (that dropped-on-arrival session
     /// is what made `grim` print "failed to copy output").
@@ -481,6 +484,10 @@ impl State {
         // real CRTC gamma_length before clients connect.
         let gamma = gamma_control::GammaControl::new(&dh, 256);
 
+        // wlr-screencopy: the older capture protocol, alongside the ext one.
+        // wf-recorder / wlrobs / xdg-desktop-portal-wlr speak only this.
+        crate::wlr_screencopy::init(&dh);
+
         // ext-idle-notify: idle daemons (swayidle et al) ask to be told when the
         // user has been inactive for N ms. Timeouts are polled per frame, not by
         // calloop timers — see `idle_notify`.
@@ -556,6 +563,7 @@ impl State {
             capture_formats: None,
             pending_captures: Vec::new(),
             capture_sessions: Vec::new(),
+            wlr_captures: Vec::new(),
             layers: layer_shell::LayerShell::new(output.clone(), out_w as f32, out_h as f32),
             touch,
             touch_targets: HashMap::new(),

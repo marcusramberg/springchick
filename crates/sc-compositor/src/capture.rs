@@ -48,8 +48,16 @@ pub fn shm_target(buffer: &WlBuffer) -> Option<ShmTarget> {
 }
 
 /// Allocate the offscreen texture a scene is drawn into before readback.
-pub fn offscreen(renderer: &mut GlesRenderer, target: &ShmTarget) -> Option<GlesTexture> {
-    match Offscreen::<GlesTexture>::create_buffer(renderer, target.fourcc, target.size) {
+///
+/// `size` is the whole scene, which is not necessarily the client's buffer:
+/// wlr-screencopy can ask for a sub-region, and the scene still has to be
+/// composited at full output size before that region is read out of it.
+pub fn offscreen(
+    renderer: &mut GlesRenderer,
+    fourcc: Fourcc,
+    size: Size<i32, smithay::utils::Buffer>,
+) -> Option<GlesTexture> {
+    match Offscreen::<GlesTexture>::create_buffer(renderer, fourcc, size) {
         Ok(t) => Some(t),
         Err(e) => {
             warn!("screencopy: offscreen alloc failed: {e}");
@@ -61,15 +69,19 @@ pub fn offscreen(renderer: &mut GlesRenderer, target: &ShmTarget) -> Option<Gles
 /// Read the drawn framebuffer back and copy it into the client's shm pool.
 ///
 /// `framebuffer` must be the one bound to the texture from [`offscreen`], with
-/// the scene already drawn into it.
+/// the scene already drawn into it. `src` is the part of it to read; its size
+/// must be the client buffer's size. The framebuffer's row 0 is the top of the
+/// image (the scene is drawn y-flipped, as it is for scanout), so `src.loc` is
+/// measured from the top-left like every other rect in the shell.
 pub fn readback_into_shm(
     renderer: &mut GlesRenderer,
     framebuffer: &<GlesRenderer as RendererSuper>::Framebuffer<'_>,
     buffer: &WlBuffer,
     target: &ShmTarget,
+    src: Rectangle<i32, smithay::utils::Buffer>,
 ) -> bool {
-    let region = Rectangle::from_size(target.size);
-    let mapping = match renderer.copy_framebuffer(framebuffer, region, target.fourcc) {
+    debug_assert_eq!(src.size, target.size);
+    let mapping = match renderer.copy_framebuffer(framebuffer, src, target.fourcc) {
         Ok(m) => m,
         Err(e) => {
             warn!("screencopy: copy_framebuffer failed: {e}");
