@@ -68,6 +68,7 @@
           vm-arrange = import ./nix/vm-arrange-test.nix { inherit self pkgs; };
           vm-lock = import ./nix/vm-lock-test.nix { inherit self pkgs; };
           vm-capture = import ./nix/vm-capture-test.nix { inherit self pkgs; };
+          vm-portal = import ./nix/vm-portal-test.nix { inherit self pkgs; };
         };
 
         devShells.default = pkgs.mkShell {

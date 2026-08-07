@@ -7,7 +7,7 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::SERIAL_COUNTER;
 use smithay::wayland::shell::xdg::dialog::ToplevelDialogHint;
-use smithay::wayland::shell::xdg::{ToplevelSurface, XdgToplevelSurfaceData};
+use smithay::wayland::shell::xdg::{SurfaceCachedState, ToplevelSurface, XdgToplevelSurfaceData};
 
 use sc_shell_model::persist;
 
@@ -172,6 +172,7 @@ impl State {
         self.toplevels.push(Some(AppToplevel {
             surface,
             app_id: app_id.clone(),
+            logged_size: None,
         }));
 
         // Keep the search app out of the MRU / task switcher.
@@ -599,6 +600,61 @@ impl State {
             state.states.set(xdg_toplevel::State::Activated);
         });
         surface.send_configure();
+    }
+
+    /// Log a toplevel's client-set xdg window geometry against the logical size
+    /// it was configured for, and whether it overflows.
+    ///
+    /// A client may legally ignore the size in a configure, and GTK does: its
+    /// file chooser clamps to the widget's minimum width (well over the ~360
+    /// logical px a phone has) and commits that instead, so the picker runs off
+    /// the screen edge. Nothing in xdg-shell can force it narrower — the fix is
+    /// a backend that is actually adaptive. This line is the oracle the
+    /// `vm-portal` check asserts on to prove one is in use.
+    ///
+    /// Only fires when the geometry changes, not on every commit.
+    pub(crate) fn log_toplevel_size(&mut self, surface: &WlSurface) {
+        let Some(idx) = self.toplevels.iter().position(|t| {
+            t.as_ref()
+                .is_some_and(|t| t.surface.wl_surface() == surface)
+        }) else {
+            return;
+        };
+        // The client's own window geometry (logical px, excluding its shadows),
+        // which is what it wants to occupy. Absent until the first real commit.
+        let geo = smithay::wayland::compositor::with_states(surface, |states| {
+            states
+                .cached_state
+                .get::<SurfaceCachedState>()
+                .current()
+                .geometry
+        });
+        let Some(geo) = geo else { return };
+        let size = (geo.size.w, geo.size.h);
+        if size == (0, 0) {
+            return;
+        }
+        let usable = self.layers.usable(self.dpi);
+        let avail_w = (usable.w as f64 / self.dpi).round() as i32;
+        let avail_h = (usable.h as f64 / self.dpi).round() as i32;
+        let Some(tl) = self.toplevels[idx].as_mut() else {
+            return;
+        };
+        if tl.logged_size == Some(size) {
+            return;
+        }
+        tl.logged_size = Some(size);
+        let app_id = tl.app_id.clone();
+        info!(
+            target: "springchick::debug",
+            "toplevel size app_id={} geometry={}x{} available={}x{} oversize={}",
+            app_id,
+            size.0,
+            size.1,
+            avail_w,
+            avail_h,
+            size.0 > avail_w || size.1 > avail_h,
+        );
     }
 
     /// Configure a toplevel truly fullscreen: the whole output, no decorations,

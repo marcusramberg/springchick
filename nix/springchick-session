@@ -31,6 +31,19 @@ fi
 # Clear any failed state left by a previous session so units can start clean.
 systemctl --user reset-failed
 
+# Identify the desktop *here*, not only on springchick.service. A greeter only
+# sets XDG_CURRENT_DESKTOP from the session's DesktopNames if it reads the
+# .desktop file at all — greetd launched from a bare `command =` does not — and
+# a variable set on the compositor's unit is per-unit anyway, invisible to
+# everything else in the session. xdg-desktop-portal is the one that cares: it
+# picks a backend by matching XDG_CURRENT_DESKTOP against portals.conf, and with
+# it unset our springchick-portals.conf never applies. No config, no match (the
+# gnome/gtk backends declare UseIn=gnome), so xdp exports no interface at all
+# and every portal call fails with UnknownMethod — file chooser and Secret
+# alike. Exported before import-environment so it lands in the user manager.
+export XDG_CURRENT_DESKTOP=springchick
+export XDG_SESSION_TYPE=wayland
+
 # Push the login/PAM environment (XDG_*, DBUS_SESSION_BUS_ADDRESS, seat vars, …)
 # into the systemd user manager so the service and everything it pulls in
 # inherit it.
