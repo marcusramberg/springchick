@@ -160,8 +160,14 @@ impl XdgShellHandler for State {
         // an xdg_popup child and ignore ALL input until that popup is
         // configured, so without this the on-screen keyboard never registers a
         // tap.
+        //
+        // Honour the client's constraint_adjustment against the on-screen area
+        // (flip/slide/resize) rather than `get_geometry()`'s raw anchor result —
+        // otherwise a menu anchored low is configured off the bottom edge and
+        // our render-time clamp drags it back over the app's own chrome.
+        let target = self.popup_target(&PopupKind::Xdg(surface.clone()));
         surface.with_pending_state(|state| {
-            state.geometry = positioner.get_geometry();
+            state.geometry = positioner.get_unconstrained_geometry(target);
         });
         if let Err(e) = surface.send_configure() {
             warn!(?e, "failed to configure popup");
@@ -198,8 +204,9 @@ impl XdgShellHandler for State {
         positioner: PositionerState,
         token: u32,
     ) {
+        let target = self.popup_target(&PopupKind::Xdg(surface.clone()));
         surface.with_pending_state(|state| {
-            state.geometry = positioner.get_geometry();
+            state.geometry = positioner.get_unconstrained_geometry(target);
         });
         surface.send_repositioned(token);
         if let Err(e) = surface.send_configure() {

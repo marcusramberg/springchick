@@ -20,6 +20,36 @@ pub fn clamp_origin(origin: (i32, i32), size: (i32, i32), output: (i32, i32)) ->
     )
 }
 
+/// The rectangle a popup's positioner should be unconstrained against, in the
+/// **logical** coordinate space its `xdg_positioner` uses (relative to the
+/// popup's parent surface).
+///
+/// Without this the compositor never applies the client's
+/// `constraint_adjustment` (flip/slide/resize), so a menu anchored near the
+/// bottom of a phone-sized screen is configured half off-screen and then only
+/// shoved back on by [`clamp_origin`] — landing on top of the app's own chrome
+/// (Firefox's URL-bar menus are the worst case). Feeding this rect to
+/// `PositionerState::get_unconstrained_geometry` makes the popup flip above its
+/// anchor instead, which is what the client asked for.
+///
+/// - `area`: physical `(x, y, w, h)` of the on-screen region popups may occupy.
+/// - `root_origin`: physical origin of the popup chain's root surface.
+/// - `toplevel_coords`: logical offset from that root to the popup's parent.
+pub fn unconstrain_target(
+    area: (i32, i32, i32, i32),
+    root_origin: (i32, i32),
+    toplevel_coords: (i32, i32),
+    dpi: f64,
+) -> (i32, i32, i32, i32) {
+    let to_logical = |v: i32| (v as f64 / dpi).round() as i32;
+    (
+        to_logical(area.0 - root_origin.0) - toplevel_coords.0,
+        to_logical(area.1 - root_origin.1) - toplevel_coords.1,
+        to_logical(area.2),
+        to_logical(area.3),
+    )
+}
+
 /// Given a popup chain ordered root→leaf and the index of the popup a touch-down
 /// landed on (`None` = the tap missed every popup), return the indices to
 /// dismiss, leaf-first (so callers can `send_popup_done` deepest-first).
@@ -60,6 +90,36 @@ mod tests {
     fn clamp_pins_oversized_popup_to_top_left() {
         // Popup wider than output: far-edge clamp would go negative → pinned to 0.
         assert_eq!(clamp_origin((50, 50), (2000, 3000), (1080, 2400)), (0, 0));
+    }
+
+    #[test]
+    fn target_for_toplevel_rooted_popup_is_area_at_origin() {
+        // App fills the usable area, popup parented straight to it: the target
+        // is the usable area in logical px, anchored at the parent's (0, 0).
+        assert_eq!(
+            unconstrain_target((0, 0, 1080, 2280), (0, 0), (0, 0), 3.0),
+            (0, 0, 360, 760)
+        );
+    }
+
+    #[test]
+    fn target_offsets_by_root_origin_and_parent_coords() {
+        // Usable area starts 90px down (a top bar), root drawn at that origin,
+        // and the popup's parent sits 20 logical px into the root.
+        assert_eq!(
+            unconstrain_target((0, 90, 1080, 2190), (0, 90), (0, 20), 3.0),
+            (0, -20, 360, 730)
+        );
+    }
+
+    #[test]
+    fn target_is_negative_when_root_drawn_below_area_top() {
+        // A bottom-docked layer surface: the area's top edge is above the root,
+        // so the target extends upward into negative parent-local coords.
+        assert_eq!(
+            unconstrain_target((0, 0, 1080, 2400), (0, 1800), (0, 0), 3.0),
+            (0, -600, 360, 800)
+        );
     }
 
     #[test]

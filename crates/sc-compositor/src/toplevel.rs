@@ -361,6 +361,9 @@ impl State {
     pub(crate) fn recompute_layers(&mut self) {
         if self.layers.usable_changed(self.dpi).is_some() {
             self.reconfigure_toplevels();
+            // The area popups may occupy moved with it (OSK up/down): re-solve
+            // their positioners so an open menu flips instead of being covered.
+            self.reconstrain_popups();
         }
     }
 

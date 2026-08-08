@@ -2,8 +2,11 @@
 //! geometry chains, the home-bar fade, and the animation gate the DRM loop uses
 //! to decide whether to keep priming page-flips.
 
-use smithay::desktop::PopupManager;
+use smithay::desktop::{
+    find_popup_root_surface, get_popup_toplevel_coords, PopupKind, PopupManager,
+};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::{Logical, Rectangle};
 
 use tracing::debug;
 
@@ -35,6 +38,81 @@ impl State {
                 (kind, clamped, size)
             })
             .collect()
+    }
+
+    /// The rect a new/repositioned popup's positioner is unconstrained against,
+    /// in the popup parent's logical space. See [`popups::unconstrain_target`].
+    ///
+    /// App-rooted popups get the *usable* area (so a menu never opens under the
+    /// OSK or the home pill); layer-rooted popups (OSK menus) get the whole
+    /// output, since the layer surface itself lives in the reserved strip.
+    pub(crate) fn popup_target(&self, kind: &PopupKind) -> Rectangle<i32, Logical> {
+        let root = find_popup_root_surface(kind).ok();
+        let app_rooted = root.is_some() && root == self.app_focus_surface();
+        let (area, root_origin) = if app_rooted {
+            let u = self.layers.usable(self.dpi);
+            let o = (u.x.round() as i32, u.y.round() as i32);
+            ((o.0, o.1, u.w.round() as i32, u.h.round() as i32), o)
+        } else {
+            let (below, above) = self.layers.render_lists(self.dpi);
+            let origin = root
+                .and_then(|r| {
+                    below
+                        .iter()
+                        .chain(above.iter())
+                        .find(|(s, _)| *s == r)
+                        .map(|(_, o)| *o)
+                })
+                .unwrap_or((0, 0));
+            ((0, 0, self.output_size.0, self.output_size.1), origin)
+        };
+        let tc = get_popup_toplevel_coords(kind);
+        let (x, y, w, h) = popups::unconstrain_target(area, root_origin, (tc.x, tc.y), self.dpi);
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    /// Re-run the positioner against the current [`State::popup_target`] for
+    /// every live popup and configure the ones whose geometry moved.
+    ///
+    /// Called when the area popups may occupy changes under them — the OSK
+    /// mapping/unmapping, an exclusive zone appearing. Without it a menu opened
+    /// against the full screen height stays where it was and the keyboard slides
+    /// up over it.
+    ///
+    /// Only *reactive* popups (`xdg_positioner.set_reactive`) may be
+    /// reconfigured after their initial configure; `send_pending_configure`
+    /// enforces that and errors otherwise, which is the expected outcome for a
+    /// static popup, not a problem — it keeps its original placement and the
+    /// render-time [`popups::clamp_origin`] keeps it on screen.
+    pub(crate) fn reconstrain_popups(&mut self) {
+        let mut roots: Vec<WlSurface> = self
+            .toplevels
+            .iter()
+            .flatten()
+            .map(|slot| slot.surface.wl_surface().clone())
+            .collect();
+        let (below, above) = self.layers.render_lists(self.dpi);
+        roots.extend(below.into_iter().chain(above).map(|(s, _)| s));
+
+        let kinds: Vec<PopupKind> = roots
+            .iter()
+            .flat_map(|r| PopupManager::popups_for_surface(r).map(|(kind, _)| kind))
+            .collect();
+
+        for kind in kinds {
+            // Input-method popups are positioned by the text cursor rectangle,
+            // not an xdg_positioner; nothing to re-solve.
+            let PopupKind::Xdg(popup) = kind else {
+                continue;
+            };
+            let target = self.popup_target(&PopupKind::Xdg(popup.clone()));
+            popup.with_pending_state(|state| {
+                state.geometry = state.positioner.get_unconstrained_geometry(target);
+            });
+            if let Ok(Some(_)) = popup.send_pending_configure() {
+                self.needs_render = true;
+            }
+        }
     }
 
     /// Popups parented to the fullscreen app (menus, dropdowns), root→leaf.
