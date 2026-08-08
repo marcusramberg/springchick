@@ -359,6 +359,12 @@ impl State {
     /// Recompute layer-surface geometry + reserved area. If the area apps may
     /// use changed, resize the toplevels to fit around it (e.g. above an OSK).
     pub(crate) fn recompute_layers(&mut self) {
+        // Hold the app at its old size while a layer surface slides in: shrinking
+        // it the instant the OSK maps leaves a bare strip that the keyboard then
+        // slides up into. `advance_frame` calls back here when the slide lands.
+        if self.layers.sliding() {
+            return;
+        }
         if self.layers.usable_changed(self.dpi).is_some() {
             self.reconfigure_toplevels();
             // The area popups may occupy moved with it (OSK up/down): re-solve

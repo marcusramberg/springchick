@@ -64,6 +64,15 @@ pub fn ease_out_cubic(p: f32) -> f32 {
     1.0 - (1.0 - p).powi(3)
 }
 
+/// How far a surface sliding in from an edge still is from its resting place,
+/// at normalized progress `p`: `(1 - ease_out_cubic(p)) * distance`.
+///
+/// `p = 0` → the full `distance` (fully off-edge), `p = 1` → `0` (in place).
+/// Used for the on-screen keyboard rising from the bottom of the screen.
+pub fn slide_in_offset(p: f32, distance: f32) -> f32 {
+    (1.0 - ease_out_cubic(p)) * distance
+}
+
 /// A breathing/pulse value in `[0,1]` from a monotonic `elapsed` (seconds) and
 /// angular `rate` (radians/sec): `sin(elapsed*rate)*0.5 + 0.5`. Drives the
 /// launching-icon halo.
@@ -139,6 +148,21 @@ mod tests {
         assert_eq!(ease_out_cubic(-1.0), 0.0);
         assert_eq!(ease_out_cubic(2.0), 1.0);
         assert!(ease_out_cubic(0.5) > 0.5); // fast start: past halfway by midpoint
+    }
+
+    #[test]
+    fn slide_in_offset_runs_full_distance_to_zero() {
+        assert_eq!(slide_in_offset(0.0, 800.0), 800.0);
+        assert_eq!(slide_in_offset(1.0, 800.0), 0.0);
+        // Ease-out: most of the travel is done by the midpoint.
+        assert!(slide_in_offset(0.5, 800.0) < 400.0);
+        // Monotonically decreasing.
+        let mut prev = f32::INFINITY;
+        for i in 0..=20 {
+            let v = slide_in_offset(i as f32 / 20.0, 800.0);
+            assert!(v < prev);
+            prev = v;
+        }
     }
 
     #[test]
