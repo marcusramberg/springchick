@@ -202,6 +202,8 @@ impl State {
             || self.launching.is_some()
             || self.osd.is_active(now)
             || self.bar_fading()
+            // A layer surface (the OSK) sliding up into place.
+            || self.layers.sliding()
             // A lock is engaged but not yet confirmed to the client: keep
             // page-flipping so the locked frame it is waiting on is actually
             // presented (see `session_lock::SessionLock::tick`).
@@ -267,6 +269,16 @@ impl State {
         }
 
         self.tick_edge_page_flip();
+
+        // Slide a freshly-mapped OSK up into place. Purely a render offset — the
+        // client is never told about it. The app keeps its old size for the
+        // duration (`recompute_layers` bails while sliding) so the keyboard rises
+        // *over* it rather than into a strip vacated ahead of it; the resize and
+        // the popup re-solve both land on the frame the slide finishes.
+        let was_sliding = self.layers.sliding();
+        if !self.layers.tick_slides(dt) && was_sliding {
+            self.recompute_layers();
+        }
 
         for (sx, sy) in self.grid_anim.values_mut() {
             sx.step(dt);

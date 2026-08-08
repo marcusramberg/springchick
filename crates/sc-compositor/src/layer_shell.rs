@@ -29,10 +29,15 @@ use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::wlr_layer::{
     Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// `(surface, physical origin)` pairs to composite, in bottom-to-top order.
 pub type RenderList = Vec<(WlSurface, (i32, i32))>;
+
+/// Seconds a bottom-docked layer surface (the OSK) takes to slide up into place
+/// after it maps. Short enough not to delay typing, long enough to read as a
+/// move rather than a pop.
+const SLIDE_SECS: f32 = 0.18;
 
 /// Whether a layer surface's `wl_surface` is currently mapped (has a buffer).
 fn is_mapped(surface: &WlSurface) -> bool {
@@ -57,6 +62,11 @@ pub struct LayerShell {
     unmapped: HashSet<WlSurface>,
     /// Last physical usable area handed to apps; compared to detect changes.
     last_usable: Rect,
+    /// Slide-in progress in `[0, 1)` for surfaces that just mapped, keyed by
+    /// `wl_surface`. Entries are added on the unmapped→mapped transition and
+    /// dropped once they reach 1 (and on unmap/destroy). Only *bottom-docked*
+    /// surfaces actually move — see `place`.
+    slides: HashMap<WlSurface, f32>,
     /// Physical output height, for the home-bar bottom exclusive zone.
     output_h: f32,
 }
@@ -72,8 +82,25 @@ impl LayerShell {
                 w: output_w,
                 h: output_h,
             },
+            slides: HashMap::new(),
             output_h,
         }
+    }
+
+    /// Advance every in-flight slide by `dt` seconds, dropping the ones that
+    /// finished. Returns true while any is still moving, so the frame loop keeps
+    /// presenting.
+    pub fn tick_slides(&mut self, dt: f32) -> bool {
+        self.slides.retain(|_, p| {
+            *p = (*p + dt / SLIDE_SECS).min(1.0);
+            *p < 1.0
+        });
+        !self.slides.is_empty()
+    }
+
+    /// True while any layer surface is still sliding in.
+    pub fn sliding(&self) -> bool {
+        !self.slides.is_empty()
     }
 
     /// Recompute the usable area after an arrange. Returns `Some(new)` if it
@@ -99,6 +126,7 @@ impl LayerShell {
     /// caller recomputes the app area).
     pub fn destroyed(&mut self, surface: &WlrLayerSurface) -> bool {
         self.unmapped.remove(surface.wl_surface());
+        self.slides.remove(surface.wl_surface());
         let mut map = layer_map_for_output(&self.output);
         let Some(layer) = map.layers().find(|l| l.layer_surface() == surface).cloned() else {
             return false;
@@ -128,11 +156,16 @@ impl LayerShell {
             .clone();
 
         if is_mapped(surface) {
-            self.unmapped.remove(surface);
+            // Unmapped → mapped: start the slide-in. Commits on an
+            // already-mapped surface (the OSK redrawing) must not restart it.
+            if self.unmapped.remove(surface) {
+                self.slides.insert(surface.clone(), 0.0);
+            }
         } else if !self.unmapped.contains(surface) {
             // Was mapped, now unmapped via a null commit: it must redo the
             // initial configure sequence before mapping again.
             self.unmapped.insert(surface.clone());
+            self.slides.remove(surface);
         } else {
             // Still unmapped. If we haven't sent the initial configure, do so;
             // otherwise `arrange` already sent any needed configure.
@@ -174,9 +207,31 @@ impl LayerShell {
     /// bars) up by the gesture zone, so the home pill's strip stays clear
     /// beneath it. Fullscreen surfaces (reaching the top edge too) are left be.
     fn shift_docked(&self, mut r: Rect) -> Rect {
-        let docked = r.y + r.h >= self.output_h - 1.0 && r.y > 1.0;
-        if docked {
+        if self.is_docked(r) {
             r.y -= self.gesture_zone();
+        }
+        r
+    }
+
+    /// Whether a physical layer rect is docked to the bottom edge (and isn't a
+    /// fullscreen surface reaching the top too).
+    fn is_docked(&self, r: Rect) -> bool {
+        r.y + r.h >= self.output_h - 1.0 && r.y > 1.0
+    }
+
+    /// Where a layer surface is drawn right now: its logical geometry scaled to
+    /// physical, lifted clear of the home pill, and pushed back down by however
+    /// much of its slide-in remains.
+    ///
+    /// Only bottom-docked surfaces slide — a top bar or fullscreen overlay would
+    /// travel the wrong way, so they just appear.
+    fn place(&self, surface: &WlSurface, geo: Rectangle<i32, Logical>, dpi: f64) -> Rect {
+        let phys = to_physical(geo, dpi);
+        let mut r = self.shift_docked(phys);
+        if self.is_docked(phys) {
+            if let Some(&p) = self.slides.get(surface) {
+                r.y += sc_anim::slide_in_offset(p, r.h);
+            }
         }
         r
     }
@@ -191,7 +246,7 @@ impl LayerShell {
             for &wanted in layers {
                 for layer in map.layers().filter(|l| l.layer() == wanted) {
                     if let Some(geo) = map.layer_geometry(layer) {
-                        let r = self.shift_docked(to_physical(geo, dpi));
+                        let r = self.place(layer.wl_surface(), geo, dpi);
                         v.push((layer.wl_surface().clone(), (r.x as i32, r.y as i32)));
                     }
                 }
@@ -216,7 +271,7 @@ impl LayerShell {
             .collect();
         tops.iter().any(|l| {
             map.layer_geometry(l)
-                .is_some_and(|g| rects_overlap(self.shift_docked(to_physical(g, dpi)), rect))
+                .is_some_and(|g| rects_overlap(self.place(l.wl_surface(), g, dpi), rect))
         })
     }
 
@@ -235,7 +290,9 @@ impl LayerShell {
                 .collect();
             for layer in candidates.iter().rev() {
                 if let Some(geo) = map.layer_geometry(layer) {
-                    let rect = self.shift_docked(to_physical(geo, dpi));
+                    // The animated position, so a tap lands where the surface is
+                    // drawn rather than where it will settle.
+                    let rect = self.place(layer.wl_surface(), geo, dpi);
                     if rect.contains(x, y) {
                         return Some((layer.wl_surface().clone(), (rect.x as i32, rect.y as i32)));
                     }
