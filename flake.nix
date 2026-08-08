@@ -101,6 +101,12 @@
           # LD_LIBRARY_PATH or you get WaylandError(NoWaylandLib) at startup.
           shellHook = ''
             export RUST_BACKTRACE=1
+            # A user's ~/.cargo/bin rustup shims can land ahead of us in PATH
+            # (interactive shell rc files run after nix sets PATH). The shim then
+            # reads rust-toolchain.toml, tries to *download* stable, and dies in
+            # rustup's vendored OpenSSL ("no cipher match"). Force the pinned
+            # toolchain to win regardless of PATH order.
+            export PATH="${rust}/bin:$PATH"
             export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
             export LD_LIBRARY_PATH="${
               pkgs.lib.makeLibraryPath [

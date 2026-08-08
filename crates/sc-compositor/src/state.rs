@@ -457,6 +457,11 @@ impl State {
             &dh,
             |_client| true,
         );
+        // activate/deactivate on zwp_input_method_v2
+        smithay::wayland::text_input::TextInputManagerState::new::<Self>(&dh);
+        smithay::wayland::input_method::InputMethodManagerState::new::<Self, _>(&dh, |_client| {
+            true
+        });
 
         // Advertise an output so clients know the display geometry.
         let output = Output::new(
