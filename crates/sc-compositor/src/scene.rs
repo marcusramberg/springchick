@@ -151,6 +151,11 @@ pub struct Scene {
     /// drawn further right. Non-zero only while Home is being dragged off to the
     /// right by a slide onto the top card of the stack.
     pub home_shift: f32,
+    /// Strength (0..1) of the frosted-glass blur applied to everything already
+    /// drawn *behind* the switcher deck — i.e. the home screen. 0 = no blur pass
+    /// at all. Ramps with the switcher entrance so the backdrop softens as the
+    /// deck comes up and sharpens again on the way out.
+    pub backdrop_blur: f32,
 }
 
 impl Scene {
@@ -183,6 +188,7 @@ pub fn compute_scene(
             home_lift: bounce.value * h,
             home_shift: 0.0,
             home_page: *page,
+            backdrop_blur: 0.0,
             cards: Vec::new(),
         },
         UiState::App { toplevel, .. } => Scene {
@@ -191,6 +197,7 @@ pub fn compute_scene(
             home_lift: 0.0,
             home_shift: 0.0,
             home_page: 0,
+            backdrop_blur: 0.0,
             cards: Vec::new(),
         },
         UiState::AppOpening {
@@ -224,6 +231,7 @@ pub fn compute_scene(
                 home_lift: 0.0,
                 home_shift,
                 home_page: 0,
+                backdrop_blur: 0.0,
                 cards: Vec::new(),
             }
         }
@@ -241,6 +249,7 @@ pub fn compute_scene(
             home_lift: 0.0,
             home_shift: 0.0,
             home_page: 0,
+            backdrop_blur: 0.0,
             cards: Vec::new(),
         },
         UiState::Grabbing {
@@ -294,6 +303,9 @@ pub fn compute_scene(
                     home_lift: 0.0,
                     home_shift: 0.0,
                     home_page: 0,
+                    // Backdrop softens on the same ramp the neighbour fan fades
+                    // in on, so the blur arrives with the deck, not before it.
+                    backdrop_blur: alpha,
                     cards: card_rects,
                 }
             } else {
@@ -303,6 +315,7 @@ pub fn compute_scene(
                     home_lift: 0.0,
                     home_shift: 0.0,
                     home_page: 0,
+                    backdrop_blur: 0.0,
                     cards: Vec::new(),
                 }
             }
@@ -384,6 +397,10 @@ pub fn compute_scene(
                     home_lift: 0.0,
                     home_shift: 0.0,
                     home_page: 0,
+                    // Already blurred by the grab preview when release happened;
+                    // hold it at full through the settle so the hand-off into
+                    // the deck doesn't flash a sharp Home for a frame.
+                    backdrop_blur: 1.0,
                     cards: card_rects,
                 };
             }
@@ -393,6 +410,7 @@ pub fn compute_scene(
                 home_lift: 0.0,
                 home_shift: 0.0,
                 home_page: 0,
+                backdrop_blur: 0.0,
                 cards: Vec::new(),
             }
         }
@@ -453,6 +471,7 @@ pub fn compute_scene(
                 home_lift: 0.0,
                 home_shift: 0.0,
                 home_page: 0,
+                backdrop_blur: 0.0,
                 cards,
             }
         }
@@ -482,6 +501,10 @@ pub fn compute_scene(
                 home_lift: 0.0,
                 home_shift: 0.0,
                 home_page: 0,
+                // Rides the entrance spring: opened from Home the backdrop
+                // frosts as the deck rises; entered from a grab `enter` is
+                // already 1, matching the blur the preview/settle left behind.
+                backdrop_blur: enter.value.clamp(0.0, 1.0),
                 cards: card_rects,
             }
         }
@@ -602,6 +625,25 @@ mod tests {
         let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert!(scene.home_lift > 0.0, "lift={}", scene.home_lift);
         assert!(scene.show_home);
+    }
+
+    #[test]
+    fn switcher_backdrop_blur_ramps_with_the_entrance() {
+        let mk = |enter: f32| UiState::Switcher {
+            cards: vec![0, 1],
+            scroll: sc_anim::Spring::new(0.0),
+            close: None,
+            enter: sc_anim::Spring::new(enter),
+        };
+        let opening = compute_scene(&mk(0.0), TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
+        let settled = compute_scene(&mk(1.0), TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
+        assert_eq!(opening.backdrop_blur, 0.0);
+        assert_eq!(settled.backdrop_blur, 1.0);
+        // Home itself is never blurred.
+        assert_eq!(
+            compute_scene(&UiState::home(0, 1), TEST_SIZE, (0.0, 0.0), TEST_RADIUS).backdrop_blur,
+            0.0
+        );
     }
 
     #[test]

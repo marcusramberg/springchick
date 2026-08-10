@@ -40,6 +40,11 @@ use tracing::warn;
 /// against; the protocol leaves the algorithm entirely to the compositor.
 const BLUR_SIGMA_LOGICAL: f32 = 8.0;
 
+/// Blur radius for the shell's own switcher backdrop, in logical px. Stronger
+/// than a client blur region: this is a whole-screen frost meant to push Home
+/// well behind the deck, not a panel's frosted glass.
+const BACKDROP_BLUR_SIGMA_LOGICAL: f32 = 18.0;
+
 /// Background clear color.
 pub const CLEAR_COLOR: Color32F = Color32F::new(0.06, 0.10, 0.14, 1.0);
 
@@ -478,6 +483,7 @@ fn flip_damage(
 ) -> Vec<Rectangle<i32, Physical>> {
     let full_damage = Rectangle::from_size(size);
     let any_blur = plan.app_blurred
+        || ctx.scene.backdrop_blur > 0.0
         || ctx
             .layers_above
             .iter()
@@ -698,6 +704,33 @@ fn pass_app_card(
     draw_scaled_card(renderer, framebuffer, size, ctx, elements, card)
 }
 
+/// Frost the shell backdrop (Home, plus anything drawn under it) before the
+/// switcher deck goes on top, so the cards read as floating glass over a soft
+/// background instead of over the icon grid.
+///
+/// Sigma ramps with `scene.backdrop_blur` rather than switching on: a blur that
+/// pops to full strength on the first switcher frame reads as a cut.
+fn pass_backdrop_blur(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>) {
+    let strength = ctx.scene.backdrop_blur.clamp(0.0, 1.0);
+    if strength <= 0.0 {
+        return;
+    }
+    let full = [crate::background_effect::BlurRect {
+        x: 0.0,
+        y: 0.0,
+        w: size.w as f32,
+        h: size.h as f32,
+        add: true,
+    }];
+    ctx.skia.blur_backdrop(
+        size.w,
+        size.h,
+        &full,
+        BACKDROP_BLUR_SIGMA_LOGICAL * ctx.app_scale as f32 * strength,
+        ctx.skia_flip_y,
+    );
+}
+
 /// Switcher deck: each card back-to-front (the scene sorts them ascending z).
 /// `close_progress` lifts a card upward via the layout as it slides off-screen
 /// to close, so the deck itself needs no extra scaling here.
@@ -853,6 +886,7 @@ pub fn draw_scene(
     pass_rotated_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_blurred_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_app_card(renderer, &mut *framebuffer, size, ctx, &mut plan)?;
+    pass_backdrop_blur(size, ctx);
     pass_switcher_cards(renderer, &mut *framebuffer, size, ctx)?;
     pass_overlays(renderer, &mut *framebuffer, size, ctx, plan.rotated)?;
     pass_chrome(size, ctx, plan.rotated);
