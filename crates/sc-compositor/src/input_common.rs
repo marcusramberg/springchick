@@ -418,7 +418,7 @@ fn app_id_of(state: &State, tid: ToplevelId) -> Option<(ToplevelId, String)> {
 /// capturing the adjacent apps from the MRU cursor. `start_x` is the screen-x at
 /// which `offset` is zero; `origin` is the normalized grab start. No-op if
 /// already switching.
-fn enter_quick_switch(state: &mut State, start_x: f32, origin: sc_input::Pt) {
+fn enter_quick_switch(state: &mut State, start_x: f32, origin: Pt) {
     let (current, current_app) = match &state.ui {
         UiState::Grabbing {
             toplevel, app_id, ..
@@ -464,11 +464,11 @@ fn revert_quick_switch(state: &mut State, x: f32, y: f32) {
     // finger is now driving a vertical gesture, and any earlier sideways travel
     // must not make the release classify as a quick-switch. Keep the original
     // start.y so `up_progress` continues smoothly into the fan.
-    let mut tracker = sc_input::Tracker::begin(sc_input::Pt {
+    let mut tracker = Tracker::begin(Pt {
         x: x / w,
         y: origin.y,
     });
-    tracker.current = sc_input::Pt { x: x / w, y: y / h };
+    tracker.current = Pt { x: x / w, y: y / h };
     let cards = state.history.deck_order();
     state.ui = UiState::Grabbing {
         toplevel: current,

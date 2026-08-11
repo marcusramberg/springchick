@@ -314,10 +314,18 @@ Environment: `SPRINGCHICK_BACKEND` (`drm`, else winit), `SPRINGCHICK_CONFIG`,
 ## Screen capture
 
 springchick implements `ext-image-copy-capture-v1` (the wlr-screencopy
-successor), so capture is zero-copy into the client's dmabuf.
+successor), so capture is zero-copy into the client's dmabuf. Clients that
+allocate shm instead (grim does) get a readback path: the scene is redrawn into
+an offscreen texture and `glReadPixels`'d into their pool.
+
+`zwlr_screencopy_v1` is also implemented (`wlr_screencopy.rs`), shm only, for
+wlr-era clients. Both protocols share the buffer plumbing in `capture.rs`
+(`shm_target` / `offscreen` / `readback_into_shm`); the draw-and-read-back glue
+around it is per-backend (`capture_region_shm` in each of `drm_backend.rs` and
+`winit_backend.rs`) because the two draw the scene differently.
 
 - `scripts/screenshot.sh` — grim. Run this first after touching capture code; if
-  it writes a correct PNG the protocol + dmabuf blit are good.
+  it writes a correct PNG the protocol + readback are good.
 - `scripts/record.sh` — wl-screenrec with hardware h264. **wf-recorder does not
   work** — it only speaks wlr-screencopy.
 

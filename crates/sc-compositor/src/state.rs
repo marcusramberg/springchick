@@ -635,7 +635,7 @@ impl State {
             grid_anim: HashMap::new(),
             dock_anim: HashMap::new(),
             start_time: std::time::Instant::now(),
-            stats: frame_stats::FrameStats::new(std::time::Duration::from_micros(11_111)),
+            stats: frame_stats::FrameStats::new(Duration::from_micros(11_111)),
             perf_log: false, // disabled for debugging
             last_perf_log: std::time::Instant::now(),
             running: true,
