@@ -210,7 +210,7 @@ fn motion_switcher_card(state: &mut State, x: f32, y: f32) -> Stage {
     match home::classify_card_drag(x - start_x, y - start_y, w, h, start_scroll) {
         home::CardDrag::Close { progress } => {
             if let UiState::Switcher { close, .. } = &mut state.ui {
-                *close = Some((toplevel, progress, false));
+                *close = Some(crate::ui_state::CardClose::dragging(toplevel, progress));
                 return Stage::Done;
             }
         }
@@ -883,8 +883,8 @@ fn release_switcher(state: &mut State, x: f32, y: f32) -> Stage {
                 UiState::Switcher { close, .. } => *close,
                 _ => None,
             };
-            if let Some((ct, progress, _)) = closing {
-                resolve_card_close(state, ct, progress);
+            if let Some(c) = closing {
+                resolve_card_close(state, c.toplevel, c.progress.value);
                 return Stage::Done;
             }
 
@@ -919,7 +919,10 @@ fn resolve_card_close(state: &mut State, toplevel: ToplevelId, progress: f32) {
             state.detach_toplevel(toplevel);
         }
     } else if let UiState::Switcher { close, .. } = &mut state.ui {
-        *close = Some((toplevel, progress, true));
+        let mut c = crate::ui_state::CardClose::dragging(toplevel, progress);
+        c.progress.retarget(0.0);
+        c.releasing = true;
+        *close = Some(c);
     }
 }
 
