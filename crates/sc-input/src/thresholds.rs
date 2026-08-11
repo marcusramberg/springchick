@@ -43,9 +43,19 @@ pub const ICON_TAP_SLOP_PX: f32 = 12.0;
 /// a tap (open the card / dismiss), above it a scroll.
 pub const SWITCHER_TAP_SLOP_PX: f32 = 15.0;
 
-/// Fraction of a page's width the finger must travel for a released page drag
-/// to commit to the neighbouring page.
+/// Fraction of a page's width the finger must travel for a released *slow* page
+/// drag to commit to the neighbouring page. A flick commits on speed instead —
+/// see [`PAGE_FLICK_VELOCITY`].
 pub const PAGE_COMMIT_FRAC: f32 = 0.3;
+/// Horizontal speed (fractions of output width per second) at which a released
+/// page drag commits regardless of distance. Like [`HOME_FLICK_VELOCITY`] this
+/// is compared against the [`VELOCITY_SMOOTHING`] low-passed velocity, which
+/// under-reports a short flick badly, so the bar sits near what a real flick
+/// *reports* (~1.0) rather than its true speed.
+pub const PAGE_FLICK_VELOCITY: f32 = 0.7;
+/// Travel a flick must still cover (fraction of width) before speed alone can
+/// commit it — stops a fast tap-and-jitter from paging.
+pub const PAGE_FLICK_MIN_FRAC: f32 = 0.04;
 /// How much of the finger's travel is still followed once a drag is past an end
 /// stop — the rubber-band feel. Shared by the ends of the page strip and the
 /// ends of the quick-switch app stack, deliberately: they should give way by the

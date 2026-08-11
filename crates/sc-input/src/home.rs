@@ -71,13 +71,28 @@ pub fn page_drag_value(dx: f32, width: f32, page: usize, page_count: usize) -> f
 
 /// The page a released page drag of `dx` output pixels settles on.
 ///
-/// Commits to a neighbour only past [`th::PAGE_COMMIT_FRAC`] of the width, and
-/// never past either end of the page strip.
-pub fn page_after_swipe(dx: f32, width: f32, page: usize, page_count: usize) -> usize {
+/// Two ways to commit to a neighbour, either alone enough:
+/// - distance: past [`th::PAGE_COMMIT_FRAC`] of the width, at any speed;
+/// - flick: moving faster than [`th::PAGE_FLICK_VELOCITY`] in that direction,
+///   having covered at least [`th::PAGE_FLICK_MIN_FRAC`].
+///
+/// Without the flick case a quick swipe that lets go early — the natural way to
+/// page — dies short of 30% and springs back. `vx` is the release velocity in
+/// fractions of output width per second, positive rightward (toward the
+/// *previous* page). Never settles past either end of the page strip.
+pub fn page_after_swipe(dx: f32, vx: f32, width: f32, page: usize, page_count: usize) -> usize {
     let delta = -dx / width; // positive = swiping toward the next page
-    if delta > th::PAGE_COMMIT_FRAC && page + 1 < page_count {
+    let flick = -vx; // positive = flicking toward the next page
+                     // A flick only counts if it agrees with the direction actually travelled;
+                     // otherwise a drag out and a snap back would page the wrong way.
+    let flicked = flick.abs() > th::PAGE_FLICK_VELOCITY
+        && delta.abs() > th::PAGE_FLICK_MIN_FRAC
+        && flick.signum() == delta.signum();
+    let next = delta > th::PAGE_COMMIT_FRAC || (flicked && flick > 0.0);
+    let prev = delta < -th::PAGE_COMMIT_FRAC || (flicked && flick < 0.0);
+    if next && page + 1 < page_count {
         page + 1
-    } else if delta < -th::PAGE_COMMIT_FRAC && page > 0 {
+    } else if prev && page > 0 {
         page - 1
     } else {
         page
@@ -217,23 +232,47 @@ mod tests {
 
     #[test]
     fn page_commits_only_past_the_threshold() {
-        // 29% of a screen is not enough; 31% is.
-        assert_eq!(page_after_swipe(-290.0, W, 0, 3), 0);
-        assert_eq!(page_after_swipe(-310.0, W, 0, 3), 1);
-        assert_eq!(page_after_swipe(310.0, W, 1, 3), 0);
+        // 29% of a screen is not enough at a standstill; 31% is.
+        assert_eq!(page_after_swipe(-290.0, 0.0, W, 0, 3), 0);
+        assert_eq!(page_after_swipe(-310.0, 0.0, W, 0, 3), 1);
+        assert_eq!(page_after_swipe(310.0, 0.0, W, 1, 3), 0);
+    }
+
+    #[test]
+    fn quick_flick_pages_short_of_the_distance_threshold() {
+        // 10% of the width, but still moving fast leftward: pages forward.
+        assert_eq!(page_after_swipe(-100.0, -1.2, W, 0, 3), 1);
+        // Same travel rightward from page 1: pages back.
+        assert_eq!(page_after_swipe(100.0, 1.2, W, 1, 3), 0);
+        // Slow drag over the same distance still springs back.
+        assert_eq!(page_after_swipe(-100.0, -0.2, W, 0, 3), 0);
+    }
+
+    #[test]
+    fn flick_needs_travel_and_a_matching_direction() {
+        // Fast but barely moved — a jittery tap, not a swipe.
+        assert_eq!(page_after_swipe(-20.0, -2.0, W, 0, 3), 0);
+        // Dragged out then snapped back: velocity points away from the travel,
+        // so it must not page in either direction.
+        assert_eq!(page_after_swipe(-100.0, 1.5, W, 1, 3), 1);
     }
 
     #[test]
     fn page_swipe_never_leaves_the_strip() {
         assert_eq!(
-            page_after_swipe(310.0, W, 0, 3),
+            page_after_swipe(310.0, 0.0, W, 0, 3),
             0,
             "no page before the first"
         );
         assert_eq!(
-            page_after_swipe(-310.0, W, 2, 3),
+            page_after_swipe(-310.0, 0.0, W, 2, 3),
             2,
             "no page after the last"
+        );
+        assert_eq!(
+            page_after_swipe(-200.0, -2.0, W, 2, 3),
+            2,
+            "a flick cannot leave the strip either"
         );
     }
 
