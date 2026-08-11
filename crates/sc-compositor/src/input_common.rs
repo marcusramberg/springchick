@@ -81,6 +81,30 @@ fn decay(v: f32, dt: f32) -> f32 {
     v * (-dt / 0.05).exp()
 }
 
+impl State {
+    /// Seconds since the previous motion event of this gesture, for feeding the
+    /// gesture tracker's velocity estimate. Consumes the timestamp, so call it
+    /// once per motion event.
+    ///
+    /// This must be measured, not assumed: input arrives at whatever rate the
+    /// device (or the synthetic-input socket) delivers it, which is nowhere near
+    /// the frame rate on a slow output. Dividing a real position jump by an
+    /// assumed 1/90s inflates the reported velocity by the ratio between the two
+    /// — enough for a deliberate 800ms drag to release as a flick.
+    ///
+    /// Floored at 1ms so two events sharing a timestamp can't divide by ~0. No
+    /// ceiling: a long stall genuinely means slow, and a finger held still is
+    /// handled by [`sc_input::Tracker::decay`] in the frame loop.
+    pub(crate) fn motion_dt(&mut self) -> f32 {
+        let now = std::time::Instant::now();
+        let dt = self
+            .last_motion
+            .map_or(1.0 / 90.0, |t| now.duration_since(t).as_secs_f32());
+        self.last_motion = Some(now);
+        dt.max(0.001)
+    }
+}
+
 /// Switcher drag state.
 #[derive(Clone, Copy, Debug)]
 pub enum SwitcherDrag {
@@ -265,7 +289,7 @@ fn motion_page_drag(state: &mut State, x: f32) {
 /// Feed the movement to the live in-app gesture, and handle crossing between
 /// the two gestures a bar drag can become.
 fn motion_live_gesture(state: &mut State, x: f32, y: f32) {
-    let dt = 1.0 / 90.0;
+    let dt = state.motion_dt();
     if let Some(ev) = input_dispatch::on_move(&state.ui, x, y, dt, state.output_size) {
         transition(&mut state.ui, ev);
     }
@@ -479,6 +503,9 @@ pub fn on_press(state: &mut State) {
         return;
     };
     state.pointer_down = true;
+    // Time the first motion from the press, not from whatever stale instant the
+    // previous gesture left behind.
+    state.last_motion = Some(std::time::Instant::now());
 
     if press_arrange(state, x, y) == Stage::Done {
         return;
@@ -656,6 +683,7 @@ pub fn on_release(state: &mut State) {
         return;
     };
     state.pointer_down = false;
+    state.last_motion = None;
     // A completed (or abandoned) gesture disarms the pull-down.
     state.search_arm = None;
 
