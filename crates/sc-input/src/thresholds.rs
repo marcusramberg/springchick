@@ -84,6 +84,11 @@ pub const QUICK_SWITCH_COMMIT_FRAC: f32 = 0.2;
 pub const CARD_CLOSE_FULL_RISE: f32 = 0.25;
 /// Close progress at/above which a released card is actually closed.
 pub const CARD_CLOSE_COMMIT: f32 = 0.4;
+/// How much of a *downward* card drag translates into (negative) close
+/// progress. Well under 1 so pushing below the stack feels like resistance.
+pub const CARD_PUSH_DOWN_RUBBER: f32 = 0.35;
+/// Cap on that downward travel, in close-progress units (× screen height).
+pub const CARD_PUSH_DOWN_MAX: f32 = 0.08;
 /// Finger travel that advances the switcher carousel one card, as a fraction of
 /// output width (≈ front card width × slide distance).
 pub const CARD_SCROLL_PER_INDEX_FRAC: f32 = 0.42;

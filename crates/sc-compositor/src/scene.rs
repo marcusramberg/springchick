@@ -481,7 +481,7 @@ pub fn compute_scene(
             close,
             enter,
         } => {
-            let close_geo = close.map(|(t, p, _)| (t, p));
+            let close_geo = close.map(|c| (c.toplevel, c.progress.value));
             let mut card_rects =
                 switcher::layout(cards, scroll.value, (w, h), close_geo, card_radius);
             // Entrance from Home: the whole deck rises from below the bottom

@@ -9,8 +9,45 @@ use tracing::debug;
 /// Opaque toplevel identifier (index into the compositor's toplevel vec).
 pub type ToplevelId = usize;
 
-/// Seconds for a cancelled close-swipe to spring back to rest.
-const CLOSE_SPRINGBACK_SECS: f32 = 0.18;
+/// A switcher card being dragged along the close axis.
+///
+/// `progress` is signed: `>0` = lifted upward toward the close commit,
+/// `<0` = pushed down below the resting stack (rubber-banded by the input
+/// layer). While the finger is down the spring is pinned to the finger; on
+/// release below the commit threshold it is retargeted to 0 and `Tick` runs it
+/// until it settles.
+#[derive(Clone, Copy, Debug)]
+pub struct CardClose {
+    pub toplevel: ToplevelId,
+    pub progress: Spring,
+    /// Finger let go below the commit threshold — springing back to rest.
+    pub releasing: bool,
+}
+
+impl CardClose {
+    /// Pinned to the finger: no physics while dragging.
+    pub fn dragging(toplevel: ToplevelId, progress: f32) -> Self {
+        let mut s = close_spring();
+        s.value = progress;
+        s.target = progress;
+        s.velocity = 0.0;
+        Self {
+            toplevel,
+            progress: s,
+            releasing: false,
+        }
+    }
+}
+
+/// Springback for a cancelled close drag: deliberately under-damped
+/// (critical ≈ 2·√320 ≈ 36) so overshooting past rest reads as a bounce —
+/// most visible when the card was pushed *down* below the stack.
+fn close_spring() -> Spring {
+    let mut s = Spring::new(0.0);
+    s.stiffness = 320.0;
+    s.damping = 17.0;
+    s
+}
 
 /// Velocity kick (fractions of screen height per second) given to the Home
 /// bounce spring when a bar gesture has nowhere to go. Tuned against the
@@ -141,10 +178,8 @@ pub enum UiState {
         cards: Vec<ToplevelId>,
         /// Carousel focus spring (continuous card index).
         scroll: Spring,
-        /// Card being swiped up to close: `(toplevel, progress 0..1, releasing)`.
-        /// `releasing` = finger let go below the commit threshold, so `Tick`
-        /// decays progress back to 0. `None` at rest.
-        close: Option<(ToplevelId, f32, bool)>,
+        /// Card being dragged along the close axis. `None` at rest.
+        close: Option<CardClose>,
         /// Entrance animation, 0 = deck still below the bottom edge, 1 = at
         /// rest. Entered from a grab release the deck is *already* in place
         /// (the settle animated it there), so that path starts settled at 1;
@@ -267,7 +302,11 @@ impl UiState {
                 close,
                 enter,
                 ..
-            } => !scroll.is_settled() || !enter.is_settled() || matches!(close, Some((_, _, true))),
+            } => {
+                !scroll.is_settled()
+                    || !enter.is_settled()
+                    || close.is_some_and(|c| c.releasing && !c.progress.is_settled())
+            }
         }
     }
 }
@@ -593,11 +632,13 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 } => {
                     scroll.step(dt);
                     enter.step(dt);
-                    // Decay a cancelled close-swipe back to rest.
-                    if let Some((_, progress, true)) = close {
-                        *progress -= dt / CLOSE_SPRINGBACK_SECS;
-                        if *progress <= 0.0 {
-                            *close = None;
+                    // Spring a cancelled close-drag back to rest (with bounce).
+                    if let Some(c) = close {
+                        if c.releasing {
+                            c.progress.step(dt);
+                            if c.progress.is_settled() {
+                                *close = None;
+                            }
                         }
                     }
                 }
@@ -1144,6 +1185,40 @@ mod tests {
         } else {
             panic!("still in switcher");
         }
+    }
+
+    #[test]
+    fn released_push_down_bounces_past_rest_then_settles() {
+        let mut c = CardClose::dragging(2, -0.08);
+        c.progress.retarget(0.0);
+        c.releasing = true;
+        let mut state = UiState::Switcher {
+            cards: vec![1, 2, 3],
+            scroll: Spring::new(0.0),
+            close: Some(c),
+            enter: Spring::new(1.0),
+        };
+        let dt = 1.0 / 90.0;
+        let mut peak = -1.0_f32;
+        for _ in 0..600 {
+            transition(&mut state, UiEvent::Tick { dt });
+            let UiState::Switcher { close, .. } = &state else {
+                panic!("left the switcher");
+            };
+            match close {
+                Some(c) => peak = peak.max(c.progress.value),
+                // Settled and cleared.
+                None => break,
+            }
+        }
+        // Under-damped: it overshoots rest (upward) before settling...
+        assert!(peak > 0.005, "no bounce past rest: peak={peak}");
+        // ...but the bounce stays small — nowhere near the close commit.
+        assert!(peak < 0.4, "bounce too big: peak={peak}");
+        assert!(
+            matches!(&state, UiState::Switcher { close: None, .. }),
+            "springback never settled"
+        );
     }
 
     #[test]

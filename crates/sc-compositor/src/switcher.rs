@@ -46,8 +46,10 @@ const SLIDE_OFF_FRAC: f32 = 1.15;
 /// grows the whole deck pans right — the focused card slides off the right edge
 /// and the next card scales up into the front slot.
 ///
-/// `close` optionally names a toplevel being swiped up to close and its progress
-/// (0..1); that card is lifted upward by `progress * h` and shrinks away.
+/// `close` optionally names a toplevel being dragged along the close axis and
+/// its signed progress: positive lifts the card upward by `progress * h` until
+/// it leaves the screen, negative pushes it below the stack. The card keeps its
+/// full size throughout — the close reads as a slide, not a shrink.
 pub fn layout(
     cards: &[ToplevelId],
     scroll: f32,
@@ -79,14 +81,12 @@ pub fn layout(
             } else {
                 front_cx + (-rel) * slide_off // passed: sliding off right
             };
-            let base_scale = front_scale;
-
             let close_progress = match close {
                 Some((t, p)) if t == toplevel => p,
                 _ => 0.0,
             };
-            // Closing card lifts up and shrinks away.
-            let scale = (base_scale * (1.0 - close_progress)).max(0.0);
+            // A closing card only slides — its size never changes.
+            let scale = front_scale;
 
             // Draw/hit priority: front slot on top, passed cards above it (they
             // slide over the deck), cards behind lowest. Monotonic in -rel.
@@ -270,5 +270,26 @@ mod tests {
         let other = rects.iter().find(|r| r.toplevel == 0).unwrap();
         assert_eq!(other.close_progress, 0.0);
         assert_eq!(other.center_y, SIZE.1 / 2.0);
+    }
+
+    #[test]
+    fn close_never_scales_the_card() {
+        let base = layout(&[0, 1, 2], 0.0, SIZE, None, CORNER);
+        let base1 = base.iter().find(|r| r.toplevel == 1).unwrap();
+        for p in [0.25_f32, 0.5, 1.0, -0.08] {
+            let rects = layout(&[0, 1, 2], 0.0, SIZE, Some((1, p)), CORNER);
+            let c = rects.iter().find(|r| r.toplevel == 1).unwrap();
+            assert_eq!(c.scale, base1.scale, "scale changed at progress {p}");
+        }
+    }
+
+    #[test]
+    fn negative_close_pushes_the_card_below_rest() {
+        let base = layout(&[0, 1, 2], 0.0, SIZE, None, CORNER);
+        let rects = layout(&[0, 1, 2], 0.0, SIZE, Some((1, -0.08)), CORNER);
+        let base1 = base.iter().find(|r| r.toplevel == 1).unwrap();
+        let pushed = rects.iter().find(|r| r.toplevel == 1).unwrap();
+        assert!(pushed.center_y > base1.center_y);
+        assert!((pushed.center_y - base1.center_y - 0.08 * SIZE.1).abs() < 0.001);
     }
 }

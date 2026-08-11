@@ -36,7 +36,9 @@ pub enum BarRelease {
 /// What a drag on a switcher card is currently doing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CardDrag {
-    /// Dominantly upward: closing this card, tracked live. `0.0..=1.0`.
+    /// Dominantly vertical: the close axis, tracked live. Positive up to `1.0`
+    /// (toward closing), negative down to a small rubber-banded push below the
+    /// stack that never commits.
     Close { progress: f32 },
     /// Otherwise: panning the carousel to this scroll position, in cards.
     Scroll { position: f32 },
@@ -139,6 +141,10 @@ pub fn classify_bar_release(dx: f32, dy_up: f32, width: f32, height: f32) -> Bar
 
 /// Classify a live drag on a switcher card. `dx`/`dy` are from the press point,
 /// `dy` negative upward; `start_scroll` is the deck position when it began.
+///
+/// A vertically-dominant drag is a close drag either way: upward gives positive
+/// progress toward the commit threshold, downward a small rubber-banded
+/// negative progress that always springs back.
 pub fn classify_card_drag(
     dx: f32,
     dy: f32,
@@ -146,8 +152,15 @@ pub fn classify_card_drag(
     height: f32,
     start_scroll: f32,
 ) -> CardDrag {
-    if dy < 0.0 && dy.abs() > dx.abs() {
-        let progress = ((-dy) / (height * th::CARD_CLOSE_FULL_RISE)).clamp(0.0, 1.0);
+    if dy.abs() > dx.abs() {
+        let rise = height * th::CARD_CLOSE_FULL_RISE;
+        let progress = if dy < 0.0 {
+            ((-dy) / rise).clamp(0.0, 1.0)
+        } else {
+            // Downward: nothing to commit to below the stack, so the card only
+            // rubber-bands a short way and springs back on release.
+            -(dy / rise * th::CARD_PUSH_DOWN_RUBBER).min(th::CARD_PUSH_DOWN_MAX)
+        };
         CardDrag::Close { progress }
     } else {
         let per_index = width * th::CARD_SCROLL_PER_INDEX_FRAC;
@@ -399,11 +412,28 @@ mod tests {
     }
 
     #[test]
-    fn downward_drag_never_closes() {
-        assert!(matches!(
-            classify_card_drag(0.0, 300.0, W, H, 0.0),
-            CardDrag::Scroll { .. }
-        ));
+    fn downward_drag_rubber_bands_below_the_stack() {
+        let CardDrag::Close { progress } = classify_card_drag(0.0, 300.0, W, H, 0.0) else {
+            panic!("downward drag should be a close drag");
+        };
+        // Negative (below rest), and well short of the raw travel: 300px of
+        // finger over a 0.25*H rise would be 0.44 unbanded.
+        assert!(progress < 0.0);
+        assert!(progress > -0.2, "progress={progress}");
+        // Never commits, however far down the finger goes.
+        assert!(!card_close_commits(progress));
+    }
+
+    #[test]
+    fn downward_drag_caps_and_never_commits() {
+        let CardDrag::Close { progress } = classify_card_drag(0.0, 5000.0, W, H, 0.0) else {
+            panic!("downward drag should be a close drag");
+        };
+        assert!(
+            (progress + th::CARD_PUSH_DOWN_MAX).abs() < 1e-6,
+            "{progress}"
+        );
+        assert!(!card_close_commits(progress));
     }
 
     #[test]
