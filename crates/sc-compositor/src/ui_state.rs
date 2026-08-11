@@ -37,6 +37,16 @@ impl CardClose {
             releasing: false,
         }
     }
+
+    /// Hand the card back to physics: spring to rest, carrying the finger's
+    /// speed over so the bounce continues the gesture instead of restarting it.
+    /// `vy` is in screen heights/s, negative upward — the opposite sign to
+    /// close progress.
+    pub fn release(&mut self, vy: f32) {
+        self.progress.velocity = -vy;
+        self.progress.retarget(0.0);
+        self.releasing = true;
+    }
 }
 
 /// Springback for a cancelled close drag: deliberately under-damped

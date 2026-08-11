@@ -293,7 +293,6 @@ pub fn compute_scene(
                     scale: t.scale,
                     corner_radius: t.corner_radius,
                     z: 1000,
-                    close_progress: 0.0,
                     alpha: 1.0,
                 });
                 card_rects.sort_by_key(|r| r.z);
@@ -387,7 +386,6 @@ pub fn compute_scene(
                     scale: transform.scale,
                     corner_radius: transform.corner_radius,
                     z: 1000,
-                    close_progress: 0.0,
                     alpha: 1.0,
                 });
                 card_rects.sort_by_key(|r| r.z);
@@ -451,7 +449,6 @@ pub fn compute_scene(
                     scale: QS_SCALE,
                     corner_radius: card_radius,
                     z: 0,
-                    close_progress: 0.0,
                     alpha: 1.0,
                 });
             }
@@ -462,7 +459,6 @@ pub fn compute_scene(
                 scale: QS_SCALE,
                 corner_radius: card_radius,
                 z: 1,
-                close_progress: 0.0,
                 alpha: 1.0,
             });
             Scene {

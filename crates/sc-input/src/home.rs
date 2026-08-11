@@ -85,13 +85,19 @@ pub fn page_drag_value(dx: f32, width: f32, page: usize, page_count: usize) -> f
 pub fn page_after_swipe(dx: f32, vx: f32, width: f32, page: usize, page_count: usize) -> usize {
     let delta = -dx / width; // positive = swiping toward the next page
     let flick = -vx; // positive = flicking toward the next page
-                     // A flick only counts if it agrees with the direction actually travelled;
-                     // otherwise a drag out and a snap back would page the wrong way.
-    let flicked = flick.abs() > th::PAGE_FLICK_VELOCITY
-        && delta.abs() > th::PAGE_FLICK_MIN_FRAC
-        && flick.signum() == delta.signum();
-    let next = delta > th::PAGE_COMMIT_FRAC || (flicked && flick > 0.0);
-    let prev = delta < -th::PAGE_COMMIT_FRAC || (flicked && flick < 0.0);
+                     // Asked once per direction, so a flick only counts when it agrees with the
+                     // travel: a drag out and a snap back must not page the wrong way.
+    let toward = |sign: f32| {
+        commits_by_distance_or_flick(
+            sign * delta,
+            sign * flick,
+            th::PAGE_COMMIT_FRAC,
+            th::PAGE_FLICK_VELOCITY,
+            th::PAGE_FLICK_MIN_FRAC,
+        )
+    };
+    let next = toward(1.0);
+    let prev = toward(-1.0);
     if next && page + 1 < page_count {
         page + 1
     } else if prev && page > 0 {
@@ -153,13 +159,15 @@ pub fn classify_card_drag(
     start_scroll: f32,
 ) -> CardDrag {
     if dy.abs() > dx.abs() {
-        let rise = height * th::CARD_CLOSE_FULL_RISE;
+        let travel = dy / height;
         let progress = if dy < 0.0 {
-            ((-dy) / rise).clamp(0.0, 1.0)
+            // Upward: the card rides the finger exactly (progress is in screen
+            // heights, and the deck lifts a card by `progress * height`).
+            (-travel).min(1.0)
         } else {
             // Downward: nothing to commit to below the stack, so the card only
             // rubber-bands a short way and springs back on release.
-            -(dy / rise * th::CARD_PUSH_DOWN_RUBBER).min(th::CARD_PUSH_DOWN_MAX)
+            -(travel * th::CARD_PUSH_DOWN_RUBBER).min(th::CARD_PUSH_DOWN_MAX)
         };
         CardDrag::Close { progress }
     } else {
@@ -170,9 +178,37 @@ pub fn classify_card_drag(
     }
 }
 
-/// Whether a released card-close drag has passed the commit threshold.
-pub fn card_close_commits(progress: f32) -> bool {
-    progress >= th::CARD_CLOSE_COMMIT
+/// Whether a released drag commits, by either of the two routes every drag in
+/// this shell uses: carried far enough (`commit`) at any speed, or flicked —
+/// faster than `flick_velocity` *and* past a token `flick_min`, so a fast
+/// jitter can't trigger it.
+///
+/// `travel` and `velocity` are both positive in the committing direction and in
+/// the same units (fractions of the relevant screen axis, per second for
+/// velocity), so a gesture that commits *upward* passes the negation of its
+/// screen-space y values.
+pub fn commits_by_distance_or_flick(
+    travel: f32,
+    velocity: f32,
+    commit: f32,
+    flick_velocity: f32,
+    flick_min: f32,
+) -> bool {
+    travel >= commit || (velocity >= flick_velocity && travel >= flick_min)
+}
+
+/// Whether a released card-close drag actually closes the card. `vy` is the
+/// release velocity in fractions of screen height per second, negative upward —
+/// the same figure (and the same flick divide) the in-app grab classifies a
+/// fling home with. A downward push (negative progress) never commits.
+pub fn card_close_commits(progress: f32, vy: f32) -> bool {
+    commits_by_distance_or_flick(
+        progress,
+        -vy,
+        th::CARD_CLOSE_COMMIT,
+        th::CARD_CLOSE_FLICK_VELOCITY,
+        th::CARD_CLOSE_FLICK_MIN_FRAC,
+    )
 }
 
 /// Live offset (in screens, `-1.0..=1.0`) for a quick-switch slide of `dx`
@@ -373,14 +409,19 @@ mod tests {
 
     #[test]
     fn dominant_up_drag_closes_a_card() {
-        // A quarter of the screen height is full close progress.
+        // Progress is the finger's own travel, in screen heights, capped at a
+        // full screen.
         assert_eq!(
-            classify_card_drag(0.0, -500.0, W, H, 0.0),
+            classify_card_drag(0.0, -H, W, H, 0.0),
             CardDrag::Close { progress: 1.0 }
         );
         assert_eq!(
-            classify_card_drag(0.0, -250.0, W, H, 0.0),
-            CardDrag::Close { progress: 0.5 }
+            classify_card_drag(0.0, -H * 2.0, W, H, 0.0),
+            CardDrag::Close { progress: 1.0 }
+        );
+        assert_eq!(
+            classify_card_drag(0.0, -500.0, W, H, 0.0),
+            CardDrag::Close { progress: 0.25 }
         );
     }
 
@@ -416,12 +457,13 @@ mod tests {
         let CardDrag::Close { progress } = classify_card_drag(0.0, 300.0, W, H, 0.0) else {
             panic!("downward drag should be a close drag");
         };
-        // Negative (below rest), and well short of the raw travel: 300px of
-        // finger over a 0.25*H rise would be 0.44 unbanded.
+        // Negative (below rest), and well short of the finger's own travel:
+        // 300px of a 2000px-high screen would be -0.15 unbanded.
         assert!(progress < 0.0);
-        assert!(progress > -0.2, "progress={progress}");
-        // Never commits, however far down the finger goes.
-        assert!(!card_close_commits(progress));
+        assert!(progress > -0.1, "progress={progress}");
+        // Never commits, at any release speed.
+        assert!(!card_close_commits(progress, 0.0));
+        assert!(!card_close_commits(progress, -5.0));
     }
 
     #[test]
@@ -433,13 +475,36 @@ mod tests {
             (progress + th::CARD_PUSH_DOWN_MAX).abs() < 1e-6,
             "{progress}"
         );
-        assert!(!card_close_commits(progress));
+        assert!(!card_close_commits(progress, 0.0));
     }
 
     #[test]
-    fn card_close_commits_past_threshold() {
-        assert!(!card_close_commits(0.39));
-        assert!(card_close_commits(0.4));
+    fn upward_drag_tracks_the_finger_one_to_one() {
+        // The card rides the finger exactly: progress is in screen heights.
+        let CardDrag::Close { progress } = classify_card_drag(0.0, -H * 0.3, W, H, 0.0) else {
+            panic!("upward drag should be a close drag");
+        };
+        assert!((progress - 0.3).abs() < 1e-6, "progress={progress}");
+    }
+
+    #[test]
+    fn card_close_commits_on_distance_at_any_speed() {
+        let just_under = th::CARD_CLOSE_COMMIT - 0.01;
+        assert!(!card_close_commits(just_under, 0.0));
+        assert!(card_close_commits(th::CARD_CLOSE_COMMIT, 0.0));
+        // A slow drag past the distance still commits.
+        assert!(card_close_commits(th::CARD_CLOSE_COMMIT, -0.05));
+    }
+
+    #[test]
+    fn card_close_commits_on_a_short_upward_flick() {
+        let short = th::CARD_CLOSE_COMMIT / 2.0;
+        // Fast enough up (negative vy) and past the token distance.
+        assert!(card_close_commits(short, -th::CARD_CLOSE_FLICK_VELOCITY));
+        // Same speed downward never closes.
+        assert!(!card_close_commits(short, th::CARD_CLOSE_FLICK_VELOCITY));
+        // A fast flick that barely moved is jitter, not a close.
+        assert!(!card_close_commits(0.001, -5.0));
     }
 
     // --- quick switch ---

@@ -16,9 +16,6 @@ pub struct CardRect {
     pub scale: f32,
     pub corner_radius: f32,
     pub z: usize,
-    /// 0 = at rest; →1 = sliding up to close (lift + fade). Only the card being
-    /// swiped up is non-zero.
-    pub close_progress: f32,
     /// Opacity 0..1. Used to fade the live grab-preview fan in/out; 1.0 for
     /// settled switcher / quick-switch cards.
     pub alpha: f32,
@@ -81,12 +78,11 @@ pub fn layout(
             } else {
                 front_cx + (-rel) * slide_off // passed: sliding off right
             };
+            // A card being closed only slides — its size never changes.
             let close_progress = match close {
                 Some((t, p)) if t == toplevel => p,
                 _ => 0.0,
             };
-            // A closing card only slides — its size never changes.
-            let scale = front_scale;
 
             // Draw/hit priority: front slot on top, passed cards above it (they
             // slide over the deck), cards behind lowest. Monotonic in -rel.
@@ -96,10 +92,9 @@ pub fn layout(
                 toplevel,
                 center_x,
                 center_y: cy - close_progress * h,
-                scale,
+                scale: front_scale,
                 corner_radius,
                 z,
-                close_progress,
                 alpha: 1.0,
             }
         })
@@ -138,7 +133,6 @@ pub fn fan_around(
             corner_radius: corner,
             // Nearer neighbours draw on top of farther ones; all below the front.
             z: 100usize.saturating_sub(i),
-            close_progress: 0.0,
             alpha,
         })
         .collect()
@@ -257,18 +251,16 @@ mod tests {
     }
 
     #[test]
-    fn close_lifts_and_records_only_that_card() {
+    fn close_lifts_only_that_card() {
         let base = layout(&[0, 1, 2], 0.0, SIZE, None, CORNER);
         let rects = layout(&[0, 1, 2], 0.0, SIZE, Some((1, 0.5)), CORNER);
         let closing = rects.iter().find(|r| r.toplevel == 1).unwrap();
         let base1 = base.iter().find(|r| r.toplevel == 1).unwrap();
-        // Records progress and lifts the card upward (smaller y = higher).
-        assert_eq!(closing.close_progress, 0.5);
+        // Lifted upward (smaller y = higher) by exactly progress * height.
         assert!(closing.center_y < base1.center_y);
         assert!((base1.center_y - closing.center_y - 0.5 * SIZE.1).abs() < 0.001);
         // Other cards untouched.
         let other = rects.iter().find(|r| r.toplevel == 0).unwrap();
-        assert_eq!(other.close_progress, 0.0);
         assert_eq!(other.center_y, SIZE.1 / 2.0);
     }
 

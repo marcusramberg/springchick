@@ -15,7 +15,7 @@ use crate::input_dispatch::{self, DownAction};
 use crate::switcher;
 use crate::ui_state::{transition, ToplevelId, UiEvent, UiState, ZoomOrigin};
 use crate::{DragItem, IconPress, State};
-use sc_input::home;
+use sc_input::{home, Pt, Tracker};
 use tracing::debug;
 
 /// A finger held on an app icon, waiting to see if it becomes a tap (launch)
@@ -28,57 +28,57 @@ pub struct PendingLaunch {
     pub start_y: f32,
 }
 
-/// A live horizontal page drag on the Home grid.
+/// A live shell drag: the same [`sc_input::Tracker`] the in-app grab gesture
+/// runs on, plus the wall-clock bookkeeping the shell drags need.
 ///
-/// Holds the press origin plus a low-passed horizontal velocity, so a release
-/// can commit on a flick as well as on distance — see
-/// [`sc_input::home::page_after_swipe`]. Velocity is in fractions of output
-/// width per second, positive rightward, smoothed the same way
-/// [`sc_input::Tracker`] smooths the in-app gestures.
+/// The grab is fed `dt` and decayed by the frame loop, because it animates every
+/// frame. The shell drags (a page swipe on the Home grid, a close drag on a
+/// switcher card) are only touched when input arrives, so they time themselves
+/// and decay lazily — otherwise a drag-then-hold-then-release keeps its stale
+/// speed and reads as a flick.
+///
+/// Positions and velocities are normalized: `x` in widths, `y` in heights (per
+/// second for velocity), y positive *downward* as on screen.
 #[derive(Clone, Copy, Debug)]
-pub struct PageDrag {
-    pub start_x: f32,
-    last_x: f32,
+pub struct FingerDrag {
+    tracker: Tracker,
     last_t: std::time::Instant,
-    velocity: f32,
 }
 
-impl PageDrag {
-    pub fn begin(start_x: f32) -> Self {
+impl FingerDrag {
+    pub fn begin(p: Pt) -> Self {
         Self {
-            start_x,
-            last_x: start_x,
+            tracker: Tracker::begin(p),
             last_t: std::time::Instant::now(),
-            velocity: 0.0,
         }
     }
 
-    /// Fold a motion event at output-x `x` into the velocity estimate.
-    pub fn update(&mut self, x: f32, width: f32) {
+    /// Fold a motion event at normalized position `p` into the estimate.
+    pub fn update(&mut self, p: Pt) {
         let now = std::time::Instant::now();
         let dt = now.duration_since(self.last_t).as_secs_f32();
-        if dt > 0.0 && width > 0.0 {
-            let inst = ((x - self.last_x) / width) / dt;
-            let a = sc_input::thresholds::VELOCITY_SMOOTHING;
-            // Decay first: motion events stop arriving while the finger is held
-            // still, so a drag-then-hold must not release as a flick.
-            self.velocity = decay(self.velocity, dt);
-            self.velocity = a * inst + (1.0 - a) * self.velocity;
-        }
-        self.last_x = x;
+        self.tracker.decay(dt);
+        self.tracker.update(p, dt);
         self.last_t = now;
     }
 
+    /// Where the drag started.
+    pub fn start(&self) -> Pt {
+        self.tracker.start
+    }
+
     /// Velocity as of now, decayed over the time since the last motion event.
-    pub fn velocity(&self) -> f32 {
-        decay(self.velocity, self.last_t.elapsed().as_secs_f32().min(1.0))
+    pub fn velocity(&self) -> Pt {
+        let mut t = self.tracker;
+        t.decay(self.last_t.elapsed().as_secs_f32().min(1.0));
+        t.velocity
     }
 }
 
-/// Exponential velocity decay, ~halving every 35ms — same curve as
-/// [`sc_input::Tracker::decay`].
-fn decay(v: f32, dt: f32) -> f32 {
-    v * (-dt / 0.05).exp()
+/// Output-pixel point as a normalized [`Pt`] (x in widths, y in heights).
+fn norm(state: &State, x: f32, y: f32) -> Pt {
+    let (w, h) = state.output_size_f();
+    Pt { x: x / w, y: y / h }
 }
 
 impl State {
@@ -108,11 +108,12 @@ impl State {
 /// Switcher drag state.
 #[derive(Clone, Copy, Debug)]
 pub enum SwitcherDrag {
-    /// Finger on a card. Horizontal drag scrolls the deck; a dominant upward
-    /// drag closes `toplevel` (tracked live via close_progress).
+    /// Finger on a card. Horizontal drag scrolls the deck; a dominant vertical
+    /// drag rides `toplevel` along the close axis. `vertical` carries the
+    /// press origin and the y velocity a release needs to spot a close flick.
     OnCard {
         start_x: f32,
-        start_y: f32,
+        vertical: FingerDrag,
         start_scroll: f32,
         toplevel: ToplevelId,
     },
@@ -156,7 +157,7 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
     if motion_pull_down_search(state, x, y) == Stage::Done {
         return;
     }
-    motion_page_drag(state, x);
+    motion_page_drag(state, x, y);
     motion_live_gesture(state, x, y);
 }
 
@@ -193,13 +194,13 @@ fn motion_arrange_drag(state: &mut State, x: f32, y: f32) -> Stage {
     Stage::Done
 }
 
-/// Switcher card drag: a dominant upward drag tracks that card's close
-/// progress, anything else carousel-pans the deck. Falls through when the UI
-/// has already left the switcher under us.
+/// Switcher card drag: a dominant vertical drag rides that card along the close
+/// axis, anything else carousel-pans the deck. Falls through when the UI has
+/// already left the switcher under us.
 fn motion_switcher_card(state: &mut State, x: f32, y: f32) -> Stage {
     let SwitcherDrag::OnCard {
         start_x,
-        start_y,
+        mut vertical,
         start_scroll,
         toplevel,
     } = state.switcher_drag
@@ -207,6 +208,17 @@ fn motion_switcher_card(state: &mut State, x: f32, y: f32) -> Stage {
         return Stage::Fallthrough;
     };
     let (w, h) = state.output_size_f();
+    // Keep the y velocity estimate fed even while the drag is horizontal: it is
+    // what tells a release apart from a flick, and a gesture can turn vertical
+    // at any point.
+    vertical.update(Pt { x: x / w, y: y / h });
+    let start_y = vertical.start().y * h;
+    state.switcher_drag = SwitcherDrag::OnCard {
+        start_x,
+        vertical,
+        start_scroll,
+        toplevel,
+    };
     match home::classify_card_drag(x - start_x, y - start_y, w, h, start_scroll) {
         home::CardDrag::Close { progress } => {
             if let UiState::Switcher { close, .. } = &mut state.ui {
@@ -262,13 +274,13 @@ fn motion_pull_down_search(state: &mut State, x: f32, y: f32) -> Stage {
 
 /// Page drag: drive the page spring straight off the finger (no spring physics
 /// while dragging), rubber-banding past either edge.
-fn motion_page_drag(state: &mut State, x: f32) {
-    let w = state.output_size.0 as f32;
+fn motion_page_drag(state: &mut State, x: f32, y: f32) {
+    let (w, h) = state.output_size_f();
     let Some(drag) = &mut state.page_drag else {
         return;
     };
-    drag.update(x, w);
-    let dx = x - drag.start_x;
+    drag.update(Pt { x: x / w, y: y / h });
+    let dx = x - drag.start().x * w;
     if let UiState::Home {
         page,
         page_spring,
@@ -540,7 +552,7 @@ fn press_arrange(state: &mut State, x: f32, y: f32) -> Stage {
         sc_layout::Hit::Miss => {
             // Empty-area press in arrange: arm a page drag. A swipe pages
             // (resolved in on_release); a still tap exits.
-            state.page_drag = Some(PageDrag::begin(x));
+            state.page_drag = Some(FingerDrag::begin(norm(state, x, y)));
         }
         sc_layout::Hit::GridIcon { app_id, .. } => {
             if let Some(a) = &mut state.arrange {
@@ -573,13 +585,14 @@ fn press_switcher(state: &mut State, x: f32, y: f32) -> Stage {
     if !matches!(state.ui, UiState::Switcher { .. }) {
         return Stage::Fallthrough;
     }
+    let norm_p = norm(state, x, y);
     match switcher::hit_test(&state.switcher_cards, x, y, state.output_size_f()) {
         switcher::CardHit::Card(idx) => {
             let toplevel = state.switcher_cards.get(idx).map(|c| c.toplevel);
             if let (UiState::Switcher { scroll, .. }, Some(toplevel)) = (&state.ui, toplevel) {
                 state.switcher_drag = SwitcherDrag::OnCard {
                     start_x: x,
-                    start_y: y,
+                    vertical: FingerDrag::begin(norm_p),
                     start_scroll: scroll.value,
                     toplevel,
                 };
@@ -626,7 +639,7 @@ fn press_arm_gesture(state: &mut State, x: f32, y: f32) {
                 start_x,
                 start_y,
             });
-            state.page_drag = Some(PageDrag::begin(start_x));
+            state.page_drag = Some(FingerDrag::begin(norm(state, start_x, start_y)));
             // Also arm the long-press hold that, if the finger stays put long
             // enough, engages arrange mode (see `advance_frame`).
             state.icon_press = Some(IconPress {
@@ -637,7 +650,7 @@ fn press_arm_gesture(state: &mut State, x: f32, y: f32) {
             });
         }
         DownAction::StartPageDrag { start_x } => {
-            state.page_drag = Some(PageDrag::begin(start_x));
+            state.page_drag = Some(FingerDrag::begin(norm(state, start_x, y)));
             // Arm a pull-down: a dominant downward drag from here opens search
             // (a sideways drag still pages — resolved in `on_motion`).
             state.search_arm = Some((x, y));
@@ -736,10 +749,10 @@ fn release_arrange(state: &mut State, x: f32) -> Stage {
     // arrange; a still tap exits.
     match state.page_drag.take() {
         Some(drag) => {
-            let dx = x - drag.start_x;
             let w = state.output_size.0 as f32;
+            let dx = x - drag.start().x * w;
             if home::is_arrange_page_swipe(dx, w) {
-                commit_page_swipe(state, dx, drag.velocity());
+                commit_page_swipe(state, dx, drag.velocity().x);
             } else {
                 state.arrange = None; // still tap -> exit
             }
@@ -862,7 +875,8 @@ fn release_bar_drag(state: &mut State, x: f32, y: f32) {
 /// Page swipe: snap based on distance travelled or release speed.
 fn release_page_swipe(state: &mut State, x: f32) {
     if let Some(drag) = state.page_drag.take() {
-        commit_page_swipe(state, x - drag.start_x, drag.velocity());
+        let w = state.output_size.0 as f32;
+        commit_page_swipe(state, x - drag.start().x * w, drag.velocity().x);
     }
 }
 
@@ -875,20 +889,21 @@ fn release_switcher(state: &mut State, x: f32, y: f32) -> Stage {
     let tapped = |sx: f32, sy: f32| home::is_switcher_tap(x - sx, y - sy);
     match std::mem::replace(&mut state.switcher_drag, SwitcherDrag::None) {
         SwitcherDrag::OnCard {
-            start_x, start_y, ..
+            start_x, vertical, ..
         } => {
-            // If this drag was closing a card, commit past the threshold or snap
-            // it back — either way the release is spent.
+            // If this drag was riding a card along the close axis, commit or
+            // snap it back — either way the release is spent.
             let closing = match &state.ui {
                 UiState::Switcher { close, .. } => *close,
                 _ => None,
             };
             if let Some(c) = closing {
-                resolve_card_close(state, c.toplevel, c.progress.value);
+                resolve_card_close(state, c, vertical.velocity().y);
                 return Stage::Done;
             }
 
-            if tapped(start_x, start_y) {
+            let (_, h) = state.output_size_f();
+            if tapped(start_x, vertical.start().y * h) {
                 return open_tapped_card(state, x, y);
             }
             if let UiState::Switcher { cards, scroll, .. } = &mut state.ui {
@@ -909,20 +924,19 @@ fn release_switcher(state: &mut State, x: f32, y: f32) -> Stage {
     Stage::Fallthrough
 }
 
-/// Finish a card-close drag: past the commit threshold remove the card from
-/// the deck and close the client, otherwise mark it releasing so `Tick` springs
-/// it back.
-fn resolve_card_close(state: &mut State, toplevel: ToplevelId, progress: f32) {
-    if home::card_close_commits(progress) {
+/// Finish a card-close drag: carried far enough up (or flicked up hard enough)
+/// the card leaves the deck and its client is closed; otherwise it springs back
+/// to rest. `vy` is the release velocity in screen heights/s, negative upward.
+fn resolve_card_close(state: &mut State, mut closing: crate::ui_state::CardClose, vy: f32) {
+    if home::card_close_commits(closing.progress.value, vy) {
+        let toplevel = closing.toplevel;
         let eff = transition(&mut state.ui, UiEvent::SwitcherCloseCard { toplevel });
         if let crate::ui_state::Effect::CloseToplevel { toplevel } = eff {
             state.detach_toplevel(toplevel);
         }
     } else if let UiState::Switcher { close, .. } = &mut state.ui {
-        let mut c = crate::ui_state::CardClose::dragging(toplevel, progress);
-        c.progress.retarget(0.0);
-        c.releasing = true;
-        *close = Some(c);
+        closing.release(vy);
+        *close = Some(closing);
     }
 }
 

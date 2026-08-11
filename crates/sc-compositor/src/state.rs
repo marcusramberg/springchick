@@ -322,7 +322,7 @@ pub(crate) struct State {
     pub last_pointer_pos: Option<(f32, f32)>,
     pub pointer_down: bool,
     /// Page drag tracking: origin + velocity when dragging on the home screen.
-    pub page_drag: Option<input_common::PageDrag>,
+    pub page_drag: Option<input_common::FingerDrag>,
     /// When the last motion event of the live gesture arrived, so the gesture
     /// tracker can be fed real elapsed time instead of an assumed frame rate.
     /// `None` between gestures; seeded on press.
