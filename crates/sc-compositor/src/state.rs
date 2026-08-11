@@ -323,6 +323,10 @@ pub(crate) struct State {
     pub pointer_down: bool,
     /// Page drag tracking: origin + velocity when dragging on the home screen.
     pub page_drag: Option<input_common::PageDrag>,
+    /// When the last motion event of the live gesture arrived, so the gesture
+    /// tracker can be fed real elapsed time instead of an assumed frame rate.
+    /// `None` between gestures; seeded on press.
+    pub last_motion: Option<std::time::Instant>,
     /// Bar drag tracking from Home state: (start_x, start_y).
     pub bar_drag_start: Option<(f32, f32)>,
     /// App icon held on Home, pending tap-to-launch (also drives the press
@@ -614,6 +618,7 @@ impl State {
             last_pointer_pos: None,
             pointer_down: false,
             page_drag: None,
+            last_motion: None,
             bar_drag_start: None,
             pending_launch: None,
             icon_press: None,
@@ -679,6 +684,7 @@ impl State {
         self.gesture_slot = None;
         self.touch_targets.clear();
         self.page_drag = None;
+        self.last_motion = None;
         self.bar_drag_start = None;
         self.pending_launch = None;
         self.icon_press = None;
