@@ -28,6 +28,59 @@ pub struct PendingLaunch {
     pub start_y: f32,
 }
 
+/// A live horizontal page drag on the Home grid.
+///
+/// Holds the press origin plus a low-passed horizontal velocity, so a release
+/// can commit on a flick as well as on distance — see
+/// [`sc_input::home::page_after_swipe`]. Velocity is in fractions of output
+/// width per second, positive rightward, smoothed the same way
+/// [`sc_input::Tracker`] smooths the in-app gestures.
+#[derive(Clone, Copy, Debug)]
+pub struct PageDrag {
+    pub start_x: f32,
+    last_x: f32,
+    last_t: std::time::Instant,
+    velocity: f32,
+}
+
+impl PageDrag {
+    pub fn begin(start_x: f32) -> Self {
+        Self {
+            start_x,
+            last_x: start_x,
+            last_t: std::time::Instant::now(),
+            velocity: 0.0,
+        }
+    }
+
+    /// Fold a motion event at output-x `x` into the velocity estimate.
+    pub fn update(&mut self, x: f32, width: f32) {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.last_t).as_secs_f32();
+        if dt > 0.0 && width > 0.0 {
+            let inst = ((x - self.last_x) / width) / dt;
+            let a = sc_input::thresholds::VELOCITY_SMOOTHING;
+            // Decay first: motion events stop arriving while the finger is held
+            // still, so a drag-then-hold must not release as a flick.
+            self.velocity = decay(self.velocity, dt);
+            self.velocity = a * inst + (1.0 - a) * self.velocity;
+        }
+        self.last_x = x;
+        self.last_t = now;
+    }
+
+    /// Velocity as of now, decayed over the time since the last motion event.
+    pub fn velocity(&self) -> f32 {
+        decay(self.velocity, self.last_t.elapsed().as_secs_f32().min(1.0))
+    }
+}
+
+/// Exponential velocity decay, ~halving every 35ms — same curve as
+/// [`sc_input::Tracker::decay`].
+fn decay(v: f32, dt: f32) -> f32 {
+    v * (-dt / 0.05).exp()
+}
+
 /// Switcher drag state.
 #[derive(Clone, Copy, Debug)]
 pub enum SwitcherDrag {
@@ -186,11 +239,12 @@ fn motion_pull_down_search(state: &mut State, x: f32, y: f32) -> Stage {
 /// Page drag: drive the page spring straight off the finger (no spring physics
 /// while dragging), rubber-banding past either edge.
 fn motion_page_drag(state: &mut State, x: f32) {
-    let Some(start_x) = state.page_drag_start else {
+    let w = state.output_size.0 as f32;
+    let Some(drag) = &mut state.page_drag else {
         return;
     };
-    let dx = x - start_x;
-    let w = state.output_size.0 as f32;
+    drag.update(x, w);
+    let dx = x - drag.start_x;
     if let UiState::Home {
         page,
         page_spring,
@@ -289,10 +343,15 @@ fn settle_quick_switch(state: &mut State) {
 }
 
 /// Commit a released horizontal page drag: snap to the neighbouring page once
-/// the finger has travelled past 30% of the output width, else settle back to
-/// the current one. No-op outside `Home`. Shared by the normal release and the
-/// arrange-mode release, which differ only in what gates the call.
-fn commit_page_swipe(state: &mut State, dx: f32) {
+/// the finger has travelled far enough *or* let go fast enough, else settle back
+/// to the current one. No-op outside `Home`. Shared by the normal release and
+/// the arrange-mode release, which differ only in what gates the call.
+///
+/// `vx` is the release velocity in fractions of width per second, positive
+/// rightward. It also hands the finger's momentum to the page spring: the drag
+/// pins `velocity` to 0 every frame while tracking, so without this the flip
+/// starts from a standstill and reads as stiff no matter how hard it was flicked.
+fn commit_page_swipe(state: &mut State, dx: f32, vx: f32) {
     let w = state.output_size.0 as f32;
     if let UiState::Home {
         page,
@@ -301,8 +360,11 @@ fn commit_page_swipe(state: &mut State, dx: f32) {
         ..
     } = &mut state.ui
     {
-        let target_page = home::page_after_swipe(dx, w, *page, *page_count);
+        let target_page = home::page_after_swipe(dx, vx, w, *page, *page_count);
         *page = target_page;
+        // Page value grows as the finger moves left, hence the sign flip.
+        // Clamped so a spike in the estimate can't overshoot past a whole page.
+        page_spring.velocity = (-vx).clamp(-4.0, 4.0);
         page_spring.retarget(target_page as f32);
     }
 }
@@ -451,7 +513,7 @@ fn press_arrange(state: &mut State, x: f32, y: f32) -> Stage {
         sc_layout::Hit::Miss => {
             // Empty-area press in arrange: arm a page drag. A swipe pages
             // (resolved in on_release); a still tap exits.
-            state.page_drag_start = Some(x);
+            state.page_drag = Some(PageDrag::begin(x));
         }
         sc_layout::Hit::GridIcon { app_id, .. } => {
             if let Some(a) = &mut state.arrange {
@@ -537,7 +599,7 @@ fn press_arm_gesture(state: &mut State, x: f32, y: f32) {
                 start_x,
                 start_y,
             });
-            state.page_drag_start = Some(start_x);
+            state.page_drag = Some(PageDrag::begin(start_x));
             // Also arm the long-press hold that, if the finger stays put long
             // enough, engages arrange mode (see `advance_frame`).
             state.icon_press = Some(IconPress {
@@ -548,7 +610,7 @@ fn press_arm_gesture(state: &mut State, x: f32, y: f32) {
             });
         }
         DownAction::StartPageDrag { start_x } => {
-            state.page_drag_start = Some(start_x);
+            state.page_drag = Some(PageDrag::begin(start_x));
             // Arm a pull-down: a dominant downward drag from here opens search
             // (a sideways drag still pages — resolved in `on_motion`).
             state.search_arm = Some((x, y));
@@ -580,7 +642,7 @@ enum Stage {
 ///
 /// - Ordering: an armed icon tap outranks the page swipe armed from the same
 ///   press (`on_press` arms both and lets the release pick); the bar-drag
-///   classification must run before the page swipe consumes `page_drag_start`.
+///   classification must run before the page swipe consumes `page_drag`.
 /// - Termination: a stage returning [`Stage::Done`] skips everything after it,
 ///   *including* the trailing `page_count` refresh — which is why the quick-switch,
 ///   arrange, icon-tap, and switcher-tap paths don't touch it, while the bar-drag,
@@ -644,12 +706,12 @@ fn release_arrange(state: &mut State, x: f32) -> Stage {
     }
     // No icon drag: empty-area release. A swipe commits a page flip and stays in
     // arrange; a still tap exits.
-    match state.page_drag_start.take() {
-        Some(start_x) => {
-            let dx = x - start_x;
+    match state.page_drag.take() {
+        Some(drag) => {
+            let dx = x - drag.start_x;
             let w = state.output_size.0 as f32;
             if home::is_arrange_page_swipe(dx, w) {
-                commit_page_swipe(state, dx);
+                commit_page_swipe(state, dx, drag.velocity());
             } else {
                 state.arrange = None; // still tap -> exit
             }
@@ -769,10 +831,10 @@ fn release_bar_drag(state: &mut State, x: f32, y: f32) {
     }
 }
 
-/// Page swipe: snap based on the 30% threshold.
+/// Page swipe: snap based on distance travelled or release speed.
 fn release_page_swipe(state: &mut State, x: f32) {
-    if let Some(start_x) = state.page_drag_start.take() {
-        commit_page_swipe(state, x - start_x);
+    if let Some(drag) = state.page_drag.take() {
+        commit_page_swipe(state, x - drag.start_x, drag.velocity());
     }
 }
 

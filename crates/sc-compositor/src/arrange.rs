@@ -217,13 +217,13 @@ impl State {
     /// Abandon an in-flight page drag, springing the grid back to the page it
     /// started on.
     ///
-    /// Dropping `page_drag_start` on its own is not enough: the drag drives the
+    /// Dropping `page_drag` on its own is not enough: the drag drives the
     /// spring by setting `value` *and* `target` together (so it tracks the finger
     /// with no physics), which means a half-dragged spring reports `is_settled()`
     /// and will never return by itself. Whoever cancels the drag has to retarget
     /// it, or the home grid stays parked a fraction of a page off for good.
     pub(crate) fn cancel_page_drag(&mut self) {
-        self.page_drag_start = None;
+        self.page_drag = None;
         if let UiState::Home {
             page, page_spring, ..
         } = &mut self.ui
@@ -257,7 +257,7 @@ impl State {
                 );
                 self.arrange = Some(ArrangeState { drag: Some(drag) });
                 self.pending_launch = None;
-                self.page_drag_start = None;
+                self.page_drag = None;
                 self.icon_press = None;
             }
         }
