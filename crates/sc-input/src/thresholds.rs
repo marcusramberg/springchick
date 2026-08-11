@@ -79,11 +79,22 @@ pub const BAR_SWITCH_FRAC: f32 = 0.15;
 /// a short, deliberate swipe commits instead of bouncing.
 pub const QUICK_SWITCH_COMMIT_FRAC: f32 = 0.2;
 
-/// Upward travel (fraction of screen height) that drives a switcher card's
-/// close progress from 0 to 1.
-pub const CARD_CLOSE_FULL_RISE: f32 = 0.25;
-/// Close progress at/above which a released card is actually closed.
-pub const CARD_CLOSE_COMMIT: f32 = 0.4;
+/// Upward travel (fraction of screen height) at/above which a *slow* released
+/// card-close drag closes the card. A flick closes on speed instead — see
+/// [`CARD_CLOSE_FLICK_VELOCITY`]. Card close progress tracks the finger 1:1, so
+/// this is literally how far up the screen the card has been carried.
+pub const CARD_CLOSE_COMMIT: f32 = 0.18;
+/// Upward speed (fraction of screen height per second, as a magnitude) that
+/// closes a card regardless of distance.
+///
+/// Deliberately *the same divide* as [`HOME_FLICK_VELOCITY`]: flicking a card
+/// up off the deck and flicking an app up off the screen are the same motion of
+/// the hand, so the speed that separates "flick" from "drag" must be the same
+/// number, or the two gestures feel like different surfaces.
+pub const CARD_CLOSE_FLICK_VELOCITY: f32 = -HOME_FLICK_VELOCITY;
+/// Travel a flick must still cover (fraction of height) before speed alone can
+/// close a card — stops a fast tap-and-jitter from closing one.
+pub const CARD_CLOSE_FLICK_MIN_FRAC: f32 = 0.02;
 /// How much of a *downward* card drag translates into (negative) close
 /// progress. Well under 1 so pushing below the stack feels like resistance.
 pub const CARD_PUSH_DOWN_RUBBER: f32 = 0.35;
