@@ -23,6 +23,8 @@ pub fn spawn_app(exec: &str, wayland_display: &str) -> Option<Child> {
         .env("WAYLAND_DISPLAY", wayland_display)
         .env("GDK_BACKEND", "wayland")
         .env("QT_QPA_PLATFORM", "wayland")
+        // ensure zwp_text_input_v3 works.
+        .env_remove("QT_IM_MODULE")
         .env_remove("DISPLAY") // prevent X11 fallback
         .spawn()
     {
