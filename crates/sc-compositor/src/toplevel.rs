@@ -310,7 +310,7 @@ impl State {
                 // Unused by the slide, but the state carries an origin for the
                 // return trip home.
                 origin: self.last_origin,
-                open_mode: crate::ui_state::OpenMode::SlideFromLeft,
+                open_mode: ui_state::OpenMode::SlideFromLeft,
             },
         );
     }

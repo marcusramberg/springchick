@@ -218,7 +218,7 @@ fn capture_region_shm(
 }
 
 /// Handle input events from the winit backend.
-fn handle_winit_input(state: &mut State, event: InputEvent<smithay::backend::winit::WinitInput>) {
+fn handle_winit_input(state: &mut State, event: InputEvent<winit::WinitInput>) {
     use smithay::backend::input::{AbsolutePositionEvent, ButtonState, PointerButtonEvent};
 
     // Any input resumes clients we told had gone idle (ext-idle-notify).

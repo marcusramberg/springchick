@@ -1045,7 +1045,7 @@ mod tests {
         let mut state = UiState::Settling {
             toplevel: 1,
             app_id: "a".into(),
-            target: sc_input::NavTarget::Switcher,
+            target: NavTarget::Switcher,
             progress: Spring::new(1.0),
             origin: ZoomOrigin::icon((0.5, 0.5)),
             cards: vec![1, 2, 3],

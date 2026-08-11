@@ -837,11 +837,11 @@ pub(crate) fn visible_grid_slots(
 /// Dock icon slots positioned from animated `dock_positions` (falling back to
 /// the static layout center for a not-yet-seeded app), so the dock reflows.
 pub(crate) fn visible_dock_slots(
-    layout: &sc_layout::Layout,
+    layout: &Layout,
     dock_positions: &HashMap<String, (f32, f32)>,
     width: f32,
     height: f32,
-) -> Vec<sc_layout::IconSlot> {
+) -> Vec<IconSlot> {
     // Skip apps absent from `dock_positions` (mirrors `visible_grid_slots`): a
     // dock icon being dragged is dropped from `dock_anim`, so it renders only as
     // the ghost, not doubled in its dock cell.

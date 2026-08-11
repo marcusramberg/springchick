@@ -48,7 +48,7 @@ struct Drm {
     renderer: GlesRenderer,
     /// Rounded-corner texture program, compiled once, passed to `draw_scene`.
     rounded_tex_shader: GlesTexProgram,
-    output_size: Size<i32, smithay::utils::Physical>,
+    output_size: Size<i32, Physical>,
     transform: Transform,
     /// Set false while a VT-switch has us deactivated.
     active: bool,
@@ -170,7 +170,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // --- Find a connected connector + crtc + preferred mode ---
     let (connector_handle, crtc_handle, mode) = find_output(&drm_device)?;
     let (mw, mh) = mode.size();
-    let output_size: Size<i32, smithay::utils::Physical> = (mw as i32, mh as i32).into();
+    let output_size: Size<i32, Physical> = (mw as i32, mh as i32).into();
     info!(w = mw, h = mh, "selected mode");
 
     // --- Scanout surface (GBM double-buffered, page-flip on vblank) ---

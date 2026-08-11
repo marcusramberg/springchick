@@ -105,7 +105,7 @@ Env vars: `SPRINGCHICK_BACKEND`, `SPRINGCHICK_CONFIG`, `SPRINGCHICK_IPC_SOCK`, `
 
 `nix/module.nix` exposes `programs.springchick.enable`, adds the package to `sessionPackages` so the greeter lists springchick as a wayland session (real logind seat, no seatd hack). `bin/springchick-session` is the same binary with `SPRINGCHICK_BACKEND=drm`. Device runbook: `docs/RUNBOOK-device.md` (build on-device over `ssh dmsmobile`).
 
-Screen capture works via `ext-image-copy-capture-v1` (not wlr-screencopy): `scripts/screenshot.sh` (grim), `scripts/record.sh` (wl-screenrec — `wf-recorder` will **not** work).
+Screen capture: `ext-image-copy-capture-v1` (dmabuf fast path on DRM, shm readback otherwise) plus `zwlr_screencopy_v1` (`wlr_screencopy.rs`, shm only) for wlr-era clients. Shared buffer plumbing in `capture.rs`; each backend has its own draw-and-read-back glue. `scripts/screenshot.sh` (grim), `scripts/record.sh` (wl-screenrec — `wf-recorder` will **not** work).
 
 ## Testing expectations
 
