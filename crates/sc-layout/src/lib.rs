@@ -111,6 +111,21 @@ const H_MARGIN: f32 = 0.04;
 const ICON_SIZE_FRAC: f32 = 0.62;
 /// Label height as fraction of cell height.
 const LABEL_HEIGHT_FRAC: f32 = 0.18;
+/// Breathing room between a label and the next row, as a fraction of the
+/// vertical band an icon and its label share.
+const CELL_V_PAD_FRAC: f32 = 0.06;
+
+/// Icon edge that fits both the cell width and the vertical band it shares with
+/// its label.
+///
+/// The width-derived size alone overflows whenever a cell is wider than it is
+/// tall - a 4x6 grid on a portrait phone - and the overflow is silent: the
+/// label lands in the next row's cell and is painted over by that row's icon,
+/// while the centering pushes the icon up into the row above.
+fn fit_icon_size(cell_w: f32, band_h: f32, label_h: f32) -> f32 {
+    let available = band_h - label_h - band_h * CELL_V_PAD_FRAC;
+    (cell_w * ICON_SIZE_FRAC).min(available).max(0.0)
+}
 
 /// Compute the full home screen layout for the given output size, page, and model.
 /// The bottom home-bar zone rectangle, standalone (no full layout needed).
@@ -173,8 +188,8 @@ fn grid_metrics(width: f32, height: f32) -> GridMetrics {
 
     let cell_w = usable_width / COLS as f32;
     let cell_h = grid_height / ROWS as f32;
-    let icon_size = cell_w * ICON_SIZE_FRAC;
     let label_h = cell_h * LABEL_HEIGHT_FRAC;
+    let icon_size = fit_icon_size(cell_w, cell_h, label_h);
 
     GridMetrics {
         grid_left,
@@ -320,8 +335,9 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
 
     // Dock icons
     let dock_cell_w = usable_width / DOCK_CAP as f32;
-    let dock_icon_size = dock_cell_w * ICON_SIZE_FRAC;
-    let dock_label_h = (height * DOCK_HEIGHT) * LABEL_HEIGHT_FRAC;
+    let dock_band_h = height * DOCK_HEIGHT;
+    let dock_label_h = dock_band_h * LABEL_HEIGHT_FRAC;
+    let dock_icon_size = fit_icon_size(dock_cell_w, dock_band_h, dock_label_h);
     let dock = model
         .dock
         .iter()
@@ -436,6 +452,93 @@ mod tests {
         m.dock.push("dock0".into());
         m.dock.push("dock1".into());
         m
+    }
+
+    /// Every output size a phone might hand us, portrait and landscape.
+    const SIZES: &[(f32, f32)] = &[
+        (1224.0, 2700.0), // Fairphone 5, portrait
+        (1901.0, 2088.0), // nested winit window
+        (2700.0, 1224.0), // rotated
+        (720.0, 1440.0),
+        (1080.0, 1080.0),
+        (400.0, 800.0), // small
+    ];
+
+    #[test]
+    fn label_never_overlaps_the_next_row() {
+        let mut m = ShellModel::default();
+        for i in 0..(COLS * ROWS) {
+            m.place(format!("app{i}"));
+        }
+
+        for &(w, h) in SIZES {
+            let l = compute(w, h, 0, &m);
+            for (i, slot) in l.grid.iter().enumerate() {
+                // The icon and its label share one cell: the label must end
+                // before the next row's icon begins, or it is painted over.
+                if let Some(below) = l.grid.get(i + COLS) {
+                    let label_bottom = slot.label_rect.y + slot.label_rect.h;
+                    assert!(
+                        label_bottom <= below.icon_rect.y,
+                        "{w}x{h}: slot {i} label ends at {label_bottom} but the icon below \
+                         starts at {}",
+                        below.icon_rect.y
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn icon_and_label_fit_inside_their_cell() {
+        let mut m = ShellModel::default();
+        for i in 0..(COLS * ROWS) {
+            m.place(format!("app{i}"));
+        }
+
+        for &(w, h) in SIZES {
+            let gm = grid_metrics(w, h);
+            assert!(
+                gm.icon_size + gm.label_h <= gm.cell_h,
+                "{w}x{h}: icon {} + label {} exceeds cell height {}",
+                gm.icon_size,
+                gm.label_h,
+                gm.cell_h
+            );
+            assert!(gm.icon_size > 0.0, "{w}x{h}: icon collapsed to nothing");
+
+            // Centering must not push the first row above the grid either
+            let l = compute(w, h, 0, &m);
+            for slot in &l.grid {
+                assert!(
+                    slot.icon_rect.y >= gm.grid_top - 0.5,
+                    "{w}x{h}: icon at {} is above grid_top {}",
+                    slot.icon_rect.y,
+                    gm.grid_top
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dock_icon_and_label_fit_their_band() {
+        let m = sample_model();
+        for &(w, h) in SIZES {
+            let l = compute(w, h, 0, &m);
+            let dock_top = h * (1.0 - BAR_HEIGHT) - h * DOCK_HEIGHT;
+            let dock_bottom = dock_top + h * DOCK_HEIGHT;
+            for slot in &l.dock {
+                assert!(
+                    slot.icon_rect.y >= dock_top - 0.5,
+                    "{w}x{h}: dock icon starts above its band"
+                );
+                let label_bottom = slot.label_rect.y + slot.label_rect.h;
+                assert!(
+                    label_bottom <= dock_bottom + 0.5,
+                    "{w}x{h}: dock label ends at {label_bottom}, past band bottom {dock_bottom}"
+                );
+            }
+        }
     }
 
     #[test]
