@@ -32,6 +32,8 @@ use smithay::wayland::image_copy_capture::{
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::selection::data_device::DataDeviceState;
 use smithay::wayland::selection::ext_data_control::DataControlState;
+use smithay::wayland::selection::primary_selection::PrimarySelectionState;
+use smithay::wayland::selection::wlr_data_control::DataControlState as WlrDataControlState;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shell::xdg::dialog::XdgDialogState;
 use smithay::wayland::shell::xdg::{ToplevelSurface, XdgShellState};
@@ -153,9 +155,20 @@ pub(crate) struct State {
     pub dmabuf_state: DmabufState,
     #[allow(dead_code)] // Must stay alive to keep the dmabuf global registered.
     pub dmabuf_global: Option<DmabufGlobal>,
+    /// Kept so focus changes can point the selection (clipboard) devices at the
+    /// newly focused client — that needs a `DisplayHandle` and `focus_changed`
+    /// doesn't get one.
+    pub dh: DisplayHandle,
     pub data_device_state: DataDeviceState,
+    /// zwp_primary_selection: middle-click paste. foot and every other terminal
+    /// expect it alongside the normal clipboard.
+    pub primary_selection_state: PrimarySelectionState,
     /// ext-data-control clipboard-manager protocol state.
     pub data_control_state: DataControlState,
+    /// wlr-data-control: same job as ext-data-control, for wlr-era clients
+    /// (wl-clipboard before v2.2, clipman, cliphist).
+    #[allow(dead_code)] // Must stay alive to keep the global registered.
+    pub wlr_data_control_state: WlrDataControlState,
     pub seat_state: SeatState<Self>,
     #[allow(dead_code)] // Must stay alive to keep the wl_seat global registered.
     pub seat: Seat<Self>,
@@ -428,9 +441,15 @@ impl State {
         // renderer's importable formats are known.
         let dmabuf_state = DmabufState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
-        // ext_data_control: clipboard managers (wl-clipboard, dms, ...). No
-        // primary selection wired, so pass None.
-        let data_control_state = DataControlState::new::<Self, _>(&dh, None, |_client| true);
+        let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
+        // Clipboard managers (wl-clipboard, dms, ...): both the ext- and the
+        // older wlr- flavour, since clients pick one or the other.
+        let data_control_state =
+            DataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), |_client| true);
+        let wlr_data_control_state =
+            WlrDataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), |_client| {
+                true
+            });
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&dh, "springchick");
         // 200ms delay / 25Hz repeat: xkb defaults, forwarded to clients.
@@ -557,8 +576,11 @@ impl State {
             shm_state,
             dmabuf_state,
             dmabuf_global: None,
+            dh: dh.clone(),
             data_device_state,
+            primary_selection_state,
             data_control_state,
+            wlr_data_control_state,
             seat_state,
             seat,
             keyboard,

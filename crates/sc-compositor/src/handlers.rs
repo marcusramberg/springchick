@@ -12,7 +12,7 @@ use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_to
 use smithay::reexports::wayland_server::protocol::wl_buffer;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::Client;
+use smithay::reexports::wayland_server::{Client, Resource};
 use smithay::utils::{IsAlive, Rectangle, Serial};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
@@ -31,7 +31,13 @@ use smithay::wayland::image_copy_capture::{
 use smithay::wayland::input_method::{InputMethodHandler, PopupSurface as ImePopupSurface};
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
-    DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
+    set_data_device_focus, DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
+};
+use smithay::wayland::selection::primary_selection::{
+    set_primary_focus, PrimarySelectionHandler, PrimarySelectionState,
+};
+use smithay::wayland::selection::wlr_data_control::{
+    DataControlHandler as WlrDataControlHandler, DataControlState as WlrDataControlState,
 };
 use smithay::wayland::selection::ext_data_control::{DataControlHandler, DataControlState};
 use smithay::wayland::selection::SelectionHandler;
@@ -232,7 +238,15 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    /// Point the selection devices at the newly focused client. Without this a
+    /// client never receives a `wl_data_offer`, so copy/paste silently does
+    /// nothing even though the globals are advertised.
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        let dh = self.dh.clone();
+        let client = focused.and_then(|s| dh.get_client(s.id()).ok());
+        set_data_device_focus(&dh, seat, client.clone());
+        set_primary_focus(&dh, seat, client);
+    }
     fn cursor_image(
         &mut self,
         _seat: &Seat<Self>,
@@ -282,6 +296,18 @@ impl DataDeviceHandler for State {
 impl DataControlHandler for State {
     fn data_control_state(&mut self) -> &mut DataControlState {
         &mut self.data_control_state
+    }
+}
+
+impl WlrDataControlHandler for State {
+    fn data_control_state(&mut self) -> &mut WlrDataControlState {
+        &mut self.wlr_data_control_state
+    }
+}
+
+impl PrimarySelectionHandler for State {
+    fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
+        &mut self.primary_selection_state
     }
 }
 
@@ -463,6 +489,8 @@ delegate_seat!(State);
 delegate_shm!(State);
 delegate_data_device!(State);
 smithay::delegate_ext_data_control!(State);
+smithay::delegate_data_control!(State);
+smithay::delegate_primary_selection!(State);
 delegate_output!(State);
 delegate_xdg_decoration!(State);
 smithay::delegate_layer_shell!(State);
