@@ -40,11 +40,20 @@ pub fn theme_dirs(bases: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 /// Size subdirectories to search, largest first.
+///
+/// Covers every size hicolor's index.theme defines at or above TARGET_SIZE:
+/// apps that ship only a 512x512 or 192x192 PNG (common for icons generated
+/// from a web app manifest) were previously missed entirely and fell through to
+/// the letter placeholder.
 const SIZE_SUBDIRS: &[&str] = &[
+    "512x512/apps",
+    "384x384/apps",
     "256x256/apps",
+    "192x192/apps",
     "128x128/apps",
     "scalable/apps",
     "96x96/apps",
+    "72x72/apps",
     "64x64/apps",
     "48x48/apps",
 ];
@@ -431,6 +440,25 @@ mod tests {
         let found = find_icon("test-app", &dirs);
         assert!(found.is_some());
         assert!(found.unwrap().ends_with("test-app.png"));
+    }
+
+    #[test]
+    fn find_icon_in_large_size_dirs() {
+        // A manifest-derived icon is often installed only at 512x512, which
+        // hicolor's index.theme defines but this search list used to omit -
+        // the icon was invisible and apps fell back to the letter placeholder.
+        for size_dir in ["512x512/apps", "384x384/apps", "192x192/apps"] {
+            let dir = tempfile::tempdir().unwrap();
+            let apps_dir = dir.path().join(size_dir);
+            std::fs::create_dir_all(&apps_dir).unwrap();
+            std::fs::write(apps_dir.join("big-app.png"), minimal_png()).unwrap();
+
+            let dirs = [dir.path().to_str().unwrap()];
+            assert!(
+                find_icon("big-app", &dirs).is_some(),
+                "icon in {size_dir} should be found"
+            );
+        }
     }
 
     #[test]
