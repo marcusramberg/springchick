@@ -314,6 +314,38 @@ impl Card {
     fn origin(&self) -> Point<i32, Physical> {
         Point::<i32, Physical>::from((self.x, self.y))
     }
+
+    /// Where the card's root surface actually lands, in physical px.
+    ///
+    /// The card rect above is `output × scale`, which is what a *fullscreen*
+    /// client draws — but a backgrounded toplevel keeps whatever size it was
+    /// configured at, so its surface can be smaller or offset. The Skia cues
+    /// drawn around a card (shadow, depth scrim) use these bounds so they hug
+    /// the pixels the client actually put on screen.
+    ///
+    /// The rounded-corner shader deliberately does *not*: its mask spans the
+    /// element's own texture (`v_coords`), which the nominal card rect already
+    /// describes, and feeding it these bounds instead softens the corner mask
+    /// so the card behind bleeds through the front card's corner.
+    ///
+    /// Mirrors what `draw_scaled_card` does to the element: relocate to the
+    /// card origin, then scale about that origin.
+    fn drawn_bounds(
+        &self,
+        elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
+        app_scale: f64,
+    ) -> (f32, f32, f32, f32) {
+        let Some(root) = elements.first() else {
+            return (self.x as f32, self.y as f32, self.size.0, self.size.1);
+        };
+        let g = root.geometry(Scale::from(app_scale));
+        (
+            self.x as f32 + g.loc.x as f32 * self.scale,
+            self.y as f32 + g.loc.y as f32 * self.scale,
+            g.size.w as f32 * self.scale,
+            g.size.h as f32 * self.scale,
+        )
+    }
 }
 
 /// Draw a shrunken app "card" (drag-up window or switcher-deck card): relocate +
@@ -734,16 +766,24 @@ fn pass_backdrop_blur(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>) {
 /// Switcher deck: each card back-to-front (the scene sorts them ascending z).
 /// `close_progress` lifts a card upward via the layout as it slides off-screen
 /// to close, so the deck itself needs no extra scaling here.
+///
+/// Each card is sandwiched between two Skia draws — a drop shadow before it and
+/// its depth scrim after — so cards read as separated slabs instead of one flat
+/// collage. The interleaving is required, not incidental: the deck overlaps, so
+/// a card's shadow must land over the card behind it and under the card itself.
 fn pass_switcher_cards(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
     size: Size<i32, Physical>,
-    ctx: &DrawCtx<'_>,
+    ctx: &mut DrawCtx<'_>,
 ) -> Result<(), SwapBuffersError> {
-    for card in &ctx.scene.cards {
+    // Copied out: the loop needs `ctx.skia` mutably while walking the cards.
+    let cards: Vec<crate::switcher::CardRect> = ctx.scene.cards.clone();
+    for card in cards {
         let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) else {
             continue;
         };
+        let surface = tl.surface.wl_surface().clone();
         let placement = Card::centered(
             size,
             card.center_x,
@@ -754,13 +794,33 @@ fn pass_switcher_cards(
         let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             render_elements_from_surface_tree(
                 renderer,
-                tl.surface.wl_surface(),
+                &surface,
                 (0, 0),
                 ctx.app_scale,
                 card.alpha,
                 Kind::Unspecified,
             );
+        if elements.is_empty() {
+            continue;
+        }
+        // Both cues track the surface's real drawn bounds: a backgrounded app
+        // keeps its old size, so the nominal card rect would put the shadow and
+        // the scrim off the card's actual edges.
+        let (dx, dy, dw, dh) = placement.drawn_bounds(&elements, ctx.app_scale);
+        let decor = crate::skia_gl::CardDecor {
+            x: dx,
+            y: dy,
+            w: dw,
+            h: dh,
+            radius: placement.corner_radius,
+            alpha: card.alpha,
+            dim: card.dim,
+        };
+        ctx.skia
+            .draw_card_shadow(size.w, size.h, &decor, ctx.skia_flip_y);
         draw_scaled_card(renderer, framebuffer, size, ctx, elements, placement)?;
+        ctx.skia
+            .draw_card_dim(size.w, size.h, &decor, ctx.skia_flip_y);
     }
     Ok(())
 }

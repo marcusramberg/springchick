@@ -19,6 +19,10 @@ pub struct CardRect {
     /// Opacity 0..1. Used to fade the live grab-preview fan in/out; 1.0 for
     /// settled switcher / quick-switch cards.
     pub alpha: f32,
+    /// Darkening scrim over the card, 0..1 (0 = untouched). Grows with depth in
+    /// the stack so cards behind the front read as receding rather than as
+    /// equally-bright siblings that blend into each other.
+    pub dim: f32,
 }
 
 /// Result of a hit test against the deck.
@@ -35,6 +39,17 @@ const FOLDED_PEEK_FRAC: f32 = 0.17;
 /// How far (fraction of front card width) a card slides right per unit of scroll
 /// once it has passed the front slot and is leaving to the right.
 const SLIDE_OFF_FRAC: f32 = 1.15;
+/// Extra darkening per step back in the stack. Continuous in the (fractional)
+/// depth so scrolling ramps a card's dim smoothly as it moves toward the front.
+const DIM_PER_STEP: f32 = 0.16;
+/// Cap on the depth scrim: past this the deck would read as a black wall.
+const DIM_MAX: f32 = 0.55;
+
+/// Darkening scrim for a card `depth` steps behind the front slot. Cards at or
+/// in front of the front slot (`depth <= 0`) are undimmed.
+fn depth_dim(depth: f32) -> f32 {
+    (depth.max(0.0) * DIM_PER_STEP).min(DIM_MAX)
+}
 
 /// Compute card rects, back-to-front. `cards[0]` = most-recent.
 ///
@@ -96,6 +111,7 @@ pub fn layout(
                 corner_radius,
                 z,
                 alpha: 1.0,
+                dim: depth_dim(rel),
             }
         })
         .collect()
@@ -134,6 +150,7 @@ pub fn fan_around(
             // Nearer neighbours draw on top of farther ones; all below the front.
             z: 100usize.saturating_sub(i),
             alpha,
+            dim: depth_dim(i as f32),
         })
         .collect()
 }
@@ -232,6 +249,41 @@ mod tests {
     #[test]
     fn empty_is_empty() {
         assert!(layout(&[], 0.0, SIZE, None, CORNER).is_empty());
+    }
+
+    #[test]
+    fn dim_grows_with_depth_and_front_is_clear() {
+        let rects = layout(&[0, 1, 2, 3], 0.0, SIZE, None, CORNER);
+        let front = rects.iter().find(|r| r.toplevel == 0).unwrap();
+        assert_eq!(front.dim, 0.0, "front card is undimmed");
+        for w in rects.windows(2) {
+            assert!(w[1].dim > w[0].dim, "deeper card must be dimmer");
+            assert!(w[1].dim <= DIM_MAX);
+        }
+    }
+
+    #[test]
+    fn dim_ramps_continuously_with_scroll() {
+        // A card one step back at scroll 0 is half-way to undimmed at scroll 0.5.
+        let a = layout(&[0, 1, 2], 0.0, SIZE, None, CORNER)[1].dim;
+        let b = layout(&[0, 1, 2], 0.5, SIZE, None, CORNER)[1].dim;
+        assert!(b < a && b > 0.0, "dim {a} -> {b} should ease, not step");
+        // Once it reaches the front slot it is fully clear.
+        assert_eq!(layout(&[0, 1, 2], 1.0, SIZE, None, CORNER)[1].dim, 0.0);
+    }
+
+    #[test]
+    fn passed_cards_are_never_dimmed() {
+        // cards[0] has slid off to the right; it is in front of the deck.
+        let rects = layout(&[0, 1, 2], 1.5, SIZE, None, CORNER);
+        assert_eq!(rects[0].dim, 0.0);
+    }
+
+    #[test]
+    fn fan_neighbours_dim_by_depth() {
+        let fan = fan_around(900.0, 1350.0, FRONT_SCALE, &[0, 1, 2], 1.0, CORNER, SIZE);
+        assert_eq!(fan.len(), 2, "front card is not returned");
+        assert!(fan[0].dim > 0.0 && fan[1].dim > fan[0].dim);
     }
 
     #[test]

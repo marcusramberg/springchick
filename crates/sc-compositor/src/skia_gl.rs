@@ -17,8 +17,8 @@ use skia_safe::gpu::{
 use skia_safe::image_filters;
 use skia_safe::PathOp;
 use skia_safe::{
-    images, Color, ColorType, Font, FontMgr, FontStyle, Image, ImageInfo, Paint, PathBuilder,
-    RRect, Rect, Surface, TextBlob, TileMode,
+    images, BlurStyle, ClipOp, Color, ColorType, Font, FontMgr, FontStyle, Image, ImageInfo,
+    MaskFilter, Paint, PathBuilder, RRect, Rect, Surface, TextBlob, TileMode,
 };
 
 use std::collections::HashMap;
@@ -40,6 +40,80 @@ pub struct SkiaGl {
     cached_surface: Option<CachedSurface>,
     icon_images: HashMap<String, Image>,
     font: Option<Font>,
+}
+
+/// One switcher card's rect in physical output px (top-left origin, y down),
+/// plus the two depth cues drawn around it: a drop shadow underneath and a
+/// darkening scrim on top.
+#[derive(Clone, Copy, Debug)]
+pub struct CardDecor {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub radius: f32,
+    /// The card's own opacity; both cues fade with it so a fading-in fan does
+    /// not show a hard shadow under a barely-visible card.
+    pub alpha: f32,
+    /// Depth scrim strength, 0..1.
+    pub dim: f32,
+}
+
+/// Drop-shadow tuning, as fractions of the card's width so the cue scales with
+/// dpi and card size.
+///
+/// The deck fans to the LEFT: every card overlaps the one behind it along that
+/// card's right edge, so the shadow is cast leftward only. A symmetric (or
+/// downward) drop shadow puts a wide smudge across the neighbour's exposed
+/// strip and over the shell below the deck, which reads as dirt rather than
+/// depth. Keeping the offset small and the blur tight keeps the whole cue
+/// inside the exposed strip, so it reads as a contact shadow rather than a
+/// gradient washing one card's color into the next.
+const SHADOW_SIGMA_FRAC: f32 = 0.005;
+const SHADOW_DX_FRAC: f32 = 0.006;
+const SHADOW_ALPHA: f32 = 0.30;
+
+impl CardDecor {
+    fn rrect(&self) -> RRect {
+        RRect::new_rect_xy(
+            Rect::from_xywh(self.x, self.y, self.w, self.h),
+            self.radius,
+            self.radius,
+        )
+    }
+}
+
+/// Blurred black rounded rect, offset to the left of the card: the shadow that
+/// separates a card from the card it overlaps.
+///
+/// Clipped to *outside* the card's own rect, which matters because app windows
+/// are often translucent (a terminal with an alpha background shows the shell
+/// through it). An unclipped shadow sits behind the card, and everything the
+/// client leaves see-through then reads as a dark wash across the card body
+/// instead of a shadow around its edge.
+fn draw_card_shadow_rrect(canvas: &skia_safe::Canvas, card: &CardDecor) {
+    let sigma = (card.w * SHADOW_SIGMA_FRAC).max(1.0);
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(Color::from_argb(
+        (SHADOW_ALPHA * card.alpha * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8,
+        0,
+        0,
+        0,
+    ));
+    // `Normal`, not `Outer`: Outer drops the shadow inside the *offset* shape,
+    // which is exactly the strip next to the card, so the ramp fell back to
+    // full brightness in the last few px before the edge — a bright line of the
+    // covered card's color, worse than no shadow. The clip below is what keeps
+    // the shadow off the card itself.
+    paint.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, sigma, false));
+    canvas.save();
+    canvas.clip_rrect(card.rrect(), Some(ClipOp::Difference), Some(true));
+    canvas.translate((-card.w * SHADOW_DX_FRAC, 0.0));
+    canvas.draw_rrect(card.rrect(), &paint);
+    canvas.restore();
 }
 
 struct CachedSurface {
@@ -469,6 +543,39 @@ impl SkiaGl {
         if let Some(ctx) = self.context.as_mut() {
             ctx.flush_and_submit();
         }
+    }
+
+    /// Drop a soft shadow behind one switcher card. Call it immediately before
+    /// the card's own (GLES) draw so the shadow lands under that card but over
+    /// whatever was already composited — the deck overlaps, so a single
+    /// shadow pre-pass for the whole deck would be hidden by the cards in front.
+    pub fn draw_card_shadow(&mut self, width: i32, height: i32, card: &CardDecor, flip_y: bool) {
+        if card.alpha <= 0.0 || card.w <= 0.0 || card.h <= 0.0 {
+            return;
+        }
+        self.with_overlay_canvas(width, height, flip_y, |canvas| {
+            draw_card_shadow_rrect(canvas, card)
+        });
+    }
+
+    /// Darken one switcher card by its depth scrim, drawn straight after the
+    /// card so it tints the client's own pixels.
+    pub fn draw_card_dim(&mut self, width: i32, height: i32, card: &CardDecor, flip_y: bool) {
+        let a = card.dim * card.alpha;
+        if a <= 0.0 || card.w <= 0.0 || card.h <= 0.0 {
+            return;
+        }
+        self.with_overlay_canvas(width, height, flip_y, |canvas| {
+            let mut paint = Paint::default();
+            paint.set_anti_alias(true);
+            paint.set_color(Color::from_argb(
+                (a * 255.0).round().clamp(0.0, 255.0) as u8,
+                0,
+                0,
+                0,
+            ));
+            canvas.draw_rrect(card.rrect(), &paint);
+        });
     }
 
     /// Draw the touch indicator marks on top of everything (demo recordings).
