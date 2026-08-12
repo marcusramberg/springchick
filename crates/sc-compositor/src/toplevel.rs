@@ -13,7 +13,7 @@ use sc_shell_model::persist;
 
 use tracing::{info, warn};
 
-use crate::launcher::spawn_app;
+use crate::launcher::{spawn_app, spawn_exec};
 use crate::state::{
     AppToplevel, Launching, State, LAUNCH_PULSE_TIMEOUT, SEARCH_APP_EXEC, SEARCH_APP_ID,
 };
@@ -45,7 +45,7 @@ impl State {
                 return;
             }
         }
-        if let Some(child) = spawn_app(SEARCH_APP_EXEC, &self.wayland_socket) {
+        if let Some(child) = spawn_exec(SEARCH_APP_EXEC, &self.wayland_socket) {
             self.children.push(child);
             self.expecting_search = true;
         }
@@ -80,8 +80,8 @@ impl State {
         // window maps or the process dies. A prior in-flight launch is abandoned
         // (its child moved to the reap list) so only one icon pulses at a time.
         if let Some(entry) = self.app_catalog.get(app_id) {
-            let exec = entry.exec.clone();
-            if let Some(child) = spawn_app(&exec, &self.wayland_socket) {
+            let entry = entry.clone();
+            if let Some(child) = spawn_app(&entry, &self.wayland_socket) {
                 if let Some(prev) = self.launching.take() {
                     self.children.push(prev.child);
                 }

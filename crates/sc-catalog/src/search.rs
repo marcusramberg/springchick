@@ -59,7 +59,7 @@ mod tests {
                 id: id.to_string(),
                 name: name.to_string(),
                 exec: "x".into(),
-                icon: String::new(),
+                ..Default::default()
             },
         )
     }

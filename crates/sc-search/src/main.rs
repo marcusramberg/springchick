@@ -118,11 +118,15 @@ impl SearchApp {
     /// Launch `id` (strip field codes, spawn detached) and quit.
     fn launch(&self, id: &str) {
         if let Some(entry) = self.catalog.get(id) {
-            let clean = sc_catalog::strip_field_codes(&entry.exec);
-            let parts: Vec<&str> = clean.split_whitespace().collect();
-            if let Some((prog, args)) = parts.split_first() {
-                // WAYLAND_DISPLAY etc. are inherited from the compositor.
-                let _ = std::process::Command::new(prog).args(args).spawn();
+            if let Some(command) = sc_catalog::launch_command(entry) {
+                if let Some((prog, args)) = command.argv.split_first() {
+                    // WAYLAND_DISPLAY etc. are inherited from the compositor.
+                    let mut builder = std::process::Command::new(prog);
+                    if let Some(cwd) = &command.cwd {
+                        builder.current_dir(cwd);
+                    }
+                    let _ = builder.args(args).spawn();
+                }
             }
         }
         std::process::exit(0);
