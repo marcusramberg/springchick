@@ -294,6 +294,7 @@ pub fn compute_scene(
                     corner_radius: t.corner_radius,
                     z: 1000,
                     alpha: 1.0,
+                    dim: 0.0,
                 });
                 card_rects.sort_by_key(|r| r.z);
                 Scene {
@@ -387,6 +388,7 @@ pub fn compute_scene(
                     corner_radius: transform.corner_radius,
                     z: 1000,
                     alpha: 1.0,
+                    dim: 0.0,
                 });
                 card_rects.sort_by_key(|r| r.z);
                 return Scene {
@@ -450,6 +452,7 @@ pub fn compute_scene(
                     corner_radius: card_radius,
                     z: 0,
                     alpha: 1.0,
+                    dim: 0.0,
                 });
             }
             cards.push(switcher::CardRect {
@@ -460,6 +463,7 @@ pub fn compute_scene(
                 corner_radius: card_radius,
                 z: 1,
                 alpha: 1.0,
+                dim: 0.0,
             });
             Scene {
                 window: None,
