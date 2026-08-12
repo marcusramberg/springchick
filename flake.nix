@@ -94,6 +94,7 @@
             pkgs.python3
             # `cargo llvm-cov` — see the coverage note in CONTRIBUTING.md.
             pkgs.cargo-llvm-cov
+            pkgs.just
           ];
           # skia-safe's build script runs bindgen — point it at libclang up front.
           # winit's Wayland backend + EGL/GLES dlopen their libs at RUNTIME; in a nix
