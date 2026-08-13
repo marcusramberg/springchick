@@ -7,7 +7,7 @@
 //! - [`crate::frame`] — per-frame advance, popups, animation gating.
 //! - [`crate::handlers`] — the smithay protocol handler impls.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Child;
 use std::time::Duration;
 
@@ -39,6 +39,7 @@ use smithay::wayland::shell::xdg::dialog::XdgDialogState;
 use smithay::wayland::shell::xdg::{ToplevelSurface, XdgShellState};
 use smithay::wayland::shm::ShmState;
 use smithay::wayland::viewporter::ViewporterState;
+use smithay::wayland::xdg_activation::XdgActivationState;
 
 use sc_catalog::AppEntry;
 use sc_icons::IconPixels;
@@ -58,7 +59,19 @@ use crate::{
 /// A running app's toplevel state.
 pub(crate) struct AppToplevel {
     pub surface: ToplevelSurface,
+    /// Which catalog app this window belongs to, as far as the shell is
+    /// concerned: the launch it was attributed to (see [`crate::provenance`]),
+    /// falling back to the client-reported id and then to `unknown_N`. Drives
+    /// the icon, the running dot, and tap-to-raise.
     pub app_id: String,
+    /// Whether `app_id` came from the launch rather than from the client. A
+    /// launch-owned id is authoritative: `resolve_app_id` must not overwrite it
+    /// when the client later announces something else (`foot` for a
+    /// `Terminal=true` entry).
+    pub id_from_launch: bool,
+    /// The client's own xdg `app_id`, kept for diagnostics and as the icon
+    /// fallback for windows no launch claimed.
+    pub wl_app_id: String,
     /// Last client-set xdg window geometry logged for this toplevel, so the
     /// size log fires on change instead of on every commit.
     pub logged_size: Option<(i32, i32)>,
@@ -66,9 +79,19 @@ pub(crate) struct AppToplevel {
 
 /// An app spawned from the launcher but not yet mapped to a toplevel. Its Home
 /// icon pulses until the window opens, the process dies, or we time out waiting.
+///
+/// Several may be in flight at once — "new window" on an already-running app
+/// means two launches of the same id can overlap — so attribution has to pick
+/// the right one rather than assume the sole entry.
 pub(crate) struct Launching {
     pub app_id: String,
     pub child: Child,
+    /// The spawned process, for [`crate::provenance`] ancestry matching. Kept
+    /// separately from `child` because reaping consumes the handle.
+    pub pid: i32,
+    /// xdg-activation token handed to the child in its environment. A client
+    /// that presents it back identifies its launch exactly.
+    pub token: String,
     pub started: std::time::Instant,
 }
 
@@ -103,6 +126,14 @@ pub(crate) struct FramePrep {
     /// Screen-space animated center `(x, y)` per dock app. Dock icons don't
     /// scroll with pages, so these are the spring positions as-is.
     pub dock_positions: HashMap<String, (f32, f32)>,
+    /// Apps still waiting for their window, as `(app_id, seconds since spawn)`.
+    /// Each draws a breathing pulse on its icon; several can be in flight when
+    /// the user opens more than one window at a time.
+    pub launch_pulses: Vec<(String, f32)>,
+    /// Apps with at least one open window — their icons get a running dot.
+    pub running_apps: HashSet<String>,
+    /// Open icon context menu, laid out for this frame. `None` when closed.
+    pub icon_menu: Option<crate::render::MenuView>,
 }
 
 /// A popup and its clamped physical geometry: `(kind, origin, size)`. Chains are
@@ -270,9 +301,18 @@ pub(crate) struct State {
     pub icon_cache: HashMap<String, IconPixels>,
     pub toplevels: Vec<Option<AppToplevel>>,
     pub children: Vec<Child>,
-    /// App spawned and awaiting its first toplevel — drives the pulsing launch
-    /// icon. Cleared when the window maps, the process exits, or on timeout.
-    pub launching: Option<Launching>,
+    /// Apps spawned and awaiting their first toplevel — drives the pulsing
+    /// launch icons. An entry is dropped when its window maps, its process
+    /// exits, or it times out.
+    pub launching: Vec<Launching>,
+    /// xdg-activation token pool. Tokens minted here are passed to spawned
+    /// children so a client can name the launch it came from.
+    pub xdg_activation_state: XdgActivationState,
+    /// Activation tokens clients have presented, keyed by the surface they
+    /// activated. Matched against `launching` when the surface registers as a
+    /// toplevel — the token, not the app id, so two launches of the same app
+    /// stay distinguishable.
+    pub pending_activation: HashMap<WlSurface, String>,
     pub history: AppHistory,
     /// Last zoom origin (cached when launching).
     pub last_origin: ZoomOrigin,
@@ -352,6 +392,12 @@ pub(crate) struct State {
     /// Arrange-mode state (icon reorder/pin/unpin/hide). `None` outside
     /// arrange mode.
     pub arrange: Option<ArrangeState>,
+    /// Open icon context menu (long press on an icon). `None` when closed.
+    pub icon_menu: Option<crate::icon_menu::IconMenu>,
+    /// Finger held on empty home background, waiting to see if it becomes the
+    /// long press that engages arrange mode. Cleared when the gesture turns into
+    /// a swipe, when it releases, or once arrange engages.
+    pub bg_press: Option<crate::arrange::BgPress>,
     /// Armed pull-down: `(start_x, start_y)` of an empty-space Home press that
     /// may become a downward drag launching the search app. Cleared once resolved.
     pub search_arm: Option<(f32, f32)>,
@@ -436,6 +482,10 @@ impl State {
         // process with no in-process parent, so the hint is the only signal that
         // identifies them as dialogs.
         let xdg_dialog_state = XdgDialogState::new::<Self>(&dh);
+        // xdg-activation: the token we hand a spawned app in its environment is
+        // the strongest signal for tying its window back to the icon that
+        // launched it — see [`crate::provenance`].
+        let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         // Global created later by the backend via `init_dmabuf_global`, once the
         // renderer's importable formats are known.
@@ -617,7 +667,9 @@ impl State {
             icon_cache,
             toplevels: Vec::new(),
             children: Vec::new(),
-            launching: None,
+            launching: Vec::new(),
+            xdg_activation_state,
+            pending_activation: HashMap::new(),
             history: AppHistory::new(),
             last_origin: ZoomOrigin::icon((out_w as f32 / 2.0, out_h as f32 / 2.0)),
             output_size,
@@ -645,6 +697,8 @@ impl State {
             pending_launch: None,
             icon_press: None,
             arrange: None,
+            icon_menu: None,
+            bg_press: None,
             search_arm: None,
             expecting_search: false,
             switcher_drag: input_common::SwitcherDrag::None,
@@ -710,6 +764,7 @@ impl State {
         self.bar_drag_start = None;
         self.pending_launch = None;
         self.icon_press = None;
+        self.bg_press = None;
         self.search_arm = None;
         self.switcher_drag = input_common::SwitcherDrag::None;
         if let Some(arrange) = self.arrange.as_mut() {

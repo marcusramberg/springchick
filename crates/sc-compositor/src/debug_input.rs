@@ -40,6 +40,14 @@ pub enum DebugCmd {
     Orientation(crate::rotation::DeviceOrientation),
     /// Re-read `config.toml` and apply the live-changeable settings.
     Reload,
+    /// Open a catalog app by id, exactly as an icon tap would: raise its most
+    /// recent window if it has one, else launch it. `new_window` forces a fresh
+    /// instance instead. This is how the search app opens things, so its
+    /// launches get the same attribution and de-duplication as icon taps.
+    Launch {
+        app_id: String,
+        new_window: bool,
+    },
 }
 
 /// Parse one command line. `w`/`h` are the logical output bounds used for the
@@ -150,6 +158,19 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
             let timeout_ms = opt_u32(&mut tok, 2000)?;
             done(tok)?;
             DebugCmd::Settle { timeout_ms }
+        }
+        "launch" => {
+            let app_id = tok
+                .next()
+                .ok_or_else(|| "parse: missing app id".to_string())?
+                .to_string();
+            let new_window = match tok.next() {
+                None => false,
+                Some("new") => true,
+                Some(other) => return Err(format!("parse: unknown launch flag {other}")),
+            };
+            done(tok)?;
+            DebugCmd::Launch { app_id, new_window }
         }
         other => return Err(format!("parse: unknown verb {other}")),
     };
@@ -319,6 +340,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
                 | DebugCmd::Up
                 | DebugCmd::Tap(..)
                 | DebugCmd::Swipe { .. }
+                | DebugCmd::Launch { .. }
         )
     {
         let _ = reply.send("ok locked\n".into());
@@ -396,6 +418,23 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             // Allowed while locked: it takes no shell input, and a config reload
             // is exactly the kind of thing a session may need behind the lock.
             state.reload_config();
+            let _ = reply.send("ok\n".into());
+        }
+        DebugCmd::Launch { app_id, new_window } => {
+            if !state.app_catalog.contains_key(&app_id) {
+                let _ = reply.send(format!("err unknown app {app_id}\n"));
+                return;
+            }
+            // Centered origin: there is no icon to zoom from when the request
+            // came over the socket (or from the search app's list).
+            let (w, h) = state.output_size_f();
+            let origin = crate::ui_state::ZoomOrigin::icon((w / 2.0, h / 2.0));
+            if new_window {
+                state.spawn_instance(&app_id, origin);
+            } else {
+                state.launch_or_raise(&app_id, origin);
+            }
+            state.needs_render = true;
             let _ = reply.send("ok\n".into());
         }
         DebugCmd::Settle { timeout_ms } => {
@@ -615,6 +654,26 @@ mod tests {
             parse_line("settle", W, H),
             Ok(DebugCmd::Settle { timeout_ms: 2000 })
         );
+    }
+
+    #[test]
+    fn parses_launch() {
+        assert_eq!(
+            parse_line("launch org.gnome.Maps", W, H),
+            Ok(DebugCmd::Launch {
+                app_id: "org.gnome.Maps".into(),
+                new_window: false,
+            })
+        );
+        assert_eq!(
+            parse_line("launch foot new", W, H),
+            Ok(DebugCmd::Launch {
+                app_id: "foot".into(),
+                new_window: true,
+            })
+        );
+        assert!(parse_line("launch", W, H).is_err()); // needs an app id
+        assert!(parse_line("launch foot copy", W, H).is_err()); // unknown flag
     }
 
     #[test]

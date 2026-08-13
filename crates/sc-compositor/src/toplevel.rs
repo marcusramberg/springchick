@@ -5,9 +5,11 @@ use smithay::desktop::PopupManager;
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::Resource;
 use smithay::utils::SERIAL_COUNTER;
 use smithay::wayland::shell::xdg::dialog::ToplevelDialogHint;
 use smithay::wayland::shell::xdg::{SurfaceCachedState, ToplevelSurface, XdgToplevelSurfaceData};
+use smithay::wayland::xdg_activation::{XdgActivationToken, XdgActivationTokenData};
 
 use sc_shell_model::persist;
 
@@ -18,7 +20,7 @@ use crate::state::{
     AppToplevel, Launching, State, LAUNCH_PULSE_TIMEOUT, SEARCH_APP_EXEC, SEARCH_APP_ID,
 };
 use crate::ui_state::{self, transition, ToplevelId, UiEvent, ZoomOrigin};
-use crate::{content_type, keybinds, rotation};
+use crate::{content_type, keybinds, provenance, rotation};
 
 impl State {
     pub(crate) fn handle_return_home(&mut self) {
@@ -45,53 +47,147 @@ impl State {
                 return;
             }
         }
-        if let Some(child) = spawn_exec(SEARCH_APP_EXEC, &self.wayland_socket) {
+        // No activation token: the search app is identified by spawn intent
+        // (`expecting_search`), not by attribution, and it never pulses an icon.
+        if let Some(child) = spawn_exec(SEARCH_APP_EXEC, &self.wayland_socket, "") {
             self.children.push(child);
             self.expecting_search = true;
         }
         self.needs_render = true;
     }
 
+    /// Raise `tid` to the foreground, zooming from `origin`. The window picked
+    /// becomes the most recent, since choosing it is a deliberate activation.
+    ///
+    /// Unlike [`Self::launch_or_raise`] this takes a window, not an app: with
+    /// several open, "the app's most recent window" is what the caller (the icon
+    /// menu's per-window rows) is choosing *against*.
+    pub(crate) fn raise_toplevel(&mut self, tid: ToplevelId, origin: ZoomOrigin) {
+        let Some(Some(tl)) = self.toplevels.get(tid) else {
+            return;
+        };
+        let app_id = tl.app_id.clone();
+        self.last_origin = origin;
+        self.history.push_foreground(tid);
+        transition(
+            &mut self.ui,
+            UiEvent::RaiseApp {
+                toplevel: tid,
+                app_id,
+            },
+        );
+    }
+
+    /// A window's client-set title, empty when it never set one.
+    pub(crate) fn toplevel_title(&self, tid: ToplevelId) -> String {
+        let Some(Some(tl)) = self.toplevels.get(tid) else {
+            return String::new();
+        };
+        smithay::wayland::compositor::with_states(tl.surface.wl_surface(), |states| {
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .and_then(|d| d.lock().ok().and_then(|d| d.title.clone()))
+        })
+        .unwrap_or_default()
+    }
+
+    /// Every window of `app_id`, most-recently-used first.
+    ///
+    /// Ordered off the MRU history rather than the toplevel vec so "raise the
+    /// app" lands on the window the user last looked at, not the oldest one.
+    /// Windows that never entered the history (only the search app) are absent.
+    pub(crate) fn instances(&self, app_id: &str) -> Vec<ToplevelId> {
+        self.history
+            .stack
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.toplevels
+                    .get(*id)
+                    .and_then(|s| s.as_ref())
+                    .is_some_and(|tl| tl.app_id == app_id)
+            })
+            .collect()
+    }
+
+    /// Tap on an icon: raise the app's most recent window if it has one,
+    /// otherwise start it.
     pub(crate) fn launch_or_raise(&mut self, app_id: &str, origin: ZoomOrigin) {
         self.last_origin = origin;
 
         // Frecency is recorded when a window actually maps (`register_toplevel`),
         // so launches from the search app — which exec apps directly rather than
         // through here — count the same as icon taps.
-
-        // Check if already running — raise it (no zoom, instant).
-        for (idx, slot) in self.toplevels.iter().enumerate() {
-            if let Some(tl) = slot {
-                if tl.app_id == app_id {
-                    self.history.push_foreground(idx);
-                    transition(
-                        &mut self.ui,
-                        UiEvent::RaiseApp {
-                            toplevel: idx,
-                            app_id: app_id.to_string(),
-                        },
-                    );
-                    return;
-                }
-            }
-        }
-
-        // Launch new. Track it as `launching` so its icon pulses until the
-        // window maps or the process dies. A prior in-flight launch is abandoned
-        // (its child moved to the reap list) so only one icon pulses at a time.
-        if let Some(entry) = self.app_catalog.get(app_id) {
-            let entry = entry.clone();
-            if let Some(child) = spawn_app(&entry, &self.wayland_socket) {
-                if let Some(prev) = self.launching.take() {
-                    self.children.push(prev.child);
-                }
-                self.launching = Some(Launching {
+        if let Some(&idx) = self.instances(app_id).first() {
+            self.history.push_foreground(idx);
+            transition(
+                &mut self.ui,
+                UiEvent::RaiseApp {
+                    toplevel: idx,
                     app_id: app_id.to_string(),
-                    child,
-                    started: std::time::Instant::now(),
-                });
+                },
+            );
+            return;
+        }
+
+        self.spawn_instance(app_id, origin);
+    }
+
+    /// Start another window of `app_id`, whether or not it is already running.
+    /// Backs the icon menu's "New window"; `launch_or_raise` falls through to it
+    /// when the app isn't running at all.
+    ///
+    /// The launch is tracked in `launching` so the icon pulses until the window
+    /// maps or the process dies, and so the mapped window can be attributed back
+    /// to it. Several launches may pulse at once.
+    pub(crate) fn spawn_instance(&mut self, app_id: &str, origin: ZoomOrigin) {
+        self.last_origin = origin;
+        let Some(entry) = self.app_catalog.get(app_id).cloned() else {
+            return;
+        };
+        let token = self.mint_activation_token(app_id);
+        if let Some(child) = spawn_app(&entry, &self.wayland_socket, &token) {
+            self.launching.push(Launching {
+                app_id: app_id.to_string(),
+                pid: child.id() as i32,
+                child,
+                token,
+                started: std::time::Instant::now(),
+            });
+        }
+    }
+
+    /// Mint an xdg-activation token tagged with the app being launched, for the
+    /// child's environment. The `app_id` we record is our catalog id, which is
+    /// exactly what attribution needs back.
+    fn mint_activation_token(&mut self, app_id: &str) -> String {
+        let data = XdgActivationTokenData {
+            app_id: Some(app_id.to_string()),
+            ..Default::default()
+        };
+        let (token, _) = self.xdg_activation_state.create_external_token(data);
+        token.as_str().to_string()
+    }
+
+    /// Take the launch a newly mapped client belongs to, if any.
+    ///
+    /// Tried in order of how much we trust them: an activation token the client
+    /// presented for this exact surface, then the process ancestry (which
+    /// survives terminals and shell wrappers that drop the token). Removing the
+    /// entry both stops its pulse and stops a second window claiming the same
+    /// launch.
+    fn claim_launch(&mut self, surface: &WlSurface) -> Option<Launching> {
+        if let Some(token) = self.pending_activation.remove(surface) {
+            if let Some(i) = self.launching.iter().position(|l| l.token == token) {
+                return Some(self.launching.remove(i));
             }
         }
+        let pid = surface.client()?.get_credentials(&self.dh).ok()?.pid;
+        let chain = provenance::ancestry(pid);
+        let pids: Vec<i32> = self.launching.iter().map(|l| l.pid).collect();
+        let i = provenance::match_ancestry(&pids, &chain)?;
+        Some(self.launching.remove(i))
     }
 
     /// Poll the pulsing launch: reap the child if it exited (launch failed) and
@@ -105,16 +201,32 @@ impl State {
         // through here.
         keybinds::reap(&mut self.children);
 
-        let Some(l) = &mut self.launching else {
-            return;
-        };
-        let exited = matches!(l.child.try_wait(), Ok(Some(_)) | Err(_));
-        let timed_out = l.started.elapsed() >= LAUNCH_PULSE_TIMEOUT;
-        if exited || timed_out {
-            if let Some(prev) = self.launching.take() {
-                self.children.push(prev.child);
+        let mut done = Vec::new();
+        for (i, l) in self.launching.iter_mut().enumerate() {
+            let exited = matches!(l.child.try_wait(), Ok(Some(_)) | Err(_));
+            let timed_out = l.started.elapsed() >= LAUNCH_PULSE_TIMEOUT;
+            if exited || timed_out {
+                done.push(i);
             }
         }
+        // Back to front so the earlier indices stay valid.
+        for i in done.into_iter().rev() {
+            self.give_up_launch(i);
+        }
+    }
+
+    /// Drop launch `i`: stop its pulse, hand the child to the reap list, and
+    /// forget the token so the pool doesn't grow for the life of the session.
+    fn give_up_launch(&mut self, i: usize) {
+        let l = self.launching.remove(i);
+        self.forget_token(&l.token);
+        self.children.push(l.child);
+    }
+
+    /// Drop a minted token from the activation pool.
+    fn forget_token(&mut self, token: &str) {
+        self.xdg_activation_state
+            .remove_token(&XdgActivationToken::from(token.to_string()));
     }
 
     pub(crate) fn register_toplevel(&mut self, surface: ToplevelSurface) -> ToplevelId {
@@ -133,45 +245,56 @@ impl State {
         // or, as a fallback, its id. The flag is consumed by the first map.
         let is_search = self.expecting_search || wl_app_id == SEARCH_APP_ID;
         self.expecting_search = false;
+
+        // Identity comes from the launch when a launch claims this window: the
+        // client's own id is wrong for anything started through a wrapper (a
+        // `Terminal=true` entry reports `foot`) or by a runner that hosts many
+        // apps under one id (a PWA shell). Claiming also stops that launch's
+        // pulse, so only the icon that is genuinely still waiting keeps
+        // breathing. `unknown_N` remains for windows nothing claimed and whose
+        // client id isn't a catalog app; `resolve_app_id` may still fix those up.
+        let claimed_app_id = (!is_search)
+            .then(|| self.claim_launch(surface.wl_surface()))
+            .flatten()
+            .map(|l| {
+                info!(
+                    toplevel = self.toplevels.len(),
+                    app_id = %l.app_id, wl_app_id = %wl_app_id,
+                    "toplevel attributed to launch"
+                );
+                self.forget_token(&l.token);
+                self.children.push(l.child);
+                l.app_id
+            });
+        let id_from_launch = claimed_app_id.is_some();
         let app_id = if is_search {
             SEARCH_APP_ID.to_string()
+        } else if let Some(id) = claimed_app_id {
+            id
         } else if !wl_app_id.is_empty() && self.app_catalog.contains_key(&wl_app_id) {
-            wl_app_id
+            wl_app_id.clone()
         } else {
             format!("unknown_{}", self.toplevels.len())
         };
 
-        // Frecency is recorded in `app_id_changed`, not here: clients set their
-        // xdg `app_id` *after* the toplevel maps, so `app_id` above is a
-        // placeholder at this point and never catalog-matches. Recording only
-        // fires once the real id arrives. The rare client that sets app_id
-        // before mapping resolves here instead — log it either way.
-        if self.app_catalog.contains_key(&app_id) {
-            info!(
-                toplevel = self.toplevels.len(),
-                app_id, "toplevel app_id resolved"
-            );
+        // A launch-claimed window is resolved right here. Otherwise frecency is
+        // recorded in `app_id_changed`: clients set their xdg `app_id` *after*
+        // the toplevel maps, so `app_id` above is a placeholder that never
+        // catalog-matches, and recording only fires once the real id arrives.
+        if id_from_launch {
+            self.record_launch(&app_id);
         }
 
         // Enter the output so the client receives its scale factor (`[main].dpi`)
         // and renders a HiDPI buffer instead of 1:1.
         self.output.enter(surface.wl_surface());
 
-        // Window opened — stop the launch pulse. Keep the child handle for
-        // reaping. The mapping client's `wl_app_id` is usually still empty at
-        // first map (so `app_id` here is `unknown_N`), meaning an app_id match
-        // is unreliable. Since only one launch pulses at a time and the search
-        // app is handled separately, stop the pulse on the first non-search map.
-        if !is_search && self.launching.is_some() {
-            if let Some(prev) = self.launching.take() {
-                self.children.push(prev.child);
-            }
-        }
-
         let id = self.toplevels.len();
         self.toplevels.push(Some(AppToplevel {
             surface,
             app_id: app_id.clone(),
+            id_from_launch,
+            wl_app_id,
             logged_size: None,
         }));
 
@@ -325,14 +448,6 @@ impl State {
         }) else {
             return;
         };
-        // Only a placeholder id is worth replacing; a real match already stuck
-        // (e.g. the search app, or a client that set app_id before mapping).
-        if !self.toplevels[id]
-            .as_ref()
-            .is_some_and(|t| t.app_id.starts_with("unknown_"))
-        {
-            return;
-        }
         let new_id = smithay::wayland::compositor::with_states(&wl_surface, |states| {
             states
                 .data_map
@@ -340,6 +455,20 @@ impl State {
                 .and_then(|d| d.lock().ok().and_then(|d| d.app_id.clone()))
         })
         .unwrap_or_default();
+        if let Some(tl) = self.toplevels[id].as_mut() {
+            tl.wl_app_id = new_id.clone();
+        }
+        // Only a placeholder id is worth replacing. A launch-owned id is
+        // authoritative and must survive whatever the client announces — a
+        // `Terminal=true` entry's window says `foot`, and taking that would hand
+        // the terminal's icon someone else's window. Anything else already stuck
+        // (the search app, or a client that set app_id before mapping).
+        if !self.toplevels[id]
+            .as_ref()
+            .is_some_and(|t| !t.id_from_launch && t.app_id.starts_with("unknown_"))
+        {
+            return;
+        }
         if new_id.is_empty() || !self.app_catalog.contains_key(&new_id) {
             return;
         }
@@ -347,13 +476,18 @@ impl State {
             tl.app_id = new_id.clone();
         }
         info!(toplevel = id, app_id = %new_id, "toplevel app_id resolved");
+        self.record_launch(&new_id);
+        self.ui.retag_app(id, &new_id);
+    }
+
+    /// Record an app opening in the frecency model and persist it.
+    fn record_launch(&mut self, app_id: &str) {
         self.model
             .frecency
-            .record_launch(&new_id, sc_shell_model::unix_now());
+            .record_launch(app_id, sc_shell_model::unix_now());
         if let Err(e) = persist::save(&self.model, &persist::state_path()) {
             warn!(%e, "failed to save shell model after launch");
         }
-        self.ui.retag_app(id, &new_id);
     }
 
     /// Recompute layer-surface geometry + reserved area. If the area apps may

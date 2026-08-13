@@ -21,7 +21,7 @@ use skia_safe::{
     MaskFilter, Paint, PathBuilder, RRect, Rect, Surface, TextBlob, TileMode,
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::os::raw::c_int;
 
@@ -212,6 +212,45 @@ impl SkiaGl {
         }
     }
 
+    /// Draw the icon context menu over the home screen.
+    ///
+    /// Follows `draw_home`'s manual surface acquisition rather than
+    /// `with_overlay_canvas`, because the rows need `&self.font` while the
+    /// canvas holds `&mut self.cached_surface`.
+    pub fn draw_icon_menu(
+        &mut self,
+        width: i32,
+        height: i32,
+        menu: &crate::render::MenuView,
+        flip_y: bool,
+    ) {
+        self.ensure_font();
+        if !self.ensure_surface(width, height) {
+            return;
+        }
+        let surface = &mut self.cached_surface.as_mut().unwrap().surface;
+        let canvas = surface.canvas();
+
+        canvas.save();
+        if flip_y {
+            canvas.translate((0.0, height as f32));
+            canvas.scale((1.0, -1.0));
+        }
+        // Grow from the anchor as it opens, so the panel reads as coming out of
+        // the icon that was held rather than fading in over it.
+        let p = menu.progress.clamp(0.0, 1.0);
+        let scale = 0.85 + 0.15 * p;
+        canvas.translate((menu.anchor.0, menu.anchor.1));
+        canvas.scale((scale, scale));
+        canvas.translate((-menu.anchor.0, -menu.anchor.1));
+        draw_menu_panel(canvas, menu, &self.font, p);
+        canvas.restore();
+
+        if let Some(ctx) = self.context.as_mut() {
+            ctx.flush_and_submit();
+        }
+    }
+
     fn get_or_upload_icon(&mut self, app_id: &str, pixels: &IconPixels) -> Option<Image> {
         if let Some(img) = self.icon_images.get(app_id) {
             return Some(img.clone());
@@ -244,8 +283,8 @@ impl SkiaGl {
         app_catalog: &HashMap<String, AppEntry>,
         flip_y: bool,
         pressed_app: Option<&str>,
-        launching_app: Option<&str>,
-        launching_elapsed: f32,
+        launch_pulses: &[(String, f32)],
+        running_apps: &HashSet<String>,
         arrange: Option<&ArrangeView>,
         grid_positions: &HashMap<String, (f32, f32)>,
         dock_positions: &HashMap<String, (f32, f32)>,
@@ -300,7 +339,8 @@ impl SkiaGl {
                 &self.font,
                 app_catalog,
                 pressed_app == Some(slot.app_id.as_str()),
-                launch_pulse(launching_app, launching_elapsed, &slot.app_id),
+                launch_pulse(launch_pulses, &slot.app_id),
+                running_apps.contains(&slot.app_id),
             );
         }
 
@@ -319,7 +359,8 @@ impl SkiaGl {
                 &self.font,
                 app_catalog,
                 pressed_app == Some(slot.app_id.as_str()),
-                launch_pulse(launching_app, launching_elapsed, &slot.app_id),
+                launch_pulse(launch_pulses, &slot.app_id),
+                running_apps.contains(&slot.app_id),
             );
         }
 
@@ -697,12 +738,21 @@ impl Default for SkiaGl {
 
 // --- Free functions for drawing (avoids borrow issues with &mut self + canvas) ---
 
-/// Seconds-since-launch for `app_id` iff it is the currently launching app,
-/// else `None`. Feeds the breathing pulse phase in [`draw_icon_slot`].
-fn launch_pulse(launching_app: Option<&str>, elapsed: f32, app_id: &str) -> Option<f32> {
-    (launching_app == Some(app_id)).then_some(elapsed)
+/// Seconds since launch for `app_id` iff it has a launch still waiting for its
+/// window, else `None`. Feeds the breathing pulse phase in [`draw_icon_slot`].
+/// The oldest in-flight launch wins when an app is opening more than one
+/// window — they pulse the same icon either way.
+fn launch_pulse(launch_pulses: &[(String, f32)], app_id: &str) -> Option<f32> {
+    launch_pulses
+        .iter()
+        .filter(|(id, _)| id == app_id)
+        .map(|(_, elapsed)| *elapsed)
+        .fold(None, |acc: Option<f32>, e| {
+            Some(acc.map_or(e, |a| a.max(e)))
+        })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_icon_slot(
     canvas: &skia_safe::Canvas,
     slot: &IconSlot,
@@ -711,6 +761,7 @@ fn draw_icon_slot(
     app_catalog: &HashMap<String, AppEntry>,
     pressed: bool,
     launching: Option<f32>,
+    running: bool,
 ) {
     // Launch pulse: while the app is spawning (before its window maps) the icon
     // breathes — a halo that swells and fades  — so the tap
@@ -768,6 +819,17 @@ fn draw_icon_slot(
         canvas.draw_rrect(rrect, &paint);
     }
 
+    // Running dot: one small dot below the label for an app that has a window
+    // open, whatever its window count — the switcher is where individual
+    // windows are counted, this only answers "is it running".
+    if running {
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(Color::from_argb(200, 255, 255, 255));
+        let d = slot.dot_rect;
+        canvas.draw_circle((d.center_x(), d.center_y()), d.w / 2.0, &paint);
+    }
+
     // Draw label.
     if let Some(entry) = app_catalog.get(&slot.app_id) {
         if let Some(f) = font {
@@ -780,6 +842,111 @@ fn draw_icon_slot(
                 canvas.draw_text_blob(&blob, (x, y), &paint);
             }
         }
+    }
+}
+
+/// Menu row text size relative to the shared UI font.
+const MENU_FONT_SCALE: f32 = 1.15;
+/// Left/right text inset inside a menu row, as a fraction of the panel width.
+const MENU_TEXT_INSET_FRAC: f32 = 0.08;
+
+/// `label` shortened with a trailing ellipsis until it fits `max_w`, or
+/// unchanged when it already does.
+///
+/// Trims by character so a multi-byte title can't be split mid-codepoint, and
+/// gives up gracefully (empty string) if even the ellipsis doesn't fit.
+fn ellipsize(font: &Font, label: &str, max_w: f32) -> String {
+    if font.measure_str(label, None).0 <= max_w {
+        return label.to_string();
+    }
+    let mut chars: Vec<char> = label.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let candidate: String = chars.iter().collect::<String>() + "…";
+        if font.measure_str(&candidate, None).0 <= max_w {
+            return candidate;
+        }
+    }
+    String::new()
+}
+
+/// The icon menu's panel, rows, and separators. `progress` (0→1) fades the
+/// whole thing in as it grows.
+fn draw_menu_panel(
+    canvas: &skia_safe::Canvas,
+    menu: &crate::render::MenuView,
+    font: &Option<Font>,
+    progress: f32,
+) {
+    let a = |alpha: f32| (alpha * progress).clamp(0.0, 255.0) as u8;
+    let panel = &menu.layout.panel;
+    let panel_rect = Rect::new(panel.x, panel.y, panel.x + panel.w, panel.y + panel.h);
+    let radius = (panel.w * 0.06).min(28.0);
+
+    // Drop shadow, then the panel itself: dark and near-opaque so labels stay
+    // readable over whatever wallpaper or icon grid is behind it.
+    let mut shadow = Paint::default();
+    shadow.set_anti_alias(true);
+    shadow.set_color(Color::from_argb(a(90.0), 0, 0, 0));
+    shadow.set_mask_filter(skia_safe::MaskFilter::blur(
+        skia_safe::BlurStyle::Normal,
+        18.0,
+        false,
+    ));
+    canvas.draw_rrect(RRect::new_rect_xy(panel_rect, radius, radius), &shadow);
+
+    // Fully opaque: even a few percent of bleed-through puts a ghost of the
+    // icon labels behind the panel across the rows.
+    let mut bg = Paint::default();
+    bg.set_anti_alias(true);
+    bg.set_color(Color::from_argb(a(255.0), 28, 30, 36));
+    canvas.draw_rrect(RRect::new_rect_xy(panel_rect, radius, radius), &bg);
+
+    for (i, row) in menu.layout.items.iter().enumerate() {
+        let rect = Rect::new(row.x, row.y, row.x + row.w, row.y + row.h);
+        if menu.pressed == Some(i) {
+            let mut hl = Paint::default();
+            hl.set_anti_alias(true);
+            hl.set_color(Color::from_argb(a(50.0), 255, 255, 255));
+            canvas.draw_rect(rect, &hl);
+        }
+        // Hairline between rows (not above the first).
+        if i > 0 {
+            let mut sep = Paint::default();
+            sep.set_color(Color::from_argb(a(40.0), 255, 255, 255));
+            let inset = row.w * 0.05;
+            canvas.draw_rect(
+                Rect::new(row.x + inset, row.y, row.x + row.w - inset, row.y + 1.0),
+                &sep,
+            );
+        }
+        let Some((label, destructive)) = menu.items.get(i) else {
+            continue;
+        };
+        let Some(f) = font else { continue };
+        // A touch of extra size over the icon labels: menu rows are read, not
+        // glanced at, and they sit on a panel with room to spare.
+        let f = f.with_size(f.size() * MENU_FONT_SCALE).unwrap_or(f.clone());
+        // Window titles are arbitrary client text and routinely wider than a
+        // phone-width panel; clip them to the row rather than letting them run
+        // out over the wallpaper.
+        let x = row.x + row.w * MENU_TEXT_INSET_FRAC;
+        let label = ellipsize(&f, label, row.w * (1.0 - 2.0 * MENU_TEXT_INSET_FRAC));
+        let Some(blob) = TextBlob::new(&label, &f) else {
+            continue;
+        };
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(if *destructive {
+            Color::from_argb(a(255.0), 255, 120, 110)
+        } else {
+            Color::from_argb(a(255.0), 255, 255, 255)
+        });
+        // Left-aligned with the same inset as the separators; vertically
+        // centered on the row using the font's own metrics.
+        let (_, metrics) = f.metrics();
+        let y = row.y + row.h / 2.0 - (metrics.ascent + metrics.descent) / 2.0;
+        canvas.draw_text_blob(&blob, (x, y), &paint);
     }
 }
 

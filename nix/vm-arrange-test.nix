@@ -1,11 +1,13 @@
 # Arrange-mode (home-screen icon reorder) test.
 #
 # The one gesture path the other VM tests never reach, because it is the only
-# one gated on *time* rather than motion: an icon must be held past HOLD_MS
-# (500ms) without moving into a swipe or a launch before arrange mode engages.
+# one gated on *time* rather than motion: empty home background must be held
+# past HOLD_MS (500ms) without moving into a swipe before arrange mode engages.
+# (Holding an *icon* opens its context menu instead — see vm-icon-menu.)
 # It exercises:
-#   - long-press on a grid icon engages arrange mode (does NOT launch the app);
-#   - dragging the lifted icon to another slot and releasing reorders the grid;
+#   - long-press on empty background engages arrange mode (launches nothing);
+#   - once in arrange, pressing an icon lifts it with no second hold, and
+#     dragging it to another slot and releasing reorders the grid;
 #   - the new order is persisted to state.toml, so it survives a restart;
 #   - dragging an icon onto the dock pins it.
 #
@@ -100,19 +102,26 @@ mkTest {
         ).strip()
         return raw.split()
 
-    # --- Long-press engages arrange mode (and does not launch the app) ---
-    # Hold the first icon still, well past HOLD_MS (500ms). `down` + sleep + `up`
-    # is the whole point of this test: the hold is a *timer*, so the compositor
-    # must keep advancing frames while a perfectly still finger rests on an icon.
-    dbg(f"down {col(0)} {ROW0}")
+    # Only three apps are installed, so every row below the first is empty
+    # background — the surface the arrange long-press now lives on.
+    EMPTY = row(4)
+
+    # --- Long-press on empty background engages arrange mode ---
+    # Hold still, well past HOLD_MS (500ms). `down` + sleep + `up` is the whole
+    # point of this test: the hold is a *timer*, so the compositor must keep
+    # advancing frames while a perfectly still finger rests on the screen.
+    dbg(f"down {col(0)} {EMPTY}")
     machine.sleep(2)
     machine.wait_until_succeeds(
         f"{JOURNAL} | grep -qF 'arrange engaged'", timeout=15
     )
+    dbg("up")
     machine.screenshot("01-arrange-engaged")
 
-    # Still holding: drag the lifted icon to the third slot of the first row and
-    # release. The move is well past the tap slop, so this is a reorder, not a tap.
+    # In arrange mode an icon is lifted by the press itself — no second hold.
+    # Drag the first icon to the third slot of the first row and release. The
+    # move is well past the tap slop, so this is a reorder, not a tap.
+    dbg(f"down {col(0)} {ROW0}")
     dbg(f"move {col(1)} {ROW0}")
     dbg(f"move {col(2)} {ROW0}")
     dbg(f"move {col(2)} {ROW0 + 4}")
@@ -122,8 +131,8 @@ mkTest {
     )
     machine.screenshot("02-after-reorder")
 
-    # The long-press must NOT have launched anything: arrange mode consumes the
-    # pending launch. No toplevel ever mapped, so no App state was entered.
+    # Neither the hold nor the drag may launch anything: arrange mode consumes
+    # the pending launch. No toplevel ever mapped, so no App state was entered.
     machine.fail(f"{JOURNAL} | grep -qF 'state changed to App'")
 
     # --- The reorder landed in the model, and was persisted ---
@@ -137,8 +146,8 @@ mkTest {
     )
 
     # --- Dragging onto the dock pins ---
+    # Still in arrange mode (a drag release keeps it), so the press lifts.
     dbg(f"down {col(0)} {ROW0}")
-    machine.sleep(2)
     dbg(f"move {col(0)} {int(0.5 * H)}")
     dbg(f"move {col(1)} {DOCK}")
     dbg(f"move {col(1)} {DOCK + 2}")
@@ -149,7 +158,7 @@ mkTest {
     machine.screenshot("03-after-pin")
 
     # The reorder above left bbb in slot 0, so that is the icon this second
-    # long-press picked up and dropped on the dock.
+    # drag picked up and dropped on the dock.
     pinned = machine.succeed(
         f"python3 -c \"import tomllib;"
         f"print(' '.join(tomllib.load(open('{STATE}','rb')).get('dock',[])))\""

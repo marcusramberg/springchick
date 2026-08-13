@@ -115,8 +115,18 @@ impl SearchApp {
         Some(tex)
     }
 
-    /// Launch `id` (strip field codes, spawn detached) and quit.
+    /// Open `id` and quit.
+    ///
+    /// Preferably by asking the compositor over its control socket, so the
+    /// launch goes through the same path as an icon tap: an already-running app
+    /// is raised rather than started twice, and the window that appears is
+    /// attributed to this app id instead of to whatever the client calls
+    /// itself. Spawning it here directly is the fallback for running outside a
+    /// springchick session.
     fn launch(&self, id: &str) {
+        if ipc_launch(id) {
+            std::process::exit(0);
+        }
         if let Some(entry) = self.catalog.get(id) {
             if let Some(command) = sc_catalog::launch_command(entry) {
                 if let Some((prog, args)) = command.argv.split_first() {
@@ -131,6 +141,33 @@ impl SearchApp {
         }
         std::process::exit(0);
     }
+}
+
+/// Ask the running compositor to open `app_id`. True when it accepted.
+///
+/// Mirrors `springchick ipc launch <id>`: same socket resolution, same one-line
+/// protocol. Any failure (no compositor, no socket, an error reply) returns
+/// false so the caller can fall back to spawning the app itself.
+fn ipc_launch(app_id: &str) -> bool {
+    use std::io::{BufRead, BufReader, Write};
+
+    let path = std::env::var("SPRINGCHICK_IPC_SOCK")
+        .or_else(|_| std::env::var("SPRINGCHICK_DEBUG_SOCK"))
+        .unwrap_or_else(|_| {
+            let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+            format!("{dir}/springchick-ipc.sock")
+        });
+    let Ok(stream) = std::os::unix::net::UnixStream::connect(path) else {
+        return false;
+    };
+    if writeln!(&stream, "launch {app_id}").is_err() {
+        return false;
+    }
+    let mut reply = String::new();
+    if BufReader::new(&stream).read_line(&mut reply).is_err() {
+        return false;
+    }
+    reply.starts_with("ok")
 }
 
 impl eframe::App for SearchApp {

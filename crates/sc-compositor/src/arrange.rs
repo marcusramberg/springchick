@@ -9,16 +9,25 @@ use crate::input_dispatch;
 use crate::state::State;
 use crate::ui_state::UiState;
 
-/// Hold duration (milliseconds) an icon press must survive before arrange
-/// mode engages.
+/// Hold duration (milliseconds) a press must survive to count as a long press.
 pub(crate) const HOLD_MS: u128 = 500;
 
-/// A finger held on an icon on Home, waiting to see if it becomes a
-/// long-press (arrange mode). Cancelled if the finger moves past the tap
-/// slop (becomes a swipe) or releases before `HOLD_MS`.
+/// A finger held on an icon on Home, waiting to see if it becomes a long-press
+/// (which opens the icon menu). Cancelled if the finger moves past the tap slop
+/// (becomes a swipe) or releases before `HOLD_MS`.
 pub(crate) struct IconPress {
     pub app_id: String,
     pub source: input_dispatch::IconSource,
+    pub at: std::time::Instant,
+}
+
+/// A finger held on empty home background, waiting to become the long press
+/// that engages arrange mode. Cancelled on the same terms as [`IconPress`].
+///
+/// Arrange lives on the background rather than on an icon because the icon's
+/// long press is spoken for by the menu — and holding the wallpaper to
+/// rearrange is the gesture iOS itself moved to.
+pub(crate) struct BgPress {
     pub start: (f32, f32),
     pub at: std::time::Instant,
 }
@@ -47,6 +56,12 @@ pub(crate) enum EdgeSide {
 #[derive(Default)]
 pub(crate) struct ArrangeState {
     pub drag: Option<DragItem>,
+    /// The long press that engaged arrange mode has not been lifted yet.
+    ///
+    /// Without this the gesture cancels itself: engaging happens mid-hold, and
+    /// the release that follows is exactly the "still tap on empty space" that
+    /// leaves arrange mode. The first release swallows the flag instead.
+    pub just_engaged: bool,
 }
 
 /// Sentinel occupying the gap slot in the drag working order. Never a real app
@@ -232,35 +247,106 @@ impl State {
         }
     }
 
-    /// Long-press hold: an icon held past HOLD_MS without moving into a swipe or
-    /// launch engages arrange mode, picking up the same icon as the initial drag
-    /// item so the finger doesn't need to move first.
+    /// Long-press hold on empty home background: engages arrange mode with
+    /// nothing picked up (the finger is on the wallpaper, not on an icon). Once
+    /// in arrange, pressing an icon lifts it immediately — no second hold.
     pub(crate) fn maybe_engage_arrange_hold(&mut self) {
         if self.arrange.is_some() || !self.pointer_down {
             return;
         }
-        if let Some(p) = &self.icon_press {
-            if p.at.elapsed().as_millis() >= HOLD_MS {
-                let drag = DragItem {
-                    app_id: p.app_id.clone(),
-                    source: p.source,
-                    cur: p.start,
-                    hover: None,
-                    edge_since: None,
-                };
-                // Logged so the VM test can assert arrange mode from the journal:
-                // engaging it changes no `UiState` discriminant (Home stays
-                // Home), so the `state changed to ...` line never fires for it.
-                debug!(
-                    target: "springchick::debug",
-                    "arrange engaged app_id={} source={:?}", drag.app_id, drag.source
-                );
-                self.arrange = Some(ArrangeState { drag: Some(drag) });
-                self.pending_launch = None;
-                self.page_drag = None;
-                self.icon_press = None;
+        let Some(p) = &self.bg_press else {
+            return;
+        };
+        if p.at.elapsed().as_millis() < HOLD_MS {
+            return;
+        }
+        // Logged so the VM test can assert arrange mode from the journal:
+        // engaging it changes no `UiState` discriminant (Home stays Home), so
+        // the `state changed to ...` line never fires for it.
+        debug!(target: "springchick::debug", "arrange engaged from background");
+        self.arrange = Some(ArrangeState {
+            drag: None,
+            just_engaged: true,
+        });
+        self.bg_press = None;
+        self.page_drag = None;
+        self.search_arm = None;
+    }
+
+    /// Long-press hold on an icon: opens its context menu. The launch armed by
+    /// the same press is dropped — the hold was not a tap.
+    pub(crate) fn maybe_open_icon_menu(&mut self) {
+        if self.icon_menu.is_some() || self.arrange.is_some() || !self.pointer_down {
+            return;
+        }
+        let Some(p) = &self.icon_press else {
+            return;
+        };
+        if p.at.elapsed().as_millis() < HOLD_MS {
+            return;
+        }
+        let (app_id, source) = (p.app_id.clone(), p.source);
+        // Titles are read straight off the surfaces here rather than mirrored
+        // into `State`: the menu is the only thing that wants them, and a title
+        // read at open time is by definition current.
+        let windows: Vec<(crate::ui_state::ToplevelId, String)> = self
+            .instances(&app_id)
+            .into_iter()
+            .map(|id| (id, self.toplevel_title(id)))
+            .collect();
+        let running = windows.len();
+        // Anchor on the icon's drawn center, so the panel points at where the
+        // finger actually is even mid-reflow.
+        let anchor = self.icon_center(&app_id, source);
+        debug!(
+            target: "springchick::debug",
+            "icon menu opened app_id={app_id} source={source:?} running={running}"
+        );
+        self.icon_menu = Some(crate::icon_menu::IconMenu::new(
+            app_id,
+            anchor,
+            crate::icon_menu::items_for(&windows),
+        ));
+        self.icon_press = None;
+        self.pending_launch = None;
+        self.cancel_page_drag();
+    }
+
+    /// Live page scroll in pages: how far the home grid is currently shifted
+    /// left. Grid reflow springs are in global (page 0 origin) space, so this is
+    /// what turns them into screen space. Zero outside Home.
+    pub(crate) fn home_page_scroll(&self) -> f32 {
+        match &self.ui {
+            UiState::Home { page_spring, .. } => page_spring.value,
+            _ => 0.0,
+        }
+    }
+
+    /// Where an icon is drawn right now: its live reflow-spring position when it
+    /// has one, else its static layout slot.
+    fn icon_center(&self, app_id: &str, source: input_dispatch::IconSource) -> (f32, f32) {
+        let (w, h) = self.output_size_f();
+        match source {
+            input_dispatch::IconSource::Dock => {
+                if let Some((sx, sy)) = self.dock_anim.get(app_id) {
+                    return (sx.value, sy.value);
+                }
+            }
+            input_dispatch::IconSource::Grid => {
+                if let Some((sx, sy)) = self.grid_anim.get(app_id) {
+                    let page_scroll = self.home_page_scroll();
+                    return (sx.value - page_scroll * w, sy.value);
+                }
             }
         }
+        let layout = sc_layout::compute(w, h, self.current_home_page(), &self.model);
+        layout
+            .grid
+            .iter()
+            .chain(layout.dock.iter())
+            .find(|s| s.app_id == app_id)
+            .map(|s| (s.icon_rect.center_x(), s.icon_rect.center_y()))
+            .unwrap_or((w / 2.0, h / 2.0))
     }
 
     /// Edge-dwell page flip: while dragging a reorder icon, holding it against a

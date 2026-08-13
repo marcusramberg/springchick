@@ -14,7 +14,7 @@ use crate::layer_shell;
 use crate::popups;
 use crate::render;
 use crate::scene::compute_scene;
-use crate::state::{FramePrep, PopupRect, State};
+use crate::state::{FramePrep, PopupRect, State, SEARCH_APP_ID};
 use crate::ui_state::{self, transition, UiEvent, UiState};
 
 impl State {
@@ -199,7 +199,7 @@ impl State {
     pub(crate) fn is_animating(&self, now: std::time::Instant) -> bool {
         self.needs_render
             || self.ui.needs_animation()
-            || self.launching.is_some()
+            || !self.launching.is_empty()
             || self.osd.is_active(now)
             || self.bar_fading()
             // A layer surface (the OSK) sliding up into place.
@@ -220,7 +220,12 @@ impl State {
             // uses — so this can only spin while a finger is actually down. A
             // stale `icon_press` left behind by a lost touch-up would otherwise
             // pin the render loop on for good, which on a phone is a battery bug.
-            || (self.pointer_down && self.icon_press.is_some())
+            || (self.pointer_down && (self.icon_press.is_some() || self.bg_press.is_some()))
+            // The icon menu's open animation.
+            || self
+                .icon_menu
+                .as_ref()
+                .is_some_and(|m| !m.open.is_settled())
             // A debug-input gesture/key/touch/settle in flight must keep the DRM
             // loop rendering each tick so it advances (page-flips otherwise stop
             // on an idle screen). Inert in normal runs — these are always None.
@@ -250,6 +255,10 @@ impl State {
         self.session_lock.tick();
 
         self.maybe_engage_arrange_hold();
+        self.maybe_open_icon_menu();
+        if let Some(menu) = &mut self.icon_menu {
+            menu.open.step(dt);
+        }
 
         // Lazy-seed the grid-reflow springs on first use so they snap to the
         // current order instead of animating in from (0,0).
@@ -375,10 +384,7 @@ impl State {
 
         // Animated icon centers in screen space. Grid springs are global (page 0
         // origin), so subtract the live page scroll here; the dock doesn't page.
-        let page_scroll = match &self.ui {
-            UiState::Home { page_spring, .. } => page_spring.value,
-            _ => 0.0,
-        };
+        let page_scroll = self.home_page_scroll();
         let (out_w, _) = self.output_size_f();
         let grid_positions = self
             .grid_anim
@@ -390,6 +396,36 @@ impl State {
             .iter()
             .map(|(app, (sx, sy))| (app.clone(), (sx.value, sy.value)))
             .collect();
+        // Apps with a window open, for the running dots. Placeholder ids are
+        // skipped: `unknown_N` matches no icon, so it would only ever be a
+        // wasted lookup.
+        let running_apps = self
+            .toplevels
+            .iter()
+            .flatten()
+            .map(|tl| tl.app_id.clone())
+            .filter(|id| !id.starts_with("unknown_") && id != SEARCH_APP_ID)
+            .collect();
+        let launch_pulses = self
+            .launching
+            .iter()
+            .map(|l| (l.app_id.clone(), l.started.elapsed().as_secs_f32()))
+            .collect();
+
+        let icon_menu = self.icon_menu.as_ref().map(|m| {
+            let (w, h) = self.output_size_f();
+            render::MenuView {
+                layout: m.layout(w, h),
+                items: m
+                    .items
+                    .iter()
+                    .map(|i| (i.label.clone(), i.action.is_destructive()))
+                    .collect(),
+                pressed: m.pressed,
+                anchor: m.anchor,
+                progress: m.open.value,
+            }
+        });
 
         FramePrep {
             scene,
@@ -406,6 +442,9 @@ impl State {
             lock_surface: self.session_lock.wl_surface().cloned(),
             grid_positions,
             dock_positions,
+            launch_pulses,
+            running_apps,
+            icon_menu,
         }
     }
 
@@ -449,11 +488,6 @@ impl State {
             }
         });
         let pressed_app = self.pending_launch.as_ref().map(|p| p.app_id.as_str());
-        let launching_app = self.launching.as_ref().map(|l| l.app_id.as_str());
-        let launching_elapsed = self
-            .launching
-            .as_ref()
-            .map_or(0.0, |l| l.started.elapsed().as_secs_f32());
 
         render::DrawCtx {
             scene: &prep.scene,
@@ -479,9 +513,10 @@ impl State {
             layer_popups: &prep.layer_popups,
             bar_alpha: prep.bar_alpha,
             pressed_app,
-            launching_app,
-            launching_elapsed,
+            launch_pulses: &prep.launch_pulses,
+            running_apps: &prep.running_apps,
             arrange,
+            icon_menu: prep.icon_menu.as_ref(),
             report_partial_damage,
             last_present: &mut self.last_present,
             grid_positions: &prep.grid_positions,
