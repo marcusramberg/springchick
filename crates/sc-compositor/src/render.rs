@@ -5,7 +5,7 @@
 //! clearing, the transformed two-pass app composite, and the Skia home/bar
 //! overlay — is identical and lives here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::scene::Scene;
 use crate::skia_gl::SkiaGl;
@@ -134,6 +134,21 @@ pub struct ArrangeView<'a> {
     pub over_dock: bool,
 }
 
+/// Render-only view of the open icon menu, derived from `State::icon_menu` the
+/// same way [`ArrangeView`] is derived from `State::arrange`.
+pub struct MenuView {
+    /// Panel and row rects (output pixels).
+    pub layout: sc_layout::menu::MenuLayout,
+    /// `(label, destructive)` per row, in the same order as `layout.items`.
+    pub items: Vec<(String, bool)>,
+    /// Row under the finger, drawn highlighted.
+    pub pressed: Option<usize>,
+    /// The icon center the panel grows out of.
+    pub anchor: (f32, f32),
+    /// Open animation, 0→1.
+    pub progress: f32,
+}
+
 /// Everything the shared draw needs beyond the renderer + framebuffer.
 pub struct DrawCtx<'a> {
     pub scene: &'a Scene,
@@ -188,14 +203,17 @@ pub struct DrawCtx<'a> {
     pub bar_alpha: f32,
     /// App id of the icon currently pressed on Home (draws a press highlight).
     pub pressed_app: Option<&'a str>,
-    /// App id of an icon whose app is launching but hasn't mapped a window yet
-    /// (draws a breathing pulse). `None` when nothing is launching.
-    pub launching_app: Option<&'a str>,
-    /// Seconds since the current launch began — drives the pulse phase.
-    pub launching_elapsed: f32,
+    /// Apps launching but not yet showing a window, as `(app_id, seconds since
+    /// spawn)`. Each draws a breathing pulse on its icon, the elapsed time
+    /// driving the phase. Empty when nothing is launching.
+    pub launch_pulses: &'a [(String, f32)],
+    /// Apps with at least one open window — their icons get a running dot.
+    pub running_apps: &'a HashSet<String>,
     /// Arrange-mode view (badges/Done/drag ghost). `None` when arrange mode
     /// is inactive.
     pub arrange: Option<ArrangeView<'a>>,
+    /// Open icon context menu, drawn over Home. `None` when closed.
+    pub icon_menu: Option<&'a MenuView>,
     /// Screen-space animated center `(x, y)` for each grid app, driven by
     /// `State.grid_anim` springs. Used to render the grid so icons slide to
     /// their reflow targets instead of snapping.
@@ -609,8 +627,8 @@ fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan)
         ctx.app_catalog,
         ctx.skia_flip_y,
         ctx.pressed_app,
-        ctx.launching_app,
-        ctx.launching_elapsed,
+        ctx.launch_pulses,
+        ctx.running_apps,
         ctx.arrange.as_ref(),
         ctx.grid_positions,
         ctx.dock_positions,
@@ -618,6 +636,19 @@ fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan)
         scene.home_lift,
         scene.home_shift,
     );
+}
+
+/// The icon context menu, over Home. Drawn only when Home itself is (an app
+/// zoom that covers the screen has already taken the menu's place).
+fn pass_icon_menu(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan) {
+    let Some(menu) = ctx.icon_menu else {
+        return;
+    };
+    if !ctx.scene.show_home || plan.app_fills_screen {
+        return;
+    }
+    ctx.skia
+        .draw_icon_menu(size.w, size.h, menu, ctx.skia_flip_y);
 }
 
 /// Rotated fullscreen app: its own pass, with the rotation composed on top of
@@ -943,6 +974,7 @@ pub fn draw_scene(
 
     pass_background(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_home(size, ctx, &plan);
+    pass_icon_menu(size, ctx, &plan);
     pass_rotated_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_blurred_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_app_card(renderer, &mut *framebuffer, size, ctx, &mut plan)?;

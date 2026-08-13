@@ -47,6 +47,9 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::wayland::xdg_activation::{
+    XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+};
 
 use smithay::delegate_compositor;
 use smithay::delegate_data_device;
@@ -359,6 +362,28 @@ impl XdgDialogHandler for State {
     }
 }
 
+impl XdgActivationHandler for State {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.xdg_activation_state
+    }
+
+    fn request_activation(
+        &mut self,
+        token: XdgActivationToken,
+        _token_data: XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        // Springboard decides what is in front, so an activation request never
+        // raises anything by itself. What it is good for is identity: a client
+        // presenting a token we minted at spawn time names the launch it came
+        // from, which beats guessing from its xdg `app_id`. The surface may not
+        // be a registered toplevel yet (clients commonly activate before their
+        // first commit), so park it for `register_toplevel` to claim.
+        self.pending_activation
+            .insert(surface, token.as_str().to_string());
+    }
+}
+
 impl ImageCaptureSourceHandler for State {}
 
 impl OutputCaptureSourceHandler for State {
@@ -503,3 +528,4 @@ smithay::delegate_image_capture_source!(State);
 smithay::delegate_output_capture_source!(State);
 smithay::delegate_image_copy_capture!(State);
 smithay::delegate_content_type!(State);
+smithay::delegate_xdg_activation!(State);

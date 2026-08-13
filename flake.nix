@@ -66,6 +66,7 @@
           vm-dialog = import ./nix/vm-dialog-test.nix { inherit self pkgs; };
           vm-rotation = import ./nix/vm-rotation-test.nix { inherit self pkgs; };
           vm-arrange = import ./nix/vm-arrange-test.nix { inherit self pkgs; };
+          vm-icon-menu = import ./nix/vm-icon-menu-test.nix { inherit self pkgs; };
           vm-lock = import ./nix/vm-lock-test.nix { inherit self pkgs; };
           vm-capture = import ./nix/vm-capture-test.nix { inherit self pkgs; };
           vm-portal = import ./nix/vm-portal-test.nix { inherit self pkgs; };

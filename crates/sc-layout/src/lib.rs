@@ -7,6 +7,7 @@
 //! Also provides the inverse: `point → Hit`.
 
 pub mod layer;
+pub mod menu;
 
 use sc_shell_model::{ShellModel, COLS, DOCK_CAP, ROWS};
 
@@ -44,6 +45,9 @@ pub struct IconSlot {
     pub label_rect: Rect,
     /// Remove-badge rect (arrange mode), centered on the icon's top-left corner.
     pub badge_rect: Rect,
+    /// Running-indicator dot, centered below the label. Drawn only for apps
+    /// that currently have a window; nothing hit-tests against it.
+    pub dot_rect: Rect,
 }
 
 /// Full layout for one frame of the home screen.
@@ -213,6 +217,26 @@ fn badge_of(ir: Rect) -> Rect {
     }
 }
 
+/// Running-dot diameter as a fraction of the icon edge.
+const DOT_SIZE_FRAC: f32 = 0.07;
+
+/// Running-dot rect for an icon and its label: centered on the icon's column
+/// and in the leftover space between the label and `bottom` (the bottom of the
+/// cell, or of the dock band). Shrinks to fit rather than spilling out — the
+/// dock band leaves very little room below its labels on squarish outputs.
+/// Single source shared by `compute` and `slot_at_center`.
+fn dot_of(icon: Rect, label: Rect, bottom: f32) -> Rect {
+    let top = label.y + label.h;
+    let space = (bottom - top).max(0.0);
+    let s = (icon.w * DOT_SIZE_FRAC).min(space / 2.0);
+    Rect {
+        x: icon.center_x() - s / 2.0,
+        y: top + (space - s) / 2.0,
+        w: s,
+        h: s,
+    }
+}
+
 /// The global-space center `(x, y)` of the grid slot at `index` on `page`,
 /// for an output of the given size. `page` offsets the position by a full
 /// `width` per page (so it is NOT screen-space — subtract `page_scroll * width`
@@ -267,6 +291,13 @@ pub fn slot_at_center(app_id: String, cx: f32, cy: f32, width: f32, height: f32)
         icon_rect,
         label_rect,
         badge_rect: badge_of(icon_rect),
+        // The cell is centered on the icon+label band, so the space left below
+        // the label matches the padding above the icon.
+        dot_rect: dot_of(
+            icon_rect,
+            label_rect,
+            label_rect.y + label_rect.h + (gm.cell_h - gm.icon_size - gm.label_h) / 2.0,
+        ),
     }
 }
 
@@ -316,16 +347,18 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
                     w: icon_size,
                     h: icon_size,
                 };
+                let label_rect = Rect {
+                    x: cell_x,
+                    y: icon_y + icon_size,
+                    w: cell_w,
+                    h: label_h,
+                };
                 IconSlot {
                     app_id: app_id.clone(),
                     icon_rect,
-                    label_rect: Rect {
-                        x: cell_x,
-                        y: icon_y + icon_size,
-                        w: cell_w,
-                        h: label_h,
-                    },
+                    label_rect,
                     badge_rect: badge_of(icon_rect),
+                    dot_rect: dot_of(icon_rect, label_rect, cell_y + cell_h),
                 }
             })
             .collect()
@@ -352,16 +385,18 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
                 w: dock_icon_size,
                 h: dock_icon_size,
             };
+            let label_rect = Rect {
+                x: cell_x,
+                y: icon_y + dock_icon_size,
+                w: dock_cell_w,
+                h: dock_label_h,
+            };
             IconSlot {
                 app_id: app_id.clone(),
                 icon_rect,
-                label_rect: Rect {
-                    x: cell_x,
-                    y: icon_y + dock_icon_size,
-                    w: dock_cell_w,
-                    h: dock_label_h,
-                },
+                label_rect,
                 badge_rect: badge_of(icon_rect),
+                dot_rect: dot_of(icon_rect, label_rect, dock_top + dock_band_h),
             }
         })
         .collect();
@@ -481,6 +516,51 @@ mod tests {
                     assert!(
                         label_bottom <= below.icon_rect.y,
                         "{w}x{h}: slot {i} label ends at {label_bottom} but the icon below \
+                         starts at {}",
+                        below.icon_rect.y
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn running_dot_sits_under_its_icon_and_clears_the_row_below() {
+        let mut m = ShellModel::default();
+        for i in 0..(COLS * ROWS) {
+            m.place(format!("app{i}"));
+        }
+        m.dock.push("dock0".into());
+
+        for &(w, h) in SIZES {
+            let l = compute(w, h, 0, &m);
+            for (i, slot) in l.grid.iter().chain(l.dock.iter()).enumerate() {
+                let dot = slot.dot_rect;
+                assert!(
+                    (dot.center_x() - slot.icon_rect.center_x()).abs() < 0.01,
+                    "{w}x{h}: slot {i} dot is not centered under its icon"
+                );
+                assert!(
+                    dot.y >= slot.label_rect.y + slot.label_rect.h,
+                    "{w}x{h}: slot {i} dot overlaps its label"
+                );
+            }
+            // The dock band is the tightest fit: its dot must not spill past the
+            // bottom of the band into the home bar.
+            for slot in &l.dock {
+                let dot_bottom = slot.dot_rect.y + slot.dot_rect.h;
+                assert!(
+                    dot_bottom <= l.dock_zone.y + l.dock_zone.h,
+                    "{w}x{h}: dock dot ends at {dot_bottom}, past the dock band"
+                );
+            }
+            // On the grid, the dot lives in the same cell as its icon.
+            for (i, slot) in l.grid.iter().enumerate() {
+                if let Some(below) = l.grid.get(i + COLS) {
+                    let dot_bottom = slot.dot_rect.y + slot.dot_rect.h;
+                    assert!(
+                        dot_bottom <= below.icon_rect.y,
+                        "{w}x{h}: slot {i} dot ends at {dot_bottom} but the icon below \
                          starts at {}",
                         below.icon_rect.y
                     );

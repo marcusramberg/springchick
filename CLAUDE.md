@@ -34,7 +34,7 @@ Always build the check matching `builtins.currentSystem` — cross-building runs
 
 Use the `run-springchick` skill (`.claude/skills/run-springchick/SKILL.md`) — it covers the nested-winit driver (`driver.sh`: build/up/client/send/shot/down) and the interactive VM driver, plus a long list of gotchas. Key one: **never `pkill foot`** — the user's own terminal is a foot window; kill by recorded PID only.
 
-A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`, `down/move/up`, `settle [MS]`, `reload`). Works nested, in the VM, and on-device.
+A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`, `down/move/up`, `settle [MS]`, `launch APP_ID [new]`, `reload`). Works nested, in the VM, and on-device.
 
 `springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `prefer_no_csd` (next window to negotiate decorations), `idle_blank_secs` (countdown restarts). `dpi` is ignored on reload — it needs a restart.
 
@@ -52,7 +52,7 @@ crates/
   sc-config/       config.toml parsing: [main] + [keybinds]. Lenient — bad entry dropped, rest applies
   sc-keys/         Short/long key-press timing rules (types live in sc-config)
   sc-catalog/      .desktop scan/parse + field-code stripping + search ranking
-  sc-layout/       Pure geometry: (size, page, model) → icon rects, dock, dots, bar zone; + hit-testing
+  sc-layout/       Pure geometry: (size, page, model) → icon rects, dock, dots, bar zone, icon-menu panel; + hit-testing
   sc-icons/        Icon theme lookup + resvg → raw RGBA (no Skia dep)
   sc-search/       Standalone pull-down search app (eframe/winit client, not part of the compositor)
   sc-compositor/   The `springchick` binary
@@ -70,7 +70,8 @@ All pure crates are `#![forbid(unsafe_code)]`.
 - `ui_state.rs` — the pure state machine: `transition(&mut state, event) -> Effect`. States `Home`/`App`/`AppOpening`/`AppClosing`/`Grabbing`/`Settling`/`QuickSwitch`/`Switcher`; side effects are *returned*, never performed here.
 - `scene.rs` — pure `compute_scene(state, output_size) -> Scene` (window transforms: scale, center, corner radius). No GPU deps.
 - `input_dispatch.rs` / `input_common.rs` / `touch.rs` / `keybinds.rs` — input normalization to `Pt` (0..1) and routing by `UiState`.
-- `arrange.rs` — home-grid reflow springs + arrange-mode drag.
+- `arrange.rs` — home-grid reflow springs + arrange-mode drag. Arrange is entered by a long press on empty home background; a long press on an *icon* opens `icon_menu.rs` instead (Open — or one row per window, by title, when the app has several — / New window / Close / Remove).
+- `provenance.rs` — which launch a mapped window belongs to (xdg-activation token, then process ancestry). Window identity comes from the launch, not the client-reported `app_id`, so a `Terminal=true` entry isn't tagged `foot` and each PWA keeps its own id.
 - `frame.rs` — per-frame shell advance, popups, animation gating → `FramePrep`.
 - `render.rs` — the shared render path both backends use (clear, two-pass transformed app composite, Skia home/bar overlay, blur regions, rounded-rect texture shader).
 - `skia_gl.rs` — Skia-on-Smithay-GLES context sharing.

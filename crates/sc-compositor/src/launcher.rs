@@ -5,16 +5,21 @@ use std::process::{Child, Command};
 use tracing::{error, info};
 
 /// Spawn a bare Exec line (our own bundled helpers, not a catalog entry).
-pub fn spawn_exec(exec: &str, wayland_display: &str) -> Option<Child> {
+pub fn spawn_exec(exec: &str, wayland_display: &str, token: &str) -> Option<Child> {
     let entry = AppEntry {
         exec: exec.to_string(),
         ..Default::default()
     };
-    spawn_app(&entry, wayland_display)
+    spawn_app(&entry, wayland_display, token)
 }
 
 /// Spawn a Wayland client for `entry`, pointing at our socket.
-pub fn spawn_app(entry: &AppEntry, wayland_display: &str) -> Option<Child> {
+///
+/// `token` is an xdg-activation token minted for this launch: a client that
+/// hands it back names the launch it came from, which is how the shell tags the
+/// window with the right app (see [`crate::provenance`]). Both the Wayland and
+/// the X11-era spelling are set, since toolkits read one or the other.
+pub fn spawn_app(entry: &AppEntry, wayland_display: &str, token: &str) -> Option<Child> {
     let Some(command) = launch_command(entry) else {
         error!(
             id = entry.id,
@@ -40,6 +45,8 @@ pub fn spawn_app(entry: &AppEntry, wayland_display: &str) -> Option<Child> {
         .env("WAYLAND_DISPLAY", wayland_display)
         .env("GDK_BACKEND", "wayland")
         .env("QT_QPA_PLATFORM", "wayland")
+        .env("XDG_ACTIVATION_TOKEN", token)
+        .env("DESKTOP_STARTUP_ID", token)
         // ensure zwp_text_input_v3 works.
         .env_remove("QT_IM_MODULE")
         .env_remove("DISPLAY") // prevent X11 fallback

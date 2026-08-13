@@ -11,6 +11,7 @@
 //! it to `State` — so the parts that are easy to get subtly wrong are testable
 //! without a compositor.
 
+use crate::arrange::BgPress;
 use crate::input_dispatch::{self, DownAction};
 use crate::switcher;
 use crate::ui_state::{transition, ToplevelId, UiEvent, UiState, ZoomOrigin};
@@ -147,6 +148,9 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
         return;
     }
 
+    if motion_icon_menu(state, x, y) == Stage::Done {
+        return;
+    }
     if motion_arrange_drag(state, x, y) == Stage::Done {
         return;
     }
@@ -159,6 +163,31 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
     }
     motion_page_drag(state, x, y);
     motion_live_gesture(state, x, y);
+}
+
+/// Icon-menu motion: track which row the finger is over, so the highlight
+/// follows it and sliding off a row disarms it (the release then does nothing
+/// rather than firing the row the finger merely started on).
+///
+/// Only claims the movement once a row has actually been pressed — the long
+/// press that opens the menu ends with the finger still on the icon, and the
+/// small drift after it must not be read as picking a row.
+fn motion_icon_menu(state: &mut State, x: f32, y: f32) -> Stage {
+    let Some(menu) = &state.icon_menu else {
+        return Stage::Fallthrough;
+    };
+    if menu.pressed.is_none() {
+        return Stage::Done;
+    }
+    let (w, h) = state.output_size_f();
+    let hit = sc_layout::menu::hit_test(&menu.layout(w, h), x, y);
+    if let Some(m) = &mut state.icon_menu {
+        if m.pressed != hit {
+            m.pressed = hit;
+            state.needs_render = true;
+        }
+    }
+    Stage::Done
 }
 
 /// Arrange-mode drag: track the finger directly, no launch/swipe logic. The
@@ -244,6 +273,13 @@ fn motion_switcher_card(state: &mut State, x: f32, y: f32) -> Stage {
 /// past the tap slop — the gesture is a swipe, not a tap. Never consumes the
 /// movement: the swipe it just became still needs the stages below.
 fn motion_cancel_icon_press(state: &mut State, x: f32, y: f32) {
+    if let Some(p) = &state.bg_press {
+        // Same slop as an icon press: a background hold that starts travelling
+        // is a page swipe or a pull-down, not a request for arrange mode.
+        if home::exceeds_icon_tap_slop(x - p.start.0, y - p.start.1) {
+            state.bg_press = None;
+        }
+    }
     let Some(p) = &state.pending_launch else {
         return;
     };
@@ -519,6 +555,9 @@ pub fn on_press(state: &mut State) {
     // previous gesture left behind.
     state.last_motion = Some(std::time::Instant::now());
 
+    if press_icon_menu(state, x, y) == Stage::Done {
+        return;
+    }
     if press_arrange(state, x, y) == Stage::Done {
         return;
     }
@@ -526,6 +565,33 @@ pub fn on_press(state: &mut State) {
         return;
     }
     press_arm_gesture(state, x, y);
+}
+
+/// Icon-menu press: while a menu is open it owns every press. A row arms
+/// itself for the release; anywhere else dismisses immediately, so a press
+/// outside never falls through to launch whatever is underneath.
+fn press_icon_menu(state: &mut State, x: f32, y: f32) -> Stage {
+    let Some(menu) = &state.icon_menu else {
+        return Stage::Fallthrough;
+    };
+    let (w, h) = state.output_size_f();
+    let layout = menu.layout(w, h);
+    match sc_layout::menu::hit_test(&layout, x, y) {
+        Some(i) => {
+            if let Some(m) = &mut state.icon_menu {
+                m.pressed = Some(i);
+            }
+        }
+        // Inside the panel but between rows: keep the menu, arm nothing.
+        None if layout.panel.contains(x, y) => {
+            if let Some(m) = &mut state.icon_menu {
+                m.pressed = None;
+            }
+        }
+        None => state.icon_menu = None,
+    }
+    state.needs_render = true;
+    Stage::Done
 }
 
 /// Arrange-mode press: remove badges, the Done button, and picking up a new drag
@@ -645,7 +711,6 @@ fn press_arm_gesture(state: &mut State, x: f32, y: f32) {
             state.icon_press = Some(IconPress {
                 app_id,
                 source,
-                start: (start_x, start_y),
                 at: std::time::Instant::now(),
             });
         }
@@ -654,6 +719,12 @@ fn press_arm_gesture(state: &mut State, x: f32, y: f32) {
             // Arm a pull-down: a dominant downward drag from here opens search
             // (a sideways drag still pages — resolved in `on_motion`).
             state.search_arm = Some((x, y));
+            // …and the long press that engages arrange mode, if the finger does
+            // none of the above and simply stays put (see `advance_frame`).
+            state.bg_press = Some(BgPress {
+                start: (x, y),
+                at: std::time::Instant::now(),
+            });
         }
         DownAction::StartBarDrag { start_x, start_y } => {
             state.bar_drag_start = Some((start_x, start_y));
@@ -700,6 +771,12 @@ pub fn on_release(state: &mut State) {
     // A completed (or abandoned) gesture disarms the pull-down.
     state.search_arm = None;
 
+    // A completed gesture also disarms the background long-press.
+    state.bg_press = None;
+
+    if release_icon_menu(state) == Stage::Done {
+        return;
+    }
     if release_quick_switch(state) == Stage::Done {
         return;
     }
@@ -722,6 +799,32 @@ pub fn on_release(state: &mut State) {
     }
 }
 
+/// Icon-menu release: run the armed row and close the menu.
+///
+/// With no row armed the menu *stays open*, which is what makes the gesture
+/// work at all: the long press that opens it ends in a release, and the finger
+/// is over the icon, not over the panel. The same rule covers a finger that
+/// slid off the row it pressed — an ambiguous release changes nothing. A press
+/// outside the panel has already dismissed it (see [`press_icon_menu`]).
+fn release_icon_menu(state: &mut State) -> Stage {
+    let Some(menu) = &state.icon_menu else {
+        return Stage::Fallthrough;
+    };
+    let Some(action) = menu
+        .pressed
+        .and_then(|i| menu.items.get(i))
+        .map(|i| i.action)
+    else {
+        return Stage::Done;
+    };
+    let Some(menu) = state.icon_menu.take() else {
+        return Stage::Fallthrough;
+    };
+    state.run_menu_action(&menu, action);
+    state.needs_render = true;
+    Stage::Done
+}
+
 /// Live quick-switch release: commit to the revealed neighbour past the
 /// threshold, otherwise spring back (reject). Every later stage is irrelevant in
 /// this state.
@@ -739,6 +842,15 @@ fn release_quick_switch(state: &mut State) -> Stage {
 fn release_arrange(state: &mut State, x: f32) -> Stage {
     if state.arrange.is_none() {
         return Stage::Fallthrough;
+    }
+    // The finger that engaged arrange mode is only now coming up; that release
+    // is part of the engaging gesture, not an exit tap.
+    if let Some(a) = state.arrange.as_mut() {
+        if a.just_engaged {
+            a.just_engaged = false;
+            state.page_drag = None;
+            return Stage::Done;
+        }
     }
     // Take the drag out (if any) without holding a &mut borrow across the body.
     if let Some(drag) = state.arrange.as_mut().and_then(|a| a.drag.take()) {
