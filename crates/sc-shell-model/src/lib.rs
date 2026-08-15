@@ -3,7 +3,7 @@
 pub mod persist;
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Stable identifier for an app (its .desktop file id, e.g. "org.gnome.Maps").
 pub type AppId = String;
@@ -99,18 +99,30 @@ impl ShellModel {
     /// `now`/`first_run` mirror the old startup seed loop (score 0 on a
     /// first-run empty store, 1.0 for a later install).
     pub fn reconcile(&mut self, catalog_ids: &[AppId], now: u64, first_run: bool) {
+        // Both halves are set lookups rather than linear scans: with a few
+        // hundred installed apps the naive form is O(installed × catalog) twice
+        // over, once for the prune and once for the placement pass.
+        let installed: HashSet<&AppId> = catalog_ids.iter().collect();
         self.pages
             .iter_mut()
-            .for_each(|p| p.retain(|a| catalog_ids.contains(a)));
+            .for_each(|p| p.retain(|a| installed.contains(a)));
         self.pages.retain(|p| !p.is_empty());
-        self.dock.retain(|a| catalog_ids.contains(a));
-        self.hidden.retain(|a| catalog_ids.contains(a));
+        self.dock.retain(|a| installed.contains(a));
+        self.hidden.retain(|a| installed.contains(a));
         self.frecency.prune(catalog_ids);
+        // Built after the retains so pruned ids don't count as known. Grows as
+        // we place, which keeps a duplicated catalog id from being placed twice.
+        let mut known: HashSet<AppId> = self
+            .pages
+            .iter()
+            .flatten()
+            .chain(self.dock.iter())
+            .chain(self.hidden.iter())
+            .cloned()
+            .collect();
         for id in catalog_ids {
-            let known = self.pages.iter().any(|p| p.contains(id))
-                || self.dock.contains(id)
-                || self.hidden.contains(id);
-            if !known {
+            if !known.contains(id) {
+                known.insert(id.clone());
                 self.place(id.clone());
             }
             self.frecency.seed(id, now, first_run);
@@ -447,6 +459,13 @@ mod tests {
         m.place("b".into());
         m.reconcile(&["a".into(), "b".into(), "c".into()], 0, false);
         assert_eq!(m.pages[0], vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn reconcile_places_a_duplicated_catalog_id_once() {
+        let mut m = ShellModel::default();
+        m.reconcile(&["a".into(), "a".into(), "b".into()], 0, false);
+        assert_eq!(m.pages[0], vec!["a", "b"]);
     }
 
     #[test]
