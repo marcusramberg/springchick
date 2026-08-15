@@ -8,6 +8,12 @@
 //! a texture and blitted into the mirror's buffer, aspect-fit and letterboxed
 //! into its mode.
 //!
+//! The blit undoes the fullscreen-app rotation ([`crate::rotation`]). That
+//! rotation exists because the phone is being *held* sideways; an external
+//! panel is not, so mirroring the buffer verbatim would show a landscape app on
+//! its side, pillarboxed. Undoing it also means a landscape app fills a
+//! landscape panel instead of a narrow strip down the middle.
+//!
 //! Consequences of that choice, all deliberate for a first cut:
 //!
 //! - Clients never see a second `wl_output`, so nothing re-lays-out on hotplug.
@@ -91,17 +97,19 @@ impl MirrorOutput {
         renderer: &mut GlesRenderer,
         src: &Dmabuf,
         src_size: Size<i32, Physical>,
+        rotation: crate::rotation::Rotation,
     ) -> Result<(), Box<dyn Error>> {
         let full = Rectangle::from_size(self.size);
-        let dst = fit(src_size, self.size);
+        let dst = dst_rect(src_size, self.size, rotation);
 
         let texture = renderer.import_dmabuf(src, None)?;
         let (mut buffer, _age) = self.surface.next_buffer()?;
         let mut fb = renderer.bind(&mut buffer)?;
         {
-            // `Transform::Normal`: source and destination are both GBM scanout
-            // buffers rendered through the same GLES path, so the Y-origin
-            // conventions cancel and a straight copy preserves orientation.
+            // `Transform::Normal` as the frame transform: source and
+            // destination are both GBM scanout buffers rendered through the
+            // same GLES path, so the Y-origin conventions cancel and a straight
+            // copy preserves orientation.
             let mut frame = renderer.render(&mut fb, self.size, Transform::Normal)?;
             frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[full])?;
             frame.render_texture_from_to(
@@ -110,7 +118,7 @@ impl MirrorOutput {
                 dst,
                 &[full],
                 &[],
-                Transform::Normal,
+                src_transform(rotation),
                 1.0,
                 // Default texture program, no extra uniforms: a plain copy, no
                 // rounded corners or tint.
@@ -130,6 +138,36 @@ impl MirrorOutput {
         self.pending_flip = true;
         Ok(())
     }
+}
+
+/// The `src_transform` for the mirror blit, undoing the quarter-turn the
+/// primary drew the app with.
+///
+/// The two sit in opposite conventions and it is the *inverse* that goes here.
+/// The primary passes [`crate::rotation::Rotation::transform`] as a **frame**
+/// transform ([`crate::render`]), which turns the content that way;
+/// `render_texture_from_to` takes a **source** transform and applies its
+/// inverse. Naming the same transform in both places therefore turns the image
+/// the same way twice instead of cancelling — a quarter turn out in each
+/// direction, which reads on the panel as the picture being upside down (both
+/// turns aspect-fit identically, so nothing else looks off).
+fn src_transform(rotation: crate::rotation::Rotation) -> Transform {
+    rotation.transform().invert()
+}
+
+/// Where the primary's buffer lands on a mirror of size `dst`, given the
+/// rotation it was drawn with.
+///
+/// A rotation swaps what the buffer *shows*: the phone's 1080x2160 portrait
+/// buffer holding a turned fullscreen app reads as a 2160x1080 landscape image
+/// once the blit un-rotates it, and it is that image that gets aspect-fit.
+fn dst_rect(
+    src: Size<i32, Physical>,
+    dst: Size<i32, Physical>,
+    rotation: crate::rotation::Rotation,
+) -> Rectangle<i32, Physical> {
+    let shown: Size<i32, Physical> = rotation.app_size((src.w, src.h)).into();
+    fit(shown, dst)
 }
 
 /// Aspect-fit `src` inside `dst`, centred — the letterboxed destination rect
@@ -298,6 +336,45 @@ mod tests {
     fn landscape_into_portrait_letterboxes() {
         let got = fit((1920, 1080).into(), (1080, 1920).into());
         assert_eq!(got, r(0, 656, 1080, 608));
+    }
+
+    #[test]
+    fn unrotated_phone_pillarboxes_on_a_tv() {
+        use crate::rotation::Rotation;
+        assert_eq!(
+            dst_rect((1080, 2160).into(), (1920, 1080).into(), Rotation::None),
+            r(690, 0, 540, 1080)
+        );
+    }
+
+    #[test]
+    fn rotated_app_fills_a_landscape_tv() {
+        use crate::rotation::Rotation;
+        // 1080x2160 portrait buffer holding a turned fullscreen app reads as
+        // 2160x1080 — 2:1 into 16:9, so width-limited with thin bars top and
+        // bottom, not a narrow strip down the middle.
+        for rot in [Rotation::LeftUp, Rotation::RightUp] {
+            assert_eq!(
+                dst_rect((1080, 2160).into(), (1920, 1080).into(), rot),
+                r(0, 60, 1920, 960)
+            );
+        }
+    }
+
+    #[test]
+    fn the_blit_undoes_the_primarys_turn() {
+        use crate::rotation::Rotation;
+        // The regression: passing the primary's own transform here turns the
+        // image a second time instead of cancelling it, landing 180° out — the
+        // mirror upside down while the phone panel itself reads correctly.
+        for rot in [Rotation::None, Rotation::LeftUp, Rotation::RightUp] {
+            assert_eq!(src_transform(rot), rot.transform().invert());
+        }
+        // An unrotated phone still blits straight through, so Home is
+        // unaffected either way.
+        assert_eq!(src_transform(Rotation::None), Transform::Normal);
+        assert_eq!(src_transform(Rotation::LeftUp), Transform::_90);
+        assert_eq!(src_transform(Rotation::RightUp), Transform::_270);
     }
 
     #[test]

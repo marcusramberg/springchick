@@ -762,17 +762,22 @@ impl App {
     /// All mirrors are drawn first, then fenced once, then flipped — a single
     /// `finish_gpu` covers the batch. A mirror still waiting on its own vblank
     /// skips this frame rather than holding the phone back.
+    ///
+    /// The current app rotation goes with it: a fullscreen app turned landscape
+    /// is drawn sideways in the phone's portrait buffer, and an external panel
+    /// that is not being held sideways has to have that undone.
     fn present_mirrors(&mut self, src: &smithay::backend::allocator::dmabuf::Dmabuf) {
         if self.drm.mirrors.is_empty() {
             return;
         }
         let size = self.drm.output_size;
+        let rotation = self.state.rotation;
         let mut drawn = false;
         for i in 0..self.drm.mirrors.len() {
             if self.drm.mirrors[i].pending_flip {
                 continue;
             }
-            match self.drm.mirrors[i].render_into(&mut self.drm.renderer, src, size) {
+            match self.drm.mirrors[i].render_into(&mut self.drm.renderer, src, size, rotation) {
                 Ok(()) => drawn = true,
                 Err(e) => warn!("mirror render failed: {e}"),
             }
