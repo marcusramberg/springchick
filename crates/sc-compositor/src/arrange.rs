@@ -1,6 +1,8 @@
 //! Home-screen icon layout: the reflow springs that slide icons to their slots,
 //! and arrange mode (long-press to wiggle, drag to reorder / pin / unpin).
 
+use std::collections::HashMap;
+
 use sc_shell_model::ShellModel;
 
 use tracing::{debug, warn};
@@ -167,21 +169,7 @@ impl State {
             }
             None => reflow_targets(&self.model, w, h),
         };
-        for (app, (tx, ty)) in &targets {
-            match self.grid_anim.get_mut(app) {
-                Some((sx, sy)) => {
-                    sx.retarget(*tx);
-                    sy.retarget(*ty);
-                }
-                None => {
-                    self.grid_anim.insert(
-                        app.clone(),
-                        (sc_anim::Spring::new(*tx), sc_anim::Spring::new(*ty)),
-                    );
-                }
-            }
-        }
-        self.grid_anim.retain(|app, _| targets.contains_key(app));
+        Self::reflow_springs(&mut self.grid_anim, &targets);
     }
 
     /// Retarget dock springs to the current dock layout, dropping a dock icon
@@ -204,29 +192,14 @@ impl State {
         } else {
             sc_layout::compute(w, h, 0, &self.model)
         };
-        let mut targets: std::collections::HashMap<String, (f32, f32)> =
-            std::collections::HashMap::new();
+        let mut targets: HashMap<String, (f32, f32)> = HashMap::new();
         for slot in &layout.dock {
             targets.insert(
                 slot.app_id.clone(),
                 (slot.icon_rect.center_x(), slot.icon_rect.center_y()),
             );
         }
-        for (app, (tx, ty)) in &targets {
-            match self.dock_anim.get_mut(app) {
-                Some((sx, sy)) => {
-                    sx.retarget(*tx);
-                    sy.retarget(*ty);
-                }
-                None => {
-                    self.dock_anim.insert(
-                        app.clone(),
-                        (sc_anim::Spring::new(*tx), sc_anim::Spring::new(*ty)),
-                    );
-                }
-            }
-        }
-        self.dock_anim.retain(|app, _| targets.contains_key(app));
+        Self::reflow_springs(&mut self.dock_anim, &targets);
     }
 
     /// Abandon an in-flight page drag, springing the grid back to the page it
@@ -245,6 +218,30 @@ impl State {
         {
             page_spring.retarget(*page as f32);
         }
+    }
+
+    /// Generic helper to reflow animation springs to new target positions.
+    /// Updates existing springs in-place and seeds new ones for apps that
+    /// don't have them yet. Removes springs for apps no longer in targets.
+    fn reflow_springs(
+        anim_map: &mut HashMap<String, (sc_anim::Spring, sc_anim::Spring)>,
+        targets: &HashMap<String, (f32, f32)>,
+    ) {
+        for (app, (tx, ty)) in targets {
+            match anim_map.get_mut(app) {
+                Some((sx, sy)) => {
+                    sx.retarget(*tx);
+                    sy.retarget(*ty);
+                }
+                None => {
+                    anim_map.insert(
+                        app.clone(),
+                        (sc_anim::Spring::new(*tx), sc_anim::Spring::new(*ty)),
+                    );
+                }
+            }
+        }
+        anim_map.retain(|app, _| targets.contains_key(app));
     }
 
     /// Long-press hold on empty home background: engages arrange mode with
