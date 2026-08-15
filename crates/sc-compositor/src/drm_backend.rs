@@ -468,6 +468,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     const ACTIVE_TIMEOUT: Duration = Duration::from_millis(2);
     const IDLE_TIMEOUT: Duration = Duration::from_millis(50);
 
+    // Scheduler utilization floor for this thread, which is the render thread.
+    let mut uclamp = crate::uclamp::Uclamp::new(app.state.uclamp_min);
+
     while running.load(Ordering::Relaxed) {
         let timeout = if app.state.is_animating(Instant::now()) {
             ACTIVE_TIMEOUT
@@ -513,7 +516,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // (`needs_render`) or an animation that started on an otherwise idle
         // screen. `render` early-returns on pending_flip, so once a flip is in
         // flight the vblank handler carries the animation and this is a no-op.
-        if app.state.is_animating(Instant::now()) {
+        // Raise the floor before rendering, not after: applying it a frame late
+        // would miss the first frame of a touch, which is the slowest one and
+        // the whole reason this exists.
+        let now = Instant::now();
+        let drawing = app.state.is_animating(now);
+        uclamp.update(drawing, now);
+        if drawing {
             app.render();
         }
 
