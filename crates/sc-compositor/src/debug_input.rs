@@ -408,6 +408,9 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             let slot = smithay::backend::input::TouchSlot::from(Some(0));
             let time = state.start_time.elapsed().as_millis() as u32;
             crate::touch::down(state, x, y, slot, time);
+            // Synthetic input has no libinput frame event behind it, so the
+            // one-finger batch is closed by hand.
+            crate::touch::frame(state);
             state.active_touch = Some(ActiveTouch {
                 slot,
                 release_at: Instant::now() + std::time::Duration::from_millis(120),
@@ -490,6 +493,7 @@ fn advance_touch(state: &mut State) {
     }
     let time = state.start_time.elapsed().as_millis() as u32;
     crate::touch::up(state, t.slot, time);
+    crate::touch::frame(state);
     let _ = t.reply.send("ok\n".into());
 }
 

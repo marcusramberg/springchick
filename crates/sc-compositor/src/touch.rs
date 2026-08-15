@@ -5,6 +5,10 @@
 //! (down/motion/up) is forwarded to that client via the seat `wl_touch`, and the
 //! gesture system never sees it. Otherwise it flows into the existing gesture
 //! funnel unchanged.
+//!
+//! Client-bound events are not flushed here: the backend calls [`frame`] when
+//! the input stack reports the end of a simultaneous batch, and [`cancel`] when
+//! it abandons the sequence.
 
 use crate::input_common;
 use crate::touch_viz;
@@ -374,7 +378,6 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
         };
         let focus = target.focus();
         touch.down(state, Some((target.surface, focus)), &event);
-        touch.frame(state);
         return;
     }
     // Not on a client surface — drive the gesture system, but only from the one
@@ -406,12 +409,57 @@ pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
         };
         // Focus is only used for DnD during motion; we pass none.
         touch.motion(state, None, &event);
-        touch.frame(state);
         return;
     }
     if state.gesture_slot == Some(slot) {
         input_common::on_motion(state, x, y);
     }
+}
+
+/// End of a set of touch changes that happened at the same instant (libinput
+/// `TOUCH_FRAME`). Flushes them to the client as one `wl_touch.frame`.
+///
+/// Driving this from the real frame event rather than firing one after every
+/// single down/motion/up is what makes a multi-finger update atomic: two fingers
+/// that moved in the same hardware report reach the client in one frame, which
+/// is what toolkit gesture recognizers expect when they decide pinch-vs-scroll.
+///
+/// Safe to call with nothing pending — smithay skips slots whose events have
+/// already been framed, so no empty frame reaches the client.
+pub fn frame(state: &mut State) {
+    let touch = state.touch.clone();
+    touch.frame(state);
+}
+
+/// The touch stream was cancelled by the input stack (libinput `TOUCH_CANCEL` —
+/// palm/thumb rejection, or the device dropping the sequence mid-gesture).
+///
+/// Without this the cancelled slot leaks: `gesture_slot` stays claimed forever,
+/// so the *next* finger on empty space fails the single-touch guard in [`down`]
+/// and its whole swipe is silently dropped; and a client-routed slot keeps a
+/// phantom contact down, because its `up` never arrives.
+///
+/// `wl_touch.cancel` is seat-wide by protocol — the client drops *all* its touch
+/// points — so this cancels every slot rather than just the reported one.
+pub fn cancel(state: &mut State) {
+    if state.show_touches {
+        let now = std::time::Instant::now();
+        let slots: Vec<TouchSlot> = state
+            .touch_targets
+            .keys()
+            .copied()
+            .chain(state.gesture_slot)
+            .collect();
+        for slot in slots {
+            state.touch_viz.release(slot_id(slot), now);
+        }
+    }
+    let touch = state.touch.clone();
+    touch.cancel(state);
+    // Drops the shell-side gesture too: no launch fires, no drag resumes, and
+    // `gesture_slot`/`touch_targets` are cleared so the next finger starts fresh.
+    state.cancel_gestures();
+    state.needs_render = true;
 }
 
 /// A finger lifted.
@@ -430,7 +478,6 @@ pub fn up(state: &mut State, slot: TouchSlot, time: u32) {
             time,
         };
         touch.up(state, &event);
-        touch.frame(state);
         return;
     }
     if state.gesture_slot == Some(slot) {
