@@ -45,7 +45,7 @@ use sc_catalog::AppEntry;
 use sc_icons::IconPixels;
 use sc_shell_model::{persist, unix_now, ShellModel};
 
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::app_history::AppHistory;
 use crate::arrange::ArrangeState;
@@ -440,6 +440,9 @@ pub(crate) struct State {
     pub stats: frame_stats::FrameStats,
     pub perf_log: bool,
     pub last_perf_log: std::time::Instant,
+    /// End of the previous rendered frame, for the per-frame `gap_ms` trace.
+    /// `None` until the first frame is recorded.
+    pub last_frame_end: Option<std::time::Instant>,
 
     // Control
     pub running: bool,
@@ -714,6 +717,7 @@ impl State {
             stats: frame_stats::FrameStats::new(Duration::from_micros(11_111)),
             perf_log: false, // disabled for debugging
             last_perf_log: std::time::Instant::now(),
+            last_frame_end: None,
             running: true,
         }
     }
@@ -807,7 +811,25 @@ impl State {
     /// Record one frame's duration and emit a perf summary at most once per
     /// second. Shared by the winit and DRM render loops.
     pub(crate) fn record_and_log_frame(&mut self, frame_start: std::time::Instant) {
-        self.stats.record_frame(frame_start.elapsed());
+        let dt = frame_start.elapsed();
+        self.stats.record_frame(dt);
+        // Per-frame trace, off unless `springchick::perf=trace` is requested.
+        // `gap_ms` is the idle time before this frame, so a large gap marks the
+        // first frame after the render loop was asleep — the one that pays
+        // schedutil's ramp-up cost, and the only one that shows whether a
+        // uclamp floor is worth having. The aggregate line below cannot show
+        // this: its ring still holds seconds of stale samples across an idle
+        // gap, so a short gesture never displaces them.
+        let now = std::time::Instant::now();
+        trace!(
+            target: "springchick::perf",
+            "frame dt_ms={:.2} gap_ms={:.1}",
+            dt.as_secs_f64() * 1000.0,
+            self.last_frame_end
+                .map(|t| (frame_start - t).as_secs_f64() * 1000.0)
+                .unwrap_or(0.0),
+        );
+        self.last_frame_end = Some(now);
         if self.perf_log && self.last_perf_log.elapsed() >= Duration::from_secs(1) {
             debug!(target: "springchick::perf", "{}", self.stats.format_line());
             self.last_perf_log = std::time::Instant::now();
