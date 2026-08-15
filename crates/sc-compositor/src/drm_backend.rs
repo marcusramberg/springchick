@@ -599,6 +599,17 @@ impl App {
                 let slot = event.slot();
                 crate::touch::up(&mut self.state, slot, event.time_msec());
             }
+            // libinput reports a frame after every batch of simultaneous touch
+            // changes; that — not the individual events — is when the client
+            // gets its `wl_touch.frame`.
+            InputEvent::TouchFrame { .. } => {
+                crate::touch::frame(&mut self.state);
+            }
+            // Palm rejection (and friends) can abandon a sequence with no `up`.
+            // Dropping it strands the slot: see `touch::cancel`.
+            InputEvent::TouchCancel { .. } => {
+                crate::touch::cancel(&mut self.state);
+            }
             InputEvent::Keyboard { event } => {
                 crate::keybinds::on_key_event(
                     &mut self.state,
