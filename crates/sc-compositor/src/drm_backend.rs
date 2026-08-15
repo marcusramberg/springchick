@@ -6,6 +6,9 @@
 //! provides the bind/submit primitives (Approach A). See
 //! `docs/superpowers/specs/2026-06-27-springchick-m4-device-backend-perf.md`.
 
+use std::os::fd::AsFd;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
@@ -23,8 +26,9 @@ use smithay::backend::renderer::{Bind, ImportDma, RendererSuper};
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev;
+use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::signals::{Signal, Signals};
-use smithay::reexports::calloop::EventLoop;
+use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::drm::control::{connector, crtc, property, Device as ControlDevice};
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
@@ -285,6 +289,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         orig_gamma,
     };
 
+    // Duplicate the wayland fds before `display`/`listener` move into `app`, so
+    // both can be registered as calloop sources below. Without these the loop
+    // has no way to learn about client traffic and has to poll for it.
+    let display_fd = display
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|e| format!("dup wayland display fd: {e}"))?;
+    let listener_fd = listener
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|e| format!("dup wayland listener fd: {e}"))?;
+
     let mut app = App {
         state,
         drm,
@@ -382,6 +398,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(|e| format!("insert session source: {e}"))?;
 
+    // 5. Wayland client traffic. Registering these means an idle compositor
+    //    sleeps until a client actually says something, instead of waking to ask.
+    event_loop
+        .handle()
+        .insert_source(
+            Generic::new(display_fd, Interest::READ, Mode::Level),
+            |_, _, app: &mut App| {
+                app.display.dispatch_clients(&mut app.state).ok();
+                Ok(PostAction::Continue)
+            },
+        )
+        .map_err(|e| format!("insert wayland display source: {e}"))?;
+
+    // 6. New client connections on the listening socket.
+    event_loop
+        .handle()
+        .insert_source(
+            Generic::new(listener_fd, Interest::READ, Mode::Level),
+            |_, _, app: &mut App| {
+                accept_client(&app.display, &app.listener);
+                Ok(PostAction::Continue)
+            },
+        )
+        .map_err(|e| format!("insert wayland listener source: {e}"))?;
+
     info!("entering DRM frame loop");
     // Kick off the first frame.
     app.render();
@@ -405,19 +446,39 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // DrmDevice::new hard-resets the device at login.
     let signals =
         Signals::new(&[Signal::SIGTERM, Signal::SIGINT]).map_err(|e| format!("signals: {e}"))?;
-    let loop_signal = event_loop.get_signal();
+    // Dispatched manually below rather than via `EventLoop::run`, so the stop
+    // request needs its own flag instead of `LoopSignal::stop`.
+    let running = Arc::new(AtomicBool::new(true));
+    let stop = running.clone();
     event_loop
         .handle()
         .insert_source(signals, move |event, _, _app| {
             info!(signal = ?event.signal(), "termination signal; shutting down");
-            loop_signal.stop();
+            stop.store(false, Ordering::Relaxed);
         })
         .map_err(|e| format!("insert signals source: {e}"))?;
 
-    // The 2ms timeout wakes the loop to accept + dispatch wayland clients even
-    // when no DRM/input event fires.
-    event_loop.run(Some(Duration::from_millis(2)), &mut app, move |app| {
-        app.dispatch_wayland();
+    // Wayland traffic, input, udev and page-flips are all event sources now, so
+    // the timeout only paces the housekeeping polls below. While animating it
+    // stays tight, because the `is_animating` render at the bottom is what
+    // primes a frame when no page-flip is in flight and a 50ms gap there would
+    // be a visible stutter. Idle, nothing needs that: the long-press threshold
+    // and the idle-blank countdown are decided on timescales where 50ms is
+    // invisible, and polling faster than that only burns battery.
+    const ACTIVE_TIMEOUT: Duration = Duration::from_millis(2);
+    const IDLE_TIMEOUT: Duration = Duration::from_millis(50);
+
+    while running.load(Ordering::Relaxed) {
+        let timeout = if app.state.is_animating(Instant::now()) {
+            ACTIVE_TIMEOUT
+        } else {
+            IDLE_TIMEOUT
+        };
+        if let Err(e) = event_loop.dispatch(Some(timeout), &mut app) {
+            error!("event loop dispatch error: {e}");
+            break;
+        }
+
         // Drain the debug-input socket (dev harness) before housekeeping so a
         // synthetic gesture takes effect this tick. `is_animating` reports true
         // while one is in flight, so the render below keeps advancing it.
@@ -455,7 +516,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if app.state.is_animating(Instant::now()) {
             app.render();
         }
-    })?;
+
+        // Flush last, and unconditionally: the render above is what emits frame
+        // callbacks, and the housekeeping emits configures, so flushing before
+        // them would leave a client waiting on a callback stalled until the next
+        // wake — up to a full idle timeout away.
+        app.display.flush_clients().ok();
+    }
 
     // Loop stopped by SIGTERM/SIGINT: restore DRM state, then let `app` drop —
     // which tears down the renderer, surface, DrmDevice (releases the master)
@@ -491,12 +558,6 @@ impl App {
                 warn!("restore gamma on shutdown: {e}");
             }
         }
-    }
-
-    fn dispatch_wayland(&mut self) {
-        accept_client(&self.display, &self.listener);
-        self.display.dispatch_clients(&mut self.state).ok();
-        self.display.flush_clients().ok();
     }
 
     fn handle_input(&mut self, event: InputEvent<LibinputInputBackend>) {
