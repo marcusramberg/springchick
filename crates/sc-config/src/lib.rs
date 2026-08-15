@@ -89,7 +89,30 @@ pub struct Config {
     /// regardless, so toolkits like GTK still draw the header bar that holds a
     /// file chooser's Open/Cancel buttons.
     pub prefer_no_csd: bool,
+    /// Scheduler utilization floor (`util_min`) applied to the render thread
+    /// while it is drawing. See [`UclampMin`].
+    pub uclamp_min: UclampMin,
     pub bindings: Vec<Binding>,
+}
+
+/// How to pick the `util_min` floor for the render thread.
+///
+/// Without a floor the render thread's utilization decays while the screen is
+/// idle, so schedutil parks it on the little cluster at a low OPP and the first
+/// frames of a touch are slow. Measured on the FP5: first frame after 12s idle
+/// 11.78ms vs an 11.11ms budget (6/6 over), follow-up frames 10.21ms. With a
+/// floor above the little cluster's capacity, 8.88ms (0/6 over) and 4.01ms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UclampMin {
+    /// Derive from CPU topology at startup: just above the little cluster's
+    /// `cpu_capacity`, which is where the migration knee sits. Portable across
+    /// devices with different capacity splits; disables itself on machines whose
+    /// CPUs are all the same capacity, where there is no bigger core to move to.
+    Auto,
+    /// No floor. The kernel default.
+    Off,
+    /// An explicit floor in the kernel's 0..=1024 utilization scale.
+    Fixed(u32),
 }
 
 /// Long-press threshold when the config does not say otherwise. 800ms so a
@@ -113,6 +136,35 @@ pub const DEFAULT_SHOW_TOUCHES: bool = false;
 /// Prefer no client-side decorations by default: the phone shell wants
 /// borderless app windows. Dialogs keep CSD regardless (see [`Config`]).
 pub const DEFAULT_PREFER_NO_CSD: bool = true;
+
+/// Utilization floor policy when `[main]` does not say otherwise. Auto-derived
+/// from CPU topology, because the useful value is the little cluster's capacity
+/// and that differs per device (382 on the FP5).
+pub const DEFAULT_UCLAMP_MIN: UclampMin = UclampMin::Auto;
+
+/// Parse the `uclamp_min` value: `"auto"`, `"off"`, or 0..=1024 (`0` = off).
+/// Anything else is dropped with a warning and the default applies.
+fn parse_uclamp_min(v: Option<&toml::Value>) -> UclampMin {
+    let Some(v) = v else {
+        return DEFAULT_UCLAMP_MIN;
+    };
+    match v {
+        toml::Value::String(s) => match s.to_ascii_lowercase().as_str() {
+            "auto" => UclampMin::Auto,
+            "off" | "false" | "none" => UclampMin::Off,
+            _ => {
+                warn!(value = %s, "uclamp_min must be \"auto\", \"off\", or 0..=1024");
+                DEFAULT_UCLAMP_MIN
+            }
+        },
+        toml::Value::Integer(0) => UclampMin::Off,
+        toml::Value::Integer(n) if (1..=1024).contains(n) => UclampMin::Fixed(*n as u32),
+        other => {
+            warn!(value = %other, "uclamp_min must be \"auto\", \"off\", or 0..=1024");
+            DEFAULT_UCLAMP_MIN
+        }
+    }
+}
 
 /// Shipped defaults, mirroring the user's niri bindings. Defined as TOML so the
 /// documented example and the built-in behavior cannot drift apart.
@@ -181,6 +233,8 @@ struct RawMain {
     card_radius: Option<f32>,
     show_touches: Option<bool>,
     prefer_no_csd: Option<bool>,
+    /// `"auto"` (the default), `"off"`, or a number in 0..=1024. `0` means off.
+    uclamp_min: Option<toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +268,7 @@ impl Config {
                     card_radius: DEFAULT_CARD_RADIUS,
                     show_touches: DEFAULT_SHOW_TOUCHES,
                     prefer_no_csd: DEFAULT_PREFER_NO_CSD,
+                    uclamp_min: DEFAULT_UCLAMP_MIN,
                     bindings: Vec::new(),
                 };
             }
@@ -224,6 +279,7 @@ impl Config {
         let card_radius = main.card_radius.unwrap_or(DEFAULT_CARD_RADIUS).max(0.0);
         let show_touches = main.show_touches.unwrap_or(DEFAULT_SHOW_TOUCHES);
         let prefer_no_csd = main.prefer_no_csd.unwrap_or(DEFAULT_PREFER_NO_CSD);
+        let uclamp_min = parse_uclamp_min(main.uclamp_min.as_ref());
         let raw = file.keybinds.unwrap_or_default();
 
         let bindings = raw.binding.into_iter().filter_map(convert).collect();
@@ -234,6 +290,7 @@ impl Config {
             card_radius,
             show_touches,
             prefer_no_csd,
+            uclamp_min,
             bindings,
         }
     }
@@ -542,6 +599,42 @@ mod tests {
         let cfg = Config::parse("");
         assert_eq!(cfg.long_press_ms, DEFAULT_LONG_PRESS_MS);
         assert!(cfg.bindings.is_empty());
+    }
+
+    #[test]
+    fn uclamp_min_defaults_to_auto() {
+        assert_eq!(Config::parse("[main]\n").uclamp_min, UclampMin::Auto);
+        assert_eq!(Config::defaults().uclamp_min, UclampMin::Auto);
+    }
+
+    #[test]
+    fn uclamp_min_accepts_auto_off_and_numbers() {
+        let p = |s: &str| Config::parse(s).uclamp_min;
+        assert_eq!(p("[main]\nuclamp_min = \"auto\"\n"), UclampMin::Auto);
+        assert_eq!(p("[main]\nuclamp_min = \"AUTO\"\n"), UclampMin::Auto);
+        assert_eq!(p("[main]\nuclamp_min = \"off\"\n"), UclampMin::Off);
+        // 0 is the natural way to spell "no floor" for a numeric setting.
+        assert_eq!(p("[main]\nuclamp_min = 0\n"), UclampMin::Off);
+        assert_eq!(p("[main]\nuclamp_min = 450\n"), UclampMin::Fixed(450));
+        assert_eq!(p("[main]\nuclamp_min = 1024\n"), UclampMin::Fixed(1024));
+    }
+
+    #[test]
+    fn uclamp_min_rejects_out_of_range_and_nonsense() {
+        // Lenient parsing: a bad value falls back to the default, it does not
+        // abort the whole config.
+        let p = |s: &str| Config::parse(s).uclamp_min;
+        assert_eq!(p("[main]\nuclamp_min = 2000\n"), UclampMin::Auto);
+        assert_eq!(p("[main]\nuclamp_min = -5\n"), UclampMin::Auto);
+        assert_eq!(p("[main]\nuclamp_min = \"fast\"\n"), UclampMin::Auto);
+        assert_eq!(p("[main]\nuclamp_min = 1.5\n"), UclampMin::Auto);
+    }
+
+    #[test]
+    fn a_bad_uclamp_min_does_not_break_the_rest_of_main() {
+        let cfg = Config::parse("[main]\nuclamp_min = \"nope\"\ncard_radius = 42.0\n");
+        assert_eq!(cfg.uclamp_min, UclampMin::Auto);
+        assert_eq!(cfg.card_radius, 42.0);
     }
 
     #[test]

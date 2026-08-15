@@ -47,6 +47,7 @@ mod switcher;
 mod toplevel;
 mod touch;
 mod touch_viz;
+mod uclamp;
 pub mod ui_state;
 mod winit_backend;
 mod wlr_screencopy;

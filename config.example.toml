@@ -10,9 +10,9 @@
 # so this file changes nothing until you edit it.
 #
 # `springchick ipc reload` re-reads this file into a running compositor. Every
-# option below takes effect immediately except `dpi` (ignored on reload; needs a
-# restart) and `prefer_no_csd` (applies to the next window that negotiates
-# decorations).
+# option below takes effect immediately except `dpi` and `uclamp_min` (ignored
+# on reload; both need a restart) and `prefer_no_csd` (applies to the next
+# window that negotiates decorations).
 
 [main]
 # Output scale advertised to clients. The FP5 panel is dense enough that 1:1
@@ -39,6 +39,25 @@ show_touches = false
 # holds a file chooser's Open/Cancel buttons. Set false to let apps draw their
 # own titlebars.
 prefer_no_csd = true
+
+# Scheduler utilization floor (util_min, 0..=1024) held on the render thread
+# while it is drawing, and dropped shortly after it settles.
+#
+# Why: on a big.LITTLE phone the render thread's tracked utilization decays
+# while the screen is idle, so schedutil parks it on the little cluster at a low
+# frequency. Short interactions — a tap, a flick — then finish before the
+# governor ramps, so every frame in them is slow, not just the first. Measured
+# on the FP5 (11.11ms budget at 90Hz), first frame after 12s idle went 11.78ms
+# (6/6 over budget) -> 8.88ms (0/6 over), and follow-up frames 10.21ms -> 4.01ms.
+#
+#   "auto"  derive from CPU topology: just above the little cluster's
+#           cpu_capacity, which is where the migration knee sits. Disables
+#           itself when all CPUs have the same capacity (nothing to move to).
+#   "off"   leave the scheduler alone. 0 means the same.
+#   <n>     an explicit floor, e.g. 450 on the FP5 (little cluster is 382).
+#
+# Read at startup only — `springchick ipc reload` will not pick this up.
+uclamp_min = "auto"
 
 [keybinds]
 # Long-press threshold (ms): how long a button is held before its "long" action

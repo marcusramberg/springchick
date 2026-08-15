@@ -333,6 +333,10 @@ pub(crate) struct State {
     /// (`[main].prefer_no_csd`). Dialogs (child toplevels) always get CSD so
     /// their toolkit header bar — and its action buttons — stay present.
     pub prefer_no_csd: bool,
+    /// Scheduler utilization floor policy for the render thread
+    /// (`[main].uclamp_min`). Read at startup only: the floor is resolved
+    /// against CPU topology once, so changing it needs a restart like `dpi`.
+    pub uclamp_min: sc_config::UclampMin,
     /// wlr-gamma-control state (night-light / color-temperature clients).
     pub gamma: gamma_control::GammaControl,
     /// ext-idle-notify-v1 state: client idle timers, polled by both frame loops.
@@ -467,6 +471,7 @@ impl State {
         let card_radius = config.card_radius;
         let show_touches = config.show_touches;
         let prefer_no_csd = config.prefer_no_csd;
+        let uclamp_min = config.uclamp_min;
 
         // v6 so clients like wvkbd that bind wl_compositor@6 can connect.
         let compositor_state = CompositorState::new_v6::<Self>(&dh);
@@ -680,6 +685,7 @@ impl State {
             dpi,
             card_radius,
             prefer_no_csd,
+            uclamp_min,
             gamma,
             idle_notify,
             idle_inhibit,
