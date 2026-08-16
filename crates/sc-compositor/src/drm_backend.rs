@@ -423,6 +423,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
         .map_err(|e| format!("insert wayland listener source: {e}"))?;
 
+    // 7. Pre-suspend blanking. logind holds the suspend off until we ack, so the
+    //    DPMS-off lands before the machine goes down and `Blank` still describes
+    //    the panel on the other side — which is what makes the press that wakes
+    //    the machine read as a wake instead of firing `toggle-display` and
+    //    blanking the screen the user just woke. Absent (no bus, no logind) is a
+    //    normal state: the panel simply does not blank before sleep.
+    if let Some(sleep) = crate::sleep::spawn() {
+        let acks = sleep.acks;
+        event_loop
+            .handle()
+            .insert_source(sleep.events, move |event, _, app| {
+                if !matches!(
+                    event,
+                    calloop::channel::Event::Msg(crate::sleep::Event::AboutToSleep)
+                ) {
+                    return;
+                }
+                // Blank here rather than leaving it to the loop body below: the
+                // ack releases the inhibitor, so the commit has to have happened
+                // by the time we send it.
+                app.state.blank.set(true);
+                app.apply_blanking();
+                let _ = acks.send(());
+            })
+            .map_err(|e| format!("insert sleep source: {e}"))?;
+    }
+
     info!("entering DRM frame loop");
     // Kick off the first frame.
     app.render();
