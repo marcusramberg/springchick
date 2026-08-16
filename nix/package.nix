@@ -94,11 +94,10 @@ rustPlatform.buildRustPackage {
 
   cargoLock = {
     lockFile = ../Cargo.lock;
-    # smithay is a fork of ff5fa7d (pinned for xkbcommon 0.9 → wvkbd keymap fix)
-    # carrying a one-commit fix for the layer-surface destroy crash (Smithay#1979).
+    # smithay is pinned to upstream ff5fa7d (xkbcommon 0.9 → wvkbd keymap fix).
     # git deps must be vendored with an explicit hash.
     outputHashes = {
-      "smithay-0.7.0" = "sha256-LmOKXMDqaEkML8e3nN2IThvKBGtBzk3ggsKwLsYyI0o=";
+      "smithay-0.7.0" = "sha256-TV/GTfSvgfVwIFUGoASU7xm38opIBLjLMf1HeNTW07U=";
     };
   };
 

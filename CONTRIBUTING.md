@@ -252,12 +252,21 @@ All pointer/touch events → normalized `Pt` (0..1) → routed on UiState:
 
 ## Smithay specifics
 
-- **Pinned to a fork**, not crates.io:
-  `https://code.bas.es/marcus/smithay.git` rev `ed8f054`. It carries xkbcommon
-  0.9 (fixes wvkbd keymap loading, blocked by the xkbcommon 0.8 `size-1` bug)
-  plus a one-commit fix for the layer-surface destroy crash (Smithay#1979 —
-  panel close raced destroy-role → nil buffer → commit into a bogus width-0
-  protocol error). Don't swap back to a release without re-checking both.
+- **Pinned to upstream git**, not crates.io:
+  `https://github.com/Smithay/smithay.git` rev `ff5fa7d` (the rev niri pins).
+  Needed for xkbcommon 0.9, which fixes wvkbd keymap loading — the xkbcommon
+  0.8 `size-1` bug. Don't swap back to a release without re-checking that.
+- **`use_system_lib` is load-bearing.** It picks libwayland-server over the
+  pure-Rust `wayland-backend`, and that choice decides whether two smithay bugs
+  are fatal. Several role handlers post a protocol error from a `wl_surface`
+  pre-commit hook *after* the role object is destroyed — the "destroy role →
+  attach nil → commit" teardown every Qt/quickshell client does on close. The
+  Rust backend delivers that error on the dead object and kills the client;
+  libwayland drops it. Two known instances: layer surfaces (Smithay#1979,
+  `width 0 requested without setting left and right anchors`, dms panel close)
+  and lock surfaces (`Committed before the first ack_configure.`, dms unlock).
+  Both reproduce with a ~15-line quickshell client the moment the feature is
+  removed. This is why we no longer carry a smithay fork.
 - libinput / DRM / GBM / session types are used via `smithay::reexports::*` to
   avoid version skew. calloop 0.14 is declared directly only to turn on its
   `signals` feature (SIGTERM handling), via feature unification.
