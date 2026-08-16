@@ -75,6 +75,15 @@ pub(crate) struct AppToplevel {
     /// Last client-set xdg window geometry logged for this toplevel, so the
     /// size log fires on change instead of on every commit.
     pub logged_size: Option<(i32, i32)>,
+    /// The rotation this window was last *configured* at — i.e. how its current
+    /// buffer is oriented, not how the shell is drawing right now.
+    ///
+    /// The two part company the moment the app stops being the foreground one:
+    /// [`State::rotation`] falls back to portrait for the shell's own chrome
+    /// while the client keeps its landscape buffer until it is reconfigured. A
+    /// card drawn from that buffer has to be turned by this, or a landscape app
+    /// spills out of its portrait card slot in the switcher.
+    pub rotation: crate::rotation::Rotation,
 }
 
 /// An app spawned from the launcher but not yet mapped to a toplevel. Its Home

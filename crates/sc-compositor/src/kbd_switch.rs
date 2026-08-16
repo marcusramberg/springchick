@@ -83,9 +83,17 @@ impl State {
                     commit: false,
                 });
             }
-            // Mid-animation (opening, closing, grabbing, quick-switching): the
-            // shell is already moving somewhere the user asked for.
-            _ => return,
+            // Mid-animation. If that animation is this session's own settle into
+            // the deck, the step belongs to it — queue it, or a quick second Tab
+            // is swallowed by the frames the deck spends flying in. Anything
+            // else is the shell already moving somewhere the user asked for.
+            _ => {
+                if let Some(session) = self.kbd_switch.as_mut() {
+                    session.pending += delta;
+                    self.needs_render = true;
+                }
+                return;
+            }
         }
         self.needs_render = true;
     }

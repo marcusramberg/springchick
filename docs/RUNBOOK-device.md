@@ -89,12 +89,18 @@ command = "foot"
 |---|---|
 | `close-app` | close the front toplevel |
 | `home` | return to the home screen |
-| `toggle-display` | blank/unblank the panel via DPMS — DRM only, no-op under winit |
+| `toggle-display` | blank/unblank the **phone** panel via DPMS — DRM only, no-op under winit. An attached external display stays lit and keeps receiving frames; see below |
 | `volume-up` / `volume-down` | `wpctl` step the default sink ±5% and show the OSD |
 | `volume-mute` | `wpctl` toggle mute and show the OSD |
 | `toggle-fullscreen` | flip the foreground app between immersive fullscreen (rotates with the device) and maximized |
 | `search` | open the search app — the same UI the Home pull-down opens |
 | `switcher-next` / `switcher-prev` | step the switcher deck one card toward older / more-recent apps, opening it first |
+
+Blanking with an external display attached only powers the phone panel down. The scene is
+still composited every frame and blitted to the mirror, which keeps its own vblank as the
+frame clock (the dark primary CRTC issues none) — so video-out keeps playing with the phone
+screen off. A suspend still takes everything dark, as does shutdown. With nothing attached,
+blanking stops rendering entirely, as before.
 
 The volume actions run `wpctl` (PipeWire), read the level back, and show a vertical OSD bar
 on the right edge (top third, next to the rockers): white fill for the level, amber past

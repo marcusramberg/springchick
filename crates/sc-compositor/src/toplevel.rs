@@ -320,6 +320,7 @@ impl State {
             id_from_launch,
             wl_app_id,
             logged_size: None,
+            rotation: rotation::Rotation::None,
         }));
 
         // Keep the search app out of the MRU / task switcher.
@@ -771,7 +772,7 @@ impl State {
     /// Maximized — not Fullscreen — is the normal app state: it fills the screen
     /// but leaves a client-side header bar visible (toolkits hide it in the
     /// Fullscreen state), which is what keeps a dialog's buttons on screen.
-    pub(crate) fn configure_maximized(&self, surface: &ToplevelSurface) {
+    pub(crate) fn configure_maximized(&mut self, surface: &ToplevelSurface) {
         let usable = self.layers.usable(self.dpi);
         let w = (usable.w as f64 / self.dpi).round() as i32;
         let h = (usable.h as f64 / self.dpi).round() as i32;
@@ -793,6 +794,7 @@ impl State {
             state.states.set(xdg_toplevel::State::Activated);
         });
         surface.send_configure();
+        self.record_toplevel_rotation(surface, rotation::Rotation::None);
     }
 
     /// Log a toplevel's client-set xdg window geometry against the logical size
@@ -858,7 +860,7 @@ impl State {
     /// what it is about to be drawn at; handing it the swapped size instead is
     /// what left the pull-down search wider than the screen and its blur region
     /// short of the bottom.
-    pub(crate) fn configure_fullscreen(&self, surface: &ToplevelSurface) {
+    pub(crate) fn configure_fullscreen(&mut self, surface: &ToplevelSurface) {
         let (ow, oh) = self.rotation.app_size(self.output_size);
         let w = (ow as f64 / self.dpi).round() as i32;
         let h = (oh as f64 / self.dpi).round() as i32;
@@ -872,5 +874,24 @@ impl State {
             state.states.set(xdg_toplevel::State::Activated);
         });
         surface.send_configure();
+        self.record_toplevel_rotation(surface, orientation);
+    }
+
+    /// Remember the orientation a window was just configured at, so its card can
+    /// be drawn the right way up after the shell itself has gone back to
+    /// portrait. See [`crate::state::AppToplevel::rotation`].
+    fn record_toplevel_rotation(
+        &mut self,
+        surface: &ToplevelSurface,
+        rotation: rotation::Rotation,
+    ) {
+        if let Some(tl) = self
+            .toplevels
+            .iter_mut()
+            .flatten()
+            .find(|tl| tl.surface.wl_surface() == surface.wl_surface())
+        {
+            tl.rotation = rotation;
+        }
     }
 }
