@@ -606,6 +606,11 @@ impl State {
     /// commits by the foreground app and whenever focus moves.
     pub(crate) fn refresh_landscape_hint(&mut self) {
         let fullscreen = self.foreground_is_fullscreen();
+        // The home pill's fullscreen policy keys off exactly the same signal as
+        // rotation does: what the client has actually committed. Idempotent, so
+        // the per-commit call rate does not matter.
+        self.bar_hint
+            .set_fullscreen(fullscreen, std::time::Instant::now());
         let hint = ui_state::desired_focus(&self.ui)
             .and_then(|tid| self.toplevels.get(tid))
             .and_then(|slot| slot.as_ref())

@@ -728,6 +728,9 @@ fn press_arm_gesture(state: &mut State, x: f32, y: f32) {
         }
         DownAction::StartBarDrag { start_x, start_y } => {
             state.bar_drag_start = Some((start_x, start_y));
+            // Reaching for the bar is what brings a faded-out pill back, so the
+            // user can see the thing they are already dragging.
+            state.bar_hint.touched(std::time::Instant::now());
         }
         DownAction::None => {}
     }
