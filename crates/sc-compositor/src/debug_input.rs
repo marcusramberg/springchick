@@ -32,6 +32,17 @@ pub enum DebugCmd {
         name: String,
         hold_ms: u32,
     },
+    /// Press (`down = true`) or release a key by xkb keysym name and return
+    /// immediately, leaving it held across later commands.
+    ///
+    /// This is how a chord is scripted: `keydown Super_L`, `key Tab`,
+    /// `keyup Super_L`. Unlike [`DebugCmd::Key`] it takes no in-flight slot, so
+    /// the held modifier is still down while the next verb runs — which is the
+    /// whole point for held-modifier bindings like Super+Tab.
+    KeyHold {
+        name: String,
+        down: bool,
+    },
     /// A real touch-down+up tap at `(x, y)` through the surface-routing path
     /// (`touch::down`/`up`), for exercising layer-surface/app input.
     Touch(f32, f32),
@@ -153,6 +164,17 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
             let hold_ms = opt_u32(&mut tok, 0)?;
             done(tok)?;
             DebugCmd::Key { name, hold_ms }
+        }
+        "keydown" | "keyup" => {
+            let name = tok
+                .next()
+                .ok_or_else(|| "parse: missing key name".to_string())?
+                .to_string();
+            done(tok)?;
+            DebugCmd::KeyHold {
+                name,
+                down: verb == "keydown",
+            }
         }
         "settle" => {
             let timeout_ms = opt_u32(&mut tok, 2000)?;
@@ -397,6 +419,23 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
                 reply,
             });
         }
+        DebugCmd::KeyHold { name, down } => {
+            let Some(keysym) = crate::keybinds::resolve_keysym(&name) else {
+                let _ = reply.send("err unknown-keysym\n".into());
+                return;
+            };
+            let Some(keycode) = crate::keybinds::keycode_for_keysym(state, keysym) else {
+                let _ = reply.send("err unmapped-keysym\n".into());
+                return;
+            };
+            let key_state = if down {
+                smithay::backend::input::KeyState::Pressed
+            } else {
+                smithay::backend::input::KeyState::Released
+            };
+            crate::keybinds::on_key_event(state, keycode, key_state, 0);
+            let _ = reply.send("ok\n".into());
+        }
         DebugCmd::Orientation(o) => {
             state.set_device_orientation(o);
             let _ = reply.send("ok\n".into());
@@ -626,6 +665,26 @@ mod tests {
         assert!(parse_line("touch 10", W, H).is_err());
         assert!(parse_line("touch -1 20", W, H).is_err()); // out of bounds
         assert!(parse_line("touch 10 20 30", W, H).is_err());
+    }
+
+    #[test]
+    fn parses_held_key_verbs() {
+        assert_eq!(
+            parse_line("keydown Super_L", W, H).unwrap(),
+            DebugCmd::KeyHold {
+                name: "Super_L".into(),
+                down: true
+            }
+        );
+        assert_eq!(
+            parse_line("keyup Super_L", W, H).unwrap(),
+            DebugCmd::KeyHold {
+                name: "Super_L".into(),
+                down: false
+            }
+        );
+        assert!(parse_line("keydown", W, H).is_err());
+        assert!(parse_line("keyup Super_L extra", W, H).is_err());
     }
 
     #[test]

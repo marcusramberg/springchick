@@ -69,7 +69,10 @@ long_press_ms = 800
 # Optional `mods` = list of ["Ctrl", "Alt", "Shift", "Super"].
 #
 # Built-in actions: close-app, home, toggle-display, volume-up, volume-down,
-# volume-mute.
+# volume-mute, toggle-fullscreen, search, switcher-next, switcher-prev.
+#
+# switcher-next / switcher-prev are meant to be bound with Super held: each
+# press steps the deck one card, and releasing Super opens the focused one.
 
 [[keybinds.binding]]
 key = "XF86AudioRaiseVolume"
@@ -102,6 +105,32 @@ press = "long"
 command = "systemctl poweroff"
 
 [[keybinds.binding]]
-key = "Escape"
+key = "h"
+mods = ["Super"]
 press = "short"
 action = "home"
+
+[[keybinds.binding]]
+key = "f"
+mods = ["Super"]
+press = "short"
+action = "toggle-fullscreen"
+
+[[keybinds.binding]]
+key = "s"
+mods = ["Super"]
+press = "short"
+action = "search"
+
+[[keybinds.binding]]
+key = "Tab"
+mods = ["Super"]
+press = "short"
+action = "switcher-next"
+
+# Shift turns Tab into ISO_Left_Tab, so the reverse step binds that keysym.
+[[keybinds.binding]]
+key = "ISO_Left_Tab"
+mods = ["Super", "Shift"]
+press = "short"
+action = "switcher-prev"

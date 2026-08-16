@@ -311,6 +311,10 @@ impl State {
             _ => {}
         }
 
+        // A held-modifier switch (Super+Tab) may have queued steps — or the
+        // release itself — while the deck was still animating in.
+        self.poll_kbd_switch();
+
         // Animations that settle to home reset page_count to 1; restore from the model.
         if let UiState::Home { page_count, .. } = &mut self.ui {
             *page_count = self.model.pages.len().max(1);

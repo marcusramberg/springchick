@@ -55,6 +55,17 @@ pub enum Action {
     VolumeDown,
     /// Toggle mute and show the OSD.
     VolumeMute,
+    /// Toggle the foreground app between fullscreen (immersive, rotates with the
+    /// device) and the normal maximized state.
+    ToggleFullscreen,
+    /// Open the search app (the same UI the Home pull-down opens).
+    Search,
+    /// Step the switcher deck one card toward older apps, opening it first when
+    /// it is not up. Meant to be held on a modifier: releasing that modifier
+    /// commits the focused card (see `switcher-prev`).
+    SwitcherNext,
+    /// Step the switcher deck one card toward more-recent apps.
+    SwitcherPrev,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -203,9 +214,34 @@ press = "long"
 command = "systemctl poweroff"
 
 [[keybinds.binding]]
-key = "Escape"
+key = "h"
+mods = ["Super"]
 press = "short"
 action = "home"
+
+[[keybinds.binding]]
+key = "f"
+mods = ["Super"]
+press = "short"
+action = "toggle-fullscreen"
+
+[[keybinds.binding]]
+key = "s"
+mods = ["Super"]
+press = "short"
+action = "search"
+
+[[keybinds.binding]]
+key = "Tab"
+mods = ["Super"]
+press = "short"
+action = "switcher-next"
+
+[[keybinds.binding]]
+key = "ISO_Left_Tab"
+mods = ["Super", "Shift"]
+press = "short"
+action = "switcher-prev"
 "#;
 
 /// Serde mirror of the on-disk shape, kept separate so the public types stay
@@ -329,6 +365,10 @@ fn convert(raw: RawBinding) -> Option<Binding> {
             "volume-up" => Action::VolumeUp,
             "volume-down" => Action::VolumeDown,
             "volume-mute" => Action::VolumeMute,
+            "toggle-fullscreen" => Action::ToggleFullscreen,
+            "search" => Action::Search,
+            "switcher-next" => Action::SwitcherNext,
+            "switcher-prev" => Action::SwitcherPrev,
             other => {
                 warn!(key = %raw.key, action = %other, "skipping keybinding: unknown action");
                 return None;
@@ -676,10 +716,21 @@ mod tests {
             find("XF86PowerOff", PressKind::Long).unwrap().action,
             Action::Command(ref c) if c.contains("poweroff")
         ));
+        let home = find("h", PressKind::Short).unwrap();
+        assert_eq!(home.action, Action::Home);
+        assert!(home.mods.logo, "Home is Super+h, not a bare h");
         assert_eq!(
-            find("Escape", PressKind::Short).unwrap().action,
-            Action::Home
+            find("f", PressKind::Short).unwrap().action,
+            Action::ToggleFullscreen
         );
+        assert_eq!(find("s", PressKind::Short).unwrap().action, Action::Search);
+        assert_eq!(
+            find("Tab", PressKind::Short).unwrap().action,
+            Action::SwitcherNext
+        );
+        let prev = find("ISO_Left_Tab", PressKind::Short).unwrap();
+        assert_eq!(prev.action, Action::SwitcherPrev);
+        assert!(prev.mods.logo && prev.mods.shift);
     }
 
     #[test]

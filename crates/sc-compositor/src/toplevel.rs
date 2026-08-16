@@ -24,12 +24,36 @@ use crate::{content_type, keybinds, provenance, rotation};
 
 impl State {
     pub(crate) fn handle_return_home(&mut self) {
+        // Going Home ends any keyboard switching session, or letting the
+        // modifier go afterwards would commit a card on top of the exit the
+        // user just asked for — Super+h then releasing Super landed back in an
+        // app instead of Home.
+        self.kbd_switch = None;
         transition(
             &mut self.ui,
             UiEvent::ReturnHome {
                 origin: self.last_origin,
             },
         );
+    }
+
+    /// Flip the foreground app between immersive fullscreen and the normal
+    /// maximized state — the keyboard equivalent of the client asking for it
+    /// (`fullscreen_request`), for apps that offer no way to ask.
+    ///
+    /// Only the configure is sent here. Rotation and the OSK's exclusive zone
+    /// follow on the client's commit, via `refresh_landscape_hint`, exactly as
+    /// they do for a client-initiated fullscreen.
+    pub(crate) fn toggle_fullscreen(&mut self) {
+        let Some(surface) = self.foreground_toplevel_surface() else {
+            return;
+        };
+        if self.foreground_is_fullscreen() {
+            self.configure_maximized(&surface);
+        } else {
+            self.configure_fullscreen(&surface);
+        }
+        self.needs_render = true;
     }
 
     /// Launch the pull-down search app. It is a normal Wayland client (a

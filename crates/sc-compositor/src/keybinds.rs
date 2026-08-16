@@ -64,6 +64,13 @@ pub fn resolve(config: Config) -> KeyBindings {
     KeyBindings::new(entries, long_press)
 }
 
+/// Whether `keysym` is the modifier that holds a keyboard switching session
+/// open. Either Super key: which one started the session does not matter, and a
+/// user who chords across both should still land on a card when both are up.
+fn is_switch_modifier(keysym: u32) -> bool {
+    keysym == xkb::keysyms::KEY_Super_L || keysym == xkb::keysyms::KEY_Super_R
+}
+
 /// smithay modifiers → binding modifiers. Lock modifiers are dropped on
 /// purpose: a stuck Caps Lock must not disable every binding.
 pub fn mod_mask(mods: &ModifiersState) -> ModMask {
@@ -116,6 +123,12 @@ pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, t
                     state.keys.tracker.on_press(keysym, mask, now)
                 }
             } else {
+                // Letting the switching modifier go is what picks the focused
+                // switcher card (Super+Tab). The modifier itself is never bound,
+                // so its release still travels on to the client below.
+                if is_switch_modifier(keysym) && !state.session_lock.is_locked() {
+                    state.switcher_release();
+                }
                 state.keys.tracker.on_release(keysym, now)
             };
             match outcome {
@@ -171,7 +184,13 @@ pub fn poll(state: &mut State) {
 pub fn allowed_while_locked(action: &Action) -> bool {
     match action {
         Action::VolumeUp | Action::VolumeDown | Action::VolumeMute | Action::ToggleDisplay => true,
-        Action::Command(_) | Action::CloseApp | Action::Home => false,
+        Action::Command(_)
+        | Action::CloseApp
+        | Action::Home
+        | Action::ToggleFullscreen
+        | Action::Search
+        | Action::SwitcherNext
+        | Action::SwitcherPrev => false,
     }
 }
 
@@ -197,6 +216,12 @@ pub fn run_action(state: &mut State, action: Action) {
         Action::VolumeUp => adjust_volume(state, VolumeChange::Up),
         Action::VolumeDown => adjust_volume(state, VolumeChange::Down),
         Action::VolumeMute => adjust_volume(state, VolumeChange::Mute),
+        Action::ToggleFullscreen => state.toggle_fullscreen(),
+        Action::Search => state.open_search(),
+        // Positive walks the deck toward older apps, so Super+Tab lands on the
+        // previously-used app first.
+        Action::SwitcherNext => state.switcher_step(1),
+        Action::SwitcherPrev => state.switcher_step(-1),
     }
 }
 
@@ -246,6 +271,10 @@ pub fn action_name(action: &Action) -> &'static str {
         Action::VolumeUp => "volume-up",
         Action::VolumeDown => "volume-down",
         Action::VolumeMute => "volume-mute",
+        Action::ToggleFullscreen => "toggle-fullscreen",
+        Action::Search => "search",
+        Action::SwitcherNext => "switcher-next",
+        Action::SwitcherPrev => "switcher-prev",
     }
 }
 
@@ -260,13 +289,15 @@ mod tests {
         assert!(resolve_keysym("XF86PowerOff").is_some());
         assert!(resolve_keysym("Return").is_some());
         assert!(resolve_keysym("Escape").is_some());
+        assert!(resolve_keysym("ISO_Left_Tab").is_some());
         assert_eq!(resolve_keysym("NotAKeysym"), None);
     }
 
     #[test]
     fn every_default_binding_resolves() {
-        // Distinct (keysym, mods) pairs: vol up, vol down, power, escape.
-        assert_eq!(resolve(Config::defaults()).len(), 4);
+        // Distinct (keysym, mods) pairs: vol up, vol down, power, and the five
+        // Super shortcuts (home, fullscreen, search, switcher next/prev).
+        assert_eq!(resolve(Config::defaults()).len(), 8);
     }
 
     #[test]

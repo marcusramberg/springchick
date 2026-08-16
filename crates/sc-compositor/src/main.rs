@@ -28,6 +28,7 @@ mod idle_notify;
 mod input_common;
 mod input_dispatch;
 mod ipc;
+mod kbd_switch;
 mod keybinds;
 mod launcher;
 mod layer_shell;
