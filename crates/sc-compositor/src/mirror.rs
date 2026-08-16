@@ -17,8 +17,10 @@
 //! Consequences of that choice, all deliberate for a first cut:
 //!
 //! - Clients never see a second `wl_output`, so nothing re-lays-out on hotplug.
-//! - A mirror renders only when the primary does; a mirror's own vblank never
-//!   drives a frame. Both panels therefore run at the primary's pace.
+//! - A mirror renders only when the primary does, so both panels run at the
+//!   primary's pace — with one exception: while the phone panel is blanked its
+//!   CRTC issues no vblank at all, so the mirror's own vblank becomes the frame
+//!   clock and the scene is composited for the external display alone.
 //! - Input from a mirror's seat is irrelevant — touch is mapped to the primary.
 
 use std::error::Error;
@@ -42,8 +44,11 @@ pub struct MirrorOutput {
     /// Mode resolution — the letterbox target for the blit.
     pub size: Size<i32, Physical>,
     pub surface: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, ()>,
-    /// This connector's `DPMS` property, so blanking the phone also powers the
-    /// external panel down. `None` if the driver exposes none.
+    /// This connector's `DPMS` property. Blanking the phone panel does *not*
+    /// power this one down — an external display is a second screen the user is
+    /// still watching, so it keeps its power and its frames (see
+    /// `drm_backend::App::apply_blanking`). It is driven for a suspend, and to
+    /// hand the device over dark at shutdown. `None` if the driver exposes none.
     pub dpms: Option<smithay::reexports::drm::control::property::Handle>,
     /// True while a page-flip is in flight on this connector. A mirror that is
     /// still waiting is simply skipped for the frame rather than stalling the

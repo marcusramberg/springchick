@@ -328,6 +328,70 @@ impl Card {
         }
     }
 
+    /// The transform that undoes `t` under [`Transform::transform_rect_in`].
+    ///
+    /// Not `Transform::invert()`: that pairs `Flipped90` with `Flipped270`, but
+    /// as rect mappings both are involutions (`Flipped90` mirrors both axes and
+    /// transposes; `Flipped270` is a plain transpose), so inverting through it
+    /// silently mis-maps every composed-with-a-flip case — which is what winit's
+    /// `Flipped180` output transform composes into. Verified by the round-trip
+    /// test below, which is the only thing keeping this table honest.
+    fn inverse_transform(t: Transform) -> Transform {
+        match t {
+            Transform::_90 => Transform::_270,
+            Transform::_270 => Transform::_90,
+            // Everything else is its own inverse.
+            other => other,
+        }
+    }
+
+    /// A card for a window whose buffer is turned a quarter-turn.
+    ///
+    /// The slot stays exactly where [`Card::centered`] put it — the deck's
+    /// geometry, hit-testing and animations are all portrait. What changes is
+    /// the space the numbers are expressed in: the rotated pass renders with the
+    /// rotation composed onto the output transform, so the card has to be given
+    /// in *that* pass's element space.
+    ///
+    /// Which is why `out_transform` is a parameter rather than an assumption.
+    /// The two backends do not agree on it — winit renders `Flipped180`, DRM
+    /// renders `Normal` — and a mapping hardcoded for one comes out mirrored on
+    /// the other: cards tracked the finger backwards on the phone while looking
+    /// correct in the nested dev window. So the rect is carried through the
+    /// output transform to the framebuffer and back through the *composed*
+    /// transform, which is right for any output transform by construction.
+    fn centered_rotated(
+        output: Size<i32, Physical>,
+        center_x: f32,
+        center_y: f32,
+        scale: f32,
+        corner_radius: f32,
+        rotation: crate::rotation::Rotation,
+        out_transform: Transform,
+    ) -> Self {
+        let slot = Card::centered(output, center_x, center_y, scale, corner_radius);
+        if !rotation.swaps_axes() {
+            return slot;
+        }
+        let rect: Rectangle<i32, Physical> = Rectangle::new(
+            slot.origin(),
+            (slot.size.0 as i32, slot.size.1 as i32).into(),
+        );
+        // Where the unrotated pass would have put it on the framebuffer...
+        let framebuffer = out_transform.transform_size(output);
+        let on_screen = out_transform.transform_rect_in(rect, &output);
+        // ...and what the rotated pass has to be handed to land there.
+        let composed = out_transform + rotation.transform();
+        let turned = Card::inverse_transform(composed).transform_rect_in(on_screen, &framebuffer);
+        Card {
+            x: turned.loc.x,
+            y: turned.loc.y,
+            scale,
+            corner_radius,
+            size: (turned.size.w as f32, turned.size.h as f32),
+        }
+    }
+
     /// Top-left as a render-element point.
     fn origin(&self) -> Point<i32, Physical> {
         Point::<i32, Physical>::from((self.x, self.y))
@@ -381,12 +445,19 @@ fn draw_scaled_card(
     ctx: &DrawCtx<'_>,
     elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
     card: Card,
+    rotation: crate::rotation::Rotation,
 ) -> Result<(), SwapBuffersError> {
     if elements.is_empty() {
         return Ok(());
     }
     let app_scale = ctx.app_scale;
-    let damage = Rectangle::from_size(size);
+    // A turned card draws in the app's own space, so both the transform and the
+    // damage rect are the swapped ones — same pairing as `app_pass_geometry`.
+    let damage = Rectangle::from_size(if rotation.swaps_axes() {
+        rotation.app_size((size.w, size.h)).into()
+    } else {
+        size
+    });
     let scaled: Vec<
         RescaleRenderElement<RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
     > = elements
@@ -403,7 +474,7 @@ fn draw_scaled_card(
         .collect();
 
     let mut frame = renderer
-        .render(framebuffer, size, ctx.transform)
+        .render(framebuffer, size, ctx.transform + rotation.transform())
         .map_err(SwapBuffersError::from)?;
 
     if card.corner_radius > 0.5 {
@@ -734,6 +805,55 @@ fn pass_blurred_app(
     Ok(())
 }
 
+/// The orientation `surface`'s window was last configured at, portrait if it is
+/// not a tracked toplevel (a layer surface, or one already gone).
+fn surface_rotation(ctx: &DrawCtx<'_>, surface: &WlSurface) -> crate::rotation::Rotation {
+    ctx.toplevels
+        .iter()
+        .flatten()
+        .find(|tl| tl.surface.wl_surface() == surface)
+        .map(|tl| tl.rotation)
+        .unwrap_or_default()
+}
+
+/// The size the root of this surface tree actually draws at, in physical px.
+fn drawn_size(
+    elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
+    app_scale: f64,
+) -> Option<Size<i32, Physical>> {
+    let root = elements.first()?;
+    Some(root.geometry(Scale::from(app_scale)).size)
+}
+
+/// The rotation to draw a card with: the orientation the window was configured
+/// at, but only while its committed buffer really is turned relative to the
+/// output.
+///
+/// [`crate::state::AppToplevel::rotation`] records only what we last
+/// *configured*. A backgrounded window can be resized out from under that — any
+/// layer change runs `reconfigure_toplevels` over every toplevel — and turning a
+/// buffer that has since gone back to portrait is exactly as broken as failing
+/// to turn one that is still landscape: it is what made a fullscreen app's card
+/// come back wrong the second time the deck was opened. What the client
+/// committed decides *whether* to turn; the stored value only says which way.
+fn card_rotation(
+    stored: crate::rotation::Rotation,
+    buffer: Option<Size<i32, Physical>>,
+    output: Size<i32, Physical>,
+) -> crate::rotation::Rotation {
+    let Some(buffer) = buffer else {
+        return crate::rotation::Rotation::None;
+    };
+    let turned = buffer.w != buffer.h
+        && output.w != output.h
+        && (buffer.w > buffer.h) != (output.w > output.h);
+    if stored.swaps_axes() && turned {
+        stored
+    } else {
+        crate::rotation::Rotation::None
+    }
+}
+
 /// Pass 2: draw the scaled app card ON TOP of home (no clear), with rounded
 /// corners when the transform carries a non-zero radius (drag-up / zoom).
 /// Consumes `plan.app_elements` — no later pass uses them.
@@ -750,10 +870,30 @@ fn pass_app_card(
     let Some(t) = plan.window_transform else {
         return Ok(());
     };
-    let card = Card::centered(size, t.center_x, t.center_y, t.scale, t.corner_radius);
+    // The window keeps its landscape buffer while the shell's own rotation has
+    // already fallen back to portrait (touching the bar drops focus), so the
+    // card follows the *window's* orientation, not `ctx.rotation`.
+    let rotation = card_rotation(
+        ctx.app_surface
+            .map(|s| surface_rotation(ctx, s))
+            .unwrap_or_default(),
+        drawn_size(&plan.app_elements, ctx.app_scale),
+        size,
+    );
+    let card = Card::centered_rotated(
+        size,
+        t.center_x,
+        t.center_y,
+        t.scale,
+        t.corner_radius,
+        rotation,
+        ctx.transform,
+    );
     // Same blur as a layer surface, but the card is scaled: the surface-local
-    // region scales with it and lands at the card's origin.
-    if let Some(surface) = ctx.app_surface {
+    // region scales with it and lands at the card's origin. Skipped for a turned
+    // card: the blur regions are Skia draws in panel space and the card's own
+    // rect is in the app's rotated space, so they would land somewhere else.
+    if let (Some(surface), false) = (ctx.app_surface, rotation.swaps_axes()) {
         blur_behind(
             ctx.skia,
             size,
@@ -764,7 +904,7 @@ fn pass_app_card(
         );
     }
     let elements = std::mem::take(&mut plan.app_elements);
-    draw_scaled_card(renderer, framebuffer, size, ctx, elements, card)
+    draw_scaled_card(renderer, framebuffer, size, ctx, elements, card, rotation)
 }
 
 /// Frost the shell backdrop (Home, plus anything drawn under it) before the
@@ -815,13 +955,9 @@ fn pass_switcher_cards(
             continue;
         };
         let surface = tl.surface.wl_surface().clone();
-        let placement = Card::centered(
-            size,
-            card.center_x,
-            card.center_y,
-            card.scale,
-            card.corner_radius,
-        );
+        let stored = tl.rotation;
+        // Elements first: whether this card is turned depends on the buffer they
+        // are about to draw, not on the configure that asked for it.
         let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             render_elements_from_surface_tree(
                 renderer,
@@ -834,10 +970,36 @@ fn pass_switcher_cards(
         if elements.is_empty() {
             continue;
         }
+        let rotation = card_rotation(stored, drawn_size(&elements, ctx.app_scale), size);
+        let placement = Card::centered_rotated(
+            size,
+            card.center_x,
+            card.center_y,
+            card.scale,
+            card.corner_radius,
+            rotation,
+            ctx.transform,
+        );
         // Both cues track the surface's real drawn bounds: a backgrounded app
         // keeps its old size, so the nominal card rect would put the shadow and
         // the scrim off the card's actual edges.
-        let (dx, dy, dw, dh) = placement.drawn_bounds(&elements, ctx.app_scale);
+        //
+        // A turned card is the exception: `placement` is in the app's rotated
+        // space, while the shadow and scrim are Skia draws in panel space. Its
+        // buffer fills the slot exactly once turned, so the panel-space slot is
+        // the right rect for both.
+        let (dx, dy, dw, dh) = if rotation.swaps_axes() {
+            let slot = Card::centered(
+                size,
+                card.center_x,
+                card.center_y,
+                card.scale,
+                card.corner_radius,
+            );
+            (slot.x as f32, slot.y as f32, slot.size.0, slot.size.1)
+        } else {
+            placement.drawn_bounds(&elements, ctx.app_scale)
+        };
         let decor = crate::skia_gl::CardDecor {
             x: dx,
             y: dy,
@@ -849,7 +1011,15 @@ fn pass_switcher_cards(
         };
         ctx.skia
             .draw_card_shadow(size.w, size.h, &decor, ctx.skia_flip_y);
-        draw_scaled_card(renderer, framebuffer, size, ctx, elements, placement)?;
+        draw_scaled_card(
+            renderer,
+            framebuffer,
+            size,
+            ctx,
+            elements,
+            placement,
+            rotation,
+        )?;
         ctx.skia
             .draw_card_dim(size.w, size.h, &decor, ctx.skia_flip_y);
     }
@@ -1070,4 +1240,146 @@ pub fn send_frames_surface_tree(surface: &WlSurface, time: u32) {
         },
         |_, _, &()| true,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rotation::Rotation;
+
+    /// FP5 panel size, so the numbers are the real ones.
+    fn output() -> Size<i32, Physical> {
+        Size::from((1224, 2700))
+    }
+
+    /// Where the renderer will actually put a card: the pass hands element-space
+    /// rects to `render(fb, size, transform)`, which maps them by `transform`.
+    fn on_framebuffer(card: &Card, transform: Transform) -> Rectangle<i32, Physical> {
+        let rect: Rectangle<i32, Physical> = Rectangle::new(
+            card.origin(),
+            (card.size.0 as i32, card.size.1 as i32).into(),
+        );
+        let element_space = transform.invert().transform_size(output());
+        transform.transform_rect_in(rect, &element_space)
+    }
+
+    /// Both backends, because they disagree: winit renders `Flipped180`, DRM
+    /// `Normal`. A mapping that is only right for one draws the card mirrored on
+    /// the other — which is exactly the bug this pairing exists to catch.
+    const OUT_TRANSFORMS: [Transform; 2] = [Transform::Normal, Transform::Flipped180];
+
+    #[test]
+    fn a_turned_card_lands_on_the_same_pixels_as_its_upright_slot() {
+        // Deliberately off-centre: a centred card is symmetric under these
+        // transforms and would pass even with the handedness inverted.
+        let (cx, cy, scale) = (500.0_f32, 900.0_f32, 0.62_f32);
+        for out in OUT_TRANSFORMS {
+            let slot = Card::centered(output(), cx, cy, scale, 40.0);
+            let want = on_framebuffer(&slot, out);
+            for rotation in [Rotation::LeftUp, Rotation::RightUp] {
+                let turned = Card::centered_rotated(output(), cx, cy, scale, 40.0, rotation, out);
+                let got = on_framebuffer(&turned, out + rotation.transform());
+                assert!(
+                    (got.loc.x - want.loc.x).abs() <= 1 && (got.loc.y - want.loc.y).abs() <= 1,
+                    "{out:?} + {rotation:?}: landed {:?}, slot {:?}",
+                    got.loc,
+                    want.loc
+                );
+                assert!(
+                    (got.size.w - want.size.w).abs() <= 1 && (got.size.h - want.size.h).abs() <= 1,
+                    "{out:?} + {rotation:?}: size {:?} vs {:?}",
+                    got.size,
+                    want.size
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_turned_card_is_the_slot_swapped_into_app_space() {
+        let (cx, cy, scale) = (500.0_f32, 900.0_f32, 0.62_f32);
+        let slot = Card::centered(output(), cx, cy, scale, 40.0);
+        for out in OUT_TRANSFORMS {
+            for rotation in [Rotation::LeftUp, Rotation::RightUp] {
+                let turned = Card::centered_rotated(output(), cx, cy, scale, 40.0, rotation, out);
+                // Axes swapped, so a landscape buffer fills the portrait slot.
+                assert!(
+                    (turned.size.0 - slot.size.1).abs() <= 1.0
+                        && (turned.size.1 - slot.size.0).abs() <= 1.0,
+                    "{out:?} + {rotation:?}: turned {:?} vs slot {:?}",
+                    turned.size,
+                    slot.size
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_inverse_table_really_inverts_every_transform() {
+        // `Card::inverse_transform` exists because `Transform::invert()` does
+        // not satisfy this for the flipped quarter-turns. If a smithay upgrade
+        // ever makes `invert()` correct, this is the test that says so.
+        let area = output();
+        let rect: Rectangle<i32, Physical> = Rectangle::new((37, 91).into(), (240, 410).into());
+        for t in [
+            Transform::Normal,
+            Transform::_90,
+            Transform::_180,
+            Transform::_270,
+            Transform::Flipped,
+            Transform::Flipped90,
+            Transform::Flipped180,
+            Transform::Flipped270,
+        ] {
+            let mapped = t.transform_rect_in(rect, &area);
+            let back =
+                Card::inverse_transform(t).transform_rect_in(mapped, &t.transform_size(area));
+            assert_eq!(back, rect, "{t:?} did not round-trip");
+        }
+    }
+
+    #[test]
+    fn a_card_turns_only_while_its_buffer_is_actually_landscape() {
+        let portrait = output();
+        let landscape: Size<i32, Physical> = Size::from((2700, 1224));
+        // The window is still drawing the landscape buffer it was configured
+        // for: turn it.
+        assert_eq!(
+            card_rotation(Rotation::LeftUp, Some(landscape), portrait),
+            Rotation::LeftUp
+        );
+        // It has since been reconfigured back to portrait (a layer change
+        // resizes every toplevel) while the stored value still says LeftUp.
+        // Turning it now is the second-open break.
+        assert_eq!(
+            card_rotation(Rotation::LeftUp, Some(portrait), portrait),
+            Rotation::None
+        );
+        // Never-fullscreen windows are left alone whatever they are drawing.
+        assert_eq!(
+            card_rotation(Rotation::None, Some(landscape), portrait),
+            Rotation::None
+        );
+        // Nothing drawn yet: nothing to turn.
+        assert_eq!(
+            card_rotation(Rotation::LeftUp, None, portrait),
+            Rotation::None
+        );
+    }
+
+    #[test]
+    fn an_upright_card_is_untouched_by_the_rotated_constructor() {
+        let plain = Card::centered(output(), 700.0, 900.0, 0.5, 24.0);
+        let same = Card::centered_rotated(
+            output(),
+            700.0,
+            900.0,
+            0.5,
+            24.0,
+            Rotation::None,
+            Transform::Normal,
+        );
+        assert_eq!((plain.x, plain.y), (same.x, same.y));
+        assert_eq!(plain.size, same.size);
+    }
 }

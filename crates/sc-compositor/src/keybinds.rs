@@ -13,7 +13,7 @@ use smithay::utils::SERIAL_COUNTER;
 use std::process::{Child, Command};
 use std::time::Duration;
 use std::time::Instant;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Keybinding runtime state owned by `State`.
 pub struct Keys {
@@ -115,6 +115,22 @@ pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, t
         |state, mods, handle| {
             let keysym = handle.modified_sym().raw();
             let mask = mod_mask(mods);
+            // Named only when the key is part of some binding (or a bare
+            // modifier); anything else is the user's actual typing — including
+            // whatever they type into a lock screen — and must not land in the
+            // journal. The mask is always safe and is the thing worth tracing:
+            // a chord that "does nothing" is usually a modifier that never
+            // cleared.
+            debug!(
+                target: "springchick::debug",
+                "key {} {} mods={mask:?}",
+                if state.keys.tracker.bindings().binds_keysym(keysym) || mask != ModMask::NONE {
+                    xkb::keysym_get_name(handle.modified_sym())
+                } else {
+                    "(unbound)".to_string()
+                },
+                if pressed { "down" } else { "up" },
+            );
             let outcome = if pressed {
                 // A press while the panel is blanked wakes it and fires nothing.
                 if state.blank.on_key_press() == crate::blank::KeyWhileBlanked::Woke {

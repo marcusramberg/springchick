@@ -37,7 +37,7 @@ use smithay::utils::{Clock, DeviceFd, Monotonic, Physical, Rectangle, Size, Tran
 use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::image_copy_capture::CaptureFailureReason;
 
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{accept_client, create_display, State};
 
@@ -86,21 +86,36 @@ const DPMS_ON: property::RawValue = 0;
 const DPMS_OFF: property::RawValue = 3;
 
 impl Drm {
-    /// Drive the primary connector's DPMS property, and every mirror's along
-    /// with it — blanking the phone must not leave an external panel lit with
-    /// the last frame. No-op per connector if the driver exposes no property.
-    fn set_dpms(&self, on: bool) {
+    /// Drive one connector's DPMS property. No-op if the driver exposes none.
+    fn set_connector_dpms(
+        &self,
+        conn: connector::Handle,
+        prop: Option<property::Handle>,
+        on: bool,
+    ) {
+        let Some(prop) = prop else { return };
         let value = if on { DPMS_ON } else { DPMS_OFF };
-        let set = |conn, prop: Option<property::Handle>| {
-            let Some(prop) = prop else { return };
-            if let Err(e) = self.device_fd.set_property(conn, prop, value) {
-                warn!("set DPMS {}: {e}", if on { "on" } else { "off" });
-            }
-        };
-        set(self.connector, self.dpms_prop);
-        for m in &self.mirrors {
-            set(m.connector, m.dpms);
+        if let Err(e) = self.device_fd.set_property(conn, prop, value) {
+            warn!("set DPMS {}: {e}", if on { "on" } else { "off" });
         }
+    }
+
+    /// Power the phone panel on or off.
+    fn set_primary_dpms(&self, on: bool) {
+        self.set_connector_dpms(self.connector, self.dpms_prop, on);
+    }
+
+    /// Power every external panel on or off.
+    fn set_mirror_dpms(&self, on: bool) {
+        for m in &self.mirrors {
+            self.set_connector_dpms(m.connector, m.dpms, on);
+        }
+    }
+
+    /// Whether an external display is attached, i.e. whether blanking the phone
+    /// leaves something on screen that still needs frames.
+    fn mirroring(&self) -> bool {
+        !self.mirrors.is_empty()
     }
 }
 
@@ -317,14 +332,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .handle()
         .insert_source(drm_notifier, |event, _meta, app| match event {
             DrmEvent::VBlank(crtc) => {
-                // A mirror's vblank only releases its own buffer — mirrors are
-                // driven by the primary's render, never the other way round.
+                // A mirror's vblank normally only releases its own buffer —
+                // mirrors are driven by the primary's render, never the other
+                // way round.
                 if crtc != app.drm.crtc {
                     if let Some(m) = app.drm.mirrors.iter_mut().find(|m| m.crtc == crtc) {
                         if let Err(e) = m.surface.frame_submitted() {
                             warn!("mirror frame_submitted error: {e}");
                         }
                         m.pending_flip = false;
+                    }
+                    // ...except while the phone panel is blanked. Then the
+                    // primary CRTC is powered down and issues no vblank at all,
+                    // so the external display's own vblank is the only clock
+                    // left to carry the next frame.
+                    if app.state.blank.is_blanked() && app.state.is_animating(Instant::now()) {
+                        app.render();
                     }
                     return;
                 }
@@ -445,6 +468,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // by the time we send it.
                 app.state.blank.set(true);
                 app.apply_blanking();
+                // Everything goes dark for a suspend, external displays
+                // included: an attached panel keeps its frames while the *phone*
+                // blanks, but the whole machine is about to stop rendering.
+                app.drm.set_mirror_dpms(false);
+                for m in &mut app.drm.mirrors {
+                    m.pending_flip = false;
+                }
                 let _ = acks.send(());
             })
             .map_err(|e| format!("insert sleep source: {e}"))?;
@@ -586,8 +616,9 @@ impl App {
     /// `App` drops right after this returns.
     fn shutdown(&mut self) {
         info!("restoring DRM state for clean handoff");
-        // Never hand over a blanked panel.
-        self.drm.set_dpms(true);
+        // Never hand over a blanked panel — nor a dark external one.
+        self.drm.set_primary_dpms(true);
+        self.drm.set_mirror_dpms(true);
         // Undo any gamma-control client's ramp.
         if let Some([r, g, b]) = &self.drm.orig_gamma {
             if let Err(e) = self.drm.device_fd.set_gamma(self.drm.crtc, r, g, b) {
@@ -658,15 +689,29 @@ impl App {
             return;
         };
         if blanked {
-            info!("blanking panel");
+            // The phone panel powers down either way. An external display is a
+            // second screen the user is still looking at (video out, a
+            // presentation), so it keeps its power *and* its frames: the scene
+            // is still composited, just never flipped to the dark panel. See
+            // `render` and `present_mirrors`.
+            let mirroring = self.drm.mirroring();
+            info!(mirroring, "blanking panel");
             self.drm.pending_flip = false;
-            for m in &mut self.drm.mirrors {
-                m.pending_flip = false;
+            self.drm.set_primary_dpms(false);
+            if mirroring {
+                // Mirrors keep flipping, so their vblanks become the frame
+                // clock; prime the first one.
+                self.render();
+            } else {
+                for m in &mut self.drm.mirrors {
+                    m.pending_flip = false;
+                }
+                self.drm.set_mirror_dpms(false);
             }
-            self.drm.set_dpms(false);
         } else {
             info!("unblanking panel");
-            self.drm.set_dpms(true);
+            self.drm.set_primary_dpms(true);
+            self.drm.set_mirror_dpms(true);
             self.drm.gbm_surface.reset_buffers();
             self.drm.pending_flip = false;
             for m in &mut self.drm.mirrors {
@@ -701,8 +746,20 @@ impl App {
 
     /// Render one frame to the scanout buffer and queue a page-flip.
     fn render(&mut self) {
-        if !self.drm.active || self.drm.pending_flip || self.state.blank.is_blanked() {
+        if !self.drm.active || self.drm.pending_flip {
             return;
+        }
+        // Blanked with nothing else attached: no target at all, so no frame. With
+        // a mirror attached the scene is still composited for it — the phone's
+        // own flip is what gets skipped, further down.
+        if self.state.blank.is_blanked() {
+            // `pending_flip` on the primary is what normally rate-limits this;
+            // with the panel dark there is none, so the mirrors' own in-flight
+            // state is the backstop. Every mirror still waiting means the frame
+            // would be composited and then dropped by `present_mirrors`.
+            if !self.drm.mirroring() || self.drm.mirrors.iter().all(|m| m.pending_flip) {
+                return;
+            }
         }
         // Consuming the request now: this frame reflects current state. A commit
         // arriving after this point re-sets the flag and gets its own render.
@@ -760,13 +817,22 @@ impl App {
         self.state.skia.finish_gpu();
 
         // Queue the page-flip; vblank fires the next render.
-        match self
-            .drm
-            .gbm_surface
-            .queue_buffer(None, Some(flip_damage), ())
-        {
-            Ok(()) => self.drm.pending_flip = true,
-            Err(e) => warn!("queue_buffer failed: {e}"),
+        //
+        // Skipped while the panel is blanked and only a mirror is watching: the
+        // primary CRTC is powered down, so a flip on it would error and its
+        // vblank would never arrive. `next_buffer` keeps handing back this same
+        // un-queued slot, which is exactly the buffer the mirrors read below.
+        if self.state.blank.is_blanked() {
+            debug!(target: "springchick::debug", "mirror-only frame (panel blanked)");
+        } else {
+            match self
+                .drm
+                .gbm_surface
+                .queue_buffer(None, Some(flip_damage), ())
+            {
+                Ok(()) => self.drm.pending_flip = true,
+                Err(e) => warn!("queue_buffer failed: {e}"),
+            }
         }
 
         // Mirror the frame we just composited onto every external display. Done

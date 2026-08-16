@@ -62,6 +62,14 @@ impl KeyBindings {
     fn slot(&self, keysym: u32, mods: ModMask) -> Option<&Slot> {
         self.map.get(&(keysym, mods))
     }
+
+    /// Whether `keysym` appears in any binding, under any modifiers. Only for
+    /// diagnostics — matching a binding needs the modifiers too (see
+    /// [`PressTracker::on_release`], where confusing the two made bare keys
+    /// repeat forever).
+    pub fn binds_keysym(&self, keysym: u32) -> bool {
+        self.map.keys().any(|(k, _)| *k == keysym)
+    }
 }
 
 /// A key currently held down.
@@ -111,14 +119,16 @@ impl PressTracker {
     /// already fire for this press.
     pub fn on_release(&mut self, keysym: u32, now: Instant) -> PressOutcome {
         let Some(held) = self.held.remove(&keysym) else {
-            // Never seen down (or unbound): forward unless it is bound with the
-            // current-unknown modifiers, in which case swallowing is safer than
-            // leaking a stray release to the client.
-            return if self.bindings.map.keys().any(|(k, _)| *k == keysym) {
-                PressOutcome::Swallow
-            } else {
-                PressOutcome::Forward
-            };
+            // No record of this key going down, so `on_press` forwarded it and
+            // the client is holding a press that only this release can end.
+            //
+            // Forward it even when the keysym appears in some binding: it is
+            // bound under *modifiers*, and this press had none. Swallowing on
+            // the mere keysym match is what made a bare `s` repeat forever in a
+            // terminal once `Super+s` existed — the client saw the press, never
+            // the release, and its own key-repeat ran on. A stray release with
+            // no matching press is harmless by comparison.
+            return PressOutcome::Forward;
         };
 
         if held.long_fired {
@@ -325,9 +335,37 @@ mod tests {
     }
 
     #[test]
-    fn release_of_a_never_pressed_key_is_harmless() {
+    fn release_of_a_never_pressed_key_is_forwarded() {
+        // Whatever the client got the press, it must get the release.
         let (mut t, t0) = tracker();
-        assert_eq!(t.on_release(VOL_UP, t0), PressOutcome::Swallow);
+        assert_eq!(t.on_release(VOL_UP, t0), PressOutcome::Forward);
+    }
+
+    #[test]
+    fn a_bare_key_bound_only_under_modifiers_passes_through_both_ways() {
+        // Regression: `Super+s` is a binding, plain `s` is not. Swallowing the
+        // bare release (the keysym does appear in a binding) left the client
+        // holding a press that never ended, so a terminal repeated the letter
+        // until another key arrived.
+        const S: u32 = 0x73;
+        let logo = ModMask {
+            logo: true,
+            ..ModMask::NONE
+        };
+        let mut t = PressTracker::new(KeyBindings::new(
+            vec![(S, logo, PressKind::Short, Action::Command("home".into()))],
+            Duration::from_millis(500),
+        ));
+        let t0 = Instant::now();
+        assert_eq!(t.on_press(S, ModMask::NONE, t0), PressOutcome::Forward);
+        assert_eq!(t.on_release(S, at(t0, 30)), PressOutcome::Forward);
+
+        // ...while the modified chord still fires and reaches no client.
+        assert_eq!(t.on_press(S, logo, at(t0, 100)), PressOutcome::Swallow);
+        assert!(matches!(
+            t.on_release(S, at(t0, 130)),
+            PressOutcome::Fire(_)
+        ));
     }
 
     #[test]
