@@ -33,6 +33,17 @@ impl Blank {
         self.dirty = true;
     }
 
+    /// Drive the flag to a known state, rather than flipping whatever it is now.
+    /// Idempotent: setting it to what it already is changes nothing and leaves
+    /// the backend with no work to do.
+    pub fn set(&mut self, blanked: bool) {
+        if self.blanked == blanked {
+            return;
+        }
+        self.blanked = blanked;
+        self.dirty = true;
+    }
+
     /// Consume the "state changed" flag. Returns `Some(blanked)` once per change.
     pub fn take_change(&mut self) -> Option<bool> {
         self.dirty.then(|| {
@@ -104,6 +115,25 @@ mod tests {
         assert_eq!(b.on_key_press(), KeyWhileBlanked::Woke);
         assert!(!b.is_blanked());
         assert_eq!(b.on_key_press(), KeyWhileBlanked::Normal);
+    }
+
+    /// What the pre-suspend blank relies on: it runs whatever the panel was
+    /// doing, and asking for a state the panel is already in is not a change the
+    /// backend has to act on.
+    #[test]
+    fn setting_a_state_is_idempotent() {
+        let mut b = Blank::new();
+        b.set(true);
+        assert!(b.is_blanked());
+        assert_eq!(b.take_change(), Some(true));
+
+        b.set(true);
+        assert!(b.is_blanked());
+        assert_eq!(b.take_change(), None);
+
+        // And a press after a suspend-blank reads as a wake, not as a binding.
+        assert_eq!(b.on_key_press(), KeyWhileBlanked::Woke);
+        assert!(!b.is_blanked());
     }
 
     #[test]

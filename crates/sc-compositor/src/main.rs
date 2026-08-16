@@ -42,6 +42,7 @@ mod sensor;
 mod session;
 mod session_lock;
 mod skia_gl;
+mod sleep;
 mod state;
 mod switcher;
 mod toplevel;
