@@ -18,10 +18,19 @@ sc-layout = { path = "../sc-layout" }
 sc-icons = { path = "../sc-icons" }
 sc-keys = { path = "../sc-keys" }
 
-# Fork of smithay@ff5fa7d (needed for xkbcommon 0.9 → wvkbd keymap fix) with a
-# one-commit fix for the layer-surface destroy crash (Smithay#1979): panel close
-# (destroy role → nil buffer → commit) tripped a bogus width-0 protocol error.
-smithay = { git = "https://code.bas.es/marcus/smithay.git", rev = "ed8f054605ff13496a1a3ded7a5153c913195f91", default-features = false, features = [
+# Upstream smithay@ff5fa7d (needed for xkbcommon 0.9 → wvkbd keymap fix); same
+# rev niri pins.
+#
+# `use_system_lib` (libwayland-server rather than the pure-Rust wayland-backend)
+# is load-bearing, not an optimisation. Several smithay role handlers post a
+# protocol error from a surface's pre-commit hook after the role object is gone
+# — the "destroy role → attach nil → commit" teardown every Qt/quickshell client
+# does. The Rust backend delivers that error on the dead object and kills the
+# client (layer surfaces: Smithay#1979, `width 0 requested…`, dms panel close;
+# lock surfaces: `Committed before the first ack_configure.`, dms unlock);
+# libwayland drops it. Dropping this feature resurrects both crashes.
+smithay = { git = "https://github.com/Smithay/smithay.git", rev = "ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef", default-features = false, features = [
+  "use_system_lib",
   "backend_winit",
   "backend_egl",
   "renderer_gl",
