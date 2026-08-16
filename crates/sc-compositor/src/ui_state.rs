@@ -194,6 +194,10 @@ pub enum UiState {
         /// rest. Entered from a grab release the deck is *already* in place
         /// (the settle animated it there), so that path starts settled at 1;
         /// only the Home-bar swipe-up plays the rise.
+        ///
+        /// Retargeted back to 0 to play the rise in reverse — that is how a
+        /// Home shortcut leaves the deck (see [`UiEvent::ReturnHome`]), and a
+        /// settled spring aimed at 0 is what tells `Tick` the exit is done.
         enter: Spring,
     },
 }
@@ -367,6 +371,18 @@ pub enum UiEvent {
     /// Enter the switcher deck from Home (bar swipe-up): the deck rises into
     /// place from below the bottom edge.
     OpenSwitcherFromHome { cards: Vec<ToplevelId> },
+    /// Enter the switcher deck from a running app without a gesture (the
+    /// Super+Tab shortcut). The app shrinks into the front card slot exactly as
+    /// a bar-grab release does — same `Settling` path, so the deck it lands in
+    /// is the one `Effect::EnterSwitcher` builds.
+    OpenSwitcherFromApp {
+        cards: Vec<ToplevelId>,
+        origin: ZoomOrigin,
+    },
+    /// Move the switcher's focused card by `delta` steps (negative = toward the
+    /// more-recent end), wrapping at both ends. Springs the carousel there, so
+    /// held-modifier stepping reads as one continuous pan.
+    SwitcherStep { delta: i32 },
     /// A Home-bar gesture that had nowhere to go — rubber-band Home and stay.
     HomeBounce,
     /// Tap a card to open that app. `app_id` is the real id resolved from the
@@ -447,6 +463,10 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                         origin,
                     };
                 }
+                // From the deck there is no window to shrink: play the deck's
+                // own entrance backwards (cards sink, backdrop unblurs) and land
+                // on Home when it settles.
+                UiState::Switcher { enter, .. } => enter.retarget(0.0),
                 _ => {}
             }
             Effect::None
@@ -642,6 +662,12 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 } => {
                     scroll.step(dt);
                     enter.step(dt);
+                    // A settled entrance spring aimed at 0 means the deck has
+                    // finished sinking off the bottom — the Home shortcut's exit.
+                    if enter.target == 0.0 && enter.is_settled() {
+                        *state = UiState::home(0, 1);
+                        return Effect::None;
+                    }
                     // Spring a cancelled close-drag back to rest (with bounce).
                     if let Some(c) = close {
                         if c.releasing {
@@ -701,6 +727,35 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     close: None,
                     enter: Spring::zoom(0.0, 1.0),
                 };
+            }
+            Effect::None
+        }
+        UiEvent::OpenSwitcherFromApp { cards, origin } => {
+            if let UiState::App { toplevel, app_id } = state {
+                if !cards.is_empty() {
+                    let toplevel = *toplevel;
+                    let app_id = app_id.clone();
+                    *state = UiState::Settling {
+                        toplevel,
+                        app_id,
+                        target: NavTarget::Switcher,
+                        progress: Spring::zoom(0.0, 1.0),
+                        origin,
+                        cards,
+                    };
+                }
+            }
+            Effect::None
+        }
+        UiEvent::SwitcherStep { delta } => {
+            if let UiState::Switcher { cards, scroll, .. } = state {
+                let n = cards.len() as i32;
+                if n > 0 {
+                    // Step from where the spring is *headed*, not where it is,
+                    // so repeats while it is still flying each add one card.
+                    let from = scroll.target.round() as i32;
+                    scroll.retarget((from + delta).rem_euclid(n) as f32);
+                }
             }
             Effect::None
         }
@@ -1053,6 +1108,119 @@ mod tests {
         let eff = transition(&mut state, UiEvent::Tick { dt: 1.0 / 60.0 });
         assert!(matches!(eff, Effect::EnterSwitcher));
         assert!(matches!(state, UiState::Home { .. }));
+    }
+
+    #[test]
+    fn super_tab_from_an_app_settles_into_the_deck() {
+        let mut state = UiState::App {
+            toplevel: 1,
+            app_id: "a".into(),
+        };
+        transition(
+            &mut state,
+            UiEvent::OpenSwitcherFromApp {
+                cards: vec![1, 2],
+                origin: ZoomOrigin::card((900.0, 1350.0), 0.62),
+            },
+        );
+        // The app shrinks into the front slot rather than cutting to the deck.
+        let UiState::Settling { target, cards, .. } = &state else {
+            panic!("expected a settle, got {state:?}");
+        };
+        assert!(matches!(target, NavTarget::Switcher));
+        assert_eq!(cards, &vec![1, 2], "the fan is carried through the settle");
+
+        for _ in 0..500 {
+            if matches!(
+                transition(&mut state, UiEvent::Tick { dt: 1.0 / 90.0 }),
+                Effect::EnterSwitcher
+            ) {
+                return;
+            }
+        }
+        panic!("settle never reached the switcher");
+    }
+
+    #[test]
+    fn super_tab_from_an_app_needs_cards() {
+        let mut state = UiState::App {
+            toplevel: 1,
+            app_id: "a".into(),
+        };
+        transition(
+            &mut state,
+            UiEvent::OpenSwitcherFromApp {
+                cards: Vec::new(),
+                origin: ZoomOrigin::icon((0.5, 0.5)),
+            },
+        );
+        assert!(matches!(state, UiState::App { .. }));
+    }
+
+    #[test]
+    fn switcher_step_springs_the_focus_and_wraps() {
+        let mut state = UiState::Switcher {
+            cards: vec![1, 2, 3],
+            scroll: Spring::new(0.0),
+            close: None,
+            enter: Spring::new(1.0),
+        };
+        transition(&mut state, UiEvent::SwitcherStep { delta: 1 });
+        let UiState::Switcher { scroll, .. } = &state else {
+            panic!("left the switcher");
+        };
+        assert_eq!(scroll.target, 1.0);
+        assert!(scroll.value < 1.0, "it springs there rather than jumping");
+
+        // Repeats accumulate off the target, even mid-flight...
+        transition(&mut state, UiEvent::SwitcherStep { delta: 1 });
+        let UiState::Switcher { scroll, .. } = &state else {
+            panic!("left the switcher");
+        };
+        assert_eq!(scroll.target, 2.0);
+
+        // ...and the deck is a ring: past the last card, back to the front.
+        transition(&mut state, UiEvent::SwitcherStep { delta: 1 });
+        let UiState::Switcher { scroll, .. } = &state else {
+            panic!("left the switcher");
+        };
+        assert_eq!(scroll.target, 0.0);
+
+        // Backwards from the front wraps to the last card.
+        transition(&mut state, UiEvent::SwitcherStep { delta: -1 });
+        let UiState::Switcher { scroll, .. } = &state else {
+            panic!("left the switcher");
+        };
+        assert_eq!(scroll.target, 2.0);
+    }
+
+    #[test]
+    fn home_from_the_switcher_sinks_the_deck_instead_of_cutting() {
+        let mut state = UiState::Switcher {
+            cards: vec![1, 2],
+            scroll: Spring::new(0.0),
+            close: None,
+            enter: Spring::new(1.0),
+        };
+        transition(
+            &mut state,
+            UiEvent::ReturnHome {
+                origin: ZoomOrigin::icon((100.0, 200.0)),
+            },
+        );
+        assert!(
+            matches!(state, UiState::Switcher { .. }),
+            "the deck plays its exit first"
+        );
+        assert!(state.needs_animation());
+
+        for _ in 0..500 {
+            transition(&mut state, UiEvent::Tick { dt: 1.0 / 90.0 });
+            if matches!(state, UiState::Home { .. }) {
+                return;
+            }
+        }
+        panic!("the deck never landed on Home");
     }
 
     #[test]

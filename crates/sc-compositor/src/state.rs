@@ -414,6 +414,9 @@ pub(crate) struct State {
     pub switcher_drag: input_common::SwitcherDrag,
     /// Switcher card rects for hit-testing during drag.
     pub switcher_cards: Vec<switcher::CardRect>,
+    /// In-flight held-modifier switching session (Super+Tab). `None` when the
+    /// keyboard is not driving the deck. See [`crate::kbd_switch`].
+    pub kbd_switch: Option<crate::kbd_switch::KbdSwitch>,
     /// In-flight synthetic swipe from the debug socket (dev harness).
     pub active_gesture: Option<debug_input::ActiveGesture>,
     /// In-flight synthetic key hold from the debug socket (dev harness).
@@ -712,6 +715,7 @@ impl State {
             expecting_search: false,
             switcher_drag: input_common::SwitcherDrag::None,
             switcher_cards: Vec::new(),
+            kbd_switch: None,
             active_gesture: None,
             active_key: None,
             active_touch: None,

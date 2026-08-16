@@ -129,7 +129,7 @@ host_layers() {
 # here: wtype uploads its own keymap, the host forwards the raw KEYCODE, and
 # springchick resolves that keycode through *its* keymap — wtype's scratch
 # keycode lands on 9, which is Escape in the default layout, which springchick
-# binds to `home`. So `shot` would silently kick the compositor out of whatever
+# used to bind to `home` (now `Super`+`h`). So `shot` would silently kick the compositor out of whatever
 # state the test had just set up. A pointer move wakes dms the same way and is
 # genuinely inert: with no button held, springchick only records the position.
 poke_seat() {

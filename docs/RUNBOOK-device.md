@@ -92,6 +92,9 @@ command = "foot"
 | `toggle-display` | blank/unblank the panel via DPMS — DRM only, no-op under winit |
 | `volume-up` / `volume-down` | `wpctl` step the default sink ±5% and show the OSD |
 | `volume-mute` | `wpctl` toggle mute and show the OSD |
+| `toggle-fullscreen` | flip the foreground app between immersive fullscreen (rotates with the device) and maximized |
+| `search` | open the search app — the same UI the Home pull-down opens |
+| `switcher-next` / `switcher-prev` | step the switcher deck one card toward older / more-recent apps, opening it first |
 
 The volume actions run `wpctl` (PipeWire), read the level back, and show a vertical OSD bar
 on the right edge (top third, next to the rockers): white fill for the level, amber past
@@ -104,7 +107,17 @@ Defaults, mirroring the niri bindings this replaced:
 | `XF86AudioRaiseVolume` | action `volume-up` | action `close-app` |
 | `XF86AudioLowerVolume` | action `volume-down` | `pkill -SIGRTMIN -f wvkbd-mobintl` |
 | `XF86PowerOff` | action `toggle-display` | `systemctl poweroff` |
-| `Escape` | action `home` | — |
+| `Super`+`h` | action `home` | — |
+| `Super`+`f` | action `toggle-fullscreen` | — |
+| `Super`+`s` | action `search` | — |
+| `Super`+`Tab` | action `switcher-next` | — |
+| `Super`+`Shift`+`Tab` (`ISO_Left_Tab`) | action `switcher-prev` | — |
+
+`Super`+`Tab` is a held-modifier switch: the deck opens (the app shrinks into the front card
+slot, or the deck rises from Home), each further `Tab` springs the carousel one card on and
+wraps at the ends, and **releasing Super opens the focused card** — zooming from wherever
+that card is on screen, even mid-flight. Releasing Super with no session running does
+nothing. Home lives on `Super`+`h` rather than `Escape` so a terminal keeps its own `Escape`.
 
 Timing — a long press fires while the key is **still held**, and suppresses the short one.
 The default threshold is 800ms so a volume nudge does not slip into the long action:

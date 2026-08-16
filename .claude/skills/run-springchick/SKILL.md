@@ -71,7 +71,8 @@ A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`
 (override with `SPRINGCHICK_IPC_SOCK`). The shipped `springchick ipc <verb>`
 client sends one line and prints the reply (exit non-zero on error). Verbs are
 the debug-input gestures: `tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`,
-`down/move/up`, `settle [MS]`, plus the control verb `reload` (re-read
+`keydown NAME` / `keyup NAME`, `down/move/up`, `settle [MS]`, plus the control
+verb `reload` (re-read
 `config.toml`). Used by `nix/vm-switcher-test.nix`; also works
 on-device. From the test driver (root reaching the tester's socket):
 
@@ -142,6 +143,15 @@ input coords are this ACTUAL size, not the FP5 constants 1224x2700).
 `tap X Y` / `swipe X1 Y1 X2 Y2 [MS]` / `settle [MS]`. Coords in the actual
 output size, inclusive bounds. Reply is `ok` or `err <msg>`.
 
+**Chords** need `keydown` / `keyup`, which return immediately and leave the key
+held — `key NAME` auto-releases and takes the one-in-flight slot, so it cannot
+hold a modifier across the next verb. Super+Tab is therefore:
+
+```bash
+$D send "keydown Super_L"; $D send "key Tab"   # deck opens, focus steps
+$D send "keyup Super_L"                        # opens the focused card
+```
+
 To launch a different client: `$D client 'CMD…'` (runs under `foot --hold sh -c`).
 
 ## Run (human path)
@@ -209,8 +219,9 @@ nix develop --command cargo test         # unit tests; bare cargo can't (see Got
 - **Never wake with a synthetic KEYSTROKE.** `wake` used to send `wtype -k
   Shift_L`, which looks harmless and is not: wtype uploads its own keymap, the
   host forwards the raw **keycode**, and springchick resolves it through *its*
-  keymap. wtype's scratch keycode lands on 9 = `Escape`, which springchick binds
-  to `home` — so every `$D shot` silently returned the compositor to Home, and a
+  keymap. wtype's scratch keycode lands on 9 = `Escape`, which springchick used
+  to bind to `home` (it is `Super`+`h` now) — so every `$D shot` silently
+  returned the compositor to Home, and a
   screenshot taken after a gesture showed the result of the screenshot, not the
   gesture. Symptom: the journal shows `keybinding fired action="home"` at the
   moment of the shot. This is why `poke_seat` nudges the pointer instead (inert
