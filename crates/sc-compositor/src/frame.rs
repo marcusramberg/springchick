@@ -171,9 +171,14 @@ impl State {
         }
     }
 
-    /// Step the home-bar fade toward its target and return the current alpha.
+    /// Step the home-bar fade toward its target and return the alpha to draw.
     /// ~0.13s fade (0.15 per 90Hz frame).
-    fn tick_bar_alpha(&mut self) -> f32 {
+    ///
+    /// Two independent things dim the pill, and they multiply: `bar_alpha` is
+    /// the occlusion fade above, while [`crate::bar_hint`] owns the fullscreen
+    /// policy (blink once on the way in, then stay out of the way). Keeping
+    /// them separate means neither has to know about the other's timing.
+    fn tick_bar_alpha(&mut self, now: std::time::Instant) -> f32 {
         let target = self.bar_alpha_target();
         let step = 0.15;
         if (self.bar_alpha - target).abs() <= step {
@@ -183,12 +188,15 @@ impl State {
         } else {
             self.bar_alpha -= step;
         }
-        self.bar_alpha
+        self.bar_hint.advance(now);
+        self.bar_alpha * self.bar_hint.alpha(now)
     }
 
-    /// True while the bar fade is still animating (keeps the DRM loop rendering).
+    /// True while the bar's drawn alpha is still changing — either fade — so the
+    /// DRM loop keeps rendering and the partial-damage fast path stays off.
     pub(crate) fn bar_fading(&self) -> bool {
         (self.bar_alpha - self.bar_alpha_target()).abs() > f32::EPSILON
+            || self.bar_hint.is_animating(std::time::Instant::now())
     }
 
     /// True while anything on screen is still changing, so the DRM loop should
@@ -350,7 +358,7 @@ impl State {
             .osd
             .is_active(osd_now)
             .then(|| (self.osd.level, self.osd.muted, self.osd.alpha(osd_now)));
-        let bar_alpha = self.tick_bar_alpha();
+        let bar_alpha = self.tick_bar_alpha(std::time::Instant::now());
         let (layers_below, layers_above) = self.layers.render_lists(self.dpi);
         // `origin` is the popup's on-screen geometry top-left (used for clamp and
         // hit-test). The buffer is drawn from its (0,0), which sits `geometry.loc`

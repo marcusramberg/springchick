@@ -13,6 +13,7 @@ mod app_history;
 mod arrange;
 mod backend;
 mod background_effect;
+mod bar_hint;
 mod blank;
 mod capture;
 mod content_type;

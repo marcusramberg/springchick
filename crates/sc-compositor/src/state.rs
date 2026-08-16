@@ -426,6 +426,10 @@ pub(crate) struct State {
     /// In-flight held-modifier switching session (Super+Tab). `None` when the
     /// keyboard is not driving the deck. See [`crate::kbd_switch`].
     pub kbd_switch: Option<crate::kbd_switch::KbdSwitch>,
+    /// Whether the home pill is drawn while an app is fullscreen: it blinks
+    /// once on the way in, then keeps out of the way until the bar is touched.
+    /// Multiplied into `bar_alpha`, which stays the occlusion fade.
+    pub bar_hint: crate::bar_hint::BarHint,
     /// In-flight synthetic swipe from the debug socket (dev harness).
     pub active_gesture: Option<debug_input::ActiveGesture>,
     /// In-flight synthetic key hold from the debug socket (dev harness).
@@ -725,6 +729,7 @@ impl State {
             switcher_drag: input_common::SwitcherDrag::None,
             switcher_cards: Vec::new(),
             kbd_switch: None,
+            bar_hint: crate::bar_hint::BarHint::new(),
             active_gesture: None,
             active_key: None,
             active_touch: None,
