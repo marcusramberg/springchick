@@ -450,6 +450,11 @@ impl State {
             app_popups,
             layer_popups,
             touch_marks,
+            cursor: if self.cursor_overlay && self.cursor_visible {
+                self.last_pointer_pos
+            } else {
+                None
+            },
             lock_view: self.session_lock.view(),
             lock_surface: self.session_lock.wl_surface().cloned(),
             grid_positions,
@@ -517,6 +522,7 @@ impl State {
             frame_time: prep.frame_time,
             osd: prep.osd_view,
             touches: &prep.touch_marks,
+            cursor: prep.cursor,
             lock_view: prep.lock_view,
             lock_surface: prep.lock_surface.as_ref(),
             layers_below: &prep.layers_below,

@@ -368,6 +368,16 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
         let _ = reply.send("ok locked\n".into());
         return;
     }
+    // Synthetic contacts stand in for a finger, so they park the mouse cursor
+    // exactly as a real touch-down does (see `touch::down`).
+    if matches!(
+        cmd,
+        DebugCmd::Down(..) | DebugCmd::Tap(..) | DebugCmd::Swipe { .. }
+    ) && state.cursor_visible
+    {
+        state.cursor_visible = false;
+        state.needs_render = true;
+    }
     match cmd {
         DebugCmd::Down(x, y) => {
             input_common::on_motion(state, x, y); // seed last_pointer_pos first

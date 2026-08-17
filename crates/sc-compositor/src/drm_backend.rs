@@ -18,7 +18,8 @@ use smithay::backend::drm::{
 };
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
-    AbsolutePositionEvent, Event as InputEventTrait, InputEvent, KeyboardKeyEvent,
+    AbsolutePositionEvent, ButtonState, Event as InputEventTrait, InputEvent, KeyboardKeyEvent,
+    PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexProgram};
@@ -227,10 +228,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     crate::publish_wayland_display(&socket_name, true);
     let mut state = State::new(&display, socket_name, (output_size.w, output_size.h));
     state.perf_log = true; // perf logging is the point of this backend
-                           // Advertise zwp_linux_dmabuf so GL clients (GTK4, etc.) share buffers
-                           // zero-copy instead of falling back to slow shm software upload. Passing the
-                           // main device binds version 4 with default feedback, which wl-screenrec
-                           // requires to allocate capture buffers.
+                           // Nothing else draws a cursor on bare KMS. (Nested under winit the host
+                           // compositor draws its own over the window, so that backend leaves this off
+                           // rather than showing two.)
+    state.cursor_overlay = true;
+    // Advertise zwp_linux_dmabuf so GL clients (GTK4, etc.) share buffers
+    // zero-copy instead of falling back to slow shm software upload. Passing the
+    // main device binds version 4 with default feedback, which wl-screenrec
+    // requires to allocate capture buffers.
     let main_device = device_fd.dev_id().ok();
     state.init_dmabuf_global(&display.handle(), renderer.dmabuf_formats(), main_device);
 
@@ -679,6 +684,39 @@ impl App {
                     event.time_msec(),
                 );
             }
+            InputEvent::PointerButton { event } => {
+                let pressed = event.state() == ButtonState::Pressed;
+                debug!(
+                    target: "springchick::debug",
+                    "pointer button: code={} pressed={}",
+                    event.button_code(),
+                    pressed
+                );
+                crate::touch::pointer_button(
+                    &mut self.state,
+                    pressed,
+                    event.button_code(),
+                    event.time_msec(),
+                );
+            }
+            InputEvent::PointerMotionAbsolute { event } => {
+                let x = event.x_transformed(w) as f32;
+                let y = event.y_transformed(h) as f32;
+                debug!(target: "springchick::debug", "pointer motion: abs x={x} y={y}");
+                crate::touch::pointer_motion(&mut self.state, x, y, event.time_msec());
+            }
+            InputEvent::PointerMotion { event } => {
+                let d = event.delta();
+                debug!(target: "springchick::debug", "pointer motion: dx={} dy={}", d.x, d.y);
+                crate::touch::pointer_motion_relative(&mut self.state, d.x, d.y, event.time_msec());
+            }
+            InputEvent::PointerAxis { event } => {
+                crate::touch::pointer_axis_event::<LibinputInputBackend, _>(
+                    &mut self.state,
+                    &event,
+                    event.time_msec(),
+                );
+            }
             _ => {}
         }
     }
@@ -789,6 +827,9 @@ impl App {
             && prep.osd_view.is_none()
             && !self.state.bar_fading()
             && prep.touch_marks.is_empty()
+            // The cursor is a Skia overlay like the rest: excluded from the
+            // damage hint it never reaches scanout.
+            && prep.cursor.is_none()
             && prep.layers_below.is_empty()
             && prep.layers_above.is_empty();
 

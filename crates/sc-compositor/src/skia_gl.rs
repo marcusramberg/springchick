@@ -634,6 +634,62 @@ impl SkiaGl {
             draw_touch_marks(canvas, marks);
         });
     }
+
+    /// Draw the mouse cursor at `(x, y)` (physical pixels). `scale` is the
+    /// output scale (`dpi`) so the arrow is the same apparent size as the rest
+    /// of the chrome on a HiDPI panel.
+    pub fn draw_cursor(
+        &mut self,
+        width: i32,
+        height: i32,
+        x: f32,
+        y: f32,
+        scale: f32,
+        flip_y: bool,
+    ) {
+        self.with_overlay_canvas(width, height, flip_y, |canvas| {
+            draw_cursor_arrow(canvas, x, y, scale);
+        });
+    }
+}
+
+/// Draw a plain left-pointing arrow cursor with its tip exactly at `(x, y)`.
+///
+/// springchick draws its own cursor rather than the client's: `cursor_image` is
+/// a no-op, so a client's `set_cursor` surface is never composited. One fixed
+/// arrow is honest about that — it always points where the click will land,
+/// whatever the client would have preferred to show.
+fn draw_cursor_arrow(canvas: &skia_safe::Canvas, x: f32, y: f32, scale: f32) {
+    // Classic arrow outline in a 12x19 unit box, tip at the origin.
+    const POINTS: [(f32, f32); 7] = [
+        (0.0, 0.0),
+        (0.0, 16.0),
+        (4.0, 12.4),
+        (6.8, 19.0),
+        (9.6, 17.8),
+        (6.9, 11.4),
+        (11.8, 11.4),
+    ];
+    let s = (scale * 8.0).clamp(12.0, 48.0) / 12.0;
+    let pts: Vec<skia_safe::Point> = POINTS
+        .iter()
+        .map(|(px, py)| skia_safe::Point::new(x + px * s, y + py * s))
+        .collect();
+    let path = skia_safe::Path::polygon(&pts, true, None, None);
+
+    // Black outline under a white fill, so the cursor stays visible over both a
+    // dark app and the light home grid.
+    let mut outline = Paint::default();
+    outline.set_anti_alias(true);
+    outline.set_stroke(true);
+    outline.set_stroke_width(1.6 * s);
+    outline.set_color(Color::from_argb(230, 0, 0, 0));
+    canvas.draw_path(&path, &outline);
+
+    let mut fill = Paint::default();
+    fill.set_anti_alias(true);
+    fill.set_color(Color::from_argb(255, 255, 255, 255));
+    canvas.draw_path(&path, &fill);
 }
 
 /// Draw touch indicator marks: a soft filled disc under each held finger, with

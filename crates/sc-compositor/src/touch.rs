@@ -14,7 +14,8 @@ use crate::input_common;
 use crate::touch_viz;
 use crate::State;
 use smithay::backend::input::TouchSlot;
-use smithay::input::pointer::{ButtonEvent, MotionEvent as PointerMotionEvent};
+use smithay::backend::input::{Axis, AxisRelativeDirection, AxisSource};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent as PointerMotionEvent};
 use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Point, SERIAL_COUNTER};
@@ -237,31 +238,74 @@ fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
     }
 }
 
-/// Pointer moved to `(x, y)` (winit/desktop). Forwards to a client surface under
-/// the cursor while a press is held on it, else drives gestures.
+/// Linux `BTN_LEFT`. The only button that drives the shell's own gestures: a
+/// right- or middle-click on Home would otherwise read as a tap and launch
+/// whatever icon is under the cursor.
+const BTN_LEFT: u32 = 0x110;
+
+/// Where the cursor currently is, in output pixels. Before any pointer event has
+/// been seen there is no position at all, and the screen centre is the only
+/// defensible guess — (0, 0) would silently aim every click at the top-left
+/// corner (a layer surface, or the first icon).
+fn cursor_pos(state: &State) -> (f32, f32) {
+    let (w, h) = state.output_size_f();
+    state.last_pointer_pos.unwrap_or((w * 0.5, h * 0.5))
+}
+
+/// Forward a pointer position to a client surface, entering it if the pointer
+/// was elsewhere. `None` leaves whatever surface the pointer was over.
+fn send_motion(state: &mut State, target: Option<Target>, x: f32, y: f32, time: u32) {
+    let ptr = state.seat.get_pointer().unwrap();
+    let (focus, location) = match &target {
+        Some(t) => (
+            Some((t.surface.clone(), t.focus())),
+            to_local(state, t.scale, t.rotated, x, y),
+        ),
+        None => (None, Point::from((x as f64, y as f64))),
+    };
+    ptr.motion(
+        state,
+        focus,
+        &PointerMotionEvent {
+            location,
+            serial: SERIAL_COUNTER.next_serial(),
+            time,
+        },
+    );
+    ptr.frame(state);
+}
+
+/// Pointer moved to `(x, y)` (winit/desktop, or a mouse on DRM). Forwards to a
+/// client surface under the cursor while a press is held on it, else hovers the
+/// surface under it and drives gestures.
 pub fn pointer_motion(state: &mut State, x: f32, y: f32, time: u32) {
     state.last_pointer_pos = Some((x, y));
+    // A real pointer moved: show the cursor (a touch-down hides it again).
+    if !state.cursor_visible {
+        state.cursor_visible = true;
+    }
+    state.needs_render = true;
     // Track the pointer as a touch contact only while a button is held (a
     // gesture press or a client grab), so a bare hover leaves no mark.
     if state.show_touches && (state.pointer_grab || state.pointer_down) {
         state
             .touch_viz
             .contact(touch_viz::POINTER_ID, x, y, std::time::Instant::now());
-        state.needs_render = true;
     }
     if state.pointer_grab {
         if let Some(target) = surface_under(state, x, y) {
-            let ptr = state.seat.get_pointer().unwrap();
-            let event = PointerMotionEvent {
-                location: to_local(state, target.scale, target.rotated, x, y),
-                serial: SERIAL_COUNTER.next_serial(),
-                time,
-            };
-            let focus = target.focus();
-            ptr.motion(state, Some((target.surface, focus)), &event);
-            ptr.frame(state);
+            send_motion(state, Some(target), x, y, time);
             return;
         }
+    }
+    // Hover. With no button held the pointer still enters and leaves client
+    // surfaces, so hover states and cursor-shape requests work as on a desktop —
+    // a touchscreen has no equivalent, which is why this is pointer-only.
+    // Suppressed while a shell gesture owns the press: those coordinates belong
+    // to the gesture, not to whatever surface happens to be underneath.
+    if !state.pointer_down {
+        let target = surface_under(state, x, y);
+        send_motion(state, target, x, y, time);
     }
     if state.session_lock.is_locked() {
         return;
@@ -269,9 +313,10 @@ pub fn pointer_motion(state: &mut State, x: f32, y: f32, time: u32) {
     input_common::on_motion(state, x, y);
 }
 
-/// Pointer button changed (winit/desktop).
+/// Pointer button changed (winit/desktop, or a mouse on DRM).
 pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) {
-    let (x, y) = state.last_pointer_pos.unwrap_or((0.0, 0.0));
+    let (x, y) = cursor_pos(state);
+    state.cursor_visible = true;
     if state.show_touches {
         if pressed {
             state
@@ -322,6 +367,11 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
         if state.session_lock.is_locked() {
             return;
         }
+        // Only a left-click acts as a finger on the shell. Right/middle on empty
+        // Home space do nothing rather than launching the icon under the cursor.
+        if button != BTN_LEFT {
+            return;
+        }
         input_common::on_press(state);
     } else {
         if state.pointer_grab {
@@ -342,8 +392,121 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
         if state.session_lock.is_locked() {
             return;
         }
+        if button != BTN_LEFT {
+            return;
+        }
         input_common::on_release(state);
     }
+}
+
+/// Relative pointer motion (mouse). Accumulates `(dx, dy)` into the tracked
+/// cursor position, clamps to output bounds, then delegates to
+/// [`pointer_motion`] with the resolved absolute position. This is how a
+/// relative-pointer device like a Bluetooth mouse ring drives the shell.
+pub fn pointer_motion_relative(state: &mut State, dx: f64, dy: f64, time: u32) {
+    let (w, h) = state.output_size_f();
+    let (mut x, mut y) = cursor_pos(state);
+    // Clamp to the last addressable pixel, not to `w`/`h`: hit-testing treats
+    // rects as half-open, so a cursor parked exactly on `w` is outside every
+    // one of them.
+    x = (x + dx as f32).clamp(0.0, (w - 1.0).max(0.0));
+    y = (y + dy as f32).clamp(0.0, (h - 1.0).max(0.0));
+    pointer_motion(state, x, y, time);
+}
+
+/// One axis of a scroll event, as libinput reported it.
+#[derive(Clone, Copy, Debug)]
+pub struct AxisMotion {
+    /// Continuous scroll distance in logical pixels. `Some` for finger and
+    /// continuous sources; a zero value from those sources means "scrolling
+    /// stopped" and is sent as `wl_pointer.axis_stop`, not as a zero value.
+    pub amount: Option<f64>,
+    /// Discrete scroll in 1/120ths of a wheel click — the same unit
+    /// `wl_pointer.axis_value120` uses, so it is forwarded unscaled. `Some` for
+    /// wheel sources.
+    pub v120: Option<f64>,
+    /// Whether physical motion matches the axis direction (natural scrolling
+    /// inverts it).
+    pub direction: AxisRelativeDirection,
+}
+
+/// Extract both axes of a backend scroll event and forward them as one frame.
+/// Generic over the backend so winit and libinput share the extraction: an
+/// event carrying *both* axes (a diagonal or tilt scroll) must not lose one, and
+/// `amount` returning `Some(0.0)` on an untouched axis makes "pick the non-`None`
+/// one" the wrong shape.
+pub fn pointer_axis_event<B, E>(state: &mut State, event: &E, time: u32)
+where
+    B: smithay::backend::input::InputBackend,
+    E: smithay::backend::input::PointerAxisEvent<B>,
+{
+    let source = event.source();
+    let read = |axis: Axis| {
+        let amount = event.amount(axis);
+        let v120 = event.amount_v120(axis);
+        // An axis the device did not scroll at all reports nothing on either
+        // measure; skip it so the frame carries only what moved.
+        if amount.is_none() && v120.is_none() {
+            return None;
+        }
+        Some(AxisMotion {
+            amount,
+            v120,
+            direction: event.relative_direction(axis),
+        })
+    };
+    pointer_axis(
+        state,
+        source,
+        read(Axis::Horizontal),
+        read(Axis::Vertical),
+        time,
+    );
+}
+
+/// Pointer scroll/axis event (mouse wheel, touchpad). Forwards to the client
+/// surface under the cursor, if any. When no client is under the cursor the
+/// event is dropped — the shell's gesture system is absolute-touch and has no
+/// meaningful scroll interpretation for a wheel.
+pub fn pointer_axis(
+    state: &mut State,
+    source: AxisSource,
+    horizontal: Option<AxisMotion>,
+    vertical: Option<AxisMotion>,
+    time: u32,
+) {
+    if horizontal.is_none() && vertical.is_none() {
+        return;
+    }
+    let (x, y) = cursor_pos(state);
+    let Some(target) = surface_under(state, x, y) else {
+        return;
+    };
+    send_motion(state, Some(target), x, y, time);
+
+    let mut frame = AxisFrame::new(time).source(source);
+    for (axis, motion) in [(Axis::Horizontal, horizontal), (Axis::Vertical, vertical)] {
+        let Some(m) = motion else { continue };
+        frame = frame.relative_direction(axis, m.direction);
+        match m.amount {
+            // Finger/continuous sources signal the end of a scroll with a zero
+            // amount. A client waiting for `axis_stop` to release its kinetic
+            // scroll never gets it if that is sent as a zero value instead.
+            Some(v) if v == 0.0 && matches!(source, AxisSource::Finger) => {
+                frame = frame.stop(axis);
+            }
+            Some(v) => frame = frame.value(axis, v),
+            None => {}
+        }
+        if let Some(v120) = m.v120 {
+            // Already in 1/120ths of a click, which is exactly what
+            // `wl_pointer.axis_value120` carries — no conversion.
+            frame = frame.v120(axis, v120 as i32);
+        }
+    }
+    let ptr = state.seat.get_pointer().unwrap();
+    ptr.axis(state, frame);
+    ptr.frame(state);
 }
 
 /// A finger touched down at output-pixel `(x, y)`. Routed per-slot: a slot that
@@ -351,6 +514,12 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
 /// a slot on empty space drives the gesture funnel — but only the first such
 /// slot (`gesture_slot`), since the funnel is single-touch.
 pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
+    // A finger took over: park the mouse cursor until the pointer moves again,
+    // the way a laptop hides it while you type.
+    if state.cursor_visible {
+        state.cursor_visible = false;
+        state.needs_render = true;
+    }
     if state.show_touches {
         state
             .touch_viz

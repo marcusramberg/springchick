@@ -237,6 +237,12 @@ fn handle_winit_input(state: &mut State, event: InputEvent<winit::WinitInput>) {
             let y = event.y_transformed(state.output_size.1) as f32;
             touch::pointer_motion(state, x, y, event.time_msec());
         }
+        // Scroll, so a wheel behaves the same nested as on device — otherwise
+        // the DRM axis path has no way to be exercised in development.
+        InputEvent::PointerAxis { event } => {
+            let time = event.time_msec();
+            touch::pointer_axis_event::<winit::WinitInput, _>(state, &event, time);
+        }
         _ => {}
     }
 }
