@@ -103,6 +103,27 @@ mod tests {
     }
 
     #[test]
+    fn target_for_rotated_app_is_the_landscape_area() {
+        // A rotated fullscreen app lives in its own turned space: the area is
+        // the axis-swapped output at that space's origin, so a menu is
+        // unconstrained against the landscape height it can actually use.
+        assert_eq!(
+            unconstrain_target((0, 0, 2400, 1080), (0, 0), (0, 0), 3.0),
+            (0, 0, 800, 360)
+        );
+    }
+
+    #[test]
+    fn clamp_keeps_rotated_popup_inside_landscape_space() {
+        // Same clamp, applied in the app's space: the bound is the turned
+        // output, not the portrait one.
+        assert_eq!(
+            clamp_origin((2300, 900), (300, 400), (2400, 1080)),
+            (2100, 680)
+        );
+    }
+
+    #[test]
     fn target_offsets_by_root_origin_and_parent_coords() {
         // Usable area starts 90px down (a top bar), root drawn at that origin,
         // and the popup's parent sits 20 logical px into the root.

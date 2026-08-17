@@ -151,18 +151,32 @@ fn rect_contains(origin: (i32, i32), size: (i32, i32), x: f32, y: f32) -> bool {
     x >= ox && y >= oy && x < ox + size.0 as f32 && y < oy + size.1 as f32
 }
 
+/// The point popup rects are hit-tested against. While the app is rotated the
+/// only popups on screen are its own (layer popups are dropped by
+/// `active_popups`), and they are placed and drawn in the app's turned space —
+/// so the tap has to be turned into that space before it is compared.
+fn popup_point(state: &State, x: f32, y: f32) -> (f32, f32) {
+    if state.rotation.swaps_axes() {
+        state.rotation.map_input(x, y, state.output_size)
+    } else {
+        (x, y)
+    }
+}
+
 /// Topmost open popup under `(x, y)`, with its physical origin and coord scale.
 fn popup_under(state: &State, x: f32, y: f32) -> Option<Target> {
     let popups = state.active_popups();
+    let (px, py) = popup_point(state, x, y);
     let i = popups
         .iter()
-        .rposition(|(_, origin, size)| rect_contains(*origin, *size, x, y))?;
+        .rposition(|(_, origin, size)| rect_contains(*origin, *size, px, py))?;
     let (kind, origin, _) = &popups[i];
-    Some(Target::at(
-        kind.wl_surface().clone(),
-        (origin.0 as f64, origin.1 as f64),
-        state.dpi,
-    ))
+    Some(Target {
+        surface: kind.wl_surface().clone(),
+        origin: (origin.0 as f64, origin.1 as f64),
+        scale: state.dpi,
+        rotated: state.rotation.swaps_axes(),
+    })
 }
 
 /// What a press should do with respect to open popups.
@@ -204,9 +218,10 @@ fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
         .iter()
         .map(|(kind, _, _)| state.popup_has_grab(kind.wl_surface()))
         .collect();
+    let (px, py) = popup_point(state, x, y);
     let hit = popups
         .iter()
-        .rposition(|(_, origin, size)| rect_contains(*origin, *size, x, y));
+        .rposition(|(_, origin, size)| rect_contains(*origin, *size, px, py));
     // Which popups to close: the set `popups_to_dismiss` would close for this
     // hit (whole chain on a miss, descendants of the hit popup otherwise),
     // restricted to grabbing popups — non-grab popups are never force-closed.
@@ -225,11 +240,12 @@ fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
     match hit {
         Some(i) => {
             let (kind, origin, _) = &popups[i];
-            PopupPress::Route(Target::at(
-                kind.wl_surface().clone(),
-                (origin.0 as f64, origin.1 as f64),
-                state.dpi,
-            ))
+            PopupPress::Route(Target {
+                surface: kind.wl_surface().clone(),
+                origin: (origin.0 as f64, origin.1 as f64),
+                scale: state.dpi,
+                rotated: state.rotation.swaps_axes(),
+            })
         }
         // Missed every popup. Only a modal (grabbing) popup consumes the tap;
         // if nothing grabbing was open, `dismiss` is empty and we fall through.

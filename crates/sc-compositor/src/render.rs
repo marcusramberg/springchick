@@ -276,6 +276,7 @@ fn draw_layer(
     ctx: &DrawCtx<'_>,
     surface: &WlSurface,
     origin: (i32, i32),
+    rotation: crate::rotation::Rotation,
 ) -> Result<(), SwapBuffersError> {
     // `origin` is physical; `app_scale` (= output `dpi`) scales the surface's
     // logical geometry to physical. Layer clients render at fractional scale
@@ -287,9 +288,20 @@ fn draw_layer(
     if elements.is_empty() {
         return Ok(());
     }
-    let damage = Rectangle::from_size(size);
+    // A popup of a rotated app is placed in the app's turned space, so it draws
+    // in that space too: same composed transform and axis-swapped damage as the
+    // app pass. Anything else draws portrait, straight onto the output.
+    let (transform, damage) = if rotation.swaps_axes() {
+        let app_size: Size<i32, Physical> = rotation.app_size((size.w, size.h)).into();
+        (
+            ctx.transform + rotation.transform(),
+            Rectangle::from_size(app_size),
+        )
+    } else {
+        (ctx.transform, Rectangle::from_size(size))
+    };
     let mut frame = renderer
-        .render(framebuffer, size, ctx.transform)
+        .render(framebuffer, size, transform)
         .map_err(SwapBuffersError::from)?;
     if let Err(e) = draw_render_elements(&mut frame, scale, &elements, &[damage]) {
         warn!(?e, "failed to draw layer surface");
@@ -1053,22 +1065,31 @@ fn pass_overlays(
 ) -> Result<(), SwapBuffersError> {
     // Borrowed, not collected: this runs every frame, and `ctx.skia` below is a
     // disjoint field from the three slices being chained.
-    let overlays = ctx.app_popups.iter().chain(
-        ctx.layers_above
+    let app_rotation = ctx.rotation;
+    let (app_popups, layers_above, layer_popups) =
+        (ctx.app_popups, ctx.layers_above, ctx.layer_popups);
+    let overlays = app_popups.iter().map(|e| (e, app_rotation)).chain(
+        layers_above
             .iter()
-            .chain(ctx.layer_popups)
-            .filter(|_| !rotated),
+            .chain(layer_popups)
+            .filter(|_| !rotated)
+            .map(|e| (e, crate::rotation::Rotation::None)),
     );
-    for (surface, origin) in overlays {
-        blur_behind(
-            ctx.skia,
-            size,
-            surface,
-            *origin,
-            ctx.app_scale,
-            ctx.skia_flip_y,
-        );
-        draw_layer(renderer, framebuffer, size, ctx, surface, *origin)?;
+    for ((surface, origin), rotation) in overlays {
+        // Skia draws portrait, in output space; a turned popup's backdrop rects
+        // are in the app's space, so blurring them would smear the wrong strip
+        // of screen. Skip it while rotated — the popup itself still draws.
+        if !rotation.swaps_axes() {
+            blur_behind(
+                ctx.skia,
+                size,
+                surface,
+                *origin,
+                ctx.app_scale,
+                ctx.skia_flip_y,
+            );
+        }
+        draw_layer(renderer, framebuffer, size, ctx, surface, *origin, rotation)?;
     }
     Ok(())
 }
