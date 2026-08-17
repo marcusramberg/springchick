@@ -103,6 +103,9 @@ impl CompositorHandler for State {
         // stopped), which is what the auto-landscape hint keys off.
         if self.app_focus_surface().as_ref() == Some(surface) {
             self.refresh_landscape_hint();
+            // ...and it may be the first commit at the size a turn configured,
+            // which is what ends the rotation fade's dark stretch.
+            self.note_rotation_commit(surface);
         }
     }
 }

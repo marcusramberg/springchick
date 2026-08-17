@@ -103,6 +103,13 @@ pub struct Config {
     /// Scheduler utilization floor (`util_min`) applied to the render thread
     /// while it is drawing. See [`UclampMin`].
     pub uclamp_min: UclampMin,
+    /// How long (ms) one accelerometer reading must hold before the app is
+    /// turned to match it. Debounces the flip that happens the moment the phone
+    /// crosses the diagonal. `0` turns as soon as the sensor reports.
+    pub rotation_settle_ms: u64,
+    /// How long (ms) each half of the dip-to-black that covers an orientation
+    /// change takes. `0` disables the transition (instant swap).
+    pub rotation_fade_ms: u64,
     pub bindings: Vec<Binding>,
 }
 
@@ -152,6 +159,15 @@ pub const DEFAULT_PREFER_NO_CSD: bool = true;
 /// from CPU topology, because the useful value is the little cluster's capacity
 /// and that differs per device (382 on the FP5).
 pub const DEFAULT_UCLAMP_MIN: UclampMin = UclampMin::Auto;
+
+/// Orientation debounce when `[main]` does not say otherwise. Long enough to sit
+/// out a hand wobbling past the diagonal, short enough that a deliberate turn
+/// still feels like a response to what the user did.
+pub const DEFAULT_ROTATION_SETTLE_MS: u64 = 400;
+
+/// Half-duration of the rotation dip-to-black when `[main]` does not say
+/// otherwise: out in 130ms, back in 130ms around the swap.
+pub const DEFAULT_ROTATION_FADE_MS: u64 = 130;
 
 /// Parse the `uclamp_min` value: `"auto"`, `"off"`, or 0..=1024 (`0` = off).
 /// Anything else is dropped with a warning and the default applies.
@@ -271,6 +287,8 @@ struct RawMain {
     prefer_no_csd: Option<bool>,
     /// `"auto"` (the default), `"off"`, or a number in 0..=1024. `0` means off.
     uclamp_min: Option<toml::Value>,
+    rotation_settle_ms: Option<u64>,
+    rotation_fade_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -305,6 +323,8 @@ impl Config {
                     show_touches: DEFAULT_SHOW_TOUCHES,
                     prefer_no_csd: DEFAULT_PREFER_NO_CSD,
                     uclamp_min: DEFAULT_UCLAMP_MIN,
+                    rotation_settle_ms: DEFAULT_ROTATION_SETTLE_MS,
+                    rotation_fade_ms: DEFAULT_ROTATION_FADE_MS,
                     bindings: Vec::new(),
                 };
             }
@@ -316,6 +336,10 @@ impl Config {
         let show_touches = main.show_touches.unwrap_or(DEFAULT_SHOW_TOUCHES);
         let prefer_no_csd = main.prefer_no_csd.unwrap_or(DEFAULT_PREFER_NO_CSD);
         let uclamp_min = parse_uclamp_min(main.uclamp_min.as_ref());
+        let rotation_settle_ms = main
+            .rotation_settle_ms
+            .unwrap_or(DEFAULT_ROTATION_SETTLE_MS);
+        let rotation_fade_ms = main.rotation_fade_ms.unwrap_or(DEFAULT_ROTATION_FADE_MS);
         let raw = file.keybinds.unwrap_or_default();
 
         let bindings = raw.binding.into_iter().filter_map(convert).collect();
@@ -327,6 +351,8 @@ impl Config {
             show_touches,
             prefer_no_csd,
             uclamp_min,
+            rotation_settle_ms,
+            rotation_fade_ms,
             bindings,
         }
     }
@@ -614,6 +640,21 @@ mod tests {
         let cfg = Config::parse("[main]\ndpi = 2\nidle_blank_secs = 90\n");
         assert_eq!(cfg.dpi, 2.0);
         assert_eq!(cfg.idle_blank_secs, 90);
+    }
+
+    #[test]
+    fn rotation_timings_default_when_main_section_absent() {
+        let cfg = Config::parse("[keybinds]\nlong_press_ms = 800\n");
+        assert_eq!(cfg.rotation_settle_ms, DEFAULT_ROTATION_SETTLE_MS);
+        assert_eq!(cfg.rotation_fade_ms, DEFAULT_ROTATION_FADE_MS);
+    }
+
+    #[test]
+    fn rotation_timings_are_read_from_main_section() {
+        let cfg = Config::parse("[main]\nrotation_settle_ms = 250\nrotation_fade_ms = 0\n");
+        assert_eq!(cfg.rotation_settle_ms, 250);
+        // 0 is meaningful (no transition), not "unset".
+        assert_eq!(cfg.rotation_fade_ms, 0);
     }
 
     #[test]

@@ -102,6 +102,11 @@ mkTest {
         The VM has no accelerometer, so the `orientation` control verb stands in
         for iio-sensor-proxy. It feeds the same `State::set_device_orientation`
         the sensor will, so the policy under test is the real one.
+
+        The turn is not instant: the reading is debounced (`rotation_settle_ms`,
+        400ms) and the swap happens inside a dip to black (`rotation_fade_ms`).
+        The sleeps at each call site cover both, and a screenshot taken during
+        the dip would be uniformly black rather than merely wrong.
         """
         return machine.succeed(
             f"SPRINGCHICK_IPC_SOCK={IPC_SOCK} springchick ipc orientation {orientation}"

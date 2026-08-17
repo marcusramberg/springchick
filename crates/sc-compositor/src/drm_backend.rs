@@ -826,6 +826,9 @@ impl App {
             && !prep.scene.show_home
             && prep.osd_view.is_none()
             && !self.state.bar_fading()
+            // The rotation dip is a Skia overlay like the rest: excluded from
+            // the damage hint it would never reach scanout.
+            && prep.dim <= 0.0
             && prep.touch_marks.is_empty()
             // The cursor is a Skia overlay like the rest: excluded from the
             // damage hint it never reaches scanout.

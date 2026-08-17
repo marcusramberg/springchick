@@ -29,6 +29,18 @@ idle_blank_secs = 600
 # drag-lift card. Other card radii scale proportionally from this.
 card_radius = 120.0
 
+# How long (ms) the accelerometer must report one orientation before a
+# fullscreen app is turned to match it. Debounces the flip that happens as the
+# phone crosses the diagonal, so a wobble on the way to putting it down does not
+# turn the app and turn it straight back. 0 turns as soon as the sensor reports.
+rotation_settle_ms = 400
+
+# Half-duration (ms) of the dip to black that covers an orientation change: the
+# screen fades out over this, the app is re-configured while it is dark, and it
+# fades back in once the app has drawn at its new size. 0 disables the
+# transition and swaps instantly.
+rotation_fade_ms = 130
+
 # Draw a visual indicator under each touch/pointer contact (a filled disc plus a
 # fading ring on release). Off by default; turn on for demo recordings.
 show_touches = false

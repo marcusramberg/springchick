@@ -204,6 +204,9 @@ pub struct DrawCtx<'a> {
     pub layer_popups: &'a [(WlSurface, (i32, i32))],
     /// Home-bar opacity (faded out when the OSK covers it).
     pub bar_alpha: f32,
+    /// Screen-wide black scrim, `0.0`..=`1.0`: the dip that covers an
+    /// orientation change. `0.0` on any ordinary frame.
+    pub dim: f32,
     /// App id of the icon currently pressed on Home (draws a press highlight).
     pub pressed_app: Option<&'a str>,
     /// Apps launching but not yet showing a window, as `(app_id, seconds since
@@ -1162,6 +1165,10 @@ pub fn draw_scene(
     pass_switcher_cards(renderer, &mut *framebuffer, size, ctx)?;
     pass_overlays(renderer, &mut *framebuffer, size, ctx, plan.rotated)?;
     pass_chrome(size, ctx, plan.rotated);
+    // Over everything, chrome included: while the screen is dipped for a turn
+    // there is nothing worth showing through it.
+    ctx.skia
+        .draw_screen_dim(size.w, size.h, ctx.dim, ctx.skia_flip_y);
 
     send_frame_callbacks(ctx);
     Ok(damage_hint)

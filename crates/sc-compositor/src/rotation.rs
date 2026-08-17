@@ -19,8 +19,16 @@
 //!
 //! The rotation is expressed as a [`Transform`] applied on top of the output
 //! transform when rendering the app, with input mapped through its inverse.
+//!
+//! Two things stand between the sensor and that transform, both here and both
+//! pure: [`Settle`] debounces the reading (the sensor flips the moment the phone
+//! crosses the diagonal, so a wobble used to turn the app and turn it straight
+//! back), and [`Fade`] dips the screen to black around the swap, because the
+//! client keeps drawing its old, now wrongly-shaped buffer until it gets round
+//! to the resize and that stretched frame is the ugliest part of a turn.
 
 use smithay::utils::Transform;
+use std::time::{Duration, Instant};
 
 /// How the device is physically held, from iio-sensor-proxy's
 /// `AccelerometerOrientation` property.
@@ -140,6 +148,225 @@ impl Rotation {
             Rotation::RightUp => (y, output.0 as f32 - x),
         }
     }
+}
+
+/// Debounce for accelerometer reports.
+///
+/// The sensor flips the moment the phone passes the diagonal, so a wobble on the
+/// way to putting it down — or a hand that overshoots and comes back — used to
+/// re-configure the app twice in a few frames. Nothing is acted on until one
+/// orientation has held still for `hold`.
+///
+/// Clock-free: the caller passes `now`, so tests drive it with synthetic time.
+/// [`Self::observe`] takes what the sensor said; [`Self::poll`] is called once a
+/// frame and yields an orientation only once it has settled.
+#[derive(Clone, Copy, Debug)]
+pub struct Settle {
+    hold: Duration,
+    /// The orientation the compositor is acting on right now.
+    committed: DeviceOrientation,
+    /// A different orientation the sensor is reporting, and since when.
+    pending: Option<(DeviceOrientation, Instant)>,
+}
+
+impl Settle {
+    /// `hold_ms == 0` disables the debounce: the next `poll` commits.
+    pub fn new(hold_ms: u64, initial: DeviceOrientation) -> Self {
+        Settle {
+            hold: Duration::from_millis(hold_ms),
+            committed: initial,
+            pending: None,
+        }
+    }
+
+    /// Change the hold time (config reload). Anything already pending keeps its
+    /// start instant and is judged by the new hold.
+    pub fn set_hold(&mut self, hold_ms: u64) {
+        self.hold = Duration::from_millis(hold_ms);
+    }
+
+    /// The sensor reported `o`. Reporting what is already committed cancels a
+    /// pending change — that is the wobble-and-return case, and it must not
+    /// leave a stale candidate waiting to fire.
+    pub fn observe(&mut self, o: DeviceOrientation, now: Instant) {
+        if o == self.committed {
+            self.pending = None;
+            return;
+        }
+        match self.pending {
+            // Same candidate as before: keep its clock running.
+            Some((p, _)) if p == o => {}
+            _ => self.pending = Some((o, now)),
+        }
+    }
+
+    /// Commit a pending orientation once it has held for `hold`. Returns the new
+    /// orientation exactly once per change; `None` otherwise.
+    pub fn poll(&mut self, now: Instant) -> Option<DeviceOrientation> {
+        let (o, since) = self.pending?;
+        if now.duration_since(since) < self.hold {
+            return None;
+        }
+        self.pending = None;
+        self.committed = o;
+        Some(o)
+    }
+
+    /// A change is waiting out its hold, so the render loop must keep ticking —
+    /// otherwise nothing calls [`Self::poll`] and the turn never lands.
+    pub fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+}
+
+/// What [`Fade::tick`] wants the caller to do this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FadeStep {
+    /// Nothing to do.
+    None,
+    /// The screen is fully dark: swap the rotation and re-configure the app now.
+    /// The client's resize — which it does in its own time, at whatever size it
+    /// last drew — happens behind the black.
+    Apply,
+    /// The fade-in finished; the transition is over.
+    Done,
+}
+
+/// The dip-to-black that covers an orientation change.
+///
+/// A rotation is not a thing that can be animated honestly: the client owns its
+/// buffer, so between the configure and its next commit the old (now wrongly
+/// shaped) buffer is all there is to draw, stretched across a screen whose axes
+/// just swapped. Rather than show that, the screen fades out, the swap happens
+/// while it is dark, and it fades back in once the client has drawn at the new
+/// size (or [`Fade::MAX_WAIT`] passes — a client that never redraws must not
+/// leave the screen black).
+///
+/// Clock-free like [`Settle`]: `now` comes from the caller.
+#[derive(Clone, Copy, Debug)]
+pub struct Fade {
+    dur: Duration,
+    phase: Phase,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Idle,
+    /// Fading to black, since.
+    Out(Instant),
+    /// Black, waiting for the client to draw at its new size, since.
+    Wait(Instant),
+    /// Fading back in, since.
+    In(Instant),
+}
+
+impl Fade {
+    /// How long the screen may stay black waiting for a client that is slow to
+    /// redraw (or has decided not to). Long enough for a toolkit round trip,
+    /// short enough that a stuck client is not mistaken for a dead screen.
+    pub const MAX_WAIT: Duration = Duration::from_millis(400);
+
+    /// `ms == 0` disables the transition: [`Self::begin`] asks for the swap
+    /// immediately and nothing is ever dimmed.
+    pub fn new(ms: u64) -> Self {
+        Fade {
+            dur: Duration::from_millis(ms),
+            phase: Phase::Idle,
+        }
+    }
+
+    pub fn set_duration(&mut self, ms: u64) {
+        self.dur = Duration::from_millis(ms);
+    }
+
+    /// The rotation is about to change. Returns `true` when the caller should
+    /// apply it right now — either fades are off, or one is already in flight
+    /// past the point of no return, in which case the in-flight fade covers this
+    /// change too and only the newest rotation is ever drawn.
+    pub fn begin(&mut self, now: Instant) -> bool {
+        if self.dur.is_zero() {
+            return true;
+        }
+        match self.phase {
+            // Already on the way out: the pending swap will pick up whatever the
+            // rotation is by the time it lands.
+            Phase::Out(_) => false,
+            // Dark already (waiting, or fading back in after an earlier turn):
+            // apply immediately and re-dark, so a second turn during the fade-in
+            // never shows the intermediate one.
+            Phase::Wait(_) => true,
+            Phase::In(_) => {
+                self.phase = Phase::Wait(now);
+                true
+            }
+            Phase::Idle => {
+                self.phase = Phase::Out(now);
+                false
+            }
+        }
+    }
+
+    /// Advance the fade. Call once a frame while [`Self::is_active`].
+    pub fn tick(&mut self, now: Instant) -> FadeStep {
+        match self.phase {
+            Phase::Idle => FadeStep::None,
+            Phase::Out(start) if now.duration_since(start) >= self.dur => {
+                self.phase = Phase::Wait(now);
+                FadeStep::Apply
+            }
+            Phase::Out(_) => FadeStep::None,
+            // The client is taking too long (or will never redraw): come back
+            // anyway rather than hold a black screen.
+            Phase::Wait(since) if now.duration_since(since) >= Self::MAX_WAIT => {
+                self.phase = Phase::In(now);
+                FadeStep::None
+            }
+            Phase::Wait(_) => FadeStep::None,
+            Phase::In(start) if now.duration_since(start) >= self.dur => {
+                self.phase = Phase::Idle;
+                FadeStep::Done
+            }
+            Phase::In(_) => FadeStep::None,
+        }
+    }
+
+    /// The client has committed a buffer at the size the new rotation implies:
+    /// there is something correct to show, so start coming back.
+    pub fn content_ready(&mut self, now: Instant) {
+        if matches!(self.phase, Phase::Wait(_)) {
+            self.phase = Phase::In(now);
+        }
+    }
+
+    /// How black the screen is, `0.0` (nothing) to `1.0` (fully dark). Smooth at
+    /// both ends so the dip reads as a fade rather than a cut.
+    pub fn dim(&self, now: Instant) -> f32 {
+        let t = |start: Instant| {
+            if self.dur.is_zero() {
+                1.0
+            } else {
+                (now.duration_since(start).as_secs_f32() / self.dur.as_secs_f32()).clamp(0.0, 1.0)
+            }
+        };
+        match self.phase {
+            Phase::Idle => 0.0,
+            Phase::Out(start) => smoothstep(t(start)),
+            Phase::Wait(_) => 1.0,
+            Phase::In(start) => smoothstep(1.0 - t(start)),
+        }
+    }
+
+    /// Whether a transition is in flight, so the render loop keeps drawing and
+    /// the DRM partial-damage fast path stays off (the dim is a Skia overlay).
+    pub fn is_active(&self) -> bool {
+        !matches!(self.phase, Phase::Idle)
+    }
+}
+
+/// Hermite ease, so the fade has no hard corner at either end.
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 #[cfg(test)]
@@ -303,5 +530,161 @@ mod tests {
             DeviceOrientation::from_sensor("sideways-ish"),
             DeviceOrientation::Undefined
         );
+    }
+
+    // --- the debounce ---
+
+    const HOLD: u64 = 400;
+
+    fn settle() -> Settle {
+        Settle::new(HOLD, DeviceOrientation::Normal)
+    }
+
+    #[test]
+    fn an_orientation_commits_only_after_it_has_held() {
+        let t0 = Instant::now();
+        let mut s = settle();
+        s.observe(DeviceOrientation::LeftUp, t0);
+        assert!(s.is_pending());
+        assert_eq!(s.poll(t0 + Duration::from_millis(399)), None);
+        assert_eq!(
+            s.poll(t0 + Duration::from_millis(400)),
+            Some(DeviceOrientation::LeftUp)
+        );
+        // Reported exactly once.
+        assert_eq!(s.poll(t0 + Duration::from_millis(500)), None);
+        assert!(!s.is_pending());
+    }
+
+    #[test]
+    fn a_wobble_back_to_where_it_was_never_fires() {
+        let t0 = Instant::now();
+        let mut s = settle();
+        s.observe(DeviceOrientation::LeftUp, t0);
+        s.observe(DeviceOrientation::Normal, t0 + Duration::from_millis(100));
+        assert!(!s.is_pending());
+        assert_eq!(s.poll(t0 + Duration::from_secs(10)), None);
+    }
+
+    #[test]
+    fn switching_candidate_restarts_the_hold() {
+        let t0 = Instant::now();
+        let mut s = settle();
+        s.observe(DeviceOrientation::LeftUp, t0);
+        s.observe(DeviceOrientation::RightUp, t0 + Duration::from_millis(300));
+        // 400ms after the *first* report, but only 100ms into the second.
+        assert_eq!(s.poll(t0 + Duration::from_millis(400)), None);
+        assert_eq!(
+            s.poll(t0 + Duration::from_millis(700)),
+            Some(DeviceOrientation::RightUp)
+        );
+    }
+
+    #[test]
+    fn repeating_the_same_candidate_does_not_restart_the_hold() {
+        // iio-sensor-proxy re-emits on every property change; a repeat must not
+        // push the deadline out forever.
+        let t0 = Instant::now();
+        let mut s = settle();
+        s.observe(DeviceOrientation::LeftUp, t0);
+        s.observe(DeviceOrientation::LeftUp, t0 + Duration::from_millis(300));
+        assert_eq!(
+            s.poll(t0 + Duration::from_millis(400)),
+            Some(DeviceOrientation::LeftUp)
+        );
+    }
+
+    #[test]
+    fn a_zero_hold_commits_on_the_next_poll() {
+        let t0 = Instant::now();
+        let mut s = Settle::new(0, DeviceOrientation::Normal);
+        s.observe(DeviceOrientation::LeftUp, t0);
+        assert_eq!(s.poll(t0), Some(DeviceOrientation::LeftUp));
+    }
+
+    // --- the fade ---
+
+    const FADE: u64 = 120;
+
+    #[test]
+    fn the_swap_happens_while_the_screen_is_black() {
+        let t0 = Instant::now();
+        let mut f = Fade::new(FADE);
+        assert!(!f.begin(t0), "a fade defers the swap");
+        assert!(f.is_active());
+        assert!(f.dim(t0) < 0.01);
+        assert!(f.dim(t0 + Duration::from_millis(60)) > 0.4);
+        assert_eq!(f.tick(t0 + Duration::from_millis(60)), FadeStep::None);
+
+        // Fade-out over: swap now, screen fully dark.
+        let swap = t0 + Duration::from_millis(120);
+        assert_eq!(f.tick(swap), FadeStep::Apply);
+        assert_eq!(f.dim(swap), 1.0);
+        assert_eq!(f.tick(swap + Duration::from_millis(50)), FadeStep::None);
+        assert_eq!(f.dim(swap + Duration::from_millis(50)), 1.0);
+
+        // The client draws at its new size; fade back in.
+        let drew = swap + Duration::from_millis(80);
+        f.content_ready(drew);
+        assert!(f.dim(drew + Duration::from_millis(60)) < 0.6);
+        assert_eq!(f.tick(drew + Duration::from_millis(120)), FadeStep::Done);
+        assert!(!f.is_active());
+        assert_eq!(f.dim(drew + Duration::from_millis(120)), 0.0);
+    }
+
+    #[test]
+    fn a_client_that_never_redraws_does_not_hold_a_black_screen() {
+        let t0 = Instant::now();
+        let mut f = Fade::new(FADE);
+        f.begin(t0);
+        let swap = t0 + Duration::from_millis(120);
+        assert_eq!(f.tick(swap), FadeStep::Apply);
+        // No `content_ready` ever arrives.
+        let give_up = swap + Fade::MAX_WAIT;
+        assert_eq!(f.tick(give_up), FadeStep::None);
+        assert_eq!(f.tick(give_up + Duration::from_millis(120)), FadeStep::Done);
+        assert!(!f.is_active());
+    }
+
+    #[test]
+    fn content_ready_outside_the_dark_is_ignored() {
+        let t0 = Instant::now();
+        let mut f = Fade::new(FADE);
+        // Nothing in flight.
+        f.content_ready(t0);
+        assert!(!f.is_active());
+        // Mid fade-out: the swap has not happened yet, so a commit is the *old*
+        // size and must not cut the fade short.
+        f.begin(t0);
+        f.content_ready(t0 + Duration::from_millis(40));
+        assert_eq!(f.tick(t0 + Duration::from_millis(120)), FadeStep::Apply);
+    }
+
+    #[test]
+    fn a_second_turn_mid_fade_is_covered_by_the_same_dip() {
+        let t0 = Instant::now();
+        let mut f = Fade::new(FADE);
+        assert!(!f.begin(t0));
+        // Turned again while still fading out: no second swap yet, the pending
+        // one picks up the newer rotation.
+        assert!(!f.begin(t0 + Duration::from_millis(40)));
+        let swap = t0 + Duration::from_millis(120);
+        assert_eq!(f.tick(swap), FadeStep::Apply);
+
+        // Turned again while coming back: apply at once and go dark again, so
+        // the intermediate orientation is never shown.
+        f.content_ready(swap);
+        assert!(f.begin(swap + Duration::from_millis(40)));
+        assert_eq!(f.dim(swap + Duration::from_millis(40)), 1.0);
+        assert!(f.is_active());
+    }
+
+    #[test]
+    fn a_zero_duration_fade_is_the_old_instant_behaviour() {
+        let t0 = Instant::now();
+        let mut f = Fade::new(0);
+        assert!(f.begin(t0), "swap immediately");
+        assert!(!f.is_active());
+        assert_eq!(f.dim(t0), 0.0);
     }
 }
