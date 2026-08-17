@@ -224,6 +224,12 @@ pub(crate) struct State {
     /// Idle-blank countdown. Reset by input in the DRM loop; when it elapses the
     /// loop flips `blank`. Inert under winit (which never polls it).
     pub idle: blank::Idle,
+    /// Whether an external display is attached (mirroring the phone panel). Kept
+    /// on `State` because the key path needs it: with a second screen lit, the
+    /// phone panel being blanked is not "the session is asleep", so typing must
+    /// reach the app instead of waking the panel. Maintained by the DRM backend
+    /// on hotplug; always false under winit.
+    pub external_display: bool,
     /// Set when a client commit or input changed on-screen state, so the
     /// vblank-driven DRM loop re-primes a page-flip on the next wake. Inert
     /// under winit (which renders every loop iteration).
@@ -662,6 +668,7 @@ impl State {
             keys: keybinds::Keys::from_config(config),
             blank: blank::Blank::new(),
             idle: blank::Idle::new(idle_blank_secs, std::time::Instant::now()),
+            external_display: false,
             needs_render: false,
             last_present: None,
             osd: osd::Osd::new(),

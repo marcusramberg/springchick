@@ -303,6 +303,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         crtc: crtc_handle,
         orig_gamma,
     };
+    // The key path reads this to decide whether a blanked phone panel means the
+    // session is asleep or merely that the user is watching the other screen.
+    state.external_display = drm.mirroring();
 
     // Duplicate the wayland fds before `display`/`listener` move into `app`, so
     // both can be registered as calloop sources below. Without these the loop
@@ -902,6 +905,7 @@ impl App {
             self.drm.connector,
             self.drm.crtc,
         );
+        self.state.external_display = self.drm.mirroring();
         if self.drm.mirrors.len() != before {
             self.state.needs_render = true;
             self.render();

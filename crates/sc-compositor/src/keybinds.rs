@@ -20,6 +20,9 @@ pub struct Keys {
     pub tracker: PressTracker,
     /// Spawned binding commands, reaped as they exit.
     pub children: Vec<Child>,
+    /// Keysyms whose press the blanking policy ate, so their release is eaten
+    /// too instead of reaching a client that never saw the press.
+    pub swallowed: std::collections::HashSet<u32>,
 }
 
 impl Keys {
@@ -37,6 +40,7 @@ impl Keys {
         Keys {
             tracker: PressTracker::new(bindings),
             children: Vec::new(),
+            swallowed: std::collections::HashSet::new(),
         }
     }
 }
@@ -132,11 +136,27 @@ pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, t
                 if pressed { "down" } else { "up" },
             );
             let outcome = if pressed {
-                // A press while the panel is blanked wakes it and fires nothing.
-                if state.blank.on_key_press() == crate::blank::KeyWhileBlanked::Woke {
-                    PressOutcome::Swallow
-                } else {
-                    state.keys.tracker.on_press(keysym, mask, now)
+                // Blanking policy first: only the key bound to `toggle-display`
+                // (the power button) wakes the panel, and while it stays dark
+                // the key either travels to the app on the external display or
+                // goes nowhere at all.
+                let wake_key = state.keys.tracker.bindings().binds_action(
+                    keysym,
+                    mask,
+                    &Action::ToggleDisplay,
+                );
+                match state.blank.on_key_press(wake_key, state.external_display) {
+                    crate::blank::KeyWhileBlanked::Woke
+                    | crate::blank::KeyWhileBlanked::Swallow => {
+                        // The tracker never saw this press, so its release must
+                        // be held back too — a client that got a release with no
+                        // press repeats the key forever.
+                        state.keys.swallowed.insert(keysym);
+                        PressOutcome::Swallow
+                    }
+                    crate::blank::KeyWhileBlanked::Normal => {
+                        state.keys.tracker.on_press(keysym, mask, now)
+                    }
                 }
             } else {
                 // Letting the switching modifier go is what picks the focused
@@ -145,7 +165,11 @@ pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, t
                 if is_switch_modifier(keysym) && !state.session_lock.is_locked() {
                     state.switcher_release();
                 }
-                state.keys.tracker.on_release(keysym, now)
+                if state.keys.swallowed.remove(&keysym) {
+                    PressOutcome::Swallow
+                } else {
+                    state.keys.tracker.on_release(keysym, now)
+                }
             };
             match outcome {
                 PressOutcome::Forward => FilterResult::Forward,

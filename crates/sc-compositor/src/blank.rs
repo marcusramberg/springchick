@@ -8,7 +8,11 @@
 pub enum KeyWhileBlanked {
     /// The press woke the screen and must not fire its binding.
     Woke,
-    /// Screen was already on; handle the key normally.
+    /// Panel stays dark and the key goes nowhere: nothing is watching, so a
+    /// press in a pocket must not fire a binding either.
+    Swallow,
+    /// Handle the key normally — either the screen is on, or an external display
+    /// is showing the session while the phone panel sleeps.
     Normal,
 }
 
@@ -52,14 +56,31 @@ impl Blank {
         })
     }
 
-    /// A key press arrived. While blanked, the first press only wakes the panel.
-    pub fn on_key_press(&mut self) -> KeyWhileBlanked {
-        if self.blanked {
+    /// A key press arrived while the panel may be blanked.
+    ///
+    /// Only the key that turned the panel off turns it back on (`wake_key`: the
+    /// key bound to `toggle-display`, i.e. the power button). Any other key used
+    /// to wake it, which is wrong the moment a keyboard is attached — every
+    /// keystroke typed at an externally mirrored session yanked the phone panel
+    /// back on.
+    ///
+    /// What the other keys do while dark depends on whether anyone can see the
+    /// session: with an external display attached they are ordinary input and
+    /// travel on to the app; with nothing but the dark phone panel they are
+    /// swallowed, so a key pressed in a pocket cannot fire a binding.
+    pub fn on_key_press(&mut self, wake_key: bool, external_display: bool) -> KeyWhileBlanked {
+        if !self.blanked {
+            return KeyWhileBlanked::Normal;
+        }
+        if wake_key {
             self.blanked = false;
             self.dirty = true;
-            KeyWhileBlanked::Woke
-        } else {
+            return KeyWhileBlanked::Woke;
+        }
+        if external_display {
             KeyWhileBlanked::Normal
+        } else {
+            KeyWhileBlanked::Swallow
         }
     }
 }
@@ -107,14 +128,28 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn a_bound_key_wakes_the_screen_instead_of_firing() {
+    fn the_power_key_wakes_the_screen_instead_of_firing() {
         let mut b = Blank::new();
         assert!(!b.is_blanked());
         b.toggle();
         assert!(b.is_blanked());
-        assert_eq!(b.on_key_press(), KeyWhileBlanked::Woke);
+        assert_eq!(b.on_key_press(true, false), KeyWhileBlanked::Woke);
         assert!(!b.is_blanked());
-        assert_eq!(b.on_key_press(), KeyWhileBlanked::Normal);
+        assert_eq!(b.on_key_press(true, false), KeyWhileBlanked::Normal);
+    }
+
+    /// The regression that motivated `wake_key`: any keystroke used to wake.
+    #[test]
+    fn other_keys_never_wake_the_panel() {
+        let mut b = Blank::new();
+        b.set(true);
+        assert_eq!(b.take_change(), Some(true));
+        // Nothing watching: dark, and the key fires nothing.
+        assert_eq!(b.on_key_press(false, false), KeyWhileBlanked::Swallow);
+        // External display attached: dark phone, but the key is real input.
+        assert_eq!(b.on_key_press(false, true), KeyWhileBlanked::Normal);
+        assert!(b.is_blanked());
+        assert_eq!(b.take_change(), None);
     }
 
     /// What the pre-suspend blank relies on: it runs whatever the panel was
@@ -131,8 +166,9 @@ mod tests {
         assert!(b.is_blanked());
         assert_eq!(b.take_change(), None);
 
-        // And a press after a suspend-blank reads as a wake, not as a binding.
-        assert_eq!(b.on_key_press(), KeyWhileBlanked::Woke);
+        // And the power press after a suspend-blank reads as a wake, not as a
+        // binding.
+        assert_eq!(b.on_key_press(true, false), KeyWhileBlanked::Woke);
         assert!(!b.is_blanked());
     }
 
@@ -143,7 +179,7 @@ mod tests {
         b.toggle();
         assert_eq!(b.take_change(), Some(true));
         assert_eq!(b.take_change(), None);
-        b.on_key_press();
+        b.on_key_press(true, false);
         assert_eq!(b.take_change(), Some(false));
         assert_eq!(b.take_change(), None);
     }
