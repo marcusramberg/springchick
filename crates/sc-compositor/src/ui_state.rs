@@ -64,6 +64,12 @@ fn close_spring() -> Spring {
 /// bounce spring below for a ~3% lift that settles in under a third of a second.
 const HOME_BOUNCE_KICK: f32 = 1.1;
 
+/// Settle progress at which a settle toward the switcher hands the deck over,
+/// instead of waiting for the spring to reach its `is_settled` tolerance. The
+/// remainder is sub-pixel on a phone panel, and the deck can't be stepped or
+/// touched until it exists.
+const SWITCHER_HANDOVER: f32 = 0.985;
+
 /// Origin of a zoom animation: where the window grows from / shrinks to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ZoomOrigin {
@@ -624,7 +630,13 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     ..
                 } => {
                     progress.step(dt);
-                    if progress.is_settled() {
+                    // The deck takes over a hair before the spring's asymptotic
+                    // tail runs out: the last fraction of a percent is invisible
+                    // motion, and holding it back only delays the first card
+                    // step (Super+Tab) or the deck's first touch.
+                    let handover = matches!(target, NavTarget::Switcher)
+                        && progress.value >= SWITCHER_HANDOVER;
+                    if progress.is_settled() || handover {
                         debug!(target: "springchick::debug", "Settling resolved target={:?}", target);
                         match target {
                             NavTarget::BackToApp => {
@@ -735,11 +747,18 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 if !cards.is_empty() {
                     let toplevel = *toplevel;
                     let app_id = app_id.clone();
+                    // Keyboard-only entry (Super+Tab): the first card step can't
+                    // start until this settle hands over, so it runs much
+                    // stiffer than a finger's settle — the shrink still reads,
+                    // but the deck is there to step almost at once.
+                    let mut progress = Spring::zoom(0.0, 1.0);
+                    progress.stiffness = 2000.0;
+                    progress.damping = 90.0;
                     *state = UiState::Settling {
                         toplevel,
                         app_id,
                         target: NavTarget::Switcher,
-                        progress: Spring::zoom(0.0, 1.0),
+                        progress,
                         origin,
                         cards,
                     };
@@ -1139,6 +1158,34 @@ mod tests {
             }
         }
         panic!("settle never reached the switcher");
+    }
+
+    /// The deck must be up fast enough that the first Tab step reads as
+    /// immediate — the step can't be applied until the settle hands over.
+    #[test]
+    fn super_tab_reaches_the_deck_within_a_few_frames() {
+        let mut state = UiState::App {
+            toplevel: 1,
+            app_id: "a".into(),
+        };
+        transition(
+            &mut state,
+            UiEvent::OpenSwitcherFromApp {
+                cards: vec![1, 2],
+                origin: ZoomOrigin::card((900.0, 1350.0), 0.62),
+            },
+        );
+        let mut frames = 0;
+        loop {
+            assert!(frames < 20, "deck took {frames} frames at 90Hz to appear");
+            frames += 1;
+            if matches!(
+                transition(&mut state, UiEvent::Tick { dt: 1.0 / 90.0 }),
+                Effect::EnterSwitcher
+            ) {
+                break;
+            }
+        }
     }
 
     #[test]
