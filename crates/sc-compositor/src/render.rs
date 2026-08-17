@@ -183,6 +183,9 @@ pub struct DrawCtx<'a> {
     /// Touch indicator marks (physical coords) drawn on top of everything for
     /// demo recordings. Empty unless `[main].show_touches` is set.
     pub touches: &'a [crate::touch_viz::TouchMark],
+    /// Mouse cursor position in physical pixels, drawn above everything else.
+    /// `None` (the usual case on a phone) draws no cursor at all.
+    pub cursor: Option<(f32, f32)>,
     /// Session-lock view. Anything but `Unlocked` replaces the entire scene —
     /// see [`draw_locked`].
     pub lock_view: crate::session_lock::LockView,
@@ -1089,6 +1092,13 @@ fn pass_chrome(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, rotated: bool) 
         ctx.skia
             .draw_touches_overlay(size.w, size.h, ctx.touches, ctx.skia_flip_y);
     }
+
+    // The cursor is the last thing drawn: it must never be occluded by the very
+    // chrome it is being aimed at.
+    if let Some((x, y)) = ctx.cursor {
+        ctx.skia
+            .draw_cursor(size.w, size.h, x, y, ctx.app_scale as f32, ctx.skia_flip_y);
+    }
 }
 
 /// Drive every client that drew this frame. The foreground app always gets a
@@ -1213,6 +1223,12 @@ fn draw_locked(
     if !ctx.touches.is_empty() {
         ctx.skia
             .draw_touches_overlay(size.w, size.h, ctx.touches, ctx.skia_flip_y);
+    }
+    // A mouse must stay usable on the lock screen — that is where a password
+    // gets typed and a button gets clicked.
+    if let Some((x, y)) = ctx.cursor {
+        ctx.skia
+            .draw_cursor(size.w, size.h, x, y, ctx.app_scale as f32, ctx.skia_flip_y);
     }
 
     if let Some(surface) = ctx.lock_surface {

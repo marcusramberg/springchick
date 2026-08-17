@@ -123,6 +123,10 @@ pub(crate) struct FramePrep {
     pub layer_popups: layer_shell::RenderList,
     /// Touch indicator marks to overlay (empty unless `show_touches`).
     pub touch_marks: Vec<touch_viz::TouchMark>,
+    /// Where to draw the mouse cursor, in physical pixels. `None` when no
+    /// pointer device has moved (or a finger has since taken over), which is the
+    /// normal state on a phone.
+    pub cursor: Option<(f32, f32)>,
     /// What the session lock wants on screen. Anything but
     /// [`session_lock::LockView::Unlocked`] replaces the whole scene.
     pub lock_view: session_lock::LockView,
@@ -293,6 +297,15 @@ pub(crate) struct State {
     pub gesture_slot: Option<smithay::backend::input::TouchSlot>,
     /// Whether the pointer press is currently held on a client surface.
     pub pointer_grab: bool,
+    /// Whether this backend is responsible for drawing the cursor at all. True
+    /// on DRM, where nothing else would; false under winit, where the host
+    /// compositor already draws one over the window.
+    pub cursor_overlay: bool,
+    /// Whether to draw the mouse cursor at `last_pointer_pos`. There is no
+    /// cursor on a phone until a pointer device shows up, so this starts false,
+    /// turns on with the first pointer motion/click, and turns back off on the
+    /// next touch-down — a finger and a cursor on screen at once is noise.
+    pub cursor_visible: bool,
     /// wl_surfaces of popups that issued an `xdg_popup.grab()`. Only these are
     /// modal — they capture touch and dismiss on an outside press. Non-grab
     /// popups (wvkbd's input-enabling hack popup, app tooltips/comboboxes) are
@@ -688,6 +701,8 @@ impl State {
             touch_targets: HashMap::new(),
             gesture_slot: None,
             pointer_grab: false,
+            cursor_overlay: false,
+            cursor_visible: false,
             popup_grabs: std::collections::HashSet::new(),
             bar_alpha: 1.0,
             show_touches,
