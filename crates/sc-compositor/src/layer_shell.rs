@@ -185,6 +185,19 @@ impl LayerShell {
         true
     }
 
+    /// Whether `surface` belongs to a currently *mapped* layer surface.
+    ///
+    /// Used by [`crate::idle_inhibit`]: an idle inhibitor on a shell layer
+    /// surface counts, but only while that surface is actually on screen.
+    pub fn is_mapped_layer(&self, surface: &WlSurface) -> bool {
+        if self.unmapped.contains(surface) {
+            return false;
+        }
+        layer_map_for_output(&self.output)
+            .layer_for_surface(surface, WindowSurfaceType::ALL)
+            .is_some()
+    }
+
     /// Physical usable area (the output minus exclusive-zone reservations).
     pub fn usable(&self, dpi: f64) -> Rect {
         let zone = layer_map_for_output(&self.output).non_exclusive_zone();
