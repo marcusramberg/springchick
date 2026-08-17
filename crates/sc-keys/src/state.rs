@@ -70,6 +70,17 @@ impl KeyBindings {
     pub fn binds_keysym(&self, keysym: u32) -> bool {
         self.map.keys().any(|(k, _)| *k == keysym)
     }
+
+    /// Whether `(keysym, mods)` runs `action` on either a short or a long press.
+    ///
+    /// Both presses count because the caller asking is the blanking policy: the
+    /// power key wakes the panel on the way down, before short vs long is even
+    /// decided.
+    pub fn binds_action(&self, keysym: u32, mods: ModMask, action: &Action) -> bool {
+        self.slot(keysym, mods).is_some_and(|slot| {
+            slot.short.as_ref() == Some(action) || slot.long.as_ref() == Some(action)
+        })
+    }
 }
 
 /// A key currently held down.
