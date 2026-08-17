@@ -708,12 +708,15 @@ impl State {
             .map(|tl| tl.surface.clone())
     }
 
-    /// Whether the foreground app is holding an idle inhibitor (video playing,
-    /// navigation running). Inhibitors from backgrounded apps don't count — see
-    /// [`crate::idle_inhibit`].
+    /// Whether anything visible is holding an idle inhibitor: the foreground app
+    /// (video playing, navigation running) or a mapped layer surface (a shell
+    /// relaying a D-Bus screensaver inhibit). Inhibitors from backgrounded apps
+    /// and unmapped layer surfaces don't count — see [`crate::idle_inhibit`].
     pub(crate) fn is_idle_inhibited(&mut self) -> bool {
         let visible = self.app_focus_surface();
-        self.idle_inhibit.is_inhibited(visible.as_ref())
+        let layers = &self.layers;
+        self.idle_inhibit
+            .is_inhibited(visible.as_ref(), |s| layers.is_mapped_layer(s))
     }
 
     /// Whether a toplevel is a dialog and so must keep client-side decorations.
