@@ -619,6 +619,28 @@ impl SkiaGl {
         });
     }
 
+    /// Black out the whole screen at `alpha`: the dip that covers an orientation
+    /// change (see [`crate::rotation::Fade`]). Drawn last, over app and chrome
+    /// alike — the whole point is that nothing of the turn itself is visible.
+    pub fn draw_screen_dim(&mut self, width: i32, height: i32, alpha: f32, flip_y: bool) {
+        if alpha <= 0.0 {
+            return;
+        }
+        self.with_overlay_canvas(width, height, flip_y, |canvas| {
+            let mut paint = Paint::default();
+            paint.set_color(Color::from_argb(
+                (alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+                0,
+                0,
+                0,
+            ));
+            canvas.draw_rect(
+                skia_safe::Rect::from_xywh(0.0, 0.0, width as f32, height as f32),
+                &paint,
+            );
+        });
+    }
+
     /// Draw the touch indicator marks on top of everything (demo recordings).
     pub fn draw_touches_overlay(
         &mut self,

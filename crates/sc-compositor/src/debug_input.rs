@@ -581,7 +581,13 @@ fn idle(state: &State) -> bool {
         .values()
         .all(|(x, y)| x.is_settled() && y.is_settled());
     is_idle(
-        state.ui.needs_animation() || !grid_settled,
+        state.ui.needs_animation()
+            || !grid_settled
+            // A turn waiting out its debounce, or the fade covering one: a
+            // screenshot taken mid-dip is black, and one taken before the turn
+            // lands shows the old orientation.
+            || state.orientation_settle.is_pending()
+            || state.rotation_fade.is_active(),
         state.active_gesture.is_some()
             || state.active_key.is_some()
             || state.active_touch.is_some(),

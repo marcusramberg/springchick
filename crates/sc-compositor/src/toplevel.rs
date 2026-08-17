@@ -675,23 +675,110 @@ impl State {
         true
     }
 
-    /// The device was turned. Re-derive the rotation and, if it changed, hand
-    /// the fullscreen app its new size — it is drawing at the old one.
+    /// The device was reported as turned — by the accelerometer, or by the
+    /// `orientation` control verb. Nothing turns yet: the reading has to hold
+    /// still for `rotation_settle_ms` first (see [`rotation::Settle`]), because
+    /// the sensor flips the instant the phone crosses the diagonal and a hand
+    /// that wobbles past it used to re-configure the app twice in a few frames.
+    ///
+    /// [`Self::tick_rotation`] is what eventually acts on it.
     pub(crate) fn set_device_orientation(&mut self, orientation: rotation::DeviceOrientation) {
+        let before = self.orientation_settle.is_pending();
+        self.orientation_settle
+            .observe(orientation, std::time::Instant::now());
+        if self.orientation_settle.is_pending() != before {
+            // A candidate appeared (or was cancelled): wake the render loop so
+            // `tick_rotation` actually runs out the hold — on an idle screen
+            // nothing else would ask for a frame.
+            self.needs_render = true;
+        }
+    }
+
+    /// Per-frame rotation work: run out the orientation debounce, then advance
+    /// the fade that covers a turn. Called by `advance_frame`, so both backends
+    /// get it.
+    pub(crate) fn tick_rotation(&mut self, now: std::time::Instant) {
+        if let Some(orientation) = self.orientation_settle.poll(now) {
+            self.apply_device_orientation(orientation, now);
+        }
+        match self.rotation_fade.tick(now) {
+            // The screen is black now: swap under cover of it.
+            rotation::FadeStep::Apply => self.swap_rotation(now),
+            rotation::FadeStep::Done => self.rotation_await_size = None,
+            rotation::FadeStep::None => {}
+        }
+        if self.rotation_fade.is_active() || self.orientation_settle.is_pending() {
+            self.needs_render = true;
+        }
+    }
+
+    /// A settled orientation. If it changes how the app should be turned, start
+    /// the fade — or swap straight away when transitions are off.
+    fn apply_device_orientation(
+        &mut self,
+        orientation: rotation::DeviceOrientation,
+        now: std::time::Instant,
+    ) {
         if orientation == self.device_orientation {
             return;
         }
         info!(target: "springchick::debug", "device orientation {orientation:?}");
         self.device_orientation = orientation;
         let fullscreen = self.foreground_is_fullscreen();
-        if self.refresh_rotation(fullscreen) {
-            if let Some(surface) = self.foreground_toplevel_surface() {
-                self.configure_fullscreen(&surface);
-            }
+        if rotation::desired_rotation(orientation, fullscreen) == self.rotation {
+            return;
+        }
+        // `begin` returns true when there is no dark stretch to wait for.
+        if self.rotation_fade.begin(now) {
+            self.swap_rotation(now);
+        }
+        self.needs_render = true;
+    }
+
+    /// Turn the app: re-derive the rotation and hand the fullscreen app the size
+    /// its new orientation implies. Called with the screen already dark (or with
+    /// fades disabled), because the client keeps drawing its old buffer until it
+    /// gets round to the resize.
+    fn swap_rotation(&mut self, now: std::time::Instant) {
+        let fullscreen = self.foreground_is_fullscreen();
+        let changed = self.refresh_rotation(fullscreen);
+        let configured = changed
+            .then(|| self.foreground_toplevel_surface())
+            .flatten()
+            .map(|surface| self.configure_fullscreen(&surface));
+        self.rotation_await_size = configured;
+        if configured.is_none() {
+            // Nothing was asked to redraw (the app left fullscreen or went away
+            // mid-fade), so there is nothing to wait for: come straight back
+            // rather than sit out the whole `Fade::MAX_WAIT` on black.
+            self.rotation_fade.content_ready(now);
         }
     }
 
-    /// Apply whatever the accelerometer last reported. Called once a tick by
+    /// A foreground-app commit arrived. If it is the first one at the size the
+    /// turn configured, the new orientation is really on screen and the fade can
+    /// come back up.
+    pub(crate) fn note_rotation_commit(&mut self, surface: &WlSurface) {
+        let Some(want) = self.rotation_await_size else {
+            return;
+        };
+        if self.app_focus_surface().as_ref() != Some(surface) {
+            return;
+        }
+        let size = smithay::backend::renderer::utils::with_renderer_surface_state(surface, |s| {
+            s.surface_size()
+        })
+        .flatten();
+        let Some(size) = size else { return };
+        if (size.w, size.h) != want {
+            return;
+        }
+        self.rotation_await_size = None;
+        self.rotation_fade.content_ready(std::time::Instant::now());
+        self.needs_render = true;
+    }
+
+    /// Hand the sensor's latest reading to the debounce. Called once a tick by
     /// both frame loops; a no-op when there is no sensor, or nothing changed.
     pub(crate) fn drain_sensor(&mut self) {
         let Some(latest) = self.sensor.as_ref().and_then(crate::sensor::Sensor::latest) else {
@@ -868,7 +955,10 @@ impl State {
     /// what it is about to be drawn at; handing it the swapped size instead is
     /// what left the pull-down search wider than the screen and its blur region
     /// short of the bottom.
-    pub(crate) fn configure_fullscreen(&mut self, surface: &ToplevelSurface) {
+    ///
+    /// Returns the logical size the client was asked for, which the rotation
+    /// fade matches commits against to know when the turn is really on screen.
+    pub(crate) fn configure_fullscreen(&mut self, surface: &ToplevelSurface) -> (i32, i32) {
         let (ow, oh) = self.rotation.app_size(self.output_size);
         let w = (ow as f64 / self.dpi).round() as i32;
         let h = (oh as f64 / self.dpi).round() as i32;
@@ -883,6 +973,7 @@ impl State {
         });
         surface.send_configure();
         self.record_toplevel_rotation(surface, orientation);
+        (w, h)
     }
 
     /// Remember the orientation a window was just configured at, so its card can

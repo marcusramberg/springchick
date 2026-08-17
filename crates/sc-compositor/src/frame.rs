@@ -241,6 +241,11 @@ impl State {
             || self.active_key.is_some()
             || self.active_touch.is_some()
             || self.pending_settle.is_some()
+            // A turn waiting out its debounce, or the fade covering one. Without
+            // this an orientation reported to an otherwise idle screen never
+            // gets a frame in which to settle, so nothing turns at all.
+            || self.orientation_settle.is_pending()
+            || self.rotation_fade.is_active()
             || self
                 .grid_anim
                 .values()
@@ -261,6 +266,10 @@ impl State {
         // presented. Done first so the snapshot below reflects the same lock
         // state the confirmation is about.
         self.session_lock.tick();
+
+        // Orientation debounce and the fade that covers a turn. Before the scene
+        // is computed, so a rotation that lands this frame is the one drawn.
+        self.tick_rotation(std::time::Instant::now());
 
         self.maybe_engage_arrange_hold();
         self.maybe_open_icon_menu();
@@ -462,6 +471,7 @@ impl State {
             launch_pulses,
             running_apps,
             icon_menu,
+            dim: self.rotation_fade.dim(std::time::Instant::now()),
         }
     }
 
@@ -535,6 +545,7 @@ impl State {
             running_apps: &prep.running_apps,
             arrange,
             icon_menu: prep.icon_menu.as_ref(),
+            dim: prep.dim,
             report_partial_damage,
             last_present: &mut self.last_present,
             grid_positions: &prep.grid_positions,

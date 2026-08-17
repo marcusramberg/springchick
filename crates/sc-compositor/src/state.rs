@@ -147,6 +147,9 @@ pub(crate) struct FramePrep {
     pub running_apps: HashSet<String>,
     /// Open icon context menu, laid out for this frame. `None` when closed.
     pub icon_menu: Option<crate::render::MenuView>,
+    /// How black to paint the whole screen, `0.0`..=`1.0`: the rotation
+    /// transition's dip. `0.0` on any ordinary frame.
+    pub dim: f32,
 }
 
 /// A popup and its clamped physical geometry: `(kind, origin, size)`. Chains are
@@ -390,6 +393,17 @@ pub(crate) struct State {
     /// `Normal` until something says otherwise, so a device with no sensor
     /// behaves exactly as if it were held upright.
     pub device_orientation: rotation::DeviceOrientation,
+    /// Debounce in front of [`Self::device_orientation`]: a reading has to hold
+    /// still for `rotation_settle_ms` before the app is turned. See
+    /// [`rotation::Settle`].
+    pub orientation_settle: rotation::Settle,
+    /// The dip-to-black that covers a turn: the rotation is swapped while the
+    /// screen is dark. See [`rotation::Fade`].
+    pub rotation_fade: rotation::Fade,
+    /// Logical size the foreground app was configured at by the turn currently
+    /// being faded through, so its first commit at that size can end the dark
+    /// stretch early. `None` when no fade is waiting on a client.
+    pub rotation_await_size: Option<(i32, i32)>,
     /// iio-sensor-proxy client. `None` on anything without an accelerometer (a
     /// dev box, the VM), where orientation only ever arrives over the control
     /// socket. See [`crate::sensor`].
@@ -507,6 +521,8 @@ impl State {
         let show_touches = config.show_touches;
         let prefer_no_csd = config.prefer_no_csd;
         let uclamp_min = config.uclamp_min;
+        let config_rotation_settle_ms = config.rotation_settle_ms;
+        let config_rotation_fade_ms = config.rotation_fade_ms;
 
         // v6 so clients like wvkbd that bind wl_compositor@6 can connect.
         let compositor_state = CompositorState::new_v6::<Self>(&dh);
@@ -732,6 +748,12 @@ impl State {
             session_lock,
             rotation: rotation::Rotation::None,
             device_orientation: rotation::DeviceOrientation::Normal,
+            orientation_settle: rotation::Settle::new(
+                config_rotation_settle_ms,
+                rotation::DeviceOrientation::Normal,
+            ),
+            rotation_fade: rotation::Fade::new(config_rotation_fade_ms),
+            rotation_await_size: None,
             sensor: sensor::spawn(),
             landscape_hint: false,
             skia: SkiaGl::new(),
@@ -834,6 +856,10 @@ impl State {
         self.prefer_no_csd = config.prefer_no_csd;
         self.show_touches = config.show_touches;
         self.idle = blank::Idle::new(config.idle_blank_secs, std::time::Instant::now());
+        self.orientation_settle.set_hold(config.rotation_settle_ms);
+        // Takes effect on the next turn; a fade already in flight keeps the
+        // duration it started with rather than jumping mid-dip.
+        self.rotation_fade.set_duration(config.rotation_fade_ms);
         // Same path as startup; `children` (spawned binding commands, still to
         // be reaped) stays on the existing `Keys`.
         self.keys.tracker = keybinds::Keys::from_config(config).tracker;
