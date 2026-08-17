@@ -21,7 +21,14 @@ impl State {
     /// Popups rooted at `root`, ordered root→leaf, as `(kind, phys_origin,
     /// phys_size)`. The origin is clamped so each popup stays fully on-screen.
     /// `root_origin` is where the root surface's `(0, 0)` is drawn, physical.
-    fn popup_chain(&self, root: &WlSurface, root_origin: (i32, i32)) -> Vec<PopupRect> {
+    /// `bound` is the space the origin is clamped into — the output, except for
+    /// popups of a rotated app, which live in the app's turned space.
+    fn popup_chain(
+        &self,
+        root: &WlSurface,
+        root_origin: (i32, i32),
+        bound: (i32, i32),
+    ) -> Vec<PopupRect> {
         let dpi = self.dpi;
         PopupManager::popups_for_surface(root)
             .map(|(kind, loc)| {
@@ -34,7 +41,7 @@ impl State {
                     root_origin.0 + (loc.x as f64 * dpi).round() as i32,
                     root_origin.1 + (loc.y as f64 * dpi).round() as i32,
                 );
-                let clamped = popups::clamp_origin(origin, size, self.output_size);
+                let clamped = popups::clamp_origin(origin, size, bound);
                 (kind, clamped, size)
             })
             .collect()
@@ -43,16 +50,17 @@ impl State {
     /// The rect a new/repositioned popup's positioner is unconstrained against,
     /// in the popup parent's logical space. See [`popups::unconstrain_target`].
     ///
-    /// App-rooted popups get the *usable* area (so a menu never opens under the
-    /// OSK or the home pill); layer-rooted popups (OSK menus) get the whole
-    /// output, since the layer surface itself lives in the reserved strip.
+    /// App-rooted popups get [`State::app_popup_space`] — the usable area, or
+    /// the app's turned space while it is rotated (so a Firefox menu in
+    /// landscape is solved against the landscape height, not the portrait one);
+    /// layer-rooted popups (OSK menus) get the whole output, since the layer
+    /// surface itself lives in the reserved strip.
     pub(crate) fn popup_target(&self, kind: &PopupKind) -> Rectangle<i32, Logical> {
         let root = find_popup_root_surface(kind).ok();
         let app_rooted = root.is_some() && root == self.app_focus_surface();
         let (area, root_origin) = if app_rooted {
-            let u = self.layers.usable(self.dpi);
-            let o = (u.x.round() as i32, u.y.round() as i32);
-            ((o.0, o.1, u.w.round() as i32, u.h.round() as i32), o)
+            let (o, (w, h)) = self.app_popup_space();
+            ((o.0, o.1, w, h), o)
         } else {
             let (below, above) = self.layers.render_lists(self.dpi);
             let origin = root
@@ -115,12 +123,35 @@ impl State {
         }
     }
 
+    /// The space app-rooted popups are laid out in, as `(origin, size)` in
+    /// physical px: normally the usable area, but a rotated app fills the output
+    /// and lives in its own turned space, starting at that space's own origin.
+    /// Everything downstream (clamp, unconstrain target, hit-test, draw) has to
+    /// agree on this or the popup lands somewhere the app never asked for.
+    pub(crate) fn app_popup_space(&self) -> ((i32, i32), (i32, i32)) {
+        if self.rotation.swaps_axes() {
+            return ((0, 0), self.rotation.app_size(self.output_size));
+        }
+        let u = self.layers.usable(self.dpi);
+        (
+            (u.x.round() as i32, u.y.round() as i32),
+            (u.w.round() as i32, u.h.round() as i32),
+        )
+    }
+
     /// Popups parented to the fullscreen app (menus, dropdowns), root→leaf.
     fn app_popups(&self) -> Vec<PopupRect> {
-        let usable = self.layers.usable(self.dpi);
-        let origin = (usable.x.round() as i32, usable.y.round() as i32);
+        let (origin, bound) = self.app_popup_space();
+        // A rotated app's popups are clamped into the app's own space, which
+        // starts at its origin; an unrotated one keeps clamping to the output so
+        // a menu may still overhang the usable area's edges (bar strip).
+        let bound = if self.rotation.swaps_axes() {
+            bound
+        } else {
+            self.output_size
+        };
         self.app_focus_surface()
-            .map(|s| self.popup_chain(&s, origin))
+            .map(|s| self.popup_chain(&s, origin, bound))
             .unwrap_or_default()
     }
 
@@ -129,7 +160,7 @@ impl State {
         let mut out = Vec::new();
         let (below, above) = self.layers.render_lists(self.dpi);
         for (surface, origin) in below.iter().chain(above.iter()) {
-            out.extend(self.popup_chain(surface, *origin));
+            out.extend(self.popup_chain(surface, *origin, self.output_size));
         }
         out
     }

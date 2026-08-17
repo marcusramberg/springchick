@@ -834,7 +834,12 @@ impl App {
             // damage hint it never reaches scanout.
             && prep.cursor.is_none()
             && prep.layers_below.is_empty()
-            && prep.layers_above.is_empty();
+            && prep.layers_above.is_empty()
+            // A popup draws over the app in its own pass; the app-shaped damage
+            // hint doesn't cover it, so it would never reach scanout (and its
+            // pixels would go stale on dismiss).
+            && prep.app_popups.is_empty()
+            && prep.layer_popups.is_empty();
 
         // Acquire the next scanout buffer and bind it as the framebuffer.
         let (mut dmabuf, _age) = match self.drm.gbm_surface.next_buffer() {
