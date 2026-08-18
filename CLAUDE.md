@@ -36,7 +36,9 @@ Use the `run-springchick` skill (`.claude/skills/run-springchick/SKILL.md`) — 
 
 A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`, `down/move/up`, `settle [MS]`, `launch APP_ID [new]`, `reload`, `layers`). Works nested, in the VM, and on-device.
 
-`springchick ipc layers` dumps every layer surface and layer-rooted popup being composited — namespace, layer, logical geometry, the physical rect it is actually drawn at, buffer size, pending-map/slide state, anchor and exclusive zone — plus the usable area and regrow-guard state. It is the first thing to run when the screen shows something no client admits to (e.g. two on-screen keyboards from one wvkbd process).
+`springchick ipc layers` dumps every layer surface and layer-rooted popup being composited — namespace, layer, logical geometry, the physical rect it is actually drawn at, buffer size, pending-map/`DEAD`/slide state, anchor and exclusive zone — plus the usable area and regrow-guard state. It is the first thing to run when the screen shows something no client admits to (e.g. two on-screen keyboards from one wvkbd process).
+
+Watch the *count* per namespace: smithay's `LayerMap::arrange` reserves the exclusive zone of every layer in the map, whether or not it has a buffer, so a surface left behind by a dead client keeps shrinking the app area (four zombie wvkbd surfaces once took the usable height down to 117px). `LayerShell::reap` drops those each frame; a `DEAD` in the dump means one slipped past it.
 
 `springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `prefer_no_csd` (next window to negotiate decorations), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn). `dpi` and `uclamp_min` are ignored on reload — they need a restart.
 

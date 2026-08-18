@@ -24,7 +24,7 @@ use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::desktop::{layer_map_for_output, LayerSurface, WindowSurfaceType};
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Rectangle};
+use smithay::utils::{IsAlive, Logical, Rectangle};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::wlr_layer::{
     Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData,
@@ -96,6 +96,9 @@ pub struct LayerInfo {
     pub buffer: Option<(i32, i32)>,
     /// Still in the unmapped set: waiting for the commit that maps it.
     pub pending_map: bool,
+    /// Whether the protocol objects are still alive. `false` = a zombie the
+    /// map is still arranging around; see [`LayerShell::reap`].
+    pub alive: bool,
     /// `zwlr_layer_surface_v1.set_anchor` bits, as the client set them.
     pub anchor: u32,
     /// Exclusive zone: `>0` reserved, `0` neutral, `-1` don't care.
@@ -142,6 +145,9 @@ pub fn format_layer(idx: usize, l: &LayerInfo) -> String {
     }
     if l.pending_map {
         s.push_str(" pending-map");
+    }
+    if !l.alive {
+        s.push_str(" DEAD");
     }
     s.push_str(&format!(" anchor={} excl={}", l.anchor, l.exclusive));
     if let Some(p) = l.slide {
@@ -341,6 +347,31 @@ impl LayerShell {
         true
     }
 
+    /// Drop layer surfaces whose objects are dead, and the bookkeeping that
+    /// hangs off them. Returns true if anything went, so the caller recomputes
+    /// the app area.
+    ///
+    /// [`Self::destroyed`] covers the orderly case — a client destroying its
+    /// `zwlr_layer_surface_v1` while it stays connected. It does *not* cover a
+    /// client that exits or crashes: those surfaces stay in the map, and an
+    /// unmapped surface still reserves its exclusive zone during `arrange`, so
+    /// every wvkbd restart shaved another 120–250px off the usable area (four
+    /// zombie keyboards seen on device, app area down to 117px). Must be called
+    /// periodically; `LayerMap::cleanup` is a cheap scan when nothing died.
+    pub fn reap(&mut self) -> bool {
+        let mut map = layer_map_for_output(&self.output);
+        let before = map.len();
+        map.cleanup();
+        let reaped = map.len() != before;
+        drop(map);
+        if reaped {
+            self.unmapped.retain(|s| s.alive());
+            self.slides.retain(|s, _| s.alive());
+            self.map_events.retain(|s, _| s.alive());
+        }
+        reaped
+    }
+
     /// Handle a `wl_surface` commit. Returns true if it belonged to a layer
     /// surface (so the caller recomputes the app area / redraws). Arranges the
     /// map and drives the map/unmap transition, mirroring niri's flow.
@@ -501,6 +532,7 @@ impl LayerShell {
                     placed: geo.map(|g| self.place(surface, g, dpi)),
                     buffer: buffer_size(surface),
                     pending_map: self.unmapped.contains(surface),
+                    alive: layer.alive(),
                     anchor: state.anchor.bits(),
                     exclusive: state.exclusive_zone.into(),
                     slide: self.slides.get(surface).copied(),
@@ -593,6 +625,7 @@ mod tests {
             }),
             buffer: Some((437, 250)),
             pending_map: false,
+            alive: true,
             anchor: 14,
             exclusive: 250,
             slide: None,
@@ -626,6 +659,26 @@ mod tests {
             format_layer(2, &l),
             "#2 ns=wvkbd layer=overlay geo=none draw=none buf=none pending-map \
              anchor=14 excl=250 slide=0.25"
+        );
+    }
+
+    /// The zombie case the dump exists for: a surface left in the map by a
+    /// client that exited, still reserving its exclusive zone. It has to be
+    /// distinguishable from a live surface that merely hasn't mapped yet.
+    #[test]
+    fn format_layer_marks_dead_surfaces() {
+        let l = LayerInfo {
+            geo: Some((0, 464, 0, 0)),
+            placed: None,
+            buffer: None,
+            pending_map: true,
+            alive: false,
+            ..info()
+        };
+        assert_eq!(
+            format_layer(3, &l),
+            "#3 ns=wvkbd layer=overlay geo=0,464+0x0 draw=none buf=none pending-map DEAD \
+             anchor=14 excl=250"
         );
     }
 

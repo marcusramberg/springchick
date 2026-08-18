@@ -387,6 +387,13 @@ impl State {
         // duration (`recompute_layers` bails while sliding) so the keyboard rises
         // *over* it rather than into a strip vacated ahead of it; the resize and
         // the popup re-solve both land on the frame the slide finishes.
+        // Reap layer surfaces whose client is gone before anything reads the
+        // map: a dead surface keeps reserving its exclusive zone, so a crashing
+        // and restarting OSK otherwise eats the app area one restart at a time.
+        if self.layers.reap() {
+            self.recompute_layers();
+        }
+
         let was_sliding = self.layers.sliding();
         if !self.layers.tick_slides(dt) && was_sliding {
             self.recompute_layers();

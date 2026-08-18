@@ -96,6 +96,13 @@ composited (slide offset included), `buf` the committed buffer. Nothing is
 filtered, so a surface still being drawn after its client moved on shows up —
 that is the handle on the "two keyboards, one wvkbd process" bug.
 
+Count the surfaces per namespace. Several `wvkbd` entries with `buf=none` mean
+leftovers: `arrange` reserves their `excl=` zone anyway, so each one shrinks the
+usable area (seen on device at 117px with four of them). `LayerShell::reap`
+clears surfaces whose client is gone once per frame; a `DEAD` marker in the dump
+means one survived that, and an *alive* pile means the client is creating layer
+surfaces without destroying them.
+
 Quick-switch handedness follows the carousel (most-recent on the right): swipe
 **right** → older app, swipe **left** → more-recent.
 
