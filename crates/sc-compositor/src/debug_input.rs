@@ -51,6 +51,10 @@ pub enum DebugCmd {
     Orientation(crate::rotation::DeviceOrientation),
     /// Re-read `config.toml` and apply the live-changeable settings.
     Reload,
+    /// Report every layer surface and layer-rooted popup being composited, with
+    /// geometry, buffer and map state. A query, not input — see
+    /// [`State::layers_dump`].
+    Layers,
     /// Open a catalog app by id, exactly as an icon tap would: raise its most
     /// recent window if it has one, else launch it. `new_window` forces a fresh
     /// instance instead. This is how the search app opens things, so its
@@ -139,6 +143,10 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
         "reload" => {
             done(tok)?;
             DebugCmd::Reload
+        }
+        "layers" => {
+            done(tok)?;
+            DebugCmd::Layers
         }
         "swipe" => {
             let x1 = num(&mut tok)?;
@@ -342,9 +350,12 @@ pub fn drain(state: &mut State, chan: &DebugChannel) {
 fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
     // Injected input counts as user activity, so ext-idle-notify clients see a
     // resume from a scripted tap the same way they would from a real one.
-    // `settle` is a query and `reload` a control verb, not input: neither must
-    // reset the countdown.
-    if !matches!(cmd, DebugCmd::Settle { .. } | DebugCmd::Reload) {
+    // `settle`/`layers` are queries and `reload` a control verb, not input: none
+    // of them must reset the countdown.
+    if !matches!(
+        cmd,
+        DebugCmd::Settle { .. } | DebugCmd::Reload | DebugCmd::Layers
+    ) {
         state.idle_notify.activity(Instant::now());
     }
     // The gesture verbs (`down`/`move`/`up`/`tap`/`swipe`) feed the shell's
@@ -471,6 +482,10 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             // is exactly the kind of thing a session may need behind the lock.
             state.reload_config();
             let _ = reply.send("ok\n".into());
+        }
+        DebugCmd::Layers => {
+            // Allowed while locked: it reads state and drives nothing.
+            let _ = reply.send(format!("ok {}\n", state.layers_dump()));
         }
         DebugCmd::Launch { app_id, new_window } => {
             if !state.app_catalog.contains_key(&app_id) {
@@ -753,6 +768,12 @@ mod tests {
         );
         assert!(parse_line("launch", W, H).is_err()); // needs an app id
         assert!(parse_line("launch foot copy", W, H).is_err()); // unknown flag
+    }
+
+    #[test]
+    fn parses_layers() {
+        assert_eq!(parse_line("layers", W, H), Ok(DebugCmd::Layers));
+        assert!(parse_line("layers all", W, H).is_err()); // no args
     }
 
     #[test]

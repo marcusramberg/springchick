@@ -58,8 +58,14 @@ const FLAP_LIMIT: usize = 4;
 const FLAP_HOLD: f32 = 10.0;
 
 /// Whether a layer surface's `wl_surface` is currently mapped (has a buffer).
-fn is_mapped(surface: &WlSurface) -> bool {
+pub fn is_mapped(surface: &WlSurface) -> bool {
     with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
+}
+
+/// The committed buffer's size in logical px, if any.
+pub fn buffer_size(surface: &WlSurface) -> Option<(i32, i32)> {
+    with_renderer_surface_state(surface, |state| state.buffer_size().map(|s| (s.w, s.h)))
+        .unwrap_or(None)
 }
 
 /// Scale a logical rectangle up to a physical [`Rect`].
@@ -70,6 +76,78 @@ fn to_physical(r: Rectangle<i32, Logical>, dpi: f64) -> Rect {
         w: (r.size.w as f64 * dpi) as f32,
         h: (r.size.h as f64 * dpi) as f32,
     }
+}
+
+/// One layer surface as the compositor sees it, for the `layers` IPC dump.
+///
+/// Deliberately plain data: the formatting below is pure and unit-tested, so a
+/// dump read off a device can be reasoned about without a compositor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerInfo {
+    pub namespace: String,
+    /// `background` / `bottom` / `top` / `overlay`.
+    pub layer: &'static str,
+    /// Logical `(x, y, w, h)` from the map. `None` while the map has no
+    /// geometry for it (created, never arranged).
+    pub geo: Option<(i32, i32, i32, i32)>,
+    /// Where it is drawn this frame, physical px, slide offset included.
+    pub placed: Option<Rect>,
+    /// Size of the committed buffer, logical px. `None` = nothing to draw.
+    pub buffer: Option<(i32, i32)>,
+    /// Still in the unmapped set: waiting for the commit that maps it.
+    pub pending_map: bool,
+    /// `zwlr_layer_surface_v1.set_anchor` bits, as the client set them.
+    pub anchor: u32,
+    /// Exclusive zone: `>0` reserved, `0` neutral, `-1` don't care.
+    pub exclusive: i32,
+    /// Slide-in progress in `[0, 1)` while one is running.
+    pub slide: Option<f32>,
+}
+
+/// Short name for a layer, for the dump.
+fn layer_name(layer: Layer) -> &'static str {
+    match layer {
+        Layer::Background => "background",
+        Layer::Bottom => "bottom",
+        Layer::Top => "top",
+        Layer::Overlay => "overlay",
+    }
+}
+
+/// `x,y+wxh`, rounded — dump geometry, not pixel-exact reporting.
+fn fmt_rect(r: Rect) -> String {
+    format!(
+        "{},{}+{}x{}",
+        r.x.round(),
+        r.y.round(),
+        r.w.round(),
+        r.h.round()
+    )
+}
+
+/// One `LayerInfo` as a dump field group. `idx` is its draw order.
+pub fn format_layer(idx: usize, l: &LayerInfo) -> String {
+    let mut s = format!("#{idx} ns={} layer={}", l.namespace, l.layer);
+    match l.geo {
+        Some((x, y, w, h)) => s.push_str(&format!(" geo={x},{y}+{w}x{h}")),
+        None => s.push_str(" geo=none"),
+    }
+    match l.placed {
+        Some(r) => s.push_str(&format!(" draw={}", fmt_rect(r))),
+        None => s.push_str(" draw=none"),
+    }
+    match l.buffer {
+        Some((w, h)) => s.push_str(&format!(" buf={w}x{h}")),
+        None => s.push_str(" buf=none"),
+    }
+    if l.pending_map {
+        s.push_str(" pending-map");
+    }
+    s.push_str(&format!(" anchor={} excl={}", l.anchor, l.exclusive));
+    if let Some(p) = l.slide {
+        s.push_str(&format!(" slide={p:.2}"));
+    }
+    s
 }
 
 /// Owns the per-output [`LayerMap`] handle and the not-yet-mapped surface set.
@@ -404,6 +482,52 @@ impl LayerShell {
         )
     }
 
+    /// Every layer surface in the map, in the order [`LayerShell::render_lists`]
+    /// draws them. For the `layers` IPC dump — the point is to show surfaces the
+    /// render lists carry but the eye can't account for (a keyboard that is
+    /// still drawn after the client moved on), so nothing is filtered out here.
+    pub fn dump(&self, dpi: f64) -> Vec<LayerInfo> {
+        let map = layer_map_for_output(&self.output);
+        let mut out = Vec::new();
+        for wanted in [Layer::Background, Layer::Bottom, Layer::Top, Layer::Overlay] {
+            for layer in map.layers().filter(|l| l.layer() == wanted) {
+                let surface = layer.wl_surface();
+                let geo = map.layer_geometry(layer);
+                let state = layer.cached_state();
+                out.push(LayerInfo {
+                    namespace: layer.namespace().to_string(),
+                    layer: layer_name(wanted),
+                    geo: geo.map(|g| (g.loc.x, g.loc.y, g.size.w, g.size.h)),
+                    placed: geo.map(|g| self.place(surface, g, dpi)),
+                    buffer: buffer_size(surface),
+                    pending_map: self.unmapped.contains(surface),
+                    anchor: state.anchor.bits(),
+                    exclusive: state.exclusive_zone.into(),
+                    slide: self.slides.get(surface).copied(),
+                });
+            }
+        }
+        out
+    }
+
+    /// Header line for the `layers` dump: output/usable geometry and the state
+    /// of the regrow guard, which is what suppresses an app resize.
+    pub fn dump_header(&self, dpi: f64) -> String {
+        let u = self.usable(dpi);
+        format!(
+            "usable={} regrow={} sliding={}",
+            fmt_rect(u),
+            if self.regrow.now < self.regrow.flap_until {
+                "flap-latched"
+            } else if self.regrow.pending.is_some() {
+                "debounced"
+            } else {
+                "idle"
+            },
+            self.slides.len(),
+        )
+    }
+
     /// Whether any Top/Overlay surface overlaps `rect` (physical) — used to hide
     /// the home bar when the on-screen keyboard covers it.
     pub fn top_overlaps(&self, rect: Rect, dpi: f64) -> bool {
@@ -455,6 +579,55 @@ fn rects_overlap(a: Rect, b: Rect) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn info() -> LayerInfo {
+        LayerInfo {
+            namespace: "wvkbd".into(),
+            layer: "overlay",
+            geo: Some((0, 1730, 437, 250)),
+            placed: Some(Rect {
+                x: 0.0,
+                y: 4844.0,
+                w: 1224.0,
+                h: 700.0,
+            }),
+            buffer: Some((437, 250)),
+            pending_map: false,
+            anchor: 14,
+            exclusive: 250,
+            slide: None,
+        }
+    }
+
+    /// The dump line carries everything needed to tell a live surface from one
+    /// left behind: geometry, where it is actually drawn, and its buffer.
+    #[test]
+    fn format_layer_reports_geometry_and_buffer() {
+        assert_eq!(
+            format_layer(0, &info()),
+            "#0 ns=wvkbd layer=overlay geo=0,1730+437x250 draw=0,4844+1224x700 buf=437x250 \
+             anchor=14 excl=250"
+        );
+    }
+
+    /// A surface with nothing committed is the interesting case (it still sits
+    /// in the render lists), so it must be visible rather than blank.
+    #[test]
+    fn format_layer_marks_unmapped_and_sliding() {
+        let l = LayerInfo {
+            geo: None,
+            placed: None,
+            buffer: None,
+            pending_map: true,
+            slide: Some(0.25),
+            ..info()
+        };
+        assert_eq!(
+            format_layer(2, &l),
+            "#2 ns=wvkbd layer=overlay geo=none draw=none buf=none pending-map \
+             anchor=14 excl=250 slide=0.25"
+        );
+    }
 
     /// An OSK that unmaps and comes back inside the debounce never resizes the
     /// app: the increase is asked for, refused, and dropped when it shrinks.

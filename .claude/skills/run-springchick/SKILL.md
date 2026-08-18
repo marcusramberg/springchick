@@ -72,14 +72,29 @@ A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`
 client sends one line and prints the reply (exit non-zero on error). Verbs are
 the debug-input gestures: `tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`,
 `keydown NAME` / `keyup NAME`, `down/move/up`, `settle [MS]`, plus the control
-verb `reload` (re-read
-`config.toml`). Used by `nix/vm-switcher-test.nix`; also works
+verb `reload` (re-read `config.toml`) and the query verb `layers`. Used by
+`nix/vm-switcher-test.nix`; also works
 on-device. From the test driver (root reaching the tester's socket):
 
 ```python
 IPC = "/run/user/1000/springchick-ipc.sock"
 machine.succeed(f"SPRINGCHICK_IPC_SOCK={IPC} springchick ipc swipe 640 788 1080 788 500")
 ```
+
+`layers` dumps what the render lists carry above and below the app — one line
+per layer surface and per layer-rooted popup, printed as a table:
+
+```
+$ springchick ipc layers
+ok out=843x1368 dpi=3 usable=0,0+843x585 regrow=idle sliding=0 layers=1 layer-popups=1
+#0 ns=wvkbd layer=overlay geo=0,206+281x250 draw=0,585+843x750 buf=843x750 anchor=14 excl=250
+popup at=0,0 geo=0x0 buf=843x1500
+```
+
+`geo` is logical (what the map arranged), `draw` the physical rect actually
+composited (slide offset included), `buf` the committed buffer. Nothing is
+filtered, so a surface still being drawn after its client moved on shows up —
+that is the handle on the "two keyboards, one wvkbd process" bug.
 
 Quick-switch handedness follows the carousel (most-recent on the right): swipe
 **right** → older app, swipe **left** → more-recent.
