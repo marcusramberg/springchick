@@ -39,6 +39,24 @@ pub type RenderList = Vec<(WlSurface, (i32, i32))>;
 /// move rather than a pop.
 const SLIDE_SECS: f32 = 0.18;
 
+/// Seconds an area *increase* (the OSK unmapping) is held back before apps are
+/// resized up again. An OSK that unmaps and remaps inside this window — wvkbd
+/// swapping layouts, or a client that drops `zwp_text_input` focus for a beat —
+/// never reaches the apps at all, so no configure storm follows it.
+const REGROW_DELAY: f32 = 0.25;
+
+/// Window in which repeated map transitions of the same surface count as
+/// flapping.
+const FLAP_WINDOW: f32 = 3.0;
+
+/// Maps within [`FLAP_WINDOW`] that trip the latch.
+const FLAP_LIMIT: usize = 4;
+
+/// How long the usable area is pinned at its smallest once flapping is seen.
+/// Long enough to outlast the cycle; short enough that a keyboard genuinely
+/// dismissed afterwards still gives the space back.
+const FLAP_HOLD: f32 = 10.0;
+
 /// Whether a layer surface's `wl_surface` is currently mapped (has a buffer).
 fn is_mapped(surface: &WlSurface) -> bool {
     with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
@@ -69,6 +87,85 @@ pub struct LayerShell {
     slides: HashMap<WlSurface, f32>,
     /// Physical output height, for the home-bar bottom exclusive zone.
     output_h: f32,
+    /// Debounce + flap latch on area increases. See [`RegrowGuard`].
+    regrow: RegrowGuard,
+    /// Timestamps of recent unmapped→mapped transitions, per surface, trimmed
+    /// to [`FLAP_WINDOW`]. Feeds the flap latch.
+    map_events: HashMap<WlSurface, Vec<f32>>,
+}
+
+/// Rate limiting on *growing* the app area back.
+///
+/// Resizing an app is what makes some clients drop `zwp_text_input` focus,
+/// which unmaps the OSK, which grows the app back — a cycle that on device
+/// looks like the keyboard being summoned and dismissed forever. So an increase
+/// waits out [`REGROW_DELAY`] (an OSK that returns inside it never reaches the
+/// apps at all), and once a surface is seen flapping, increases are refused
+/// entirely for [`FLAP_HOLD`]. Holding the app at the smaller size costs
+/// nothing — the space it gives up is empty.
+#[derive(Debug, Default)]
+struct RegrowGuard {
+    /// Monotonic seconds, advanced by [`RegrowGuard::tick`]. Only differences
+    /// matter, so the origin is arbitrary.
+    now: f32,
+    /// Deadline at which a held-back increase may be applied. Set the first
+    /// time the area grows, cleared when applied or when it shrinks again.
+    pending: Option<f32>,
+    /// While `now` is below this, increases are refused outright.
+    flap_until: f32,
+}
+
+impl RegrowGuard {
+    fn tick(&mut self, dt: f32) {
+        self.now += dt;
+    }
+
+    /// Whether an area increase may be applied now. Starts (or continues) the
+    /// debounce when it may not.
+    fn allow_grow(&mut self) -> bool {
+        if self.now < self.flap_until {
+            return false;
+        }
+        match self.pending {
+            // First frame of the increase: start the debounce.
+            None => {
+                self.pending = Some(self.now + REGROW_DELAY);
+                false
+            }
+            Some(deadline) => self.now >= deadline,
+        }
+    }
+
+    /// The area settled (grew and was applied, or shrank): drop the debounce.
+    fn resolved(&mut self) {
+        self.pending = None;
+    }
+
+    /// A surface flapped: pin the area at its smallest for [`FLAP_HOLD`].
+    fn latch(&mut self) {
+        self.flap_until = self.now + FLAP_HOLD;
+    }
+
+    /// Whether an increase is being held back right now, either by the debounce
+    /// or the flap latch. The frame loop keeps drawing while this is true so the
+    /// hold has a frame to expire on — otherwise a keyboard that stops flapping
+    /// and stays gone leaves the app shrunk until some unrelated commit.
+    fn holding(&self) -> bool {
+        self.pending.is_some() || self.now < self.flap_until
+    }
+}
+
+/// Record a map at `now` in `events` and report whether the surface has now
+/// mapped [`FLAP_LIMIT`] times inside [`FLAP_WINDOW`]. Trips at most once per
+/// burst: a run that trips clears its history.
+fn flapped(events: &mut Vec<f32>, now: f32) -> bool {
+    events.retain(|t| now - *t <= FLAP_WINDOW);
+    events.push(now);
+    let tripped = events.len() >= FLAP_LIMIT;
+    if tripped {
+        events.clear();
+    }
+    tripped
 }
 
 impl LayerShell {
@@ -84,6 +181,8 @@ impl LayerShell {
             },
             slides: HashMap::new(),
             output_h,
+            regrow: RegrowGuard::default(),
+            map_events: HashMap::new(),
         }
     }
 
@@ -91,6 +190,7 @@ impl LayerShell {
     /// finished. Returns true while any is still moving, so the frame loop keeps
     /// presenting.
     pub fn tick_slides(&mut self, dt: f32) -> bool {
+        self.regrow.tick(dt);
         self.slides.retain(|_, p| {
             *p = (*p + dt / SLIDE_SECS).min(1.0);
             *p < 1.0
@@ -105,12 +205,37 @@ impl LayerShell {
 
     /// Recompute the usable area after an arrange. Returns `Some(new)` if it
     /// changed since the last call (so the caller resizes app toplevels).
+    ///
+    /// Increases are debounced, and refused outright while a client is flapping
+    /// its keyboard — see [`RegrowGuard`].
     pub fn usable_changed(&mut self, dpi: f64) -> Option<Rect> {
         let now = self.usable(dpi);
-        (now != self.last_usable).then(|| {
-            self.last_usable = now;
-            now
-        })
+        if now == self.last_usable {
+            return None;
+        }
+        if now.h > self.last_usable.h && !self.regrow.allow_grow() {
+            return None;
+        }
+        self.regrow.resolved();
+        self.last_usable = now;
+        Some(now)
+    }
+
+    /// True while an area increase is being held back (debounce or flap latch),
+    /// so the frame loop keeps rendering long enough to apply it.
+    pub fn regrow_pending(&self) -> bool {
+        self.regrow.holding()
+    }
+
+    /// Record an unmapped→mapped transition, latching the guard if this surface
+    /// is cycling.
+    fn record_map(&mut self, surface: &WlSurface) {
+        let now = self.regrow.now;
+        let events = self.map_events.entry(surface.clone()).or_default();
+        if flapped(events, now) {
+            tracing::warn!("layer surface mapping repeatedly; holding app size for {FLAP_HOLD}s");
+            self.regrow.latch();
+        }
     }
 
     /// A new layer surface was created. Track it as unmapped and register it
@@ -127,6 +252,9 @@ impl LayerShell {
     pub fn destroyed(&mut self, surface: &WlrLayerSurface) -> bool {
         self.unmapped.remove(surface.wl_surface());
         self.slides.remove(surface.wl_surface());
+        // A client that exits and relaunches its keyboard is not the cycle this
+        // guards against, so its history goes with it.
+        self.map_events.remove(surface.wl_surface());
         let mut map = layer_map_for_output(&self.output);
         let Some(layer) = map.layers().find(|l| l.layer_surface() == surface).cloned() else {
             return false;
@@ -154,12 +282,16 @@ impl LayerShell {
             .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
             .unwrap()
             .clone();
+        // Everything below works off the clone; dropping the guard here keeps
+        // `&mut self` usable (the map borrows `self.output`).
+        drop(map);
 
         if is_mapped(surface) {
             // Unmapped → mapped: start the slide-in. Commits on an
             // already-mapped surface (the OSK redrawing) must not restart it.
             if self.unmapped.remove(surface) {
                 self.slides.insert(surface.clone(), 0.0);
+                self.record_map(surface);
             }
         } else if !self.unmapped.contains(surface) {
             // Was mapped, now unmapped via a null commit: it must redo the
@@ -318,4 +450,72 @@ impl LayerShell {
 
 fn rects_overlap(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An OSK that unmaps and comes back inside the debounce never resizes the
+    /// app: the increase is asked for, refused, and dropped when it shrinks.
+    #[test]
+    fn brief_unmap_never_grows_the_app() {
+        let mut g = RegrowGuard::default();
+        assert!(!g.allow_grow(), "first ask starts the debounce");
+        g.tick(REGROW_DELAY / 2.0);
+        assert!(!g.allow_grow());
+        // OSK back: the area shrank again, so the pending grow is dropped.
+        g.resolved();
+        g.tick(1.0);
+        assert!(!g.allow_grow(), "a later unmap starts a fresh debounce");
+    }
+
+    /// A keyboard really dismissed gives the space back once the debounce ends.
+    #[test]
+    fn settled_unmap_grows_after_the_delay() {
+        let mut g = RegrowGuard::default();
+        assert!(!g.allow_grow());
+        g.tick(REGROW_DELAY + 0.01);
+        assert!(g.allow_grow());
+    }
+
+    /// While latched, no increase is applied however long it is asked for.
+    #[test]
+    fn flap_latch_refuses_grows_then_releases() {
+        let mut g = RegrowGuard::default();
+        g.latch();
+        for _ in 0..20 {
+            g.tick(FLAP_HOLD / 20.0);
+            assert!(!g.allow_grow(), "latched");
+        }
+        assert!(g.holding());
+        g.tick(0.1);
+        // Latch expired: the normal debounce takes over, then the grow lands.
+        assert!(!g.allow_grow());
+        g.tick(REGROW_DELAY + 0.01);
+        assert!(g.allow_grow());
+        g.resolved();
+        assert!(!g.holding());
+    }
+
+    #[test]
+    fn flap_trips_only_on_a_fast_burst() {
+        let mut events = Vec::new();
+        // Slow, legitimate keyboard use: each map is outside the window of the
+        // one before it, so nothing accumulates.
+        let mut t = 0.0;
+        for _ in 0..10 {
+            t += FLAP_WINDOW + 0.1;
+            assert!(!flapped(&mut events, t));
+        }
+        // A cycling client: FLAP_LIMIT maps inside one window trips it. The
+        // last slow map above is still inside the window, so it counts as the
+        // first of the burst.
+        for i in 2..FLAP_LIMIT {
+            assert!(!flapped(&mut events, t + i as f32 * 0.1), "map {i}");
+        }
+        assert!(flapped(&mut events, t + (FLAP_LIMIT - 1) as f32 * 0.1));
+        // History cleared, so the same burst has to build up again.
+        assert!(!flapped(&mut events, t + 10.0));
+    }
 }
