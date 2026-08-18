@@ -4,8 +4,12 @@
 //! The compositor always listens on [`socket_path`]; `springchick ipc <verb>
 //! [args...]` connects there, sends one line, prints the reply, and exits
 //! non-zero if the reply is an error. The verbs are the debug-input gestures
-//! (`tap`, `swipe`, `key`, `settle`, …) plus control verbs (`reload`); further
-//! control verbs (`state`, …) slot in the same way.
+//! (`tap`, `swipe`, `key`, `settle`, …) plus control and query verbs (`reload`,
+//! `layers`); further verbs (`state`, …) slot in the same way.
+//!
+//! A reply is always a single line. A query that answers with several records
+//! (`layers`) packs them into that line separated by ` | `, which the client
+//! prints one per line.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -35,6 +39,7 @@ pub fn run_client(args: &[String]) -> ExitCode {
         eprintln!("       springchick ipc swipe 640 788 1080 788 500");
         eprintln!("       springchick ipc launch org.gnome.Maps [new]");
         eprintln!("       springchick ipc reload   # re-read config.toml");
+        eprintln!("       springchick ipc layers   # dump layer surfaces + their popups");
         return ExitCode::from(2);
     }
 
@@ -63,7 +68,9 @@ pub fn run_client(args: &[String]) -> ExitCode {
     }
     let reply = reply.trim();
     if !reply.is_empty() {
-        println!("{reply}");
+        // One line on the wire, but a dump reply (`layers`) packs its entries
+        // with ` | ` separators — break those out so it reads as a table.
+        println!("{}", reply.replace(" | ", "\n"));
     }
     if reply.starts_with("ok") {
         ExitCode::SUCCESS

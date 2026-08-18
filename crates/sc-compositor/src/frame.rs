@@ -165,6 +165,58 @@ impl State {
         out
     }
 
+    /// One-line snapshot of every layer surface and layer-rooted popup the
+    /// compositor would composite, answered by `springchick ipc layers`.
+    ///
+    /// This exists for the "two keyboards on screen, one wvkbd process" class of
+    /// bug: it shows what the render lists actually carry, so a surface that is
+    /// still drawn after its client moved on (stale buffer, stale geometry, or a
+    /// popup left behind) is visible without a rebuild. Fields are `key=value`,
+    /// entries separated by ` | ` — the ipc client prints one entry per line.
+    pub(crate) fn layers_dump(&self) -> String {
+        let infos = self.layers.dump(self.dpi);
+        let popups = self.layer_popups();
+        // Layer surfaces and their popups are not drawn while the app is turned
+        // (portrait chrome over a landscape app), so say so rather than let the
+        // reader wonder why the dump lists surfaces they cannot see.
+        let rotated = if self.rotation.swaps_axes() {
+            " rotated=yes(layers-not-drawn)"
+        } else {
+            ""
+        };
+        let mut parts = vec![format!(
+            "out={}x{} dpi={} {}{} layers={} layer-popups={}",
+            self.output_size.0,
+            self.output_size.1,
+            self.dpi,
+            self.layers.dump_header(self.dpi),
+            rotated,
+            infos.len(),
+            popups.len(),
+        )];
+        parts.extend(
+            infos
+                .iter()
+                .enumerate()
+                .map(|(i, l)| layer_shell::format_layer(i, l)),
+        );
+        for (kind, origin, size) in popups {
+            // `size` is the popup's *geometry*, which a client may leave at zero
+            // while still committing a buffer (wvkbd's key-preview popup does),
+            // so the buffer size is reported alongside it.
+            let surface = kind.wl_surface().clone();
+            let buf = match layer_shell::buffer_size(&surface) {
+                Some((w, h)) => format!("{w}x{h}"),
+                None => "none".into(),
+            };
+            parts.push(format!(
+                "popup at={},{} geo={}x{} buf={buf}",
+                origin.0, origin.1, size.0, size.1,
+            ));
+        }
+        parts.join(" | ")
+    }
+
     /// Popups that are on screen right now, app-rooted first then layer-rooted.
     /// Used by touch routing to hit-test and (for grabbing popups only) dismiss.
     /// A tap is routed into whichever popup it lands on regardless of grab; only
