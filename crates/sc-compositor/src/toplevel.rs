@@ -573,18 +573,33 @@ impl State {
         // back up. So focus the topmost grabbing popup in the app's chain if any,
         // else keep focus on the app itself. Both fall out of recomputing `want`
         // every frame, so focus restores to the app when the grab chain closes.
+        //
+        // EXPERIMENT (duplicate-keyboard hunt): the popup branch is disabled to
+        // test whether handing focus to a grabbing popup is what makes GTK cycle
+        // `zwp_text_input_v3`. Every observed keyboard-duplication burst is
+        // immediately preceded by a focus change into a popup, and each
+        // enable/disable cycle reaches wvkbd as an activate, which starts
+        // another `show()`. If the bursts stop with this off, the popup focus
+        // policy is the trigger; if they continue, it is not, and this comes
+        // straight back out — Firefox menus need it for keyboard nav.
+        let popup_focus = false;
         let want = app
             .as_ref()
+            .filter(|_| popup_focus)
             .and_then(|s| {
                 PopupManager::popups_for_surface(s)
                     .filter(|(kind, _)| self.popup_grabs.contains(kind.wl_surface()))
                     .last()
                     .map(|(kind, _)| kind.wl_surface().clone())
             })
-            .or(app);
+            .or_else(|| app.clone());
         if want == self.focused_surface {
             return;
         }
+        tracing::info!(
+            to_popup = want.is_some() && want != app,
+            "keyboard focus changed"
+        );
         self.focused_surface = want.clone();
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, want, SERIAL_COUNTER.next_serial());

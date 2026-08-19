@@ -202,6 +202,13 @@ impl LayerShell {
     pub fn new_surface(&mut self, surface: WlrLayerSurface, namespace: String) {
         self.unmapped.insert(surface.wl_surface().clone());
         let mut map = layer_map_for_output(&self.output);
+        // A client creating a second surface in a namespace before destroying
+        // the first has one it can no longer reach — wvkbd does this when it is
+        // told to activate again while still building the last keyboard, and
+        // each orphan keeps reserving its exclusive zone. Anything above 0 here
+        // is the duplicate-keyboard bug in progress.
+        let live = map.layers().filter(|l| l.namespace() == namespace).count();
+        tracing::info!(%namespace, already_in_namespace = live, "layer surface created");
         // Only fails if already mapped, which a fresh surface never is.
         let _ = map.map_layer(&LayerSurface::new(surface, namespace));
     }
