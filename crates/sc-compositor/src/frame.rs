@@ -295,9 +295,6 @@ impl State {
             || self.bar_fading()
             // A layer surface (the OSK) sliding up into place.
             || self.layers.sliding()
-            // An app resize held back while the OSK's unmap is debounced: the
-            // deadline is only checked from a frame, so keep them coming.
-            || self.layers.regrow_pending()
             // A lock is engaged but not yet confirmed to the client: keep
             // page-flipping so the locked frame it is waiting on is actually
             // presented (see `session_lock::SessionLock::tick`).
@@ -396,13 +393,6 @@ impl State {
 
         let was_sliding = self.layers.sliding();
         if !self.layers.tick_slides(dt) && was_sliding {
-            self.recompute_layers();
-        }
-
-        // An OSK unmap whose regrow is still debounced: re-ask every frame so
-        // the resize lands once the deadline passes (or never, if the keyboard
-        // comes back first).
-        if self.layers.regrow_pending() {
             self.recompute_layers();
         }
 
