@@ -466,7 +466,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             // clients register a proper tap. Slot 0 = a valid libinput slot;
             // real monotonic time so clients don't see stale events.
             let slot = smithay::backend::input::TouchSlot::from(Some(0));
-            let time = state.start_time.elapsed().as_millis() as u32;
+            let time = state.clock.now().as_millis();
             crate::touch::down(state, x, y, slot, time);
             // Synthetic input has no libinput frame event behind it, so the
             // one-finger batch is closed by hand.
@@ -555,7 +555,7 @@ fn advance_touch(state: &mut State) {
         state.active_touch = Some(t);
         return;
     }
-    let time = state.start_time.elapsed().as_millis() as u32;
+    let time = state.clock.now().as_millis();
     crate::touch::up(state, t.slot, time);
     crate::touch::frame(state);
     let _ = t.reply.send("ok\n".into());
