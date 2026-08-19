@@ -80,6 +80,43 @@ pub enum DownAction {
     None,
 }
 
+/// Hit-test a press against the Home layout (grid, dock, bar, background).
+fn home_press(x: f32, y: f32, page: usize, model: &ShellModel, w: f32, h: f32) -> DownAction {
+    let layout = sc_layout::compute(w, h, page, model);
+    match sc_layout::hit_test(&layout, x, y) {
+        Hit::GridIcon { app_id, index } => {
+            let slot = &layout.grid[index];
+            let cx = slot.icon_rect.center_x();
+            let cy = slot.icon_rect.center_y();
+            DownAction::PressIcon {
+                app_id,
+                origin: ZoomOrigin::icon((cx, cy)),
+                start_x: x,
+                start_y: y,
+                source: IconSource::Grid,
+            }
+        }
+        Hit::DockIcon { app_id, index } => {
+            let slot = &layout.dock[index];
+            let cx = slot.icon_rect.center_x();
+            let cy = slot.icon_rect.center_y();
+            DownAction::PressIcon {
+                app_id,
+                origin: ZoomOrigin::icon((cx, cy)),
+                start_x: x,
+                start_y: y,
+                source: IconSource::Dock,
+            }
+        }
+        Hit::Bar => DownAction::StartBarDrag {
+            start_x: x,
+            start_y: y,
+        },
+        Hit::Miss => DownAction::StartPageDrag { start_x: x },
+        Hit::RemoveBadge { .. } | Hit::DoneButton => DownAction::None,
+    }
+}
+
 /// Process a pointer/touch down event.
 pub fn on_press(
     state: &UiState,
@@ -92,41 +129,7 @@ pub fn on_press(
     let pt = normalize(x, y, w, h);
 
     match state {
-        UiState::Home { page, .. } => {
-            let layout = sc_layout::compute(w, h, *page, model);
-            match sc_layout::hit_test(&layout, x, y) {
-                Hit::GridIcon { app_id, index } => {
-                    let slot = &layout.grid[index];
-                    let cx = slot.icon_rect.center_x();
-                    let cy = slot.icon_rect.center_y();
-                    DownAction::PressIcon {
-                        app_id,
-                        origin: ZoomOrigin::icon((cx, cy)),
-                        start_x: x,
-                        start_y: y,
-                        source: IconSource::Grid,
-                    }
-                }
-                Hit::DockIcon { app_id, index } => {
-                    let slot = &layout.dock[index];
-                    let cx = slot.icon_rect.center_x();
-                    let cy = slot.icon_rect.center_y();
-                    DownAction::PressIcon {
-                        app_id,
-                        origin: ZoomOrigin::icon((cx, cy)),
-                        start_x: x,
-                        start_y: y,
-                        source: IconSource::Dock,
-                    }
-                }
-                Hit::Bar => DownAction::StartBarDrag {
-                    start_x: x,
-                    start_y: y,
-                },
-                Hit::Miss => DownAction::StartPageDrag { start_x: x },
-                Hit::RemoveBadge { .. } | Hit::DoneButton => DownAction::None,
-            }
-        }
+        UiState::Home { page, .. } => home_press(x, y, *page, model, w, h),
         UiState::App { .. } => {
             // Check if finger is in bar zone → start grab.
             let layout = sc_layout::compute(w, h, 0, model);
@@ -136,8 +139,23 @@ pub fn on_press(
                 DownAction::None
             }
         }
-        UiState::Settling { .. } | UiState::AppClosing { .. } => {
-            // Interrupt the animation.
+        // Home is already on screen behind the shrinking app, so its icons are
+        // live: tapping one during the minimise animation must launch *that*
+        // app, not resurrect the one on its way out (which is what a blanket
+        // Interrupt → Grabbing → BackToApp release did). Anything that is not
+        // an icon still interrupts and re-grabs the outgoing window.
+        UiState::AppClosing { .. } => match home_press(x, y, 0, model, w, h) {
+            press @ DownAction::PressIcon { .. } => press,
+            _ => DownAction::Event(UiEvent::Interrupt { point: pt }),
+        },
+        UiState::Settling { target, .. } => {
+            // Same for a settle that is on its way Home (the fast swipe-up);
+            // a settle back to the app or into the deck keeps interrupting.
+            if matches!(target, sc_input::NavTarget::Home) {
+                if let press @ DownAction::PressIcon { .. } = home_press(x, y, 0, model, w, h) {
+                    return press;
+                }
+            }
             DownAction::Event(UiEvent::Interrupt { point: pt })
         }
         UiState::AppOpening { .. } => DownAction::Event(UiEvent::Interrupt { point: pt }),
@@ -217,6 +235,91 @@ mod tests {
         // Top-left corner of the status-bar padding — no icon there.
         let action = on_press(&UiState::home(0, 1), 5.0, 5.0, &m, out);
         assert!(matches!(action, DownAction::StartPageDrag { .. }));
+    }
+
+    fn icon_center(m: &ShellModel, out: (i32, i32)) -> (f32, f32) {
+        let layout = sc_layout::compute(out.0 as f32, out.1 as f32, 0, m);
+        let slot = &layout.grid[0];
+        (slot.icon_rect.center_x(), slot.icon_rect.center_y())
+    }
+
+    /// Tapping an icon while the previous app is still shrinking must launch
+    /// that icon, not interrupt-and-restore the outgoing window.
+    #[test]
+    fn press_on_icon_while_closing_launches_it() {
+        let m = model();
+        let out = (1224, 2700);
+        let (cx, cy) = icon_center(&m, out);
+        let closing = UiState::AppClosing {
+            toplevel: 7,
+            app_id: "other".into(),
+            progress: sc_anim::Spring::zoom(1.0, 0.0),
+            origin: ZoomOrigin::icon((0.5, 0.5)),
+        };
+        match on_press(&closing, cx, cy, &m, out) {
+            DownAction::PressIcon { app_id, .. } => assert_eq!(app_id, "app0"),
+            other => panic!("expected PressIcon, got {other:?}"),
+        }
+    }
+
+    /// Same for the fast swipe-up settle, which is the state that fast gesture
+    /// actually lands in.
+    #[test]
+    fn press_on_icon_while_settling_home_launches_it() {
+        let m = model();
+        let out = (1224, 2700);
+        let (cx, cy) = icon_center(&m, out);
+        let settling = UiState::Settling {
+            toplevel: 7,
+            app_id: "other".into(),
+            target: sc_input::NavTarget::Home,
+            progress: sc_anim::Spring::new(0.5),
+            origin: ZoomOrigin::icon((0.5, 0.5)),
+            cards: Vec::new(),
+        };
+        match on_press(&settling, cx, cy, &m, out) {
+            DownAction::PressIcon { app_id, .. } => assert_eq!(app_id, "app0"),
+            other => panic!("expected PressIcon, got {other:?}"),
+        }
+    }
+
+    /// A press away from any icon still interrupts the animation and re-grabs
+    /// the outgoing window.
+    #[test]
+    fn press_off_icon_while_closing_interrupts() {
+        let m = model();
+        let out = (1224, 2700);
+        let closing = UiState::AppClosing {
+            toplevel: 7,
+            app_id: "other".into(),
+            progress: sc_anim::Spring::zoom(1.0, 0.0),
+            origin: ZoomOrigin::icon((0.5, 0.5)),
+        };
+        assert!(matches!(
+            on_press(&closing, 5.0, 5.0, &m, out),
+            DownAction::Event(UiEvent::Interrupt { .. })
+        ));
+    }
+
+    /// A settle back to the app is not a Home-bound animation — every press
+    /// interrupts it, icon or not.
+    #[test]
+    fn press_on_icon_while_settling_back_to_app_interrupts() {
+        let m = model();
+        let out = (1224, 2700);
+        let (cx, cy) = icon_center(&m, out);
+        let settling = UiState::Settling {
+            toplevel: 7,
+            app_id: "other".into(),
+            target: sc_input::NavTarget::BackToApp,
+            progress: sc_anim::Spring::new(0.5),
+            origin: ZoomOrigin::icon((0.5, 0.5)),
+            cards: Vec::new(),
+        };
+        assert!(matches!(
+            on_press(&settling, cx, cy, &m, out),
+            DownAction::Event(UiEvent::Interrupt { .. })
+        ));
     }
 
     #[test]
