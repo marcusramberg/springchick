@@ -18,8 +18,13 @@ sc-layout = { path = "../sc-layout" }
 sc-icons = { path = "../sc-icons" }
 sc-keys = { path = "../sc-keys" }
 
-# Upstream smithay@ff5fa7d (needed for xkbcommon 0.9 → wvkbd keymap fix); same
-# rev niri pins.
+# EXPERIMENT (duplicate-keyboard hunt): fork of smithay@ff5fa7d carrying one
+# commit, `input_method: don't repeat activate/deactivate`. Goes back to
+# upstream `ff5fa7d` once the root cause is settled — see
+# nix/smithay-im-dedupe.patch for the diff.
+#
+# Upstream smithay@ff5fa7d is the rev niri pins (needed for xkbcommon 0.9 →
+# wvkbd keymap fix).
 #
 # `use_system_lib` (libwayland-server rather than the pure-Rust wayland-backend)
 # is load-bearing, not an optimisation. Several smithay role handlers post a
@@ -29,7 +34,7 @@ sc-keys = { path = "../sc-keys" }
 # client (layer surfaces: Smithay#1979, `width 0 requested…`, dms panel close;
 # lock surfaces: `Committed before the first ack_configure.`, dms unlock);
 # libwayland drops it. Dropping this feature resurrects both crashes.
-smithay = { git = "https://github.com/Smithay/smithay.git", rev = "ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef", default-features = false, features = [
+smithay = { git = "https://code.bas.es/marcus/smithay.git", rev = "b78380f7", default-features = false, features = [
   "use_system_lib",
   "backend_winit",
   "backend_egl",

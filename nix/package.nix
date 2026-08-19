@@ -94,10 +94,12 @@ rustPlatform.buildRustPackage {
 
   cargoLock = {
     lockFile = ../Cargo.lock;
-    # smithay is pinned to upstream ff5fa7d (xkbcommon 0.9 → wvkbd keymap fix).
+    # smithay is pinned to the fork of ff5fa7d carrying the input-method
+    # activate/deactivate dedupe (duplicate-keyboard experiment; goes back to
+    # upstream once the root cause is settled).
     # git deps must be vendored with an explicit hash.
     outputHashes = {
-      "smithay-0.7.0" = "sha256-TV/GTfSvgfVwIFUGoASU7xm38opIBLjLMf1HeNTW07U=";
+      "smithay-0.7.0" = "sha256-lfvGHNASXW34Vvwh+0HYkRWJ2AdQz8NiZd9/mXzxcSU=";
     };
   };
 
