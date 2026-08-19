@@ -94,10 +94,10 @@ rustPlatform.buildRustPackage {
 
   cargoLock = {
     lockFile = ../Cargo.lock;
-    # smithay is pinned to upstream ff5fa7d (xkbcommon 0.9 → wvkbd keymap fix).
+    # smithay is pinned to upstream 7ddcd17 (xkbcommon 0.9 → wvkbd keymap fix).
     # git deps must be vendored with an explicit hash.
     outputHashes = {
-      "smithay-0.7.0" = "sha256-TV/GTfSvgfVwIFUGoASU7xm38opIBLjLMf1HeNTW07U=";
+      "smithay-0.7.0" = "sha256-FkybYhnZ6h5EQIROWzNTGD7zk9fH3WwNzomWr3ebbzA=";
     };
   };
 

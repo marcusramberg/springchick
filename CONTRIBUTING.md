@@ -253,9 +253,11 @@ All pointer/touch events → normalized `Pt` (0..1) → routed on UiState:
 ## Smithay specifics
 
 - **Pinned to upstream git**, not crates.io:
-  `https://github.com/Smithay/smithay.git` rev `ff5fa7d` (the rev niri pins).
+  `https://github.com/Smithay/smithay.git` rev `7ddcd17`.
   Needed for xkbcommon 0.9, which fixes wvkbd keymap loading — the xkbcommon
   0.8 `size-1` bug. Don't swap back to a release without re-checking that.
+  Dispatch goes through the single `delegate_dispatch2!(State)` in
+  `handlers.rs`; the per-protocol `delegate_*!` macros no longer exist upstream.
 - **`use_system_lib` is load-bearing.** It picks libwayland-server over the
   pure-Rust `wayland-backend`, and that choice decides whether two smithay bugs
   are fatal. Several role handlers post a protocol error from a `wl_surface`
