@@ -582,7 +582,7 @@ impl State {
         skia_flip_y: bool,
         report_partial_damage: bool,
         rounded_tex_shader: &'a smithay::backend::renderer::gles::GlesTexProgram,
-        presented: &'a mut Vec<smithay::wayland::presentation::PresentationFeedbackCallback>,
+        sinks: &'a mut render::FrameSinks,
     ) -> render::DrawCtx<'a> {
         // Resolved before the struct literal so nothing here borrows `self`
         // while `skia` and `last_present` hold mutable borrows of it.
@@ -610,8 +610,14 @@ impl State {
         });
         let pressed_app = self.pending_launch.as_ref().map(|p| p.app_id.as_str());
 
+        // When the frame being composited is expected to land: one refresh
+        // interval out. Commits aimed at this frame are released against it,
+        // and aiming at "now" instead would hold each one back a frame.
+        let frame_target = self.clock.now() + self.output_refresh_interval();
+
         render::DrawCtx {
-            presented,
+            frame_target,
+            sinks,
             scene: &prep.scene,
             app_surface: prep.app_surface.as_ref(),
             skia: &mut self.skia,

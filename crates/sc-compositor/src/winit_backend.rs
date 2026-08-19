@@ -209,17 +209,18 @@ fn capture_region_shm(
         // surface, so this matches the DRM path's Skia flip instead.
         // A screencopy draw goes into the client's buffer, never to the panel,
         // so any feedback it collects is discarded rather than presented.
-        let mut presented = Vec::new();
+        let mut sinks = render::FrameSinks::default();
         let mut ctx = state.draw_ctx(
             prep,
             Transform::Flipped180,
             true,
             false,
             rounded_tex_shader,
-            &mut presented,
+            &mut sinks,
         );
         let draw = render::draw_scene(renderer, &mut fb, size, &mut ctx);
-        crate::presentation::discard(presented);
+        crate::presentation::discard(sinks.presented);
+        crate::pacing::clear_blockers(state, sinks.unblocked);
         if let Err(e) = draw {
             warn!("screencopy: draw_scene failed: {e}");
             return Some(false);
@@ -279,7 +280,7 @@ fn render_frame(
     state.sync_keyboard_focus();
 
     let (renderer, mut framebuffer) = backend.bind()?;
-    let mut presented = Vec::new();
+    let mut sinks = render::FrameSinks::default();
     {
         // winit presents an already-correct framebuffer (no Skia y-flip) and
         // submits full damage, so no partial hint.
@@ -289,10 +290,11 @@ fn render_frame(
             false,
             false,
             rounded_tex_shader,
-            &mut presented,
+            &mut sinks,
         );
         render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }
+    crate::pacing::clear_blockers(state, sinks.unblocked);
 
     drop(framebuffer);
     let result = backend.submit(Some(&[damage]));
@@ -303,7 +305,7 @@ fn render_frame(
     // sequence — honest about what a dev backend can actually know.
     if result.is_ok() {
         crate::presentation::present(
-            presented,
+            sinks.presented,
             &state.output,
             Clock::<Monotonic>::new().now().into(),
             smithay::wayland::presentation::Refresh::Unknown,
@@ -311,7 +313,7 @@ fn render_frame(
             wp_presentation_feedback::Kind::empty(),
         );
     } else {
-        crate::presentation::discard(presented);
+        crate::presentation::discard(sinks.presented);
     }
 
     // Record + periodically log frame timing.

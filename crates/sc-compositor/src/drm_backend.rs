@@ -1058,23 +1058,26 @@ impl App {
 
         // The GBM scanout buffer has the opposite Y-origin from Skia's
         // BottomLeft surface, hence `skia_flip_y`.
-        let mut presented = Vec::new();
+        let mut sinks = crate::render::FrameSinks::default();
         let mut ctx = self.state.draw_ctx(
             prep,
             self.drm.transform,
             true,
             report_partial,
             &self.drm.rounded_tex_shader,
-            &mut presented,
+            &mut sinks,
         );
-        match crate::render::draw_scene(&mut self.drm.renderer, framebuffer, size, &mut ctx) {
-            Ok(damage) => Some((damage, presented)),
-            Err(e) => {
-                warn!("draw_scene failed: {e}");
-                crate::presentation::discard(presented);
-                None
-            }
-        }
+        let drawn =
+            match crate::render::draw_scene(&mut self.drm.renderer, framebuffer, size, &mut ctx) {
+                Ok(damage) => Some((damage, std::mem::take(&mut ctx.sinks.presented))),
+                Err(e) => {
+                    warn!("draw_scene failed: {e}");
+                    crate::presentation::discard(std::mem::take(&mut ctx.sinks.presented));
+                    None
+                }
+            };
+        crate::pacing::clear_blockers(&mut self.state, sinks.unblocked);
+        drawn
     }
 
     /// Blit the just-composited scene into each pending screencopy frame's

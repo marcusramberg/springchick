@@ -150,6 +150,19 @@ pub struct MenuView {
     pub progress: f32,
 }
 
+/// What a draw collects for the backend to act on once the frame is presented.
+///
+/// Both halves are obligations, not information: unanswered feedback leaves a
+/// client waiting forever, and an unreleased blocker leaves its commit
+/// unapplied. See [`crate::presentation`] and [`crate::pacing`].
+#[derive(Default)]
+pub struct FrameSinks {
+    /// Presentation feedback from the surfaces drawn this frame.
+    pub presented: Vec<PresentationFeedbackCallback>,
+    /// Clients whose fifo/commit-timing blockers were signalled this frame.
+    pub unblocked: Vec<smithay::reexports::wayland_server::Client>,
+}
+
 /// Everything the shared draw needs beyond the renderer + framebuffer.
 pub struct DrawCtx<'a> {
     pub scene: &'a Scene,
@@ -242,11 +255,12 @@ pub struct DrawCtx<'a> {
     /// card's root surface when its `corner_radius > 0` so shrunken app cards
     /// (drag-up / switcher deck) render with rounded corners.
     pub rounded_tex_shader: &'a GlesTexProgram,
-    /// Presentation feedback taken from the surfaces drawn this frame. The
-    /// backend owns the vector and must answer every callback in it once the
-    /// frame is presented — or discard them if it never reaches scanout. See
-    /// [`crate::presentation`].
-    pub presented: &'a mut Vec<PresentationFeedbackCallback>,
+    /// When the frame being drawn is expected to reach the panel, used to
+    /// release commit-timing commits aimed at it (see [`crate::pacing`]).
+    pub frame_target: smithay::utils::Time<smithay::utils::Monotonic>,
+    /// What the draw hands back to the backend for the client-facing half of
+    /// the frame: presentation feedback and released blockers.
+    pub sinks: &'a mut FrameSinks,
 }
 
 /// Render a layer surface's tree at `origin` in its own pass. Used for both the
@@ -1142,7 +1156,7 @@ fn pass_chrome(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, rotated: bool) 
 /// present. A surface we didn't draw keeps its callbacks until we do draw it —
 /// it has nothing in this frame to report a presentation time for.
 fn send_frame_callbacks(ctx: &mut DrawCtx<'_>) {
-    // Collected first: the walk below borrows `ctx.presented` mutably, and the
+    // Collected first: the walk below borrows `ctx.sinks` mutably, and the
     // surface lists hang off `ctx` too.
     let mut drawn: Vec<&WlSurface> = Vec::new();
     if let Some(wl_surface) = ctx.app_surface {
@@ -1164,7 +1178,11 @@ fn send_frame_callbacks(ctx: &mut DrawCtx<'_>) {
 
     for surface in drawn {
         send_frames_surface_tree(surface, ctx.frame_time);
-        crate::presentation::take_feedback(surface, ctx.presented);
+        crate::presentation::take_feedback(surface, &mut ctx.sinks.presented);
+        // The surface's current content is in this frame, so its fifo barrier
+        // has been honoured and its next update may go ahead.
+        crate::pacing::signal_fifo(surface, &mut ctx.sinks.unblocked);
+        crate::pacing::signal_commit_timers(surface, ctx.frame_target, &mut ctx.sinks.unblocked);
     }
 }
 
