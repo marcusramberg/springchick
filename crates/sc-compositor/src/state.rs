@@ -109,6 +109,31 @@ pub(crate) struct Launching {
 /// hung launcher may never map a window; stop breathing forever).
 pub(crate) const LAUNCH_PULSE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The per-app icon overlays the home pass draws on top of the layout: animated
+/// positions, launch pulses, running dots.
+///
+/// Lives on [`State`] and is refilled in place by `advance_frame` rather than
+/// rebuilt into a fresh `FramePrep` — every entry is keyed by an app id, so
+/// rebuilding meant ~30 `String` allocations per frame at 90 Hz for keys that
+/// almost never change. Refilling reuses both the maps' buckets and the key
+/// allocations themselves.
+#[derive(Default)]
+pub(crate) struct IconOverlays {
+    /// Screen-space animated center `(x, y)` per grid app: the reflow spring
+    /// position minus the current page scroll, so the grid pass can render
+    /// sliding icons without knowing about pages.
+    pub grid_positions: HashMap<String, (f32, f32)>,
+    /// Screen-space animated center `(x, y)` per dock app. Dock icons don't
+    /// scroll with pages, so these are the spring positions as-is.
+    pub dock_positions: HashMap<String, (f32, f32)>,
+    /// Apps still waiting for their window, as `(app_id, seconds since spawn)`.
+    /// Each draws a breathing pulse on its icon; several can be in flight when
+    /// the user opens more than one window at a time.
+    pub launch_pulses: Vec<(String, f32)>,
+    /// Apps with at least one open window — their icons get a running dot.
+    pub running_apps: HashSet<String>,
+}
+
 /// Backend-agnostic render snapshot produced by [`State::advance_frame`]. Holds
 /// everything both backends feed into [`crate::render::DrawCtx`]; each backend
 /// adds only its own output transform, Skia flip, and framebuffer binding.
@@ -133,19 +158,6 @@ pub(crate) struct FramePrep {
     pub lock_view: session_lock::LockView,
     /// The lock surface to draw when `lock_view` is `Surface`.
     pub lock_surface: Option<WlSurface>,
-    /// Screen-space animated center `(x, y)` per grid app: the reflow spring
-    /// position minus the current page scroll, so the grid pass can render
-    /// sliding icons without knowing about pages.
-    pub grid_positions: HashMap<String, (f32, f32)>,
-    /// Screen-space animated center `(x, y)` per dock app. Dock icons don't
-    /// scroll with pages, so these are the spring positions as-is.
-    pub dock_positions: HashMap<String, (f32, f32)>,
-    /// Apps still waiting for their window, as `(app_id, seconds since spawn)`.
-    /// Each draws a breathing pulse on its icon; several can be in flight when
-    /// the user opens more than one window at a time.
-    pub launch_pulses: Vec<(String, f32)>,
-    /// Apps with at least one open window — their icons get a running dot.
-    pub running_apps: HashSet<String>,
     /// Open icon context menu, laid out for this frame. `None` when closed.
     pub icon_menu: Option<crate::render::MenuView>,
     /// How black to paint the whole screen, `0.0`..=`1.0`: the rotation
@@ -490,6 +502,9 @@ pub(crate) struct State {
     /// `grid_anim` for the dock row; seeded lazily and kept in sync by
     /// `reflow_dock`.
     pub dock_anim: HashMap<String, (sc_anim::Spring, sc_anim::Spring)>,
+    /// Icon overlay inputs for the frame being drawn. Refilled in place by
+    /// `advance_frame`; read by `draw_ctx` for the same frame.
+    pub icon_overlays: IconOverlays,
 
     // Timing
     /// CLOCK_MONOTONIC, the clock every timestamp we hand a client is on:
@@ -810,6 +825,7 @@ impl State {
             last_log_state: None,
             grid_anim: HashMap::new(),
             dock_anim: HashMap::new(),
+            icon_overlays: IconOverlays::default(),
             clock: Clock::new(),
             stats: frame_stats::FrameStats::new(Duration::from_micros(11_111)),
             perf_log: false, // disabled for debugging

@@ -14,8 +14,69 @@ use crate::layer_shell;
 use crate::popups;
 use crate::render;
 use crate::scene::compute_scene;
-use crate::state::{FramePrep, PopupRect, State, SEARCH_APP_ID};
+use crate::state::{AppToplevel, FramePrep, Launching, PopupRect, State, SEARCH_APP_ID};
 use crate::ui_state::{self, transition, UiEvent, UiState};
+
+use std::collections::{HashMap, HashSet};
+
+/// Refill `out` from the reflow springs in `springs`, shifted left by `scroll`
+/// (the live page scroll for the grid; zero for the dock, which doesn't page).
+///
+/// Updates in place: existing keys keep their `String` allocation and only their
+/// value is overwritten, so a steady grid costs no allocation per frame.
+fn sync_positions(
+    out: &mut HashMap<String, (f32, f32)>,
+    springs: &HashMap<String, (sc_anim::Spring, sc_anim::Spring)>,
+    scroll: f32,
+) {
+    out.retain(|app, _| springs.contains_key(app));
+    for (app, (sx, sy)) in springs {
+        let pos = (sx.value - scroll, sy.value);
+        match out.get_mut(app) {
+            Some(slot) => *slot = pos,
+            None => {
+                out.insert(app.clone(), pos);
+            }
+        }
+    }
+}
+
+/// Refill `out` with the app ids that have at least one open window, for the
+/// running dots. Placeholder ids are skipped: `unknown_N` matches no icon, so it
+/// would only ever be a wasted lookup.
+///
+/// In place, as [`sync_positions`]. `toplevels` holds a handful of entries, so
+/// the nested scan is cheaper than rebuilding the set.
+fn sync_running_apps(out: &mut HashSet<String>, toplevels: &[Option<AppToplevel>]) {
+    let shown = |id: &str| !id.starts_with("unknown_") && id != SEARCH_APP_ID;
+    out.retain(|id| toplevels.iter().flatten().any(|tl| tl.app_id == *id));
+    for tl in toplevels.iter().flatten() {
+        if shown(&tl.app_id) && !out.contains(tl.app_id.as_str()) {
+            out.insert(tl.app_id.clone());
+        }
+    }
+}
+
+/// Refill `out` with `(app_id, seconds since spawn)` for every launch still
+/// waiting on its window. Positional and in place: `launching` is short and
+/// ordered, so slot `i` almost always already holds the right id and only the
+/// elapsed time changes.
+fn sync_launch_pulses(out: &mut Vec<(String, f32)>, launching: &[Launching]) {
+    out.truncate(launching.len());
+    for (i, l) in launching.iter().enumerate() {
+        let elapsed = l.started.elapsed().as_secs_f32();
+        match out.get_mut(i) {
+            Some(slot) => {
+                if slot.0 != l.app_id {
+                    slot.0.clear();
+                    slot.0.push_str(&l.app_id);
+                }
+                slot.1 = elapsed;
+            }
+            None => out.push((l.app_id.clone(), elapsed)),
+        }
+    }
+}
 
 impl State {
     /// Popups rooted at `root`, ordered root→leaf, as `(kind, phys_origin,
@@ -498,33 +559,20 @@ impl State {
 
         // Animated icon centers in screen space. Grid springs are global (page 0
         // origin), so subtract the live page scroll here; the dock doesn't page.
+        //
+        // All four overlays are refilled in place (see [`IconOverlays`]) — the
+        // app ids keying them are stable across frames, so rebuilding them would
+        // re-allocate every key at 90 Hz.
         let page_scroll = self.home_page_scroll();
         let (out_w, _) = self.output_size_f();
-        let grid_positions = self
-            .grid_anim
-            .iter()
-            .map(|(app, (sx, sy))| (app.clone(), (sx.value - page_scroll * out_w, sy.value)))
-            .collect();
-        let dock_positions = self
-            .dock_anim
-            .iter()
-            .map(|(app, (sx, sy))| (app.clone(), (sx.value, sy.value)))
-            .collect();
-        // Apps with a window open, for the running dots. Placeholder ids are
-        // skipped: `unknown_N` matches no icon, so it would only ever be a
-        // wasted lookup.
-        let running_apps = self
-            .toplevels
-            .iter()
-            .flatten()
-            .map(|tl| tl.app_id.clone())
-            .filter(|id| !id.starts_with("unknown_") && id != SEARCH_APP_ID)
-            .collect();
-        let launch_pulses = self
-            .launching
-            .iter()
-            .map(|l| (l.app_id.clone(), l.started.elapsed().as_secs_f32()))
-            .collect();
+        sync_positions(
+            &mut self.icon_overlays.grid_positions,
+            &self.grid_anim,
+            page_scroll * out_w,
+        );
+        sync_positions(&mut self.icon_overlays.dock_positions, &self.dock_anim, 0.0);
+        sync_running_apps(&mut self.icon_overlays.running_apps, &self.toplevels);
+        sync_launch_pulses(&mut self.icon_overlays.launch_pulses, &self.launching);
 
         let icon_menu = self.icon_menu.as_ref().map(|m| {
             let (w, h) = self.output_size_f();
@@ -559,10 +607,6 @@ impl State {
             },
             lock_view: self.session_lock.view(),
             lock_surface: self.session_lock.wl_surface().cloned(),
-            grid_positions,
-            dock_positions,
-            launch_pulses,
-            running_apps,
             icon_menu,
             dim: self.rotation_fade.dim(std::time::Instant::now()),
         }
@@ -642,16 +686,71 @@ impl State {
             layer_popups: &prep.layer_popups,
             bar_alpha: prep.bar_alpha,
             pressed_app,
-            launch_pulses: &prep.launch_pulses,
-            running_apps: &prep.running_apps,
+            launch_pulses: &self.icon_overlays.launch_pulses,
+            running_apps: &self.icon_overlays.running_apps,
             arrange,
             icon_menu: prep.icon_menu.as_ref(),
             dim: prep.dim,
             report_partial_damage,
             last_present: &mut self.last_present,
-            grid_positions: &prep.grid_positions,
-            dock_positions: &prep.dock_positions,
+            grid_positions: &self.icon_overlays.grid_positions,
+            dock_positions: &self.icon_overlays.dock_positions,
             rounded_tex_shader,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn springs(
+        entries: &[(&str, f32, f32)],
+    ) -> HashMap<String, (sc_anim::Spring, sc_anim::Spring)> {
+        entries
+            .iter()
+            .map(|(app, x, y)| {
+                (
+                    (*app).to_string(),
+                    (sc_anim::Spring::new(*x), sc_anim::Spring::new(*y)),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sync_positions_fills_an_empty_map() {
+        let mut out = HashMap::new();
+        sync_positions(&mut out, &springs(&[("a", 10.0, 20.0)]), 0.0);
+        assert_eq!(out.get("a"), Some(&(10.0, 20.0)));
+    }
+
+    #[test]
+    fn sync_positions_subtracts_the_page_scroll() {
+        let mut out = HashMap::new();
+        sync_positions(&mut out, &springs(&[("a", 10.0, 20.0)]), 4.0);
+        assert_eq!(out.get("a"), Some(&(6.0, 20.0)));
+    }
+
+    #[test]
+    fn sync_positions_drops_apps_the_springs_no_longer_have() {
+        let mut out = HashMap::new();
+        sync_positions(&mut out, &springs(&[("a", 1.0, 1.0), ("b", 2.0, 2.0)]), 0.0);
+        sync_positions(&mut out, &springs(&[("b", 3.0, 3.0)]), 0.0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.get("b"), Some(&(3.0, 3.0)));
+    }
+
+    /// The point of syncing in place: a steady grid must not re-allocate its
+    /// keys every frame. Same `String` buffer, so the same heap pointer.
+    #[test]
+    fn sync_positions_reuses_the_key_allocations() {
+        let s = springs(&[("a", 1.0, 1.0)]);
+        let mut out = HashMap::new();
+        sync_positions(&mut out, &s, 0.0);
+        let first = out.keys().next().unwrap().as_ptr();
+        sync_positions(&mut out, &springs(&[("a", 9.0, 9.0)]), 0.0);
+        assert_eq!(out.get("a"), Some(&(9.0, 9.0)));
+        assert_eq!(out.keys().next().unwrap().as_ptr(), first);
     }
 }
