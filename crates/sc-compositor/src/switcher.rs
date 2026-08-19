@@ -6,6 +6,7 @@
 //! view when the spread is wider than the screen.
 
 use crate::ui_state::ToplevelId;
+use sc_anim::Spring;
 
 /// Geometry of one card in the switcher deck.
 #[derive(Clone, Copy, Debug)]
@@ -164,6 +165,108 @@ pub fn front_slot(size: (f32, f32)) -> (f32, f32, f32) {
     (w - front_w / 2.0 - w * 0.06, h / 2.0, FRONT_SCALE)
 }
 
+/// The card sitting in the front slot at `scroll`, i.e. the one the deck is
+/// focused on. `None` for an empty deck.
+///
+/// Rounded from the same rubber-banded focus the layout uses, so mid-scroll the
+/// answer flips exactly when the nearer card takes the front slot.
+pub fn focused_card(cards: &[ToplevelId], scroll: f32) -> Option<ToplevelId> {
+    let n = cards.len();
+    if n == 0 {
+        return None;
+    }
+    let i = clamp_focus(scroll, n).round().clamp(0.0, (n - 1) as f32) as usize;
+    cards.get(i).copied()
+}
+
+/// Fades for the per-card chrome drawn around the deck: the app-icon badges and
+/// the focused card's window title.
+///
+/// Two separate fades, because they answer different questions. `visible` is
+/// "is the deck up" — it ramps the whole chrome in as the switcher opens and
+/// out as it leaves, so badges don't pop into existence over a rising deck.
+/// `title_alpha` is "has the focus moved" — switching cards fades the old title
+/// out and the new one in, rather than swapping the text under a steady alpha,
+/// which would read as a glitch.
+///
+/// The title text is owned here (not re-read per frame) precisely so the
+/// outgoing title survives its fade-out after the focus has already moved on.
+pub struct CardChrome {
+    visible: Spring,
+    title_alpha: Spring,
+    shown: Option<ToplevelId>,
+    text: String,
+}
+
+/// Below this alpha a title counts as gone: the incoming one can take over
+/// without a visible cut, and the outgoing one stops being drawn rather than
+/// lingering at the fraction of a percent a spring settles to.
+const TITLE_SWAP_ALPHA: f32 = 0.02;
+
+impl CardChrome {
+    pub fn new() -> Self {
+        Self {
+            visible: Spring::new(0.0),
+            title_alpha: Spring::new(0.0),
+            shown: None,
+            text: String::new(),
+        }
+    }
+
+    /// Advance both fades by `dt`. `focused` is the front card and its title,
+    /// `None` whenever the deck isn't on screen.
+    pub fn advance(&mut self, dt: f32, focused: Option<(ToplevelId, &str)>) {
+        self.visible
+            .retarget(if focused.is_some() { 1.0 } else { 0.0 });
+        self.visible.step(dt);
+
+        match focused {
+            // Same card still focused: hold (or finish fading in) its title.
+            Some((id, _)) if self.shown == Some(id) => self.title_alpha.retarget(1.0),
+            Some((id, title)) => {
+                // Nothing on screen to cross-fade from — adopt at once, so the
+                // first title of a freshly-opened deck fades in with the badges
+                // instead of waiting out an empty fade-out first.
+                if self.shown.is_none() || self.title_alpha.value <= TITLE_SWAP_ALPHA {
+                    self.shown = Some(id);
+                    self.text.clear();
+                    self.text.push_str(title);
+                    self.title_alpha.value = 0.0;
+                    self.title_alpha.velocity = 0.0;
+                    self.title_alpha.retarget(1.0);
+                } else {
+                    self.title_alpha.retarget(0.0);
+                }
+            }
+            None => self.title_alpha.retarget(0.0),
+        }
+        self.title_alpha.step(dt);
+    }
+
+    /// Opacity for the icon badges: the deck-visibility fade alone.
+    pub fn icon_alpha(&self) -> f32 {
+        self.visible.value.clamp(0.0, 1.0)
+    }
+
+    /// The title to draw and its opacity, plus the card it belongs to. `None`
+    /// once it has faded out entirely (or was never shown).
+    pub fn title(&self) -> Option<(ToplevelId, &str, f32)> {
+        let alpha = self.icon_alpha() * self.title_alpha.value.clamp(0.0, 1.0);
+        let id = self.shown?;
+        (alpha > TITLE_SWAP_ALPHA && !self.text.is_empty()).then_some((
+            id,
+            self.text.as_str(),
+            alpha,
+        ))
+    }
+
+    /// True while either fade is still moving, so the render loop keeps frames
+    /// coming until the chrome has settled.
+    pub fn is_animating(&self) -> bool {
+        !self.visible.is_settled() || !self.title_alpha.is_settled()
+    }
+}
+
 /// Clamp the focus index to the deck with soft rubber-banding past the ends.
 fn clamp_focus(scroll: f32, n: usize) -> f32 {
     let max = (n as f32 - 1.0).max(0.0);
@@ -284,6 +387,89 @@ mod tests {
         let fan = fan_around(900.0, 1350.0, FRONT_SCALE, &[0, 1, 2], 1.0, CORNER, SIZE);
         assert_eq!(fan.len(), 2, "front card is not returned");
         assert!(fan[0].dim > 0.0 && fan[1].dim > fan[0].dim);
+    }
+
+    #[test]
+    fn focused_card_follows_the_scroll() {
+        assert_eq!(focused_card(&[7, 3, 1], 0.0), Some(7));
+        assert_eq!(focused_card(&[7, 3, 1], 0.9), Some(3));
+        assert_eq!(focused_card(&[7, 3, 1], 2.0), Some(1));
+        // Rubber-banded past either end, still a real card.
+        assert_eq!(focused_card(&[7, 3, 1], -4.0), Some(7));
+        assert_eq!(focused_card(&[7, 3, 1], 40.0), Some(1));
+        assert_eq!(focused_card(&[], 0.0), None);
+    }
+
+    /// Run `chrome` for `steps` frames at 60 Hz on one focus.
+    fn run(chrome: &mut CardChrome, focused: Option<(ToplevelId, &str)>, steps: usize) {
+        for _ in 0..steps {
+            chrome.advance(1.0 / 60.0, focused);
+        }
+    }
+
+    #[test]
+    fn chrome_fades_in_with_the_deck_and_out_when_it_leaves() {
+        let mut c = CardChrome::new();
+        assert_eq!(c.icon_alpha(), 0.0, "nothing drawn before the deck is up");
+        c.advance(1.0 / 60.0, Some((1, "Terminal")));
+        let first = c.icon_alpha();
+        assert!(first > 0.0 && first < 1.0, "ramps in, doesn't pop: {first}");
+        run(&mut c, Some((1, "Terminal")), 120);
+        assert!(c.icon_alpha() > 0.99);
+        // Deck gone: fade back out rather than cut.
+        c.advance(1.0 / 60.0, None);
+        assert!(c.icon_alpha() < 1.0);
+        run(&mut c, None, 120);
+        assert!(c.icon_alpha() < 0.01);
+        assert!(c.title().is_none());
+    }
+
+    #[test]
+    fn title_cross_fades_when_the_focus_moves() {
+        let mut c = CardChrome::new();
+        run(&mut c, Some((1, "Terminal")), 120);
+        let (id, text, alpha) = c.title().unwrap();
+        assert_eq!((id, text), (1, "Terminal"));
+        assert!(alpha > 0.99);
+
+        // The old title fades out first: the new one must not appear yet.
+        c.advance(1.0 / 60.0, Some((2, "Browser")));
+        let (id, text, alpha) = c.title().unwrap();
+        assert_eq!((id, text), (1, "Terminal"), "old title fades out first");
+        assert!(alpha < 1.0);
+
+        run(&mut c, Some((2, "Browser")), 120);
+        let (id, text, alpha) = c.title().unwrap();
+        assert_eq!((id, text), (2, "Browser"));
+        assert!(alpha > 0.99, "new title fades in to full: {alpha}");
+    }
+
+    #[test]
+    fn first_title_needs_no_fade_out_first() {
+        let mut c = CardChrome::new();
+        // Nothing was on screen, so the incoming title starts rising at once.
+        run(&mut c, Some((1, "Terminal")), 12);
+        let (id, _, alpha) = c.title().unwrap();
+        assert_eq!(id, 1);
+        assert!(alpha > 0.0);
+    }
+
+    #[test]
+    fn untitled_window_draws_no_title() {
+        let mut c = CardChrome::new();
+        run(&mut c, Some((1, "")), 60);
+        assert!(c.title().is_none());
+        assert!(c.icon_alpha() > 0.0, "the badge still shows");
+    }
+
+    #[test]
+    fn chrome_animates_only_while_a_fade_is_moving() {
+        let mut c = CardChrome::new();
+        assert!(!c.is_animating(), "idle at rest");
+        c.advance(1.0 / 60.0, Some((1, "Terminal")));
+        assert!(c.is_animating());
+        run(&mut c, Some((1, "Terminal")), 300);
+        assert!(!c.is_animating(), "settles so the render loop can idle");
     }
 
     #[test]

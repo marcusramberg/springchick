@@ -89,6 +89,13 @@ const CARD_ICON_SHADOW_OFFSET_FRAC: f32 = 0.06;
 const CARD_ICON_SHADOW_SIGMA_FRAC: f32 = 0.13;
 const CARD_ICON_SHADOW_ALPHA: f32 = 0.45;
 
+/// Focused card's title, drawn beside the badge: gap from the badge and text
+/// size as fractions of the badge side, and how much of the available width the
+/// right-edge fade covers when the title overruns.
+const CARD_TITLE_GAP_FRAC: f32 = 0.28;
+const CARD_TITLE_SIZE_FRAC: f32 = 0.34;
+const CARD_TITLE_FADE_FRAC: f32 = 0.25;
+
 impl CardDecor {
     fn rrect(&self) -> RRect {
         RRect::new_rect_xy(
@@ -130,6 +137,19 @@ fn draw_card_shadow_rrect(canvas: &skia_safe::Canvas, card: &CardDecor) {
     canvas.translate((-card.w * SHADOW_DX_FRAC, 0.0));
     canvas.draw_rrect(card.rrect(), &paint);
     canvas.restore();
+}
+
+/// Where the app-icon badge for `card` is drawn: square, above the card's top
+/// edge and inset from its left. Shared by the badge and the title beside it so
+/// the two can't drift apart.
+fn card_icon_rect(card: &CardDecor) -> Rect {
+    let side = (card.w * CARD_ICON_FRAC).max(1.0);
+    Rect::from_xywh(
+        card.x + card.w * CARD_ICON_INSET_FRAC,
+        card.y - side - side * CARD_ICON_GAP_FRAC,
+        side,
+        side,
+    )
 }
 
 struct CachedSurface {
@@ -643,8 +663,10 @@ impl SkiaGl {
     /// under it sells the same separation.
     ///
     /// Drawn after the card and its depth scrim, so it stays legible on a card
-    /// that is dimmed by depth. Fades with the card's own alpha so a fading fan
-    /// doesn't leave icons floating over nothing.
+    /// that is dimmed by depth. `alpha` is the card's own opacity times the
+    /// deck-chrome fade, so badges ramp in with the opening deck rather than
+    /// popping, and a fading fan doesn't leave icons floating over nothing.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_card_icon(
         &mut self,
         width: i32,
@@ -652,9 +674,11 @@ impl SkiaGl {
         card: &CardDecor,
         app_id: &str,
         icon_cache: &HashMap<String, IconPixels>,
+        alpha: f32,
         flip_y: bool,
     ) {
-        if card.alpha <= 0.0 || card.w <= 0.0 || card.h <= 0.0 {
+        let alpha = alpha.clamp(0.0, 1.0);
+        if alpha <= 0.0 || card.w <= 0.0 || card.h <= 0.0 {
             return;
         }
         // Uploaded here rather than relying on `draw_home`: the deck is drawn in
@@ -666,13 +690,8 @@ impl SkiaGl {
         let Some(image) = image else {
             return;
         };
-        let side = (card.w * CARD_ICON_FRAC).max(1.0);
-        let dst = Rect::from_xywh(
-            card.x + card.w * CARD_ICON_INSET_FRAC,
-            card.y - side - side * CARD_ICON_GAP_FRAC,
-            side,
-            side,
-        );
+        let dst = card_icon_rect(card);
+        let side = dst.width();
         self.with_overlay_canvas(width, height, flip_y, |canvas| {
             // Lifted shadow: offset down-right and blurred wide, so the badge
             // reads as hovering above the card rather than stuck to it. Also
@@ -680,7 +699,7 @@ impl SkiaGl {
             let mut shadow = Paint::default();
             shadow.set_anti_alias(true);
             shadow.set_color(Color::from_argb(
-                (CARD_ICON_SHADOW_ALPHA * card.alpha * 255.0)
+                (CARD_ICON_SHADOW_ALPHA * alpha * 255.0)
                     .round()
                     .clamp(0.0, 255.0) as u8,
                 0,
@@ -700,9 +719,133 @@ impl SkiaGl {
 
             let mut paint = Paint::default();
             paint.set_anti_alias(true);
-            paint.set_alpha_f(card.alpha.clamp(0.0, 1.0));
+            paint.set_alpha_f(alpha);
             canvas.draw_image_rect(&image, None, dst, &paint);
         });
+    }
+
+    /// Draw the focused card's window title beside its icon badge, at `alpha`
+    /// (the chrome fade times the title's own cross-fade).
+    ///
+    /// A title too long for the card is *not* ellipsized: it runs to the card's
+    /// right edge and fades out there, so a long title reads as continuing
+    /// rather than as truncated, and the deck keeps a clean right margin.
+    ///
+    /// Follows `draw_home`'s manual surface acquisition rather than
+    /// `with_overlay_canvas`: the text needs `&self.font` while the canvas holds
+    /// `&mut self.cached_surface`.
+    pub fn draw_card_title(
+        &mut self,
+        width: i32,
+        height: i32,
+        card: &CardDecor,
+        title: &str,
+        alpha: f32,
+        flip_y: bool,
+    ) {
+        let alpha = alpha.clamp(0.0, 1.0);
+        if alpha <= 0.0 || title.is_empty() || card.w <= 0.0 {
+            return;
+        }
+        let icon = card_icon_rect(card);
+        let x0 = icon.right() + icon.width() * CARD_TITLE_GAP_FRAC;
+        let right = card.x + card.w - card.w * CARD_ICON_INSET_FRAC;
+        let avail = right - x0;
+        if avail <= 0.0 {
+            return;
+        }
+
+        self.ensure_font();
+        if !self.ensure_surface(width, height) {
+            return;
+        }
+        let Some(font) = self
+            .font
+            .as_ref()
+            .and_then(|f| f.with_size(icon.width() * CARD_TITLE_SIZE_FRAC))
+        else {
+            return;
+        };
+        let Some(blob) = TextBlob::new(title, &font) else {
+            return;
+        };
+        let text_w = font.measure_str(title, None).0;
+        // Baseline that centres the text on the badge: metrics are negative
+        // above the baseline, so this splits ascent and descent evenly.
+        let (_, metrics) = font.metrics();
+        let baseline = icon.center_y() - (metrics.ascent + metrics.descent) / 2.0;
+
+        let surface = &mut self.cached_surface.as_mut().unwrap().surface;
+        let canvas = surface.canvas();
+        canvas.save();
+        if flip_y {
+            canvas.translate((0.0, height as f32));
+            canvas.scale((1.0, -1.0));
+        }
+        // The overflow fade is a DstIn gradient, which needs the text on its own
+        // layer — applied straight to the canvas it would eat the card too.
+        let bounds = Rect::new(x0, icon.top(), right, icon.bottom());
+        canvas.save_layer_alpha_f(bounds, 1.0);
+        canvas.clip_rect(bounds, None, true);
+
+        // Same soft shadow the badge gets, for the same reason: the title sits
+        // over the shell backdrop and whatever card is fanned behind it.
+        let mut shadow = Paint::default();
+        shadow.set_anti_alias(true);
+        shadow.set_color(Color::from_argb(
+            (CARD_ICON_SHADOW_ALPHA * alpha * 255.0)
+                .round()
+                .clamp(0.0, 255.0) as u8,
+            0,
+            0,
+            0,
+        ));
+        shadow.set_mask_filter(MaskFilter::blur(
+            BlurStyle::Normal,
+            (font.size() * 0.12).max(1.0),
+            false,
+        ));
+        canvas.draw_text_blob(&blob, (x0, baseline + font.size() * 0.06), &shadow);
+
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(Color::WHITE);
+        paint.set_alpha_f(alpha);
+        canvas.draw_text_blob(&blob, (x0, baseline), &paint);
+
+        // Only a title that actually overruns gets the edge fade; a short one
+        // would otherwise have its last few characters dimmed for no reason.
+        if text_w > avail {
+            let fade = (avail * CARD_TITLE_FADE_FRAC).min(icon.width());
+            let mut mask = Paint::default();
+            mask.set_blend_mode(skia_safe::BlendMode::DstIn);
+            // Opaque → transparent left to right; DstIn keeps the layer's alpha
+            // where this is opaque, so the text dissolves into the card edge.
+            let stops = [
+                skia_safe::Color4f::new(1.0, 1.0, 1.0, 1.0),
+                skia_safe::Color4f::new(1.0, 1.0, 1.0, 0.0),
+            ];
+            let colors =
+                skia_safe::gradient::Colors::new_evenly_spaced(&stops, TileMode::Clamp, None);
+            mask.set_shader(skia_safe::gradient::shaders::linear_gradient(
+                ((right - fade, 0.0), (right, 0.0)),
+                &skia_safe::gradient::Gradient::new(
+                    colors,
+                    skia_safe::gradient::Interpolation::default(),
+                ),
+                None,
+            ));
+            canvas.draw_rect(
+                Rect::new(right - fade, bounds.top(), right, bounds.bottom()),
+                &mask,
+            );
+        }
+        canvas.restore(); // layer
+        canvas.restore(); // flip
+
+        if let Some(ctx) = self.context.as_mut() {
+            ctx.flush_and_submit();
+        }
     }
 
     /// Black out the whole screen at `alpha`: the dip that covers an orientation
