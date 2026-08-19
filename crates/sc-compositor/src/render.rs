@@ -135,6 +135,37 @@ pub struct ArrangeView<'a> {
     pub over_dock: bool,
 }
 
+/// Everything the Skia home pass draws from, bundled into one argument: the
+/// model and catalogs, the animated icon positions, the per-icon cues, arrange
+/// mode, and the whole-screen offsets.
+///
+/// Assembled by [`pass_home`] from [`DrawCtx`], which holds these as separate
+/// fields because the rest of the render path uses them separately.
+pub struct HomeView<'a> {
+    /// Page whose dock/dots layout is drawn. Grid icons come from
+    /// `grid_positions` instead, so paging is icon motion, not a page offset.
+    pub page: usize,
+    pub model: &'a ShellModel,
+    pub icon_cache: &'a HashMap<String, IconPixels>,
+    pub app_catalog: &'a HashMap<String, AppEntry>,
+    /// Icon currently pressed, drawn with a press highlight.
+    pub pressed_app: Option<&'a str>,
+    /// `(app_id, seconds since spawn)` per in-flight launch: the icon breathes.
+    pub launch_pulses: &'a [(String, f32)],
+    /// Apps with at least one open window — their icons get a running dot.
+    pub running_apps: &'a HashSet<String>,
+    /// Arrange-mode extras (badges, Done, drag ghost). `None` when inactive.
+    pub arrange: Option<&'a ArrangeView<'a>>,
+    /// Animated screen-space centers for grid and dock icons.
+    pub grid_positions: &'a HashMap<String, (f32, f32)>,
+    pub dock_positions: &'a HashMap<String, (f32, f32)>,
+    /// Top of the usable area, which the arrange-mode Done button stays below.
+    pub top_inset: f32,
+    /// Whole-screen offsets: the Home bounce (up) and the drag-out (sideways).
+    pub lift: f32,
+    pub shift: f32,
+}
+
 /// Render-only view of the open icon menu, derived from `State::icon_menu` the
 /// same way [`ArrangeView`] is derived from `State::arrange`.
 pub struct MenuView {
@@ -743,24 +774,22 @@ fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan)
     if !(plan.app_blurred || (scene.show_home && !plan.app_fills_screen)) {
         return;
     }
-    ctx.skia.draw_home(
-        size.w,
-        size.h,
-        scene.home_page,
-        ctx.model,
-        ctx.icon_cache,
-        ctx.app_catalog,
-        ctx.skia_flip_y,
-        ctx.pressed_app,
-        ctx.launch_pulses,
-        ctx.running_apps,
-        ctx.arrange.as_ref(),
-        ctx.grid_positions,
-        ctx.dock_positions,
-        ctx.app_origin.1 as f32,
-        scene.home_lift,
-        scene.home_shift,
-    );
+    let view = HomeView {
+        page: scene.home_page,
+        model: ctx.model,
+        icon_cache: ctx.icon_cache,
+        app_catalog: ctx.app_catalog,
+        pressed_app: ctx.pressed_app,
+        launch_pulses: ctx.launch_pulses,
+        running_apps: ctx.running_apps,
+        arrange: ctx.arrange.as_ref(),
+        grid_positions: ctx.grid_positions,
+        dock_positions: ctx.dock_positions,
+        top_inset: ctx.app_origin.1 as f32,
+        lift: scene.home_lift,
+        shift: scene.home_shift,
+    };
+    ctx.skia.draw_home(size.w, size.h, ctx.skia_flip_y, &view);
 }
 
 /// The icon context menu, over Home. Drawn only when Home itself is (an app
@@ -1063,6 +1092,7 @@ fn pass_switcher_cards(
             radius: placement.corner_radius,
             alpha: card.alpha,
             dim: card.dim,
+            chrome: ctx.card_chrome.icon_alpha,
         };
         ctx.skia
             .draw_card_shadow(size.w, size.h, &decor, ctx.skia_flip_y);
@@ -1077,16 +1107,14 @@ fn pass_switcher_cards(
         )?;
         ctx.skia
             .draw_card_dim(size.w, size.h, &decor, ctx.skia_flip_y);
-        // Badges and title ride the deck's own chrome fade on top of the card
-        // alpha, so they ramp in with an opening deck instead of popping.
-        let chrome = card.alpha * ctx.card_chrome.icon_alpha;
+        // Badge and title ride `decor.chrome` on top of the card alpha, so they
+        // ramp in with an opening deck instead of popping.
         ctx.skia.draw_card_icon(
             size.w,
             size.h,
             &decor,
             &app_id,
             ctx.icon_cache,
-            chrome,
             ctx.skia_flip_y,
         );
         // Only the focused card is titled — the fanned ones show a sliver of

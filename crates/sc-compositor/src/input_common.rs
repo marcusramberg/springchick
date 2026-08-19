@@ -884,16 +884,8 @@ fn resolve_arrange_drop(state: &mut State, drag: DragItem) {
     let page = state.current_home_page();
     let page_len = state.model.pages.get(page).map_or(0, |p| p.len());
     let layout = sc_layout::compute(w, h, page, &state.model);
-    let action = input_dispatch::resolve_drop(
-        drag.cur.0,
-        drag.cur.1,
-        &layout,
-        drag.source,
-        page,
-        page_len,
-        w,
-        h,
-    );
+    let action =
+        input_dispatch::resolve_drop(drag.cur, &layout, drag.source, page, page_len, (w, h));
     // Logged so the VM test can assert the drop resolved the way the gesture
     // intended, separately from whether the model edit then landed.
     debug!(
