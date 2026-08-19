@@ -24,6 +24,7 @@ use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::desktop::{layer_map_for_output, LayerSurface, WindowSurfaceType};
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{IsAlive, Logical, Rectangle};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::wlr_layer::{
@@ -68,6 +69,13 @@ pub fn buffer_size(surface: &WlSurface) -> Option<(i32, i32)> {
         .unwrap_or(None)
 }
 
+/// A surface's protocol object id. Stable for the surface's lifetime and shown
+/// in both the `layers` dump and the create/destroy log, so an orphan left
+/// behind by a client can be followed across the two.
+pub fn surface_id(surface: &WlSurface) -> u32 {
+    surface.id().protocol_id()
+}
+
 /// Scale a logical rectangle up to a physical [`Rect`].
 fn to_physical(r: Rectangle<i32, Logical>, dpi: f64) -> Rect {
     Rect {
@@ -85,6 +93,8 @@ fn to_physical(r: Rectangle<i32, Logical>, dpi: f64) -> Rect {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayerInfo {
     pub namespace: String,
+    /// `wl_surface` protocol id, matching the create/destroy log lines.
+    pub id: u32,
     /// `background` / `bottom` / `top` / `overlay`.
     pub layer: &'static str,
     /// Logical `(x, y, w, h)` from the map. `None` while the map has no
@@ -96,8 +106,9 @@ pub struct LayerInfo {
     pub buffer: Option<(i32, i32)>,
     /// Still in the unmapped set: waiting for the commit that maps it.
     pub pending_map: bool,
-    /// Whether the protocol objects are still alive. `false` = a zombie the
-    /// map is still arranging around; see [`LayerShell::reap`].
+    /// Whether the protocol objects are still alive. `false` = the client is
+    /// gone but the map is still arranging around the surface. Never yet
+    /// observed; a duplicate keyboard is *live* orphans, not dead ones.
     pub alive: bool,
     /// `zwlr_layer_surface_v1.set_anchor` bits, as the client set them.
     pub anchor: u32,
@@ -130,7 +141,7 @@ fn fmt_rect(r: Rect) -> String {
 
 /// One `LayerInfo` as a dump field group. `idx` is its draw order.
 pub fn format_layer(idx: usize, l: &LayerInfo) -> String {
-    let mut s = format!("#{idx} ns={} layer={}", l.namespace, l.layer);
+    let mut s = format!("#{idx} ns={} id={} layer={}", l.namespace, l.id, l.layer);
     match l.geo {
         Some((x, y, w, h)) => s.push_str(&format!(" geo={x},{y}+{w}x{h}")),
         None => s.push_str(" geo=none"),
@@ -301,6 +312,16 @@ impl LayerShell {
             return None;
         }
         self.regrow.resolved();
+        // The app resize this returns is what makes clients cycle
+        // `zwp_text_input`, which is what drives the OSK's show/hide. When a
+        // keyboard duplicates, this is the line to look for just before the
+        // unpaired `layer surface created`.
+        tracing::info!(
+            from_h = self.last_usable.h,
+            to_h = now.h,
+            grew = now.h > self.last_usable.h,
+            "usable area changed; resizing apps"
+        );
         self.last_usable = now;
         Some(now)
     }
@@ -327,6 +348,16 @@ impl LayerShell {
     pub fn new_surface(&mut self, surface: WlrLayerSurface, namespace: String) {
         self.unmapped.insert(surface.wl_surface().clone());
         let mut map = layer_map_for_output(&self.output);
+        // Paired with the `layer surface destroyed` line below. A client that
+        // creates a second surface in a namespace without destroying the first
+        // has leaked one, and the log says which app-facing change preceded it.
+        let live = map.layers().filter(|l| l.namespace() == namespace).count();
+        tracing::info!(
+            id = surface_id(surface.wl_surface()),
+            %namespace,
+            already_in_namespace = live,
+            "layer surface created"
+        );
         // Only fails if already mapped, which a fresh surface never is.
         let _ = map.map_layer(&LayerSurface::new(surface, namespace));
     }
@@ -334,42 +365,43 @@ impl LayerShell {
     /// A layer surface was destroyed. Returns true if it was mapped (so the
     /// caller recomputes the app area).
     pub fn destroyed(&mut self, surface: &WlrLayerSurface) -> bool {
-        self.unmapped.remove(surface.wl_surface());
-        self.slides.remove(surface.wl_surface());
-        // A client that exits and relaunches its keyboard is not the cycle this
-        // guards against, so its history goes with it.
-        self.map_events.remove(surface.wl_surface());
+        tracing::info!(
+            id = surface_id(surface.wl_surface()),
+            "layer surface destroyed"
+        );
         let mut map = layer_map_for_output(&self.output);
-        let Some(layer) = map.layers().find(|l| l.layer_surface() == surface).cloned() else {
+        // Match on the `zwlr_layer_surface_v1` being destroyed, NOT on the
+        // `wl_surface`: smithay's `PartialEq for LayerSurface` compares the
+        // latter, and libwayland recycles object ids aggressively (wvkbd cycles
+        // through the same handful every few hundred microseconds). A stale map
+        // entry whose id has since been reused then compares equal to an
+        // unrelated live surface, so the wrong one is unmapped and the real one
+        // is left reserving its exclusive zone forever. Enough of those and the
+        // usable area shrinks below what the client asked for, which makes
+        // wvkbd tear down and rebuild on every configure — an endless loop that
+        // only ends when its connection drops.
+        let Some(layer) = map
+            .layers()
+            .find(|l| l.layer_surface().shell_surface() == surface.shell_surface())
+            .cloned()
+        else {
+            tracing::warn!(
+                id = surface_id(surface.wl_surface()),
+                "layer surface destroyed but not found in the map"
+            );
             return false;
         };
         map.unmap_layer(&layer);
-        true
-    }
-
-    /// Drop layer surfaces whose objects are dead, and the bookkeeping that
-    /// hangs off them. Returns true if anything went, so the caller recomputes
-    /// the app area.
-    ///
-    /// [`Self::destroyed`] covers the orderly case — a client destroying its
-    /// `zwlr_layer_surface_v1` while it stays connected. It does *not* cover a
-    /// client that exits or crashes: those surfaces stay in the map, and an
-    /// unmapped surface still reserves its exclusive zone during `arrange`, so
-    /// every wvkbd restart shaved another 120–250px off the usable area (four
-    /// zombie keyboards seen on device, app area down to 117px). Must be called
-    /// periodically; `LayerMap::cleanup` is a cheap scan when nothing died.
-    pub fn reap(&mut self) -> bool {
-        let mut map = layer_map_for_output(&self.output);
-        let before = map.len();
-        map.cleanup();
-        let reaped = map.len() != before;
         drop(map);
-        if reaped {
-            self.unmapped.retain(|s| s.alive());
-            self.slides.retain(|s, _| s.alive());
-            self.map_events.retain(|s, _| s.alive());
-        }
-        reaped
+        // Keyed off the layer we actually found, for the same reason: the
+        // `wl_surface` handed to us may name a different, live surface by now.
+        let wl = layer.wl_surface();
+        self.unmapped.remove(wl);
+        self.slides.remove(wl);
+        // A client that exits and relaunches its keyboard is not the cycle the
+        // flap guard is for, so its history goes with it.
+        self.map_events.remove(wl);
+        true
     }
 
     /// Handle a `wl_surface` commit. Returns true if it belonged to a layer
@@ -527,6 +559,7 @@ impl LayerShell {
                 let state = layer.cached_state();
                 out.push(LayerInfo {
                     namespace: layer.namespace().to_string(),
+                    id: surface_id(surface),
                     layer: layer_name(wanted),
                     geo: geo.map(|g| (g.loc.x, g.loc.y, g.size.w, g.size.h)),
                     placed: geo.map(|g| self.place(surface, g, dpi)),
@@ -615,6 +648,7 @@ mod tests {
     fn info() -> LayerInfo {
         LayerInfo {
             namespace: "wvkbd".into(),
+            id: 42,
             layer: "overlay",
             geo: Some((0, 1730, 437, 250)),
             placed: Some(Rect {
@@ -638,7 +672,7 @@ mod tests {
     fn format_layer_reports_geometry_and_buffer() {
         assert_eq!(
             format_layer(0, &info()),
-            "#0 ns=wvkbd layer=overlay geo=0,1730+437x250 draw=0,4844+1224x700 buf=437x250 \
+            "#0 ns=wvkbd id=42 layer=overlay geo=0,1730+437x250 draw=0,4844+1224x700 buf=437x250 \
              anchor=14 excl=250"
         );
     }
@@ -657,7 +691,7 @@ mod tests {
         };
         assert_eq!(
             format_layer(2, &l),
-            "#2 ns=wvkbd layer=overlay geo=none draw=none buf=none pending-map \
+            "#2 ns=wvkbd id=42 layer=overlay geo=none draw=none buf=none pending-map \
              anchor=14 excl=250 slide=0.25"
         );
     }
@@ -677,7 +711,7 @@ mod tests {
         };
         assert_eq!(
             format_layer(3, &l),
-            "#3 ns=wvkbd layer=overlay geo=0,464+0x0 draw=none buf=none pending-map DEAD \
+            "#3 ns=wvkbd id=42 layer=overlay geo=0,464+0x0 draw=none buf=none pending-map DEAD \
              anchor=14 excl=250"
         );
     }

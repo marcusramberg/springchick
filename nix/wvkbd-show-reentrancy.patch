@@ -1,0 +1,98 @@
+diff --git a/main.c b/main.c
+index 765abda..71853d5 100644
+--- a/main.c
++++ b/main.c
+@@ -74,6 +74,10 @@ static uint32_t height, normal_height, landscape_height;
+ static int rounding = DEFAULT_ROUNDING;
+ static bool hidden = false;
+ static bool im_auto = false;
++/* Re-entrancy state for show()/hide(); see the comment in show(). */
++static bool showing = false;
++static bool hide_pending = false;
++static bool restart_pending = false;
+
+ /* event handler prototypes */
+ static void wl_pointer_enter(void *data, struct wl_pointer *wl_pointer,
+@@ -587,6 +591,14 @@ layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface,
+     // Not what we expected, or redimension, refresh and restart
+     if (keyboard.w != w || keyboard.h != h) {
+         zwlr_layer_surface_v1_ack_configure(surface, serial);
++        /* This runs from a wl_display_roundtrip() inside show() when the
++         * compositor answers the probe surface. Restarting from there would
++         * re-enter show() and orphan the surface it is halfway through
++         * building, so defer the restart to the end of show(). */
++        if (showing) {
++            restart_pending = true;
++            return;
++        }
+         hide();
+         show();
+         return;
+@@ -719,6 +731,16 @@ list_layers()
+ void
+ hide()
+ {
++    /* show() is re-entrant: refresh_available_dimension() round-trips, which
++     * dispatches queued events (im_activate/im_deactivate) before show() has
++     * assigned layer_surface. A hide() landing in that window would see a NULL
++     * layer_surface and drop the request, leaving the keyboard up. Defer it to
++     * the end of show() instead. */
++    if (showing) {
++        hide_pending = true;
++        return;
++    }
++
+     if (!layer_surface) {
+         return;
+     }
+@@ -757,15 +779,26 @@ hide()
+     wl_surface_destroy(draw_surf.surf);
+     draw_surf.attached = false;
+
++    /* Nothing left to rebuild for. */
++    restart_pending = false;
+     hidden = true;
+ }
+
+ void
+ show()
+ {
+-    if (layer_surface) {
++    /* The layer_surface guard alone is not enough: it is only assigned at the
++     * bottom of this function, while refresh_available_dimension() below runs
++     * two wl_display_roundtrip()s first. Any im_activate dispatched from those
++     * round-trips re-enters show(), passes the NULL check, creates a real
++     * layer surface and assigns it — then this outer call creates a second one
++     * and overwrites the global. The inner surface is then orphaned: mapped,
++     * drawn, holding its exclusive zone, and unreachable by hide() forever.
++     * One extra keyboard on screen per race. */
++    if (layer_surface || showing) {
+         return;
+     }
++    showing = true;
+
+     refresh_available_dimension();
+     redimension_keyboard();
+@@ -796,6 +829,22 @@ show()
+     zwlr_layer_surface_v1_add_listener(layer_surface, &layer_surface_listener,
+                                        NULL);
+     wl_surface_commit(draw_surf.surf);
++
++    showing = false;
++    /* Requests that arrived while we were building this surface, honoured now
++     * that there is something to act on. A hide wins over a restart: the
++     * keyboard was dismissed, so there is nothing to rebuild. Both run
++     * iteratively rather than nested, so at most one layer surface exists at a
++     * time however many configures disagree with us. */
++    if (hide_pending) {
++        hide_pending = false;
++        restart_pending = false;
++        hide();
++    } else if (restart_pending) {
++        restart_pending = false;
++        hide();
++        show();
++    }
+ }
+
+ void

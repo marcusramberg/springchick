@@ -20,7 +20,7 @@ use crate::state::{
     AppToplevel, Launching, State, LAUNCH_PULSE_TIMEOUT, SEARCH_APP_EXEC, SEARCH_APP_ID,
 };
 use crate::ui_state::{self, transition, ToplevelId, UiEvent, ZoomOrigin};
-use crate::{content_type, keybinds, provenance, rotation};
+use crate::{content_type, keybinds, layer_shell, provenance, rotation};
 
 impl State {
     pub(crate) fn handle_return_home(&mut self) {
@@ -581,10 +581,21 @@ impl State {
                     .last()
                     .map(|(kind, _)| kind.wl_surface().clone())
             })
-            .or(app);
+            .or_else(|| app.clone());
         if want == self.focused_surface {
             return;
         }
+        // Every focus change makes smithay send the input method a
+        // deactivate/activate pair, and wvkbd builds a whole new layer surface
+        // per activate. A burst here is what duplicates the on-screen keyboard
+        // (see the `already_in_namespace` field on `layer surface created`), so
+        // the transitions are logged even though nothing is wrong with one.
+        tracing::info!(
+            from = self.focused_surface.as_ref().map(layer_shell::surface_id),
+            to = want.as_ref().map(layer_shell::surface_id),
+            to_popup = want.is_some() && want != app,
+            "keyboard focus changed"
+        );
         self.focused_surface = want.clone();
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, want, SERIAL_COUNTER.next_serial());
