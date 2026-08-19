@@ -385,6 +385,10 @@ pub(crate) struct State {
     /// ext-session-lock-v1 state: whether the session is locked and the lock
     /// client's surface. See [`crate::session_lock`].
     pub session_lock: session_lock::SessionLock,
+    /// wp_fifo and wp_commit_timing protocol state. Held only to keep the
+    /// globals alive; the work happens in [`crate::pacing`], driven per frame.
+    _fifo_manager: smithay::wayland::fifo::FifoManagerState,
+    _commit_timing_manager: smithay::wayland::commit_timing::CommitTimingManagerState,
     /// Current app rotation, derived from [`Self::device_orientation`] and
     /// whether the foreground app is fullscreen. Only the app surface rotates —
     /// see [`crate::rotation`].
@@ -597,6 +601,13 @@ impl State {
             &dh,
             |_client| true,
         );
+        // wp_fifo + wp_commit_timing: a client can ask for an update to be held
+        // for a refresh, or commit early and name the frame it wants the
+        // content on. smithay does the protocol side and blocks the commits;
+        // releasing them is `crate::pacing`, driven from the render walk.
+        let fifo_manager = smithay::wayland::fifo::FifoManagerState::new::<Self>(&dh);
+        let commit_timing_manager =
+            smithay::wayland::commit_timing::CommitTimingManagerState::new::<Self>(&dh);
         // wp_presentation: report the vblank a client's frame landed on, so
         // self-pacing clients (video, browser animations) can line up with the
         // panel instead of guessing. Timestamps go out on CLOCK_MONOTONIC, the
@@ -762,6 +773,8 @@ impl State {
             content_type,
             background_effect,
             session_lock,
+            _fifo_manager: fifo_manager,
+            _commit_timing_manager: commit_timing_manager,
             rotation: rotation::Rotation::None,
             device_orientation: rotation::DeviceOrientation::Normal,
             orientation_settle: rotation::Settle::new(
@@ -885,6 +898,23 @@ impl State {
     /// call needs.
     pub(crate) fn output_size_f(&self) -> (f32, f32) {
         (self.output_size.0 as f32, self.output_size.1 as f32)
+    }
+
+    /// How long one refresh of the output lasts, from its current mode.
+    ///
+    /// Used to predict when the frame being composited will land, which is what
+    /// commit-timing releases are measured against. A mode with no usable rate
+    /// falls back to 60Hz — a wrong-but-sane interval keeps held commits moving,
+    /// where a zero would release everything immediately.
+    pub(crate) fn output_refresh_interval(&self) -> Duration {
+        const FALLBACK: Duration = Duration::from_nanos(16_666_666);
+        let Some(mode) = self.output.current_mode() else {
+            return FALLBACK;
+        };
+        if mode.refresh <= 0 {
+            return FALLBACK;
+        }
+        Duration::from_nanos(1_000_000_000_000u64 / mode.refresh as u64)
     }
 
     /// Current Home page, or `0` when not on the home screen (app/switcher/etc).
