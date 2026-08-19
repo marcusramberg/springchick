@@ -80,6 +80,7 @@ All pure crates are `#![forbid(unsafe_code)]`.
 - `winit_backend.rs` / `drm_backend.rs` — the two ways to present; `session.rs` is the Wayland display/socket plumbing they share.
 - `debug_input.rs` + `ipc.rs` — synthetic-input socket and its CLI client.
 - Protocol extras: `layer_shell.rs`, `popups.rs`, `idle_notify.rs`, `idle_inhibit.rs`, `gamma_control.rs`, `background_effect.rs`, `content_type.rs`, `session_lock.rs`, `rotation.rs`, `blank.rs`, `osd.rs`, `touch_viz.rs`, `switcher.rs`, `frame_stats.rs`.
+- Client pacing: `presentation.rs` (wp_presentation — feedback answered from the DRM vblank, or after the swap on winit) and `pacing.rs` (wp_fifo + wp_commit_timing). Both are driven from `render.rs`'s frame-callback walk and hand the backend a `FrameSinks`, whose two halves are obligations: unanswered feedback hangs a client, and a signalled blocker still needs `pacing::clear_blockers` to apply the commit waiting on it.
 
 ### Render pipeline (`render.rs`)
 
