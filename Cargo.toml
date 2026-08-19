@@ -23,3 +23,8 @@ opt-level = 1
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# TEMPORARY (duplicate-keyboard hunt): local smithay with the input-method
+# activate/deactivate dedupe. Not for merge — see nix/smithay-im-dedupe.patch.
+[patch."https://github.com/Smithay/smithay.git"]
+smithay = { path = "/home/marcus/Source/smithay" }

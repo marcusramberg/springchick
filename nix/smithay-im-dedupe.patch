@@ -1,0 +1,53 @@
+diff --git a/src/wayland/input_method/input_method_handle.rs b/src/wayland/input_method/input_method_handle.rs
+index fc036949..559787af 100644
+--- a/src/wayland/input_method/input_method_handle.rs
++++ b/src/wayland/input_method/input_method_handle.rs
+@@ -38,6 +38,16 @@ pub(crate) struct InputMethod {
+ pub(crate) struct Instance {
+     pub object: ZwpInputMethodV2,
+     pub serial: u32,
++    /// Whether `activate` has been sent without a matching `deactivate`.
++    ///
++    /// `zwp_input_method_v2.activate`/`deactivate` describe a toggle, so the
++    /// two have to alternate. Text inputs can be enabled or disabled more than
++    /// once for one logical focus change (GTK cycles `zwp_text_input_v3` while
++    /// opening a popover, for instance), and forwarding each of those verbatim
++    /// tells the input method to start over when it is already running. On
++    /// wvkbd that means a fresh layer surface per redundant `activate`, each
++    /// one orphaned by the next.
++    pub active: bool,
+ }
+
+ impl Instance {
+@@ -64,6 +74,7 @@ impl InputMethodHandle {
+             inner.instance = Some(Instance {
+                 object: instance.clone(),
+                 serial: 0,
++                active: false,
+             });
+         }
+     }
+@@ -124,7 +135,11 @@ impl InputMethodHandle {
+     /// Activate input method on the given surface.
+     pub(crate) fn activate_input_method<D: SeatHandler + 'static>(&self, state: &mut D, surface: &WlSurface) {
+         self.with_input_method(|im| {
+-            if let Some(instance) = im.instance.as_ref() {
++            if let Some(instance) = im.instance.as_mut() {
++                if instance.active {
++                    return;
++                }
++                instance.active = true;
+                 instance.object.activate();
+                 if let Some(popup) = im.popup_handle.surface.as_mut() {
+                     let data = instance.object.data::<InputMethodUserData<D>>().unwrap();
+@@ -150,6 +165,10 @@ impl InputMethodHandle {
+     pub(crate) fn deactivate_input_method<D: SeatHandler + 'static>(&self, state: &mut D) {
+         self.with_input_method(|im| {
+             if let Some(instance) = im.instance.as_mut() {
++                if !instance.active {
++                    return;
++                }
++                instance.active = false;
+                 instance.object.deactivate();
+                 instance.done();
+                 if let Some(popup) = im.popup_handle.surface.as_mut() {
