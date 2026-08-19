@@ -10,8 +10,8 @@ use smithay::backend::renderer::ImportDma;
 use smithay::backend::winit::{self, WinitEvent, WinitGraphicsBackend};
 use smithay::backend::SwapBuffersError;
 use smithay::reexports::winit::dpi::LogicalSize;
-use smithay::reexports::winit::platform::pump_events::PumpStatus;
-use smithay::reexports::winit::window::Window as WinitWindow;
+use smithay::reexports::winit::event_loop::pump_events::PumpStatus;
+use smithay::reexports::winit::window::WindowAttributes;
 use smithay::utils::{Rectangle, Transform};
 
 use sc_shell_model::persist;
@@ -26,9 +26,9 @@ pub(crate) fn run_winit() {
     let (win_w, win_h) = backend::dev_window_size();
     info!(width = win_w, height = win_h, "starting winit dev backend");
 
-    let attributes = WinitWindow::default_attributes()
+    let attributes = WindowAttributes::default()
         .with_title("springchick")
-        .with_inner_size(LogicalSize::new(f64::from(win_w), f64::from(win_h)))
+        .with_surface_size(LogicalSize::new(f64::from(win_w), f64::from(win_h)))
         .with_visible(true);
 
     let (mut gfx_backend, mut winit_evt) =

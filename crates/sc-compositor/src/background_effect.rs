@@ -133,5 +133,3 @@ impl ExtBackgroundEffectHandler for State {
         debug!("blur region unset");
     }
 }
-
-smithay::delegate_background_effect!(State);

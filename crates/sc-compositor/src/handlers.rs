@@ -50,17 +50,7 @@ use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
-
-use smithay::delegate_compositor;
-use smithay::delegate_data_device;
-use smithay::delegate_input_method_manager;
-use smithay::delegate_output;
-use smithay::delegate_seat;
-use smithay::delegate_shm;
-use smithay::delegate_text_input_manager;
-use smithay::delegate_xdg_decoration;
-use smithay::delegate_xdg_dialog;
-use smithay::delegate_xdg_shell;
+use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
 
 use tracing::{debug, info, warn};
 
@@ -509,26 +499,13 @@ impl smithay::wayland::shell::wlr_layer::WlrLayerShellHandler for State {
     }
 }
 
-delegate_compositor!(State);
-smithay::delegate_dmabuf!(State);
-delegate_xdg_shell!(State);
-delegate_xdg_dialog!(State);
-delegate_seat!(State);
-delegate_shm!(State);
-delegate_data_device!(State);
-smithay::delegate_ext_data_control!(State);
-smithay::delegate_data_control!(State);
-smithay::delegate_primary_selection!(State);
-delegate_output!(State);
-delegate_xdg_decoration!(State);
-smithay::delegate_layer_shell!(State);
-smithay::delegate_virtual_keyboard_manager!(State);
-smithay::delegate_fractional_scale!(State);
-smithay::delegate_viewporter!(State);
-delegate_text_input_manager!(State);
-delegate_input_method_manager!(State);
-smithay::delegate_image_capture_source!(State);
-smithay::delegate_output_capture_source!(State);
-smithay::delegate_image_copy_capture!(State);
-smithay::delegate_content_type!(State);
-smithay::delegate_xdg_activation!(State);
+/// `PointerTarget for WlSurface` requires this bound; we advertise no
+/// pointer-constraints global, so every method keeps its default no-op.
+impl PointerConstraintsHandler for State {}
+
+// One blanket impl in place of the old per-protocol `delegate_*!` invocations:
+// smithay now dispatches through `Dispatch2`/`GlobalDispatch2`, implemented on
+// each protocol's user-data type rather than on `State`. Modules that hand-roll
+// `Dispatch for State` (gamma_control, wlr_screencopy, idle_notify) are
+// unaffected — the interfaces are disjoint, so they don't overlap this.
+smithay::delegate_dispatch2!(State);
