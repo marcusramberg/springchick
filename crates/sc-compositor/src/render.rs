@@ -150,6 +150,20 @@ pub struct MenuView {
     pub progress: f32,
 }
 
+/// Render-only view of the switcher deck's chrome fades, snapshotted from
+/// [`crate::switcher::CardChrome`] the way [`MenuView`] is from the icon menu.
+#[derive(Default)]
+pub struct CardChromeView {
+    /// Opacity of every card's app-icon badge, 0 when the deck is not up.
+    pub icon_alpha: f32,
+    /// The card the title belongs to, and the title itself. `None` while no
+    /// title is on screen (deck down, focused window untitled, or faded out).
+    pub title: Option<(crate::ui_state::ToplevelId, String)>,
+    /// Opacity of that title — its own cross-fade, already multiplied by
+    /// `icon_alpha` so the whole chrome leaves together.
+    pub title_alpha: f32,
+}
+
 /// What a draw collects for the backend to act on once the frame is presented.
 ///
 /// Both halves are obligations, not information: unanswered feedback leaves a
@@ -234,6 +248,8 @@ pub struct DrawCtx<'a> {
     pub arrange: Option<ArrangeView<'a>>,
     /// Open icon context menu, drawn over Home. `None` when closed.
     pub icon_menu: Option<&'a MenuView>,
+    /// Fades for the switcher deck's icon badges and focused-card title.
+    pub card_chrome: &'a CardChromeView,
     /// Screen-space animated center `(x, y)` for each grid app, driven by
     /// `State.grid_anim` springs. Used to render the grid so icons slide to
     /// their reflow targets instead of snapping.
@@ -1061,14 +1077,32 @@ fn pass_switcher_cards(
         )?;
         ctx.skia
             .draw_card_dim(size.w, size.h, &decor, ctx.skia_flip_y);
+        // Badges and title ride the deck's own chrome fade on top of the card
+        // alpha, so they ramp in with an opening deck instead of popping.
+        let chrome = card.alpha * ctx.card_chrome.icon_alpha;
         ctx.skia.draw_card_icon(
             size.w,
             size.h,
             &decor,
             &app_id,
             ctx.icon_cache,
+            chrome,
             ctx.skia_flip_y,
         );
+        // Only the focused card is titled — the fanned ones show a sliver of
+        // themselves and nowhere to put the text.
+        if let Some((tid, title)) = &ctx.card_chrome.title {
+            if *tid == card.toplevel {
+                ctx.skia.draw_card_title(
+                    size.w,
+                    size.h,
+                    &decor,
+                    title,
+                    card.alpha * ctx.card_chrome.title_alpha,
+                    ctx.skia_flip_y,
+                );
+            }
+        }
     }
     Ok(())
 }

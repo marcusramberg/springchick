@@ -381,6 +381,9 @@ impl State {
                 .icon_menu
                 .as_ref()
                 .is_some_and(|m| !m.open.is_settled())
+            // The deck's badge/title fades, which outlive the deck itself on the
+            // way out (and the scroll spring on a focus change).
+            || self.card_chrome.is_animating()
             // A debug-input gesture/key/touch/settle in flight must keep the DRM
             // loop rendering each tick so it advances (page-flips otherwise stop
             // on an idle screen). Inert in normal runs — these are always None.
@@ -574,6 +577,31 @@ impl State {
         sync_running_apps(&mut self.icon_overlays.running_apps, &self.toplevels);
         sync_launch_pulses(&mut self.icon_overlays.launch_pulses, &self.launching);
 
+        // Deck chrome. The title is read from the toplevel only while that card
+        // is focused; `CardChrome` owns the copy it is drawing so an outgoing
+        // title survives its fade-out (and a window that closes mid-fade).
+        let focused = match &self.ui {
+            UiState::Switcher { cards, scroll, .. } => {
+                crate::switcher::focused_card(cards, scroll.value)
+            }
+            _ => None,
+        };
+        let focused_title = focused.map(|tid| (tid, self.toplevel_title(tid)));
+        self.card_chrome.advance(
+            dt,
+            focused_title
+                .as_ref()
+                .map(|(tid, title)| (*tid, title.as_str())),
+        );
+        let card_chrome = render::CardChromeView {
+            icon_alpha: self.card_chrome.icon_alpha(),
+            title: self
+                .card_chrome
+                .title()
+                .map(|(tid, text, _)| (tid, text.to_string())),
+            title_alpha: self.card_chrome.title().map_or(0.0, |(_, _, a)| a),
+        };
+
         let icon_menu = self.icon_menu.as_ref().map(|m| {
             let (w, h) = self.output_size_f();
             render::MenuView {
@@ -608,6 +636,7 @@ impl State {
             lock_view: self.session_lock.view(),
             lock_surface: self.session_lock.wl_surface().cloned(),
             icon_menu,
+            card_chrome,
             dim: self.rotation_fade.dim(std::time::Instant::now()),
         }
     }
@@ -690,6 +719,7 @@ impl State {
             running_apps: &self.icon_overlays.running_apps,
             arrange,
             icon_menu: prep.icon_menu.as_ref(),
+            card_chrome: &prep.card_chrome,
             dim: prep.dim,
             report_partial_damage,
             last_present: &mut self.last_present,

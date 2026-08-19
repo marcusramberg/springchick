@@ -160,6 +160,9 @@ pub(crate) struct FramePrep {
     pub lock_surface: Option<WlSurface>,
     /// Open icon context menu, laid out for this frame. `None` when closed.
     pub icon_menu: Option<crate::render::MenuView>,
+    /// Per-card chrome for the switcher deck: badge opacity plus the focused
+    /// card's title and its own cross-fade.
+    pub card_chrome: crate::render::CardChromeView,
     /// How black to paint the whole screen, `0.0`..=`1.0`: the rotation
     /// transition's dip. `0.0` on any ordinary frame.
     pub dim: f32,
@@ -473,6 +476,8 @@ pub(crate) struct State {
     pub switcher_drag: input_common::SwitcherDrag,
     /// Switcher card rects for hit-testing during drag.
     pub switcher_cards: Vec<switcher::CardRect>,
+    /// Fades for the deck's icon badges and focused-card title.
+    pub card_chrome: switcher::CardChrome,
     /// In-flight held-modifier switching session (Super+Tab). `None` when the
     /// keyboard is not driving the deck. See [`crate::kbd_switch`].
     pub kbd_switch: Option<crate::kbd_switch::KbdSwitch>,
@@ -816,6 +821,7 @@ impl State {
             expecting_search: false,
             switcher_drag: input_common::SwitcherDrag::None,
             switcher_cards: Vec::new(),
+            card_chrome: switcher::CardChrome::new(),
             kbd_switch: None,
             bar_hint: crate::bar_hint::BarHint::new(),
             active_gesture: None,
