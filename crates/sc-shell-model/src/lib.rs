@@ -47,8 +47,7 @@ impl FrecencyStore {
     /// Record an app launch: decay the stored score to `now`, then add 1.
     pub fn record_launch(&mut self, app: &str, now: u64) {
         let s = self.apps.entry(app.to_owned()).or_default();
-        let elapsed = now.saturating_sub(s.last_launch) as f64;
-        s.score = s.score * 0.5_f64.powf(elapsed / HALF_LIFE_SECS) + 1.0;
+        s.score = eff(s, now) + 1.0;
         s.last_launch = now;
     }
 

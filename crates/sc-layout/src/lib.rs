@@ -131,7 +131,6 @@ fn fit_icon_size(cell_w: f32, band_h: f32, label_h: f32) -> f32 {
     (cell_w * ICON_SIZE_FRAC).min(available).max(0.0)
 }
 
-/// Compute the full home screen layout for the given output size, page, and model.
 /// The bottom home-bar zone rectangle, standalone (no full layout needed).
 pub fn bar_rect(width: f32, height: f32) -> Rect {
     Rect {
@@ -168,6 +167,10 @@ pub fn pill_rect(width: f32, height: f32) -> Rect {
 
 /// Shared grid-cell geometry, derived once from output dimensions.
 struct GridMetrics {
+    /// Top of the dock band, i.e. the bottom edge of the page-dots band.
+    dock_top: f32,
+    /// Top of the page-dots band, i.e. the bottom edge of the icon grid.
+    dots_top: f32,
     grid_left: f32,
     grid_top: f32,
     cell_w: f32,
@@ -180,7 +183,7 @@ struct GridMetrics {
 /// source for the numbers used both by `compute` and the standalone
 /// positioning helpers (`global_slot_pos`, `slot_at_center`).
 fn grid_metrics(width: f32, height: f32) -> GridMetrics {
-    let dock_top = height * (1.0 - BAR_HEIGHT) - height * DOCK_HEIGHT;
+    let dock_top = bar_rect(width, height).y - height * DOCK_HEIGHT;
     let dots_top = dock_top - height * DOTS_HEIGHT;
 
     let grid_top = height * TOP_PAD;
@@ -196,6 +199,8 @@ fn grid_metrics(width: f32, height: f32) -> GridMetrics {
     let icon_size = fit_icon_size(cell_w, cell_h, label_h);
 
     GridMetrics {
+        dock_top,
+        dots_top,
         grid_left,
         grid_top,
         cell_w,
@@ -305,15 +310,11 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
     let page_count = model.pages.len().max(1);
     let clamped_page = page.min(page_count.saturating_sub(1));
 
-    let bar_rect = Rect {
-        x: 0.0,
-        y: height * (1.0 - BAR_HEIGHT),
-        w: width,
-        h: height * BAR_HEIGHT,
-    };
+    let bar_rect = bar_rect(width, height);
 
-    let dock_top = bar_rect.y - height * DOCK_HEIGHT;
-    let dots_top = dock_top - height * DOTS_HEIGHT;
+    let gm = grid_metrics(width, height);
+    let dock_top = gm.dock_top;
+    let dots_top = gm.dots_top;
     let dots_rect = Rect {
         x: 0.0,
         y: dots_top,
@@ -321,7 +322,6 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
         h: height * DOTS_HEIGHT,
     };
 
-    let gm = grid_metrics(width, height);
     let grid_top = gm.grid_top;
     let usable_width = width * (1.0 - 2.0 * H_MARGIN);
     let grid_left = gm.grid_left;
