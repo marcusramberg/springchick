@@ -94,7 +94,7 @@ All pure crates are `#![forbid(unsafe_code)]`.
 
 ### Smithay dependency
 
-Pinned to upstream git (`github.com/Smithay/smithay.git`, rev `ff5fa7d` — the rev niri pins), not crates.io: needed for xkbcommon 0.9, which fixes wvkbd keymap loading.
+Pinned to upstream git (`github.com/Smithay/smithay.git`, rev `7ddcd17`), not crates.io: needed for xkbcommon 0.9, which fixes wvkbd keymap loading. Protocol dispatch is one `smithay::delegate_dispatch2!(State)` in `handlers.rs` — the per-protocol `delegate_*!` macros were removed upstream.
 
 The `use_system_lib` feature is **load-bearing, not an optimisation**: it selects libwayland-server over the pure-Rust `wayland-backend`. Several smithay role handlers post a protocol error from a surface pre-commit hook after the role object is gone (the "destroy role → attach nil → commit" teardown every Qt/quickshell client does). The Rust backend delivers that on the dead object and kills the client — layer surfaces (Smithay#1979, dms panel close) and lock surfaces (`Committed before the first ack_configure.`, dms unlock); libwayland drops it. Removing the feature resurrects both crashes.
 

@@ -22,7 +22,6 @@
 use std::collections::HashSet;
 use std::hash::Hash;
 
-use smithay::delegate_idle_inhibit;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::utils::IsAlive;
@@ -89,8 +88,6 @@ impl IdleInhibitHandler for State {
         self.idle_inhibit.surfaces.remove(&surface);
     }
 }
-
-delegate_idle_inhibit!(State);
 
 #[cfg(test)]
 mod tests {

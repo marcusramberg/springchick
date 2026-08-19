@@ -223,8 +223,6 @@ impl SessionLockHandler for State {
     }
 }
 
-smithay::delegate_session_lock!(State);
-
 #[cfg(test)]
 mod tests {
     use super::*;
