@@ -23,7 +23,7 @@ use smithay::backend::input::{
 };
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexProgram};
-use smithay::backend::renderer::{Bind, ImportDma, RendererSuper};
+use smithay::backend::renderer::{Bind, ImportDma, Renderer, RendererSuper};
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev;
@@ -748,6 +748,14 @@ impl App {
                     m.pending_flip = false;
                 }
                 self.drm.set_mirror_dpms(false);
+                // Nothing will be composited until the panel comes back, so the
+                // renderer's texture and dmabuf import caches are dead weight
+                // held on the GPU for as long as the phone sits in a pocket.
+                // Imports are rebuilt from the clients' buffers on the first
+                // frame after unblanking.
+                if let Err(err) = self.drm.renderer.invalidate_caches() {
+                    warn!("invalidate_caches on blank failed: {err}");
+                }
             }
         } else {
             info!("unblanking panel");
