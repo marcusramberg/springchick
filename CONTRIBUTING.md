@@ -275,11 +275,16 @@ All pointer/touch events → normalized `Pt` (0..1) → routed on UiState:
 - Protocols implemented: compositor, xdg-shell, xdg-decoration, xdg-dialog,
   layer-shell, shm, dmabuf, seat, wl_output, viewporter, fractional-scale,
   content-type, text-input, input-method, virtual-keyboard, idle-inhibit,
-  idle-notify, data-device, ext-data-control, ext-image-capture-source,
-  ext-image-copy-capture, ext-background-effect.
-- Not implemented (expect the odd client warning): primary-selection,
-  xdg-activation, cursor-shape, pointer-constraints, presentation-time. The
-  `xwayland` cargo feature is enabled but no XWayland is wired up yet.
+  idle-notify, data-device, primary-selection, ext-data-control,
+  xdg-activation, ext-image-capture-source, ext-image-copy-capture,
+  ext-background-effect, session-lock, presentation-time, fifo, commit-timing.
+- Not implemented (expect the odd client warning): cursor-shape,
+  pointer-constraints (the handler exists to satisfy a trait bound, but no
+  global is advertised), explicit sync (linux-drm-syncobj), xdg-toplevel-icon.
+  The `xwayland` cargo feature is enabled but no XWayland is wired up yet.
+- Client-facing timestamps are all CLOCK_MONOTONIC — frame callbacks, input
+  events and presentation feedback. Clients do arithmetic across them; a
+  process-local epoch breaks that silently.
 - Top-level apps are configured **Maximized**, not Fullscreen — maximized fills
   the screen while leaving toolkits their normal layout (which keeps a dialog's
   buttons on screen). Fullscreen is set only when a client asks for it (e.g.
