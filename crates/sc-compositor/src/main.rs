@@ -36,6 +36,7 @@ mod layer_shell;
 mod mirror;
 mod osd;
 mod popups;
+mod presentation;
 mod provenance;
 mod render;
 mod rotation;

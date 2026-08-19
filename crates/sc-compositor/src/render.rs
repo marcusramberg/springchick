@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::scene::Scene;
 use crate::skia_gl::SkiaGl;
+use smithay::wayland::presentation::PresentationFeedbackCallback;
 
 use sc_catalog::AppEntry;
 use sc_icons::IconPixels;
@@ -241,6 +242,11 @@ pub struct DrawCtx<'a> {
     /// card's root surface when its `corner_radius > 0` so shrunken app cards
     /// (drag-up / switcher deck) render with rounded corners.
     pub rounded_tex_shader: &'a GlesTexProgram,
+    /// Presentation feedback taken from the surfaces drawn this frame. The
+    /// backend owns the vector and must answer every callback in it once the
+    /// frame is presented — or discard them if it never reaches scanout. See
+    /// [`crate::presentation`].
+    pub presented: &'a mut Vec<PresentationFeedbackCallback>,
 }
 
 /// Render a layer surface's tree at `origin` in its own pass. Used for both the
@@ -1130,23 +1136,35 @@ fn pass_chrome(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, rotated: bool) 
 /// backgrounded clients (which throttle drawing to frame callbacks) stop
 /// presenting and their card renders blank after the entry animation settles.
 /// Layer surfaces and popups throttle the same way.
-fn send_frame_callbacks(ctx: &DrawCtx<'_>) {
+///
+/// The same surfaces have their presentation feedback taken, since these are
+/// exactly the ones whose content is in the frame the backend is about to
+/// present. A surface we didn't draw keeps its callbacks until we do draw it —
+/// it has nothing in this frame to report a presentation time for.
+fn send_frame_callbacks(ctx: &mut DrawCtx<'_>) {
+    // Collected first: the walk below borrows `ctx.presented` mutably, and the
+    // surface lists hang off `ctx` too.
+    let mut drawn: Vec<&WlSurface> = Vec::new();
     if let Some(wl_surface) = ctx.app_surface {
-        send_frames_surface_tree(wl_surface, ctx.frame_time);
+        drawn.push(wl_surface);
     }
     for card in &ctx.scene.cards {
         if let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) {
-            send_frames_surface_tree(tl.surface.wl_surface(), ctx.frame_time);
+            drawn.push(tl.surface.wl_surface());
         }
     }
-    for (surface, _) in ctx
-        .layers_below
-        .iter()
-        .chain(ctx.layers_above)
-        .chain(ctx.app_popups)
-        .chain(ctx.layer_popups)
-    {
+    drawn.extend(
+        ctx.layers_below
+            .iter()
+            .chain(ctx.layers_above)
+            .chain(ctx.app_popups)
+            .chain(ctx.layer_popups)
+            .map(|(surface, _)| surface),
+    );
+
+    for surface in drawn {
         send_frames_surface_tree(surface, ctx.frame_time);
+        crate::presentation::take_feedback(surface, ctx.presented);
     }
 }
 

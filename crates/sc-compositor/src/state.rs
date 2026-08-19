@@ -22,6 +22,7 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
+use smithay::utils::{Clock, Monotonic};
 use smithay::wayland::compositor::{CompositorClientState, CompositorState};
 use smithay::wayland::dmabuf::{DmabufFeedbackBuilder, DmabufGlobal, DmabufState};
 use smithay::wayland::fractional_scale::FractionalScaleManagerState;
@@ -487,7 +488,14 @@ pub(crate) struct State {
     pub dock_anim: HashMap<String, (sc_anim::Spring, sc_anim::Spring)>,
 
     // Timing
-    pub start_time: std::time::Instant,
+    /// CLOCK_MONOTONIC, the clock every timestamp we hand a client is on:
+    /// `wl_surface.frame` callbacks, input event times, and the presentation
+    /// feedback we advertise at bind. Clients mix the three — a media player
+    /// schedules its next commit from a frame callback and checks it against
+    /// presentation feedback — so they have to share a base. Measuring frames
+    /// from `start_time` instead put frame callbacks on a per-process epoch,
+    /// which made that arithmetic land days out.
+    pub clock: Clock<Monotonic>,
 
     // Perf instrumentation
     pub stats: frame_stats::FrameStats,
@@ -588,6 +596,14 @@ impl State {
         smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState::new::<Self, _>(
             &dh,
             |_client| true,
+        );
+        // wp_presentation: report the vblank a client's frame landed on, so
+        // self-pacing clients (video, browser animations) can line up with the
+        // panel instead of guessing. Timestamps go out on CLOCK_MONOTONIC, the
+        // clock both backends measure frames with.
+        smithay::wayland::presentation::PresentationState::new::<Self>(
+            &dh,
+            libc::CLOCK_MONOTONIC as u32,
         );
         // activate/deactivate on zwp_input_method_v2
         smithay::wayland::text_input::TextInputManagerState::new::<Self>(&dh);
@@ -781,7 +797,7 @@ impl State {
             last_log_state: None,
             grid_anim: HashMap::new(),
             dock_anim: HashMap::new(),
-            start_time: std::time::Instant::now(),
+            clock: Clock::new(),
             stats: frame_stats::FrameStats::new(Duration::from_micros(11_111)),
             perf_log: false, // disabled for debugging
             last_perf_log: std::time::Instant::now(),

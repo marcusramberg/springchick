@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::{Fourcc, Modifier};
 use smithay::backend::drm::{
-    DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, GbmBufferedSurface, NodeType,
+    DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata, DrmEventTime, DrmNode, GbmBufferedSurface,
+    NodeType,
 };
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
@@ -33,10 +34,12 @@ use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::drm::control::{connector, crtc, property, Device as ControlDevice};
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
+use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 use smithay::reexports::wayland_server::{Display, ListeningSocket};
 use smithay::utils::{Clock, DeviceFd, Monotonic, Physical, Rectangle, Size, Transform};
 use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::image_copy_capture::CaptureFailureReason;
+use smithay::wayland::presentation::PresentationFeedbackCallback;
 
 use tracing::{debug, error, info, warn};
 
@@ -44,6 +47,13 @@ use crate::{accept_client, create_display, State};
 
 /// Per-frame user data threaded through the GBM swapchain page-flip.
 type FlipData = ();
+
+/// What one composited frame hands the presenting code: the KMS damage hint,
+/// and the presentation feedback owed to the clients drawn into it.
+type DrawnFrame = (
+    Vec<Rectangle<i32, Physical>>,
+    Vec<PresentationFeedbackCallback>,
+);
 
 struct Drm {
     device: DrmDevice,
@@ -64,6 +74,13 @@ struct Drm {
     active: bool,
     /// True while a page-flip is in flight (waiting on vblank).
     pending_flip: bool,
+    /// Presentation feedback for the frame currently in flight, answered from
+    /// the vblank that scans it out (see [`crate::presentation`]). Empty
+    /// whenever no flip is pending.
+    pending_presentation: Vec<PresentationFeedbackCallback>,
+    /// Refresh rate of the scanout mode in mHz, reported to clients alongside
+    /// each presentation timestamp so they can pace to the panel.
+    refresh_mhz: i32,
     /// DRM node fd, kept for DPMS toggling (blanking).
     device_fd: DrmDeviceFd,
     /// The connector we scan out to, and its `DPMS` property handle if the
@@ -302,6 +319,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         transform: Transform::Normal,
         active: true,
         pending_flip: false,
+        pending_presentation: Vec::new(),
+        refresh_mhz: mode_refresh_mhz(&mode),
         device_fd: device_fd.clone(),
         connector: connector_handle,
         dpms_prop,
@@ -338,7 +357,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // 1. DRM page-flip events.
     event_loop
         .handle()
-        .insert_source(drm_notifier, |event, _meta, app| match event {
+        .insert_source(drm_notifier, |event, meta, app| match event {
             DrmEvent::VBlank(crtc) => {
                 // A mirror's vblank normally only releases its own buffer —
                 // mirrors are driven by the primary's render, never the other
@@ -363,6 +382,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     warn!("frame_submitted error: {e}");
                 }
                 app.drm.pending_flip = false;
+                app.present_feedback(meta.take());
                 // Only re-prime a flip if something is still changing. On a
                 // static screen (idle home, quiescent app) this lets the vblank
                 // loop stop instead of rendering every frame forever — the idle
@@ -865,10 +885,11 @@ impl App {
             }
         };
 
-        let flip_damage = match self.draw_scene_into(&mut framebuffer, &prep, report_partial) {
-            Some(damage) => damage,
-            None => return,
-        };
+        let (flip_damage, presented) =
+            match self.draw_scene_into(&mut framebuffer, &prep, report_partial) {
+                Some(drawn) => drawn,
+                None => return,
+            };
         drop(framebuffer);
 
         // Fence the frame: block until smithay + Skia GL work has completed so
@@ -884,14 +905,27 @@ impl App {
         // un-queued slot, which is exactly the buffer the mirrors read below.
         if self.state.blank.is_blanked() {
             debug!(target: "springchick::debug", "mirror-only frame (panel blanked)");
+            // The panel is off: this frame reaches a mirror at best, never the
+            // vblank that would time it.
+            crate::presentation::discard(presented);
         } else {
             match self
                 .drm
                 .gbm_surface
                 .queue_buffer(None, Some(flip_damage), ())
             {
-                Ok(()) => self.drm.pending_flip = true,
-                Err(e) => warn!("queue_buffer failed: {e}"),
+                Ok(()) => {
+                    self.drm.pending_flip = true;
+                    // Answered by the vblank this flip produces. Anything still
+                    // held from an earlier frame never got one (a refused flip,
+                    // a VT switch): tell those clients so they stop waiting.
+                    let stale = std::mem::replace(&mut self.drm.pending_presentation, presented);
+                    crate::presentation::discard(stale);
+                }
+                Err(e) => {
+                    warn!("queue_buffer failed: {e}");
+                    crate::presentation::discard(presented);
+                }
             }
         }
 
@@ -952,6 +986,48 @@ impl App {
     /// Re-derive the mirror set after a display hotplug, then repaint so a
     /// freshly attached panel shows the current frame instead of staying black
     /// until something else animates.
+    /// Answer the in-flight frame's presentation feedback from the vblank that
+    /// scanned it out.
+    ///
+    /// The kernel's own timestamp and sequence are used when the driver reports
+    /// them on a monotonic clock — that is what makes the feedback worth having,
+    /// and it is flagged `HW_CLOCK`/`HW_COMPLETION` so clients know to trust it.
+    /// A realtime (or missing) stamp is not on the clock we advertised at bind,
+    /// so those frames fall back to reading the monotonic clock here and drop
+    /// the hardware flags.
+    fn present_feedback(&mut self, meta: Option<DrmEventMetadata>) {
+        let callbacks = std::mem::take(&mut self.drm.pending_presentation);
+        if callbacks.is_empty() {
+            return;
+        }
+        let hw_time = meta.and_then(|m| match m.time {
+            DrmEventTime::Monotonic(time) => Some((time, m.sequence)),
+            DrmEventTime::Realtime(_) => None,
+        });
+        let (time, seq, flags) = match hw_time {
+            Some((time, sequence)) => (
+                time,
+                u64::from(sequence),
+                wp_presentation_feedback::Kind::Vsync
+                    | wp_presentation_feedback::Kind::HwClock
+                    | wp_presentation_feedback::Kind::HwCompletion,
+            ),
+            None => (
+                self.clock.now().into(),
+                0,
+                wp_presentation_feedback::Kind::Vsync,
+            ),
+        };
+        crate::presentation::present(
+            callbacks,
+            &self.state.output,
+            time,
+            crate::presentation::refresh_from_mhz(self.drm.refresh_mhz),
+            seq,
+            flags,
+        );
+    }
+
     fn refresh_outputs(&mut self) {
         let before = self.drm.mirrors.len();
         crate::mirror::refresh(
@@ -977,22 +1053,25 @@ impl App {
         framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
         prep: &crate::FramePrep,
         report_partial: bool,
-    ) -> Option<Vec<Rectangle<i32, Physical>>> {
+    ) -> Option<DrawnFrame> {
         let size = self.drm.output_size;
 
         // The GBM scanout buffer has the opposite Y-origin from Skia's
         // BottomLeft surface, hence `skia_flip_y`.
+        let mut presented = Vec::new();
         let mut ctx = self.state.draw_ctx(
             prep,
             self.drm.transform,
             true,
             report_partial,
             &self.drm.rounded_tex_shader,
+            &mut presented,
         );
         match crate::render::draw_scene(&mut self.drm.renderer, framebuffer, size, &mut ctx) {
-            Ok(damage) => Some(damage),
+            Ok(damage) => Some((damage, presented)),
             Err(e) => {
                 warn!("draw_scene failed: {e}");
+                crate::presentation::discard(presented);
                 None
             }
         }
@@ -1135,6 +1214,23 @@ fn capture_gamma(device: &DrmDeviceFd, crtc: crtc::Handle, size: u32) -> Option<
             None
         }
     }
+}
+
+/// Refresh rate of a DRM mode in mHz.
+///
+/// `drm::control::Mode::vrefresh()` rounds to whole Hz (90Hz and 89.6Hz both
+/// report 90), which is too coarse to pace against, so this recomputes the rate
+/// from the mode's own timings: pixel clock over the total blanked line/frame
+/// size. Returns 0 for a degenerate mode, which reads as "unknown refresh".
+fn mode_refresh_mhz(mode: &smithay::reexports::drm::control::Mode) -> i32 {
+    let clock = u64::from(mode.clock());
+    let htotal = u64::from(mode.hsync().2);
+    let vtotal = u64::from(mode.vsync().2);
+    if htotal == 0 || vtotal == 0 {
+        return 0;
+    }
+    // clock is in kHz; the extra 1_000_000 converts Hz to mHz.
+    ((clock * 1_000_000_000) / (htotal * vtotal)) as i32
 }
 
 /// Find the first connected connector, a usable crtc, and its preferred mode.

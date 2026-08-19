@@ -9,10 +9,11 @@ use smithay::backend::renderer::gles::{GlesRenderer, GlesTexProgram};
 use smithay::backend::renderer::ImportDma;
 use smithay::backend::winit::{self, WinitEvent, WinitGraphicsBackend};
 use smithay::backend::SwapBuffersError;
+use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 use smithay::reexports::winit::dpi::LogicalSize;
 use smithay::reexports::winit::event_loop::pump_events::PumpStatus;
 use smithay::reexports::winit::window::WindowAttributes;
-use smithay::utils::{Rectangle, Transform};
+use smithay::utils::{Clock, Monotonic, Rectangle, Transform};
 
 use sc_shell_model::persist;
 
@@ -206,8 +207,20 @@ fn capture_region_shm(
     {
         // Rendering to our own FBO flips Y relative to winit's presented
         // surface, so this matches the DRM path's Skia flip instead.
-        let mut ctx = state.draw_ctx(prep, Transform::Flipped180, true, false, rounded_tex_shader);
-        if let Err(e) = render::draw_scene(renderer, &mut fb, size, &mut ctx) {
+        // A screencopy draw goes into the client's buffer, never to the panel,
+        // so any feedback it collects is discarded rather than presented.
+        let mut presented = Vec::new();
+        let mut ctx = state.draw_ctx(
+            prep,
+            Transform::Flipped180,
+            true,
+            false,
+            rounded_tex_shader,
+            &mut presented,
+        );
+        let draw = render::draw_scene(renderer, &mut fb, size, &mut ctx);
+        crate::presentation::discard(presented);
+        if let Err(e) = draw {
             warn!("screencopy: draw_scene failed: {e}");
             return Some(false);
         }
@@ -266,6 +279,7 @@ fn render_frame(
     state.sync_keyboard_focus();
 
     let (renderer, mut framebuffer) = backend.bind()?;
+    let mut presented = Vec::new();
     {
         // winit presents an already-correct framebuffer (no Skia y-flip) and
         // submits full damage, so no partial hint.
@@ -275,12 +289,30 @@ fn render_frame(
             false,
             false,
             rounded_tex_shader,
+            &mut presented,
         );
         render::draw_scene(renderer, &mut framebuffer, size, &mut ctx)?;
     }
 
     drop(framebuffer);
     let result = backend.submit(Some(&[damage]));
+
+    // Answer presentation feedback right after the swap. A nested compositor
+    // owns neither the vblank nor the CRTC sequence, so the timestamp is our
+    // own clock and the frame is flagged as a software present with no
+    // sequence — honest about what a dev backend can actually know.
+    if result.is_ok() {
+        crate::presentation::present(
+            presented,
+            &state.output,
+            Clock::<Monotonic>::new().now().into(),
+            smithay::wayland::presentation::Refresh::Unknown,
+            0,
+            wp_presentation_feedback::Kind::empty(),
+        );
+    } else {
+        crate::presentation::discard(presented);
+    }
 
     // Record + periodically log frame timing.
     state.record_and_log_frame(frame_start);

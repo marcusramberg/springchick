@@ -454,7 +454,7 @@ impl State {
                 .map(|tl| tl.surface.wl_surface().clone())
         });
 
-        let frame_time = self.start_time.elapsed().as_millis() as u32;
+        let frame_time = self.clock.now().as_millis();
         let osd_now = std::time::Instant::now();
         let osd_view = self
             .osd
@@ -582,6 +582,7 @@ impl State {
         skia_flip_y: bool,
         report_partial_damage: bool,
         rounded_tex_shader: &'a smithay::backend::renderer::gles::GlesTexProgram,
+        presented: &'a mut Vec<smithay::wayland::presentation::PresentationFeedbackCallback>,
     ) -> render::DrawCtx<'a> {
         // Resolved before the struct literal so nothing here borrows `self`
         // while `skia` and `last_present` hold mutable borrows of it.
@@ -610,6 +611,7 @@ impl State {
         let pressed_app = self.pending_launch.as_ref().map(|p| p.app_id.as_str());
 
         render::DrawCtx {
+            presented,
             scene: &prep.scene,
             app_surface: prep.app_surface.as_ref(),
             skia: &mut self.skia,
