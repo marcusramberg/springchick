@@ -47,9 +47,28 @@
         # purpose: coverage is a dev-shell concern, and extending the toolchain
         # the *package* builds with would change its derivation and force every
         # VM check to rebuild the release tree.
+        #
+        # `rust-analyzer` is repeated from `rust-toolchain.toml` because
+        # `.override { extensions = ... }` *replaces* that file's `components`
+        # list rather than extending it. `rustfmt` and `clippy` survive the
+        # override anyway (they are in the default profile); `rust-analyzer` is
+        # not, so without it here the shell has no language server and editors
+        # fall through to a `~/.cargo/bin` rustup shim, which on NixOS cannot
+        # download the component and dies on an openssl cipher mismatch.
+        #
+        # `rust-src` is what rust-analyzer reads `core`/`alloc`/`std` from. It is
+        # not optional polish: without the sysroot sources every unsize coercion
+        # (`&[T; N]` -> `&[T]`, `&Concrete` -> `&dyn Trait`) fails to typecheck,
+        # so the server reports a screenful of phantom E0308s on code `cargo
+        # check` accepts — including inside `tracing`'s macros.
         rust =
-          (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override
-            { extensions = [ "llvm-tools-preview" ]; };
+          (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
+            extensions = [
+              "llvm-tools-preview"
+              "rust-analyzer"
+              "rust-src"
+            ];
+          };
       in
       {
         packages.springchick = pkgs.springchick;
