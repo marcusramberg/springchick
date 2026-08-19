@@ -73,6 +73,22 @@ const SHADOW_SIGMA_FRAC: f32 = 0.005;
 const SHADOW_DX_FRAC: f32 = 0.006;
 const SHADOW_ALPHA: f32 = 0.30;
 
+/// App-icon badge on a switcher card. Side length is a fraction of the card's
+/// width so the badge scales with dpi and card size; the rest are fractions of
+/// that side.
+///
+/// The badge sits clear of the card, above its top edge and inset from the left
+/// (`INSET` is a fraction of the card width, `GAP` the clearance above the
+/// edge), with a soft shadow under it. Nothing of it overlaps the client's
+/// pixels, so it reads as a label floating over the card. The space to its
+/// right is where the focused card's window title will go.
+const CARD_ICON_FRAC: f32 = 0.20;
+const CARD_ICON_INSET_FRAC: f32 = 0.05;
+const CARD_ICON_GAP_FRAC: f32 = 0.3;
+const CARD_ICON_SHADOW_OFFSET_FRAC: f32 = 0.06;
+const CARD_ICON_SHADOW_SIGMA_FRAC: f32 = 0.13;
+const CARD_ICON_SHADOW_ALPHA: f32 = 0.45;
+
 impl CardDecor {
     fn rrect(&self) -> RRect {
         RRect::new_rect_xy(
@@ -616,6 +632,76 @@ impl SkiaGl {
                 0,
             ));
             canvas.draw_rrect(card.rrect(), &paint);
+        });
+    }
+
+    /// Badge one switcher card with its app icon, floating clear above the
+    /// card's top-left.
+    ///
+    /// The icon sits outside the card entirely rather than over the client's
+    /// pixels, so it reads as a label belonging to the card; the soft shadow
+    /// under it sells the same separation.
+    ///
+    /// Drawn after the card and its depth scrim, so it stays legible on a card
+    /// that is dimmed by depth. Fades with the card's own alpha so a fading fan
+    /// doesn't leave icons floating over nothing.
+    pub fn draw_card_icon(
+        &mut self,
+        width: i32,
+        height: i32,
+        card: &CardDecor,
+        app_id: &str,
+        icon_cache: &HashMap<String, IconPixels>,
+        flip_y: bool,
+    ) {
+        if card.alpha <= 0.0 || card.w <= 0.0 || card.h <= 0.0 {
+            return;
+        }
+        // Uploaded here rather than relying on `draw_home`: the deck is drawn in
+        // states where Home may never have been painted this frame.
+        let image = match icon_cache.get(app_id) {
+            Some(pixels) => self.get_or_upload_icon(app_id, pixels),
+            None => self.icon_images.get(app_id).cloned(),
+        };
+        let Some(image) = image else {
+            return;
+        };
+        let side = (card.w * CARD_ICON_FRAC).max(1.0);
+        let dst = Rect::from_xywh(
+            card.x + card.w * CARD_ICON_INSET_FRAC,
+            card.y - side - side * CARD_ICON_GAP_FRAC,
+            side,
+            side,
+        );
+        self.with_overlay_canvas(width, height, flip_y, |canvas| {
+            // Lifted shadow: offset down-right and blurred wide, so the badge
+            // reads as hovering above the card rather than stuck to it. Also
+            // keeps a light icon readable over a light window.
+            let mut shadow = Paint::default();
+            shadow.set_anti_alias(true);
+            shadow.set_color(Color::from_argb(
+                (CARD_ICON_SHADOW_ALPHA * card.alpha * 255.0)
+                    .round()
+                    .clamp(0.0, 255.0) as u8,
+                0,
+                0,
+                0,
+            ));
+            shadow.set_mask_filter(MaskFilter::blur(
+                BlurStyle::Normal,
+                (side * CARD_ICON_SHADOW_SIGMA_FRAC).max(1.0),
+                false,
+            ));
+            let lift = side * CARD_ICON_SHADOW_OFFSET_FRAC;
+            canvas.draw_rrect(
+                RRect::new_rect_xy(dst.with_offset((lift, lift)), side * 0.22, side * 0.22),
+                &shadow,
+            );
+
+            let mut paint = Paint::default();
+            paint.set_anti_alias(true);
+            paint.set_alpha_f(card.alpha.clamp(0.0, 1.0));
+            canvas.draw_image_rect(&image, None, dst, &paint);
         });
     }
 

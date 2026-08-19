@@ -994,6 +994,7 @@ fn pass_switcher_cards(
         };
         let surface = tl.surface.wl_surface().clone();
         let stored = tl.rotation;
+        let app_id = tl.app_id.clone();
         // Elements first: whether this card is turned depends on the buffer they
         // are about to draw, not on the configure that asked for it.
         let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
@@ -1060,6 +1061,14 @@ fn pass_switcher_cards(
         )?;
         ctx.skia
             .draw_card_dim(size.w, size.h, &decor, ctx.skia_flip_y);
+        ctx.skia.draw_card_icon(
+            size.w,
+            size.h,
+            &decor,
+            &app_id,
+            ctx.icon_cache,
+            ctx.skia_flip_y,
+        );
     }
     Ok(())
 }
