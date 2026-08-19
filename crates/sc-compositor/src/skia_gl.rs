@@ -4,7 +4,7 @@
 //! caches the Skia `Surface` + `BackendRenderTarget` keyed on (fboid, width, height),
 //! recreating only on change.
 
-use crate::render::ArrangeView;
+use crate::render::HomeView;
 use sc_catalog::AppEntry;
 use sc_icons::IconPixels;
 use sc_layout::{self, IconSlot, Layout};
@@ -21,7 +21,7 @@ use skia_safe::{
     MaskFilter, Paint, PathBuilder, RRect, Rect, Surface, TextBlob, TileMode,
 };
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::os::raw::c_int;
 
@@ -57,6 +57,10 @@ pub struct CardDecor {
     pub alpha: f32,
     /// Depth scrim strength, 0..1.
     pub dim: f32,
+    /// How far the deck's chrome (the icon badge, and the title beside it) has
+    /// faded in, 0..1. Multiplied by `alpha`, not folded into it: the shadow and
+    /// the scrim belong to the card itself and must not ride the chrome fade.
+    pub chrome: f32,
 }
 
 /// Drop-shadow tuning, as fractions of the card's width so the cue scales with
@@ -137,6 +141,24 @@ fn draw_card_shadow_rrect(canvas: &skia_safe::Canvas, card: &CardDecor) {
     canvas.translate((-card.w * SHADOW_DX_FRAC, 0.0));
     canvas.draw_rrect(card.rrect(), &paint);
     canvas.restore();
+}
+
+/// The uploaded icons, font, and catalog every Home icon draws from: one
+/// borrow of the renderer's caches, shared by the grid and dock passes.
+#[derive(Clone, Copy)]
+struct IconAssets<'a> {
+    icon_images: &'a HashMap<String, Image>,
+    font: &'a Option<Font>,
+    app_catalog: &'a HashMap<String, AppEntry>,
+}
+
+/// The per-icon cues drawn on top of the icon itself, resolved per slot: press
+/// highlight, launch pulse (seconds since spawn), and the running dot.
+#[derive(Clone, Copy)]
+struct IconCues {
+    pressed: bool,
+    launching: Option<f32>,
+    running: bool,
 }
 
 /// Where the app-icon badge for `card` is drawn: square, above the card's top
@@ -308,26 +330,22 @@ impl SkiaGl {
     /// Draw the home screen (grid + dock + dots + bar). Grid icons are drawn
     /// from `grid_positions` (animated screen-space centers), so paging and
     /// reflow both play out as icon motion rather than a page-offset scroll.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw_home(
-        &mut self,
-        width: i32,
-        height: i32,
-        page: usize,
-        model: &ShellModel,
-        icon_cache: &HashMap<String, IconPixels>,
-        app_catalog: &HashMap<String, AppEntry>,
-        flip_y: bool,
-        pressed_app: Option<&str>,
-        launch_pulses: &[(String, f32)],
-        running_apps: &HashSet<String>,
-        arrange: Option<&ArrangeView>,
-        grid_positions: &HashMap<String, (f32, f32)>,
-        dock_positions: &HashMap<String, (f32, f32)>,
-        top_inset: f32,
-        lift: f32,
-        shift: f32,
-    ) {
+    pub fn draw_home(&mut self, width: i32, height: i32, flip_y: bool, view: &HomeView<'_>) {
+        let &HomeView {
+            page,
+            model,
+            icon_cache,
+            app_catalog,
+            pressed_app,
+            launch_pulses,
+            running_apps,
+            arrange,
+            grid_positions,
+            dock_positions,
+            top_inset,
+            lift,
+            shift,
+        } = view;
         self.ensure_font();
 
         // Upload any icons we haven't uploaded yet.
@@ -367,17 +385,18 @@ impl SkiaGl {
         // (page, slot) order — see `visible_grid_slots`. Reused below for arrange
         // badges so they track the sliding icons instead of the static layout.
         let anim_slots = visible_grid_slots(model, grid_positions, width as f32, height as f32);
+        let assets = IconAssets {
+            icon_images: &self.icon_images,
+            font: &self.font,
+            app_catalog,
+        };
+        let cues = |slot: &IconSlot| IconCues {
+            pressed: pressed_app == Some(slot.app_id.as_str()),
+            launching: launch_pulse(launch_pulses, &slot.app_id),
+            running: running_apps.contains(&slot.app_id),
+        };
         for slot in &anim_slots {
-            draw_icon_slot(
-                canvas,
-                slot,
-                &self.icon_images,
-                &self.font,
-                app_catalog,
-                pressed_app == Some(slot.app_id.as_str()),
-                launch_pulse(launch_pulses, &slot.app_id),
-                running_apps.contains(&slot.app_id),
-            );
+            draw_icon_slot(canvas, slot, assets, cues(slot));
         }
 
         // Dock and dots don't scroll with pages.
@@ -388,16 +407,7 @@ impl SkiaGl {
         let dock_slots =
             visible_dock_slots(&current_layout, dock_positions, width as f32, height as f32);
         for slot in &dock_slots {
-            draw_icon_slot(
-                canvas,
-                slot,
-                &self.icon_images,
-                &self.font,
-                app_catalog,
-                pressed_app == Some(slot.app_id.as_str()),
-                launch_pulse(launch_pulses, &slot.app_id),
-                running_apps.contains(&slot.app_id),
-            );
+            draw_icon_slot(canvas, slot, assets, cues(slot));
         }
 
         // Draw page indicator dots.
@@ -663,10 +673,9 @@ impl SkiaGl {
     /// under it sells the same separation.
     ///
     /// Drawn after the card and its depth scrim, so it stays legible on a card
-    /// that is dimmed by depth. `alpha` is the card's own opacity times the
-    /// deck-chrome fade, so badges ramp in with the opening deck rather than
+    /// that is dimmed by depth. Its opacity is the card's own times
+    /// `card.chrome`, so badges ramp in with the opening deck rather than
     /// popping, and a fading fan doesn't leave icons floating over nothing.
-    #[allow(clippy::too_many_arguments)]
     pub fn draw_card_icon(
         &mut self,
         width: i32,
@@ -674,10 +683,9 @@ impl SkiaGl {
         card: &CardDecor,
         app_id: &str,
         icon_cache: &HashMap<String, IconPixels>,
-        alpha: f32,
         flip_y: bool,
     ) {
-        let alpha = alpha.clamp(0.0, 1.0);
+        let alpha = (card.alpha * card.chrome).clamp(0.0, 1.0);
         if alpha <= 0.0 || card.w <= 0.0 || card.h <= 0.0 {
             return;
         }
@@ -1059,17 +1067,22 @@ fn launch_pulse(launch_pulses: &[(String, f32)], app_id: &str) -> Option<f32> {
         })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_icon_slot(
     canvas: &skia_safe::Canvas,
     slot: &IconSlot,
-    icon_images: &HashMap<String, Image>,
-    font: &Option<Font>,
-    app_catalog: &HashMap<String, AppEntry>,
-    pressed: bool,
-    launching: Option<f32>,
-    running: bool,
+    assets: IconAssets<'_>,
+    cues: IconCues,
 ) {
+    let IconAssets {
+        icon_images,
+        font,
+        app_catalog,
+    } = assets;
+    let IconCues {
+        pressed,
+        launching,
+        running,
+    } = cues;
     // Launch pulse: while the app is spawning (before its window maps) the icon
     // breathes — a halo that swells and fades  — so the tap
     // has visible, ongoing feedback instead of a dead icon. Takes over from the

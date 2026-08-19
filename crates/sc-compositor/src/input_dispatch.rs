@@ -30,21 +30,20 @@ pub enum DropAction {
     SnapBack,
 }
 
-/// Decide what a drop at (x,y) means given where the dragged icon came from.
+/// Decide what a drop at `pos` means given where the dragged icon came from.
 /// A `Pin` may still fail at the model layer (full dock); the caller maps that to snap-back.
-/// `page` is the visible Home page and `page_len` its filled icon count; `(w, h)` is
+/// `page` is the visible Home page and `page_len` its filled icon count; `size` is
 /// the output size (Layout has no size fields), used for nearest-slot mapping.
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_drop(
-    x: f32,
-    y: f32,
+    pos: (f32, f32),
     layout: &sc_layout::Layout,
     source: IconSource,
     page: usize,
     page_len: usize,
-    w: f32,
-    h: f32,
+    size: (f32, f32),
 ) -> DropAction {
+    let (x, y) = pos;
+    let (w, h) = size;
     let over_dock = layout.dock_zone.contains(x, y);
     match (source, over_dock) {
         (IconSource::Grid, true) => DropAction::Pin, // grid -> dock: pin
@@ -332,7 +331,7 @@ mod tests {
         let l = sc_layout::compute(w, h, 0, &m);
         let (x, y) = (l.dock_zone.center_x(), l.dock_zone.center_y());
         assert_eq!(
-            resolve_drop(x, y, &l, IconSource::Grid, 0, 0, w, h),
+            resolve_drop((x, y), &l, IconSource::Grid, 0, 0, (w, h)),
             DropAction::Pin
         );
     }
@@ -343,7 +342,7 @@ mod tests {
         let l = sc_layout::compute(w, h, 0, &ShellModel::default());
         let p = sc_layout::global_slot_pos(0, 1, w, h);
         assert_eq!(
-            resolve_drop(p.0, p.1, &l, IconSource::Dock, 0, 3, w, h),
+            resolve_drop(p, &l, IconSource::Dock, 0, 3, (w, h)),
             DropAction::Reorder { page: 0, index: 1 },
         );
     }
@@ -354,7 +353,7 @@ mod tests {
         let l = sc_layout::compute(w, h, 0, &ShellModel::default());
         let p = sc_layout::global_slot_pos(0, 2, w, h);
         assert_eq!(
-            resolve_drop(p.0, p.1, &l, IconSource::Grid, 0, 5, w, h),
+            resolve_drop(p, &l, IconSource::Grid, 0, 5, (w, h)),
             DropAction::Reorder { page: 0, index: 2 },
         );
     }
@@ -365,7 +364,7 @@ mod tests {
         let l = sc_layout::compute(w, h, 0, &ShellModel::default());
         let p = sc_layout::global_slot_pos(0, 10, w, h);
         assert_eq!(
-            resolve_drop(p.0, p.1, &l, IconSource::Grid, 0, 3, w, h),
+            resolve_drop(p, &l, IconSource::Grid, 0, 3, (w, h)),
             DropAction::Reorder { page: 0, index: 3 },
         );
     }
