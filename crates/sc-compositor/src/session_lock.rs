@@ -20,6 +20,14 @@
 //! no surface — [`LockView::Blank`] — which is exactly the intended failure
 //! mode: the session is unreachable, not wide open.
 //!
+//! That rule only holds if the lock stays with the client that took it. smithay
+//! reports every `lock` request to us regardless of the session's state, and
+//! treats whichever `SessionLocker` we confirm as the lock's owner — the one
+//! instance whose `unlock_and_destroy` it will honour. A second `lock` is
+//! therefore refused outright, and lock surfaces are only adopted from the
+//! owning `ext_session_lock_v1`; otherwise any client could take a locked
+//! session over, draw its own prompt, and unlock it.
+//!
 //! ## Confirming the lock
 //!
 //! `ext_session_lock_v1.locked` promises the client that nothing of the session
@@ -28,6 +36,7 @@
 //! [`SessionLocker`] for one full frame — the lock engages visually on the frame
 //! the request arrived, and the confirmation goes out on the next one.
 
+use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::DisplayHandle;
@@ -35,7 +44,7 @@ use smithay::wayland::session_lock::{
     LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker,
 };
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::state::State;
 
@@ -79,6 +88,11 @@ pub struct SessionLock {
     frames: u32,
     /// The lock client's surface, if it has created one.
     surface: Option<LockSurface>,
+    /// The `ext_session_lock_v1` that owns the current lock. Every later request
+    /// is checked against it: smithay hands us a `SessionLocker` for *every*
+    /// `lock` request, whatever the session's state, so refusing a second one is
+    /// our job (see [`SessionLock::owns`]).
+    owner: Option<ExtSessionLockV1>,
 }
 
 impl SessionLock {
@@ -91,7 +105,15 @@ impl SessionLock {
             pending: None,
             frames: 0,
             surface: None,
+            owner: None,
         }
+    }
+
+    /// Whether `lock` is the `ext_session_lock_v1` that holds the current lock.
+    /// False while unlocked, and false for every other instance — including one
+    /// from the same client.
+    fn owns(&self, lock: &ExtSessionLockV1) -> bool {
+        self.owner.as_ref() == Some(lock)
     }
 
     /// Whether the session is locked, i.e. no client content but the lock
@@ -124,6 +146,7 @@ impl SessionLock {
     /// the client is told on the next one (see [`Self::tick`]).
     fn engage(&mut self, confirmation: SessionLocker) {
         self.locked = true;
+        self.owner = Some(confirmation.ext_session_lock().clone());
         self.pending = Some(confirmation);
         self.frames = 0;
     }
@@ -134,6 +157,7 @@ impl SessionLock {
         self.pending = None;
         self.frames = 0;
         self.surface = None;
+        self.owner = None;
     }
 
     /// Adopt the lock client's surface.
@@ -171,6 +195,17 @@ impl SessionLockHandler for State {
     }
 
     fn lock(&mut self, confirmation: SessionLocker) {
+        // smithay calls this for every `lock` request, locked or not, and
+        // whichever `SessionLocker` we confirm becomes the lock's owner — the
+        // one instance allowed to `unlock_and_destroy` it. Confirming a second
+        // one would hand a live session away to whoever asked last, so a lock
+        // already held is refused: dropping the `SessionLocker` sends `finished`
+        // and the requesting client learns it did not get the lock.
+        if self.session_lock.is_locked() {
+            warn!("refusing session lock: already locked by another client");
+            drop(confirmation);
+            return;
+        }
         info!("session lock requested");
         self.session_lock.engage(confirmation);
         // Anything the user was in the middle of on the shell is over: a
@@ -192,6 +227,14 @@ impl SessionLockHandler for State {
     }
 
     fn new_surface(&mut self, surface: LockSurface, _output: WlOutput) {
+        // A refused lock keeps a live `ext_session_lock_v1` — `finished` is not a
+        // destructor — so it can still create lock surfaces. Adopting one would
+        // put a stranger's surface in front of the locked session, which is a
+        // password prompt the user cannot tell from the real one.
+        if !self.session_lock.owns(surface.ext_session_lock()) {
+            warn!("ignoring lock surface from a lock we did not grant");
+            return;
+        }
         // Enter the output so the client learns the scale factor and renders a
         // HiDPI buffer, exactly like an app toplevel.
         self.output.enter(surface.wl_surface());
