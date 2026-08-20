@@ -5,7 +5,7 @@
 //! [args...]` connects there, sends one line, prints the reply, and exits
 //! non-zero if the reply is an error. The verbs are the debug-input gestures
 //! (`tap`, `swipe`, `key`, `settle`, …) plus control and query verbs (`reload`,
-//! `layers`); further verbs (`state`, …) slot in the same way.
+//! `layers`, `quit`); further verbs (`state`, …) slot in the same way.
 //!
 //! A reply is always a single line. A query that answers with several records
 //! (`layers`) packs them into that line separated by ` | `, which the client
@@ -40,6 +40,7 @@ pub fn run_client(args: &[String]) -> ExitCode {
         eprintln!("       springchick ipc launch org.gnome.Maps [new]");
         eprintln!("       springchick ipc reload   # re-read config.toml");
         eprintln!("       springchick ipc layers   # dump layer surfaces + their popups");
+        eprintln!("       springchick ipc quit     # end the session");
         return ExitCode::from(2);
     }
 
