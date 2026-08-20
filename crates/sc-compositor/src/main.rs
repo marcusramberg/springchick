@@ -35,6 +35,7 @@ mod launcher;
 mod layer_shell;
 mod mirror;
 mod osd;
+mod output_power;
 mod pacing;
 mod popups;
 mod presentation;
