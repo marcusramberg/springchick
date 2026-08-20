@@ -51,6 +51,9 @@ pub enum DebugCmd {
     Orientation(crate::rotation::DeviceOrientation),
     /// Re-read `config.toml` and apply the live-changeable settings.
     Reload,
+    /// Shut the compositor down, as SIGTERM does. This is how a shell's logout
+    /// action ends the session — springchick has no other exit path.
+    Quit,
     /// Report every layer surface and layer-rooted popup being composited, with
     /// geometry, buffer and map state. A query, not input — see
     /// [`State::layers_dump`].
@@ -147,6 +150,10 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
         "layers" => {
             done(tok)?;
             DebugCmd::Layers
+        }
+        "quit" => {
+            done(tok)?;
+            DebugCmd::Quit
         }
         "swipe" => {
             let x1 = num(&mut tok)?;
@@ -354,7 +361,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
     // of them must reset the countdown.
     if !matches!(
         cmd,
-        DebugCmd::Settle { .. } | DebugCmd::Reload | DebugCmd::Layers
+        DebugCmd::Settle { .. } | DebugCmd::Reload | DebugCmd::Layers | DebugCmd::Quit
     ) {
         state.idle_notify.activity(Instant::now());
     }
@@ -486,6 +493,13 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
         DebugCmd::Layers => {
             // Allowed while locked: it reads state and drives nothing.
             let _ = reply.send(format!("ok {}\n", state.layers_dump()));
+        }
+        DebugCmd::Quit => {
+            // Answer before stopping: once the loop exits nothing drains this
+            // channel, and the client would block until the socket closed.
+            let _ = reply.send("ok\n".into());
+            tracing::info!("quit requested over ipc");
+            state.running = false;
         }
         DebugCmd::Launch { app_id, new_window } => {
             if !state.app_catalog.contains_key(&app_id) {
@@ -774,6 +788,12 @@ mod tests {
     fn parses_layers() {
         assert_eq!(parse_line("layers", W, H), Ok(DebugCmd::Layers));
         assert!(parse_line("layers all", W, H).is_err()); // no args
+    }
+
+    #[test]
+    fn parses_quit() {
+        assert_eq!(parse_line("quit", W, H), Ok(DebugCmd::Quit));
+        assert!(parse_line("quit now", W, H).is_err()); // no args
     }
 
     #[test]
