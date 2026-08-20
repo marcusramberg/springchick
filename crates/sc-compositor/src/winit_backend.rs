@@ -124,6 +124,11 @@ pub(crate) fn run_winit() {
             .idle_notify
             .refresh(std::time::Instant::now(), inhibited);
 
+        // Report a blank flipped by anything other than the client itself
+        // (here, only the power key: winit never blanks for real).
+        let blanked = state.blank.is_blanked();
+        state.output_power.sync(blanked);
+
         // Dispatch Wayland clients.
         display.dispatch_clients(&mut state).ok();
         display.flush_clients().ok();

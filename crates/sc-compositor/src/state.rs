@@ -53,8 +53,8 @@ use crate::arrange::ArrangeState;
 use crate::ui_state::{ToplevelId, UiState, ZoomOrigin};
 use crate::{
     background_effect, blank, content_type, debug_input, frame_stats, gamma_control, idle_inhibit,
-    idle_notify, input_common, keybinds, layer_shell, osd, rotation, scene, sensor, session_lock,
-    skia_gl::SkiaGl, switcher, touch_viz,
+    idle_notify, input_common, keybinds, layer_shell, osd, output_power, rotation, scene, sensor,
+    session_lock, skia_gl::SkiaGl, switcher, touch_viz,
 };
 
 /// A running app's toplevel state.
@@ -386,6 +386,8 @@ pub(crate) struct State {
     pub uclamp_min: sc_config::UclampMin,
     /// wlr-gamma-control state (night-light / color-temperature clients).
     pub gamma: gamma_control::GammaControl,
+    /// wlr-output-power-management state (client-driven DPMS).
+    pub output_power: output_power::OutputPower,
     /// ext-idle-notify-v1 state: client idle timers, polled by both frame loops.
     pub idle_notify: idle_notify::IdleNotify,
     /// zwp_idle_inhibit_manager_v1 state: surfaces asking to hold off idle.
@@ -675,6 +677,11 @@ impl State {
         // real CRTC gamma_length before clients connect.
         let gamma = gamma_control::GammaControl::new(&dh, 256);
 
+        // wlr-output-power-management: let a shell blank the panel (dms's
+        // monitor power-off, swayidle). Drives the same `blank` flag the power
+        // key does, so it is a mock under winit like everything else there.
+        let output_power = output_power::OutputPower::new(&dh);
+
         // wlr-screencopy: the older capture protocol, alongside the ext one.
         // wf-recorder / wlrobs / xdg-desktop-portal-wlr speak only this.
         crate::wlr_screencopy::init(&dh);
@@ -788,6 +795,7 @@ impl State {
             prefer_no_csd,
             uclamp_min,
             gamma,
+            output_power,
             idle_notify,
             idle_inhibit,
             content_type,

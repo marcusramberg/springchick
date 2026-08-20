@@ -556,7 +556,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Scheduler utilization floor for this thread, which is the render thread.
     let mut uclamp = crate::uclamp::Uclamp::new(app.state.uclamp_min);
 
-    while running.load(Ordering::Relaxed) {
+    while running.load(Ordering::Relaxed) && app.state.running {
         let timeout = if app.state.is_animating(Instant::now()) {
             ACTIVE_TIMEOUT
         } else {
@@ -595,6 +595,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         // ext-idle-notify timeouts: same poll, client-driven timeouts.
         app.state.idle_notify.refresh(Instant::now(), inhibited);
+        // Tell a wlr-output-power client about a blank it did not ask for (the
+        // power key, the idle timeout) before the panel acts on it.
+        let blanked = app.state.blank.is_blanked();
+        app.state.output_power.sync(blanked);
         app.apply_blanking();
         app.apply_gamma();
         // Drive frames that no vblank is priming: a fresh commit/input
