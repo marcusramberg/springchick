@@ -644,6 +644,20 @@ impl State {
             true
         });
 
+        // wlr-gamma-control: advertise the manager global. 256 is a mock LUT
+        // size for the winit backend; the DRM backend overrides it with the
+        // real CRTC gamma_length before clients connect.
+        let gamma = gamma_control::GammaControl::new(&dh, 256);
+
+        // wlr-output-power-management: let a shell blank the panel (dms's
+        // monitor power-off, swayidle). Drives the same `blank` flag the power
+        // key does, so it is a mock under winit like everything else there.
+        let output_power = output_power::OutputPower::new(&dh);
+
+        // Both are announced before the wl_output global on purpose: a client
+        // that binds its per-output control from inside its wl_output registry
+        // callback only finds the manager if the manager came first. dms's
+        // gamma client does exactly that, and reports "no outputs" otherwise.
         // Advertise an output so clients know the display geometry.
         let output = Output::new(
             "springchick-0".into(),
@@ -671,16 +685,6 @@ impl State {
         // name + logical geometry. Recorders like wl-screenrec require it to
         // resolve which output to capture. Dispatched via `delegate_output!`.
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
-
-        // wlr-gamma-control: advertise the manager global. 256 is a mock LUT
-        // size for the winit backend; the DRM backend overrides it with the
-        // real CRTC gamma_length before clients connect.
-        let gamma = gamma_control::GammaControl::new(&dh, 256);
-
-        // wlr-output-power-management: let a shell blank the panel (dms's
-        // monitor power-off, swayidle). Drives the same `blank` flag the power
-        // key does, so it is a mock under winit like everything else there.
-        let output_power = output_power::OutputPower::new(&dh);
 
         // wlr-screencopy: the older capture protocol, alongside the ext one.
         // wf-recorder / wlrobs / xdg-desktop-portal-wlr speak only this.
