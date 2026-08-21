@@ -1,15 +1,17 @@
 # Springchick
 
-## A Wayland compositor for Linux phones, written in rust with Smithay and Skia
+## A Wayland compositor for Linux phones, written in Rust with Smithay and Skia
 
 _The Authorative home for this repo is <https://code.bas.es/marcus/springchick/> -
-github is a mirror to allow easier contributions and visibility._
+Github is a mirror to allow easier contributions and visibility._
 
 _IMPORTANT_: This project is made using LLM assist, however, it is not a low
 effort project, and I don't consider it to be slop. It is in early development.
 I'm daily driving it on my fairphone 5 running nixos. See
 [dmsmobile](https://code.bas.es/marcus/dms-mobile) or
 [my flake](https://code.bas.es/marcus/nix-config/src/branch/main/machines/dmsmobile/configuration.nix).
+
+<img align="right" src="./assets/springchick.svg" alt="Right aligned icon">
 
 - Springchick gets a lot of inspiration from iOS' springboard shell, and will be
   quite familiar to iPhone users.
