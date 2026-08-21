@@ -90,6 +90,7 @@
           vm-capture = import ./nix/vm-capture-test.nix { inherit self pkgs; };
           vm-portal = import ./nix/vm-portal-test.nix { inherit self pkgs; };
           vm-pointer = import ./nix/vm-pointer-test.nix { inherit self pkgs; };
+          vm-card-mask = import ./nix/vm-card-mask-test.nix { inherit self pkgs; };
         };
 
         devShells.default = pkgs.mkShell {
