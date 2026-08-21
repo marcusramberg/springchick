@@ -50,12 +50,22 @@ const BACKDROP_BLUR_SIGMA_LOGICAL: f32 = 18.0;
 pub const CLEAR_COLOR: Color32F = Color32F::new(0.06, 0.10, 0.14, 1.0);
 
 /// Rounded-rect texture fragment shader. Derived verbatim from smithay's default
-/// `texture.frag` (pin ff5fa7d) — same `//_DEFINES_` placeholder and
+/// `texture.frag` (pin 7ddcd17) — same `//_DEFINES_` placeholder and
 /// `NO_ALPHA`/`EXTERNAL`/`DEBUG_FLAGS` variants — with two extra uniforms
-/// (`corner_radius`, `card_size`) and a rounded-rect signed-distance-field mask
-/// applied to the premultiplied output. Mask is computed in card-local physical
-/// px via `v_coords` (0..1 spans the drawn card), so it is independent of the
-/// framebuffer orientation.
+/// (`corner_radius`, `card_rect`) and a rounded-rect signed-distance-field mask
+/// applied to the premultiplied output.
+///
+/// The mask works in **framebuffer pixels** off `gl_FragCoord`, with the card's
+/// rect handed in as a uniform. Deriving it from `v_coords` instead does not
+/// work: that varying is the quad coordinate already mapped through
+/// `tex_matrix`, which folds in the client's viewport crop and buffer size, so
+/// it spans 0..1 only for a client whose buffer is exactly the dest rect. A
+/// waydroid window (Android renders into a fixed gralloc buffer and
+/// viewport-maps it) makes the span arbitrary, which collapses the mask to a
+/// constant: 0 paints the card solid black — smithay disables blending over the
+/// opaque region, so zero is written, not skipped — and 1 drops the rounding.
+/// Recovering the quad coordinate by inverting `tex_matrix` in the shader is
+/// worse: it is fine on a desktop fp32 renderer and falls apart on the phone.
 const ROUNDED_TEX_SHADER: &str = r#"#version 100
 
 //_DEFINES_
@@ -75,7 +85,9 @@ uniform float alpha;
 varying vec2 v_coords;
 
 uniform float corner_radius;
-uniform vec2 card_size;
+// The card in framebuffer px: origin in `gl_FragCoord` space (y from the
+// bottom), then size.
+uniform vec4 card_rect;
 
 #if defined(DEBUG_FLAGS)
 uniform float tint;
@@ -96,11 +108,11 @@ void main() {
 #endif
 
     // Rounded-rect signed distance field in card-local physical px.
-    vec2 p = v_coords * card_size;
-    vec2 half_size = card_size * 0.5;
+    vec2 p = gl_FragCoord.xy - card_rect.xy;
+    vec2 half_size = card_rect.zw * 0.5;
     vec2 q = abs(p - half_size) - (half_size - vec2(corner_radius));
     float dist = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - corner_radius;
-    float aa = max(0.5, min(card_size.x, card_size.y) * 0.004);
+    float aa = max(0.5, min(card_rect.z, card_rect.w) * 0.004);
     float mask = 1.0 - smoothstep(-aa, aa, dist);
     color *= mask;
 
@@ -118,7 +130,7 @@ pub fn compile_rounded_tex_shader(
         ROUNDED_TEX_SHADER,
         &[
             UniformName::new("corner_radius", UniformType::_1f),
-            UniformName::new("card_size", UniformType::_2f),
+            UniformName::new("card_rect", UniformType::_4f),
         ],
     )
 }
@@ -490,10 +502,13 @@ impl Card {
     /// drawn around a card (shadow, depth scrim) use these bounds so they hug
     /// the pixels the client actually put on screen.
     ///
-    /// The rounded-corner shader deliberately does *not*: its mask spans the
-    /// element's own texture (`v_coords`), which the nominal card rect already
-    /// describes, and feeding it these bounds instead softens the corner mask
-    /// so the card behind bleeds through the front card's corner.
+    /// The rounded-corner shader masks against these same bounds (carried into
+    /// framebuffer space by [`Card::fb_rect`]), so the corner it rounds is the
+    /// one the shadow and scrim are drawn around.
+    ///
+    /// The root is `elements.last()`, not `.first()`: a render-element slice is
+    /// ordered front-to-back (`draw_render_elements` reverses it before
+    /// drawing), so the surface-tree root — the window itself — is at the end.
     ///
     /// Mirrors what `draw_scaled_card` does to the element: relocate to the
     /// card origin, then scale about that origin.
@@ -502,7 +517,7 @@ impl Card {
         elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
         app_scale: f64,
     ) -> (f32, f32, f32, f32) {
-        let Some(root) = elements.first() else {
+        let Some(root) = elements.last() else {
             return (self.x as f32, self.y as f32, self.size.0, self.size.1);
         };
         let g = root.geometry(Scale::from(app_scale));
@@ -513,16 +528,66 @@ impl Card {
             g.size.h as f32 * self.scale,
         )
     }
+
+    /// The card's drawn rect in framebuffer px, in `gl_FragCoord` terms (origin
+    /// bottom-left) — what the rounded-corner shader masks against.
+    ///
+    /// This runs the rect through the *same* projection `GlesFrame::render`
+    /// builds — element space → NDC (y down), the pass transform, then GL's own
+    /// y flip — because nothing simpler survives both backends. The two do not
+    /// agree on the output transform (winit renders `Flipped180`, DRM renders
+    /// `Normal`, hence `skia_flip_y`), and the ortho's y flip cancels the GL
+    /// one for exactly one of them: a hand-rolled "transform the rect, then
+    /// flip" is right on winit and upside-down on the phone, which is a mask
+    /// sitting off the card and cards that draw as empty outlines.
+    fn fb_rect(
+        &self,
+        elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
+        app_scale: f64,
+        pass_transform: Transform,
+        fb_size: Size<i32, Physical>,
+    ) -> [f32; 4] {
+        let (x, y, w, h) = self.drawn_bounds(elements, app_scale);
+        // Element space: what the pass was handed, axis-swapped for a
+        // quarter-turn transform the way `GlesFrame::render` swaps it.
+        let elem = pass_transform.transform_size(fb_size);
+        let (ew, eh) = (elem.w as f32, elem.h as f32);
+        let (fw, fh) = (fb_size.w as f32, fb_size.h as f32);
+        // Column-major [x_axis, y_axis, translation]; read as components so the
+        // glam types stay smithay's business.
+        let m = pass_transform.matrix().to_cols_array();
+
+        let project = |px: f32, py: f32| -> (f32, f32) {
+            let (nx, ny) = (2.0 * px / ew - 1.0, 1.0 - 2.0 * py / eh);
+            let tx = m[0] * nx + m[2] * ny + m[4];
+            let ty = m[1] * nx + m[3] * ny + m[5];
+            // GL's y flip, applied after the transform just as the renderer's
+            // `flip180` is.
+            ((tx + 1.0) * 0.5 * fw, (-ty + 1.0) * 0.5 * fh)
+        };
+
+        let (x0, y0) = project(x, y);
+        let (x1, y1) = project(x + w, y + h);
+        [x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs()]
+    }
 }
 
 /// Draw a shrunken app "card" (drag-up window or switcher-deck card): relocate +
 /// rescale the surface tree to the card rect, then draw it in its own pass.
 ///
-/// When `corner_radius > 0`, the card's root surface (`elements[0]`, always first
-/// in the pre-order surface-tree walk) is drawn through the rounded-corner
-/// texture program so the card's outer shape is rounded; any subsurfaces
-/// (`elements[1..]`, interior content) draw unrounded. At `corner_radius == 0`
-/// the whole tree draws through the default program unchanged.
+/// When `corner_radius > 0` the whole tree goes through the rounded-corner
+/// texture program in **one** `draw_render_elements` call. Both halves of that
+/// matter:
+///
+/// - One call, because the slice is ordered front-to-back and
+///   `draw_render_elements` reverses it internally. Splitting it into
+///   `[..1]` then `[1..]` drew the topmost element *underneath* the rest — for a
+///   client whose card is an opaque root plus a full-size content subsurface
+///   (waydroid) that painted the root over the content, i.e. a black card at
+///   every radius except 0, where the single call had ordered it correctly.
+/// - Every element, not just the root, because the mask is in framebuffer
+///   coordinates: the same `card_rect` clips the whole tree to one rounded
+///   shape, instead of rounding one surface that another then covers.
 fn draw_scaled_card(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -536,6 +601,10 @@ fn draw_scaled_card(
         return Ok(());
     }
     let app_scale = ctx.app_scale;
+    let pass_transform = ctx.transform + rotation.transform();
+    // Taken before the elements are consumed below; the mask needs the rect the
+    // root element actually lands on.
+    let card_rect = card.fb_rect(&elements, app_scale, pass_transform, size);
     // A turned card draws in the app's own space, so both the transform and the
     // damage rect are the swapped ones — same pairing as `app_pass_geometry`.
     let damage = Rectangle::from_size(if rotation.swaps_axes() {
@@ -559,27 +628,20 @@ fn draw_scaled_card(
         .collect();
 
     let mut frame = renderer
-        .render(framebuffer, size, ctx.transform + rotation.transform())
+        .render(framebuffer, size, pass_transform)
         .map_err(SwapBuffersError::from)?;
 
     if card.corner_radius > 0.5 {
         let uniforms = vec![
             Uniform::new("corner_radius", card.corner_radius),
-            Uniform::new("card_size", card.size),
+            Uniform::new("card_rect", card_rect),
         ];
         frame.override_default_tex_program(ctx.rounded_tex_shader.clone(), uniforms);
-        if let Err(e) = draw_render_elements(&mut frame, app_scale, &scaled[..1], &[damage]) {
-            warn!(?e, "failed to draw rounded card root surface");
-        }
-        frame.clear_tex_program_override();
-        if scaled.len() > 1 {
-            if let Err(e) = draw_render_elements(&mut frame, app_scale, &scaled[1..], &[damage]) {
-                warn!(?e, "failed to draw card subsurfaces");
-            }
-        }
-    } else if let Err(e) = draw_render_elements(&mut frame, app_scale, &scaled, &[damage]) {
+    }
+    if let Err(e) = draw_render_elements(&mut frame, app_scale, &scaled, &[damage]) {
         warn!(?e, "failed to draw scaled card elements");
     }
+    frame.clear_tex_program_override();
 
     let _sync = frame.finish().map_err(SwapBuffersError::from)?;
     Ok(())
