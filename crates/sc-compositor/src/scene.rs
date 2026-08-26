@@ -133,6 +133,18 @@ fn home_slide_out(progress: f32, width: f32) -> f32 {
     sc_anim::ease_out_cubic(progress) * width
 }
 
+/// Backdrop blur behind a card being dragged up off an app. Ramps in with the
+/// finger from the very first pixel of upward travel (full by the time the
+/// neighbour fan reveals) and back out as the drag crosses into the go-home
+/// band, where Home must be sharp again.
+fn grab_backdrop_blur(up: f32) -> f32 {
+    use sc_input::thresholds as th;
+    const FADE_OUT: f32 = 0.06;
+    let a_in = (up / th::SWITCHER_REVEAL_PROGRESS).clamp(0.0, 1.0);
+    let a_out = ((th::HOME_MIN_PROGRESS - up) / FADE_OUT).clamp(0.0, 1.0);
+    a_in.min(a_out)
+}
+
 /// Full scene state for one frame.
 #[derive(Clone, Debug)]
 pub struct Scene {
@@ -260,6 +272,7 @@ pub fn compute_scene(
         } => {
             let up = tracker.up_progress();
             let t = WindowTransform::from_tracker(tracker, w, h, card_radius);
+            let blur = grab_backdrop_blur(up);
             // Band B (reveal..mid): unfold the live fan behind the finger-tracked
             // front card. Bands A/C: just the single card (window path).
             let preview = matches!(
@@ -303,19 +316,17 @@ pub fn compute_scene(
                     home_lift: 0.0,
                     home_shift: 0.0,
                     home_page: 0,
-                    // Backdrop softens on the same ramp the neighbour fan fades
-                    // in on, so the blur arrives with the deck, not before it.
-                    backdrop_blur: alpha,
+                    backdrop_blur: blur,
                     cards: card_rects,
                 }
             } else {
                 Scene {
                     window: Some((*toplevel, t)),
-                    show_home: up > 0.05,
+                    show_home: true,
                     home_lift: 0.0,
                     home_shift: 0.0,
                     home_page: 0,
-                    backdrop_blur: 0.0,
+                    backdrop_blur: blur,
                     cards: Vec::new(),
                 }
             }
@@ -722,6 +733,34 @@ mod tests {
         let (_, transform) = scene.window.unwrap();
         assert!((transform.scale - 1.0).abs() < 0.001);
         assert!(!scene.show_home);
+    }
+
+    #[test]
+    fn grab_blur_ramps_from_the_first_upward_pixel() {
+        use sc_input::thresholds as th;
+        assert_eq!(grab_backdrop_blur(0.0), 0.0);
+        let early = grab_backdrop_blur(0.03);
+        assert!(early > 0.2 && early < 0.5, "early={early}");
+        // Full by the time the neighbour fan reveals, and held through band B.
+        assert_eq!(grab_backdrop_blur(th::SWITCHER_REVEAL_PROGRESS), 1.0);
+        assert_eq!(grab_backdrop_blur(0.25), 1.0);
+        // Sharp Home again once the drag commits to going home.
+        assert_eq!(grab_backdrop_blur(th::HOME_MIN_PROGRESS), 0.0);
+    }
+
+    #[test]
+    fn grabbing_shows_blurred_home_immediately() {
+        let mut tracker = Tracker::begin(sc_input::Pt { x: 0.5, y: 0.99 });
+        tracker.current = sc_input::Pt { x: 0.5, y: 0.96 };
+        let state = UiState::Grabbing {
+            toplevel: 0,
+            app_id: "x".into(),
+            tracker,
+            cards: Vec::new(),
+        };
+        let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
+        assert!(scene.show_home);
+        assert!(scene.backdrop_blur > 0.0);
     }
 
     #[test]
