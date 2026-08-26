@@ -1348,10 +1348,12 @@ pub fn draw_scene(
     pass_background(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_home(size, ctx, &plan);
     pass_icon_menu(size, ctx, &plan);
+    // Before any app/card pass: the backdrop is the shell behind the cards, and
+    // a dragged card drawn first would be blurred along with it.
+    pass_backdrop_blur(size, ctx);
     pass_rotated_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_blurred_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_app_card(renderer, &mut *framebuffer, size, ctx, &mut plan)?;
-    pass_backdrop_blur(size, ctx);
     pass_switcher_cards(renderer, &mut *framebuffer, size, ctx)?;
     pass_overlays(renderer, &mut *framebuffer, size, ctx, plan.rotated)?;
     pass_chrome(size, ctx, plan.rotated);
