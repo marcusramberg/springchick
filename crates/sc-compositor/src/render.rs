@@ -228,6 +228,8 @@ pub struct DrawCtx<'a> {
     pub model: &'a ShellModel,
     pub icon_cache: &'a HashMap<String, IconPixels>,
     pub app_catalog: &'a HashMap<String, AppEntry>,
+    /// Catalog rescan counter — a change drops the renderer's uploaded icons.
+    pub catalog_gen: u64,
     /// Toplevels for switcher card rendering.
     pub toplevels: &'a Vec<Option<crate::AppToplevel>>,
     /// Output scale (`[main].dpi`). App surfaces are configured at physical/dpi
@@ -1339,6 +1341,8 @@ pub fn draw_scene(
     if ctx.lock_view != crate::session_lock::LockView::Unlocked {
         return draw_locked(renderer, framebuffer, size, ctx);
     }
+
+    ctx.skia.sync_catalog_gen(ctx.catalog_gen);
 
     let mut plan = plan_scene(renderer, ctx);
     // Computed before drawing: it reads the app element's pre-draw commit

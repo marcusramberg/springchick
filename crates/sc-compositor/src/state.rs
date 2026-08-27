@@ -46,7 +46,7 @@ use sc_catalog::AppEntry;
 use sc_icons::IconPixels;
 use sc_shell_model::{persist, unix_now, ShellModel};
 
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::app_history::AppHistory;
 use crate::arrange::ArrangeState;
@@ -200,6 +200,34 @@ impl ClientData for ClientState {
     }
 }
 
+/// Scan installed `.desktop` files and resolve each entry's icon. Shared by
+/// startup and `reload_catalog`; the icon-theme search path is built once, not
+/// per icon.
+fn scan_catalog() -> (HashMap<String, AppEntry>, HashMap<String, IconPixels>) {
+    let app_catalog: HashMap<String, AppEntry> = sc_catalog::scan_apps()
+        .into_iter()
+        .map(|e| (e.id.clone(), e))
+        .collect();
+    let icon_dirs = sc_icons::theme_dirs(&sc_catalog::xdg_data_dirs());
+    let icon_cache = app_catalog
+        .iter()
+        .map(|(id, entry)| {
+            (
+                id.clone(),
+                sc_icons::resolve_with_dirs(&entry.icon, &icon_dirs),
+            )
+        })
+        .collect();
+    (app_catalog, icon_cache)
+}
+
+/// Place newly installed apps, prune uninstalled ones, seed frecency.
+fn reconcile_catalog(model: &mut ShellModel, catalog: &HashMap<String, AppEntry>, first_run: bool) {
+    let mut catalog_ids: Vec<String> = catalog.keys().cloned().collect();
+    catalog_ids.sort(); // deterministic seeding + first-run alpha order
+    model.reconcile(&catalog_ids, unix_now(), first_run);
+}
+
 /// Main compositor state.
 pub(crate) struct State {
     pub compositor_state: CompositorState,
@@ -346,6 +374,10 @@ pub(crate) struct State {
     pub model: ShellModel,
     pub app_catalog: HashMap<String, AppEntry>,
     pub icon_cache: HashMap<String, IconPixels>,
+    /// Bumped on every catalog rescan. The renderer's uploaded icon textures are
+    /// keyed by app id alone, so a change of generation is what tells it to drop
+    /// them — otherwise a re-themed or reinstalled app keeps its old pixels.
+    pub catalog_gen: u64,
     pub toplevels: Vec<Option<AppToplevel>>,
     pub children: Vec<Child>,
     /// Apps spawned and awaiting their first toplevel — drives the pulsing
@@ -709,27 +741,12 @@ impl State {
 
         // Load shell model + app catalog.
         let model = persist::load(&persist::state_path()).unwrap_or_default();
-        let apps = sc_catalog::scan_apps();
-        let app_catalog: HashMap<String, AppEntry> =
-            apps.into_iter().map(|e| (e.id.clone(), e)).collect();
+        let (app_catalog, icon_cache) = scan_catalog();
 
         // Seed new catalog apps, drop stats for uninstalled ones, derive order.
         let mut model = model;
-        let now = unix_now();
-        let mut catalog_ids: Vec<String> = app_catalog.keys().cloned().collect();
-        catalog_ids.sort(); // deterministic seeding + first-run alpha order
         let first_run = model.frecency.apps.is_empty();
-        model.reconcile(&catalog_ids, now, first_run);
-
-        // Pre-resolve icons. The search path is built once, not per icon.
-        let icon_dirs = sc_icons::theme_dirs(&sc_catalog::xdg_data_dirs());
-        let mut icon_cache = HashMap::new();
-        for (id, entry) in &app_catalog {
-            icon_cache.insert(
-                id.clone(),
-                sc_icons::resolve_with_dirs(&entry.icon, &icon_dirs),
-            );
-        }
+        reconcile_catalog(&mut model, &app_catalog, first_run);
 
         let page_count = model.pages.len().max(1);
         let ui = UiState::home(0, page_count);
@@ -785,6 +802,7 @@ impl State {
             model,
             app_catalog,
             icon_cache,
+            catalog_gen: 0,
             toplevels: Vec::new(),
             children: Vec::new(),
             launching: Vec::new(),
@@ -926,6 +944,35 @@ impl State {
         // Same path as startup; `children` (spawned binding commands, still to
         // be reaped) stays on the existing `Keys`.
         self.keys.tracker = keybinds::Keys::from_config(config).tracker;
+    }
+
+    /// Re-scan `.desktop` files and icons, for `springchick ipc reload`.
+    ///
+    /// Newly installed apps get placed on Home, uninstalled ones disappear from
+    /// pages/dock/hidden and lose their frecency stats. `first_run` seeding is
+    /// never re-triggered: an existing session has stats, so new apps seed cold.
+    pub(crate) fn reload_catalog(&mut self) {
+        let (app_catalog, icon_cache) = scan_catalog();
+        self.app_catalog = app_catalog;
+        self.icon_cache = icon_cache;
+        self.catalog_gen = self.catalog_gen.wrapping_add(1);
+        reconcile_catalog(&mut self.model, &self.app_catalog, false);
+        if let Err(e) = persist::save(&self.model, &persist::state_path()) {
+            warn!(?e, "failed to persist shell model after catalog reload");
+        }
+        // A pruned page can leave the model shorter than the page the shell is
+        // sitting on.
+        let page_count = self.model.pages.len().max(1);
+        if let UiState::Home {
+            page,
+            page_count: pc,
+            ..
+        } = &mut self.ui
+        {
+            *pc = page_count;
+            *page = (*page).min(page_count - 1);
+        }
+        self.needs_render = true;
     }
 
     /// Output size as floats — shorthand for the `(w, h)` pair every geometry

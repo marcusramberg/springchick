@@ -697,6 +697,7 @@ impl State {
             model: &self.model,
             icon_cache: &self.icon_cache,
             app_catalog: &self.app_catalog,
+            catalog_gen: self.catalog_gen,
             toplevels: &self.toplevels,
             app_scale: self.dpi,
             app_origin,

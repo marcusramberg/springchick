@@ -39,6 +39,8 @@ pub struct SkiaGl {
     setup_failed: bool,
     cached_surface: Option<CachedSurface>,
     icon_images: HashMap<String, Image>,
+    /// Catalog generation `icon_images` was uploaded from.
+    icon_gen: u64,
     font: Option<Font>,
 }
 
@@ -190,6 +192,7 @@ impl SkiaGl {
             setup_failed: false,
             cached_surface: None,
             icon_images: HashMap::new(),
+            icon_gen: 0,
             font: None,
         }
     }
@@ -306,6 +309,16 @@ impl SkiaGl {
 
         if let Some(ctx) = self.context.as_mut() {
             ctx.flush_and_submit();
+        }
+    }
+
+    /// Drop the uploaded icons when the catalog has been rescanned: they are
+    /// keyed by app id, so a re-themed or reinstalled app would otherwise keep
+    /// drawing its old pixels. Called once per frame, before any icon draw.
+    pub fn sync_catalog_gen(&mut self, gen: u64) {
+        if self.icon_gen != gen {
+            self.icon_gen = gen;
+            self.icon_images.clear();
         }
     }
 
