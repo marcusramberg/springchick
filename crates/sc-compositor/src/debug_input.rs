@@ -49,7 +49,8 @@ pub enum DebugCmd {
     /// Pretend the device was turned. Drives the same path the accelerometer
     /// will, so rotation policy is testable with no sensor.
     Orientation(crate::rotation::DeviceOrientation),
-    /// Re-read `config.toml` and apply the live-changeable settings.
+    /// Re-read `config.toml` (live-changeable settings only) and rescan the
+    /// app catalog.
     Reload,
     /// Shut the compositor down, as SIGTERM does. This is how a shell's logout
     /// action ends the session — springchick has no other exit path.
@@ -488,6 +489,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             // Allowed while locked: it takes no shell input, and a config reload
             // is exactly the kind of thing a session may need behind the lock.
             state.reload_config();
+            state.reload_catalog();
             let _ = reply.send("ok\n".into());
         }
         DebugCmd::Layers => {

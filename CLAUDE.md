@@ -38,7 +38,7 @@ A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; 
 
 `springchick ipc layers` dumps every layer surface and layer-rooted popup being composited — namespace, layer, logical geometry, the physical rect it is actually drawn at, buffer size, pending-map/slide state, anchor and exclusive zone — plus the usable area and regrow-guard state. It is the first thing to run when the screen shows something no client admits to (e.g. two on-screen keyboards from one wvkbd process).
 
-`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `prefer_no_csd` (next window to negotiate decorations), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn). `dpi` and `uclamp_min` are ignored on reload — they need a restart.
+`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `prefer_no_csd` (next window to negotiate decorations), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn). `dpi` and `uclamp_min` are ignored on reload — they need a restart. It also rescans the app catalog (`.desktop` files + icons): newly installed apps land on Home, uninstalled ones leave pages/dock/hidden and lose their frecency stats, and the renderer's uploaded icon textures are dropped so re-themed icons repaint.
 
 `tests/integration.sh` is an older nested-winit smoke suite (sockets, multi-client, clean shutdown, keybinds); parts are being ported to the VM checks.
 
