@@ -168,6 +168,38 @@ pub fn run_drm() {
 /// greeter, which on the phone reads as a reboot. Retry a bounded number of
 /// times with a short backoff so the handover can complete; after that, give up
 /// and surface the last error.
+/// Open a render node directly. Render nodes carry no modeset state and need no
+/// DRM master, so -- unlike the scanout device -- they can be opened without
+/// going through libseat.
+fn open_render_node(
+    path: &std::path::Path,
+) -> Result<std::os::fd::OwnedFd, Box<dyn std::error::Error>> {
+    use smithay::reexports::rustix::fs::{open, Mode};
+    let flags = OFlags::RDWR | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    Ok(open(path, flags, Mode::empty())?)
+}
+
+/// Pick the render node to run GL on: the render node of a GPU that is *not* the
+/// scanout device. On this SoC that is panthor -- the DECON (scanout) has no 3D
+/// engine, so an EGL context on it is llvmpipe. Returns `None` when the only GPU
+/// is the scanout device (the winit host case), where the caller renders on it.
+fn pick_render_node(seat: &str, scanout: &DrmDeviceFd) -> Option<std::path::PathBuf> {
+    let scanout_node = DrmNode::from_file(scanout).ok()?;
+    for card in udev::all_gpus(seat).ok()? {
+        let node = match DrmNode::from_path(&card) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if node.dev_id() == scanout_node.dev_id() {
+            continue; // the display controller, no 3D engine
+        }
+        if let Some(render) = node.dev_path_with_type(NodeType::Render) {
+            return Some(render);
+        }
+    }
+    None
+}
+
 fn open_drm_node(
     session: &mut LibSeatSession,
     path: &std::path::Path,
@@ -202,18 +234,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let seat_name = session.seat();
     info!(seat = %seat_name, "libseat session acquired");
 
-    // --- Pick the primary GPU ---
+    // --- Pick the scanout GPU (the display controller) ---
     let gpu_path = udev::primary_gpu(&seat_name)?.ok_or("no primary GPU found")?;
-    info!(path = ?gpu_path, "primary GPU");
+    info!(path = ?gpu_path, "scanout GPU");
 
     // --- Open the DRM node through the session ---
     let fd = open_drm_node(&mut session, &gpu_path)?;
     let device_fd = DrmDeviceFd::new(DeviceFd::from(fd));
 
-    // --- DRM device + GBM + EGL + GLES renderer ---
+    // --- DRM device + scanout GBM ---
     let (mut drm_device, drm_notifier) = DrmDevice::new(device_fd.clone(), true)?;
     let gbm = GbmDevice::new(device_fd.clone())?;
-    let egl_display = unsafe { EGLDisplay::new(gbm.clone())? };
+
+    // --- Render GPU + EGL + GLES renderer ---
+    let render_gbm = match pick_render_node(&seat_name, &device_fd) {
+        Some(path) => {
+            info!(?path, "render GPU");
+            let rfd = open_render_node(&path)?;
+            GbmDevice::new(DrmDeviceFd::new(DeviceFd::from(rfd)))?
+        }
+        None => {
+            info!("no separate render node; rendering on the scanout GPU");
+            gbm.clone()
+        }
+    };
+    let render_node = DrmNode::from_file(&render_gbm).ok();
+    let egl_display = unsafe { EGLDisplay::new(render_gbm)? };
     let egl_context = EGLContext::new(&egl_display)?;
     let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
     let rounded_tex_shader = crate::render::compile_rounded_tex_shader(&mut renderer)?;
@@ -253,7 +299,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // zero-copy instead of falling back to slow shm software upload. Passing the
     // main device binds version 4 with default feedback, which wl-screenrec
     // requires to allocate capture buffers.
-    let main_device = device_fd.dev_id().ok();
+    // Advertise the render node (panthor) as the main device: GL clients should
+    // allocate buffers there so our renderer imports them zero-copy, not on the
+    // display controller.
+    let main_device = render_node.map(|n| n.dev_id());
     state.init_dmabuf_global(&display.handle(), renderer.dmabuf_formats(), main_device);
 
     // Control/IPC socket (`springchick ipc …`), same as the winit backend.
@@ -263,12 +312,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Screencopy dmabuf constraints: the render node + format/modifier set a
     // recorder must allocate its capture buffers with, so we can blit into them
     // zero-copy. Falls back to shm-only if the node can't be resolved.
-    if let Ok(node) = DrmNode::from_file(&device_fd) {
-        let render_node = node
+    if let Some(node) = render_node {
+        let cap_node = node
             .node_with_type(NodeType::Render)
             .and_then(Result::ok)
             .unwrap_or(node);
-        state.capture_formats = Some((render_node, group_formats(renderer.dmabuf_formats())));
+        state.capture_formats = Some((cap_node, group_formats(renderer.dmabuf_formats())));
     }
 
     // Look up the connector's DPMS property so power-short can truly blank the
