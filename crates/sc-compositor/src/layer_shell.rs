@@ -27,7 +27,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::wlr_layer::{
-    Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData,
+    KeyboardInteractivity, Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -170,6 +170,9 @@ pub struct LayerShell {
     /// Timestamps of recent unmapped→mapped transitions, per surface, trimmed
     /// to [`FLAP_WINDOW`]. Feeds the flap latch.
     map_events: HashMap<WlSurface, Vec<f32>>,
+    /// Last layer surface a finger went down on. An `OnDemand` surface only
+    /// takes keyboard focus after such a tap, per the layer-shell protocol.
+    focus_tap: Option<WlSurface>,
 }
 
 /// Rate limiting on *growing* the app area back.
@@ -261,6 +264,7 @@ impl LayerShell {
             output_h,
             regrow: RegrowGuard::default(),
             map_events: HashMap::new(),
+            focus_tap: None,
         }
     }
 
@@ -333,6 +337,9 @@ impl LayerShell {
         // A client that exits and relaunches its keyboard is not the cycle this
         // guards against, so its history goes with it.
         self.map_events.remove(surface.wl_surface());
+        if self.focus_tap.as_ref() == Some(surface.wl_surface()) {
+            self.focus_tap = None;
+        }
         let mut map = layer_map_for_output(&self.output);
         let Some(layer) = map.layers().find(|l| l.layer_surface() == surface).cloned() else {
             return false;
@@ -376,6 +383,9 @@ impl LayerShell {
             // initial configure sequence before mapping again.
             self.unmapped.insert(surface.clone());
             self.slides.remove(surface);
+            if self.focus_tap.as_ref() == Some(surface) {
+                self.focus_tap = None;
+            }
         } else {
             // Still unmapped. If we haven't sent the initial configure, do so;
             // otherwise `arrange` already sent any needed configure.
@@ -569,6 +579,45 @@ impl LayerShell {
             }
         }
         None
+    }
+
+    /// Note a touch-down on `surface`, so an `OnDemand` layer surface can take
+    /// keyboard focus on tap. A tap anywhere else clears it.
+    pub fn note_tap(&mut self, surface: &WlSurface) {
+        let is_layer = layer_map_for_output(&self.output)
+            .layer_for_surface(surface, WindowSurfaceType::ALL)
+            .is_some();
+        self.focus_tap = is_layer.then(|| surface.clone());
+    }
+
+    /// The mapped layer surface that should hold keyboard focus, if any.
+    /// `Exclusive` takes it outright (topmost first, Overlay above Top);
+    /// `OnDemand` only once tapped. Without this a shell dialog never sees a
+    /// key, and `zwp_text_input` never gets focus there, so the OSK cannot
+    /// auto-show for it.
+    pub fn keyboard_focus(&self) -> Option<WlSurface> {
+        let map = layer_map_for_output(&self.output);
+        let mut on_demand = None;
+        for wanted in [Layer::Overlay, Layer::Top] {
+            let candidates: Vec<LayerSurface> = map
+                .layers()
+                .filter(|l| l.layer() == wanted && !self.unmapped.contains(l.wl_surface()))
+                .cloned()
+                .collect();
+            for layer in candidates.iter().rev() {
+                match layer.cached_state().keyboard_interactivity {
+                    KeyboardInteractivity::Exclusive => return Some(layer.wl_surface().clone()),
+                    KeyboardInteractivity::OnDemand
+                        if on_demand.is_none()
+                            && self.focus_tap.as_ref() == Some(layer.wl_surface()) =>
+                    {
+                        on_demand = Some(layer.wl_surface().clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        on_demand
     }
 }
 

@@ -554,6 +554,7 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
         state
             .touch_targets
             .insert(slot, (target.scale, target.rotated));
+        state.layers.note_tap(&target.surface);
         let touch = state.touch.clone();
         let event = DownEvent {
             slot,

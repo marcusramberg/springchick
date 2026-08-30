@@ -573,15 +573,18 @@ impl State {
         // back up. So focus the topmost grabbing popup in the app's chain if any,
         // else keep focus on the app itself. Both fall out of recomputing `want`
         // every frame, so focus restores to the app when the grab chain closes.
-        let want = app
-            .as_ref()
-            .and_then(|s| {
-                PopupManager::popups_for_surface(s)
-                    .filter(|(kind, _)| self.popup_grabs.contains(kind.wl_surface()))
-                    .last()
-                    .map(|(kind, _)| kind.wl_surface().clone())
-            })
-            .or(app);
+        // A layer surface asking for keyboard focus (a shell dialog) outranks
+        // the app behind it.
+        let want = self.layers.keyboard_focus().or_else(|| {
+            app.as_ref()
+                .and_then(|s| {
+                    PopupManager::popups_for_surface(s)
+                        .filter(|(kind, _)| self.popup_grabs.contains(kind.wl_surface()))
+                        .last()
+                        .map(|(kind, _)| kind.wl_surface().clone())
+                })
+                .or(app)
+        });
         if want == self.focused_surface {
             return;
         }
