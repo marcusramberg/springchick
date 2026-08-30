@@ -76,11 +76,16 @@ let
 
   # winit/EGL/GLES and libseat are dlopen'd at runtime, so they must be on the
   # loader path of the installed binary — build-time rpath does not cover them.
+  #
+  # NOT mesa: on NixOS the GL/EGL driver comes from /run/opengl-driver (via the
+  # glvnd libGL/libEGL below and libgbm's gbm-backends-path). Putting mesa's own
+  # libEGL/DRI on LD_LIBRARY_PATH shadows glvnd with this flake's stock mesa,
+  # which has no arch-11 panfrost for the Mali-G715 and so falls back to
+  # llvmpipe. Let glvnd dispatch to whatever driver the host system installed.
   runtimeLibs = [
     wayland
     libxkbcommon
     libGL
-    mesa
     libgbm
     libinput
     udev
