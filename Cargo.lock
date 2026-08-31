@@ -2759,9 +2759,7 @@ name = "sc-catalog"
 version = "0.1.0"
 dependencies = [
  "sc-shell-model",
- "serde",
  "tempfile",
- "toml 0.8.23",
 ]
 
 [[package]]
