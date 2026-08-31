@@ -68,8 +68,9 @@ pub fn resolve_with_dirs<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> I
         }
     }
 
-    // Search theme directories.
-    if let Some(path) = find_icon(icon_name, theme_dirs) {
+    // Search theme directories. Keep going if an earlier candidate is corrupt:
+    // a broken PNG must not shadow a usable SVG in a lower-priority directory.
+    for path in icon_candidates(icon_name, theme_dirs) {
         if let Some(pixels) = load_icon_file(&path) {
             return pixels;
         }
@@ -79,8 +80,9 @@ pub fn resolve_with_dirs<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> I
     placeholder(icon_name)
 }
 
-/// Search theme dirs for an icon file matching the name.
-fn find_icon<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> Option<PathBuf> {
+/// Existing icon-file candidates matching the name, in lookup order.
+fn icon_candidates<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
     for dir in theme_dirs {
         let base = dir.as_ref();
 
@@ -90,20 +92,26 @@ fn find_icon<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> Option<PathBu
             for ext in &["png", "svg"] {
                 let path = dir_path.join(format!("{icon_name}.{ext}"));
                 if path.exists() {
-                    return Some(path);
+                    out.push(path);
                 }
             }
         }
 
         // Check directly in the dir (e.g. /usr/share/pixmaps/foo.png).
-        for ext in &["png", "svg", "xpm"] {
+        for ext in &["png", "svg"] {
             let path = base.join(format!("{icon_name}.{ext}"));
             if path.exists() {
-                return Some(path);
+                out.push(path);
             }
         }
     }
-    None
+    out
+}
+
+/// Search theme dirs for an icon file matching the name.
+#[cfg(test)]
+fn find_icon<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> Option<PathBuf> {
+    icon_candidates(icon_name, theme_dirs).into_iter().next()
 }
 
 /// Load and decode an icon file (PNG or SVG) to RGBA pixels.
@@ -476,6 +484,26 @@ mod tests {
         // Should have non-zero red pixels
         let has_red = p.data.chunks_exact(4).any(|px| px[0] > 200 && px[1] < 50);
         assert!(has_red, "SVG rasterization should produce red pixels");
+    }
+
+    #[test]
+    fn corrupt_candidate_does_not_shadow_later_usable_icon() {
+        let dir = tempfile::tempdir().unwrap();
+        let png_dir = dir.path().join("256x256/apps");
+        let svg_dir = dir.path().join("scalable/apps");
+        std::fs::create_dir_all(&png_dir).unwrap();
+        std::fs::create_dir_all(&svg_dir).unwrap();
+        std::fs::write(png_dir.join("shadow.png"), b"not a png").unwrap();
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48"><rect width="48" height="48" fill="red"/></svg>"#;
+        std::fs::write(svg_dir.join("shadow.svg"), svg).unwrap();
+
+        let dirs = [dir.path().to_str().unwrap()];
+        let p = resolve_with_dirs("shadow", &dirs);
+        let has_red = p.data.chunks_exact(4).any(|px| px[0] > 200 && px[1] < 50);
+        assert!(
+            has_red,
+            "later SVG should be used when earlier PNG is corrupt"
+        );
     }
 
     /// Minimal valid 1x1 red PNG.
