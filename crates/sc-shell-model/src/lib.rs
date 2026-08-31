@@ -185,6 +185,7 @@ impl ShellModel {
     pub fn hide(&mut self, app: &str) {
         if !self.hidden.iter().any(|a| a == app) {
             self.remove_from_pages(app);
+            self.unpin(app);
             self.repack();
             self.hidden.push(app.to_owned());
         }
