@@ -33,7 +33,15 @@ impl AppHistory {
 
     /// Remove a closed toplevel.
     pub fn remove(&mut self, id: ToplevelId) {
+        let removed_before_cursor = self
+            .stack
+            .iter()
+            .position(|&x| x == id)
+            .is_some_and(|i| i < self.cursor);
         self.stack.retain(|&x| x != id);
+        if removed_before_cursor {
+            self.cursor = self.cursor.saturating_sub(1);
+        }
         if self.cursor >= self.stack.len() {
             self.cursor = 0;
         }
@@ -187,5 +195,16 @@ mod tests {
         h.push_foreground(2);
         h.remove(2);
         assert_eq!(h.stack, vec![1]);
+    }
+
+    #[test]
+    fn remove_before_cursor_keeps_current_app_current() {
+        let mut h = AppHistory::new();
+        h.push_foreground(1);
+        h.push_foreground(2);
+        h.push_foreground(3); // stack [3, 2, 1], current 3
+        h.quick_switch(1); // current 2, cursor 1
+        h.remove(3); // remove an entry before the cursor
+        assert_eq!(h.deck_order(), vec![2, 1]);
     }
 }
