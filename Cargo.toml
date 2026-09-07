@@ -19,6 +19,12 @@ license = "MIT"
 
 [profile.dev]
 opt-level = 1
+debug = "line-tables-only"
+
+[profile.debugging]
+inherits = "dev"
+debug = true
+
 
 [profile.release]
 lto = "thin"
