@@ -15,7 +15,7 @@ use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::{Fourcc, Modifier};
 use smithay::backend::drm::{
     DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata, DrmEventTime, DrmNode, GbmBufferedSurface,
-    NodeType,
+    NodeType, VrrSupport,
 };
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
@@ -31,7 +31,9 @@ use smithay::backend::udev;
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::signals::{Signal, Signals};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
-use smithay::reexports::drm::control::{connector, crtc, property, Device as ControlDevice};
+use smithay::reexports::drm::control::{
+    connector, crtc, property, Device as ControlDevice, ModeTypeFlags,
+};
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
@@ -295,6 +297,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                            // compositor draws its own over the window, so that backend leaves this off
                            // rather than showing two.)
     state.cursor_overlay = true;
+
+    // Variable refresh: with render-on-demand the panel otherwise keeps scanning
+    // out at the mode's rate over a frozen frame. Enabling VRR lets it stretch
+    // its own vblank interval when we stop flipping, and present a flip as soon
+    // as it lands instead of at the next fixed vblank.
+    match gbm_surface.vrr_supported(connector_handle) {
+        Ok(VrrSupport::NotSupported) => info!("connector does not support VRR"),
+        Ok(support) => {
+            info!(?support, want = state.vrr, "connector supports VRR");
+            if state.vrr {
+                // `RequiresModeset` only stages it; the modeset rides the first
+                // `queue_buffer`, which commits instead of page-flipping while
+                // pending state differs.
+                match gbm_surface.use_vrr(true) {
+                    Ok(()) => info!("VRR enabled"),
+                    Err(e) => warn!("enabling VRR failed: {e}"),
+                }
+            }
+        }
+        Err(e) => warn!("VRR probe failed: {e}"),
+    }
     // Advertise zwp_linux_dmabuf so GL clients (GTK4, etc.) share buffers
     // zero-copy instead of falling back to slow shm software upload. Passing the
     // main device binds version 4 with default feedback, which wl-screenrec
@@ -1304,5 +1327,21 @@ fn find_output(
         .into_iter()
         .next()
         .ok_or("no connected connector with a usable crtc")?;
+    // Dump the panel's whole mode list: several modes at one resolution and
+    // different refresh rates is the mode-switch path to an adaptive cadence,
+    // and the fallback for a panel with no VRR_ENABLED property.
+    if let Ok(conn) = drm.get_connector(first.connector, false) {
+        for m in conn.modes() {
+            let (w, h) = m.size();
+            info!(
+                target: "springchick::debug",
+                "connector mode {}x{}@{:.3} preferred={}",
+                w,
+                h,
+                mode_refresh_mhz(m) as f64 / 1000.0,
+                m.mode_type().contains(ModeTypeFlags::PREFERRED),
+            );
+        }
+    }
     Ok((first.connector, first.crtc, first.mode))
 }

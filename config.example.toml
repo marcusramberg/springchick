@@ -10,8 +10,8 @@
 # so this file changes nothing until you edit it.
 #
 # `springchick ipc reload` re-reads this file into a running compositor. Every
-# option below takes effect immediately except `dpi` and `uclamp_min` (ignored
-# on reload; both need a restart) and `prefer_no_csd` (applies to the next
+# option below takes effect immediately except `dpi`, `uclamp_min` and `vrr`
+# (ignored on reload; those need a restart) and `prefer_no_csd` (applies to the next
 # window that negotiates decorations).
 
 [main]
@@ -70,6 +70,18 @@ prefer_no_csd = true
 #
 # Read at startup only — `springchick ipc reload` will not pick this up.
 uclamp_min = "auto"
+
+# Ask the panel for a variable refresh rate (DRM backend only). The compositor
+# already renders on demand and stops flipping on a static screen; with VRR the
+# panel stretches its own refresh interval to match instead of scanning out the
+# same frame at the mode's rate, and a flip reaches the glass as soon as it is
+# queued rather than at the next fixed vblank.
+#
+# Ignored unless the connector reports `vrr_capable` and the CRTC exposes
+# `VRR_ENABLED` — check the log line "connector supports VRR" at startup.
+#
+# Read at startup only — `springchick ipc reload` will not pick this up.
+vrr = true
 
 [keybinds]
 # Long-press threshold (ms): how long a button is held before its "long" action

@@ -38,7 +38,7 @@ A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; 
 
 `springchick ipc layers` dumps every layer surface and layer-rooted popup being composited — namespace, layer, logical geometry, the physical rect it is actually drawn at, buffer size, pending-map/slide state, anchor and exclusive zone — plus the usable area and regrow-guard state. It is the first thing to run when the screen shows something no client admits to (e.g. two on-screen keyboards from one wvkbd process).
 
-`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `prefer_no_csd` (next window to negotiate decorations), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn). `dpi` and `uclamp_min` are ignored on reload — they need a restart. It also rescans the app catalog (`.desktop` files + icons): newly installed apps land on Home, uninstalled ones leave pages/dock/hidden and lose their frecency stats, and the renderer's uploaded icon textures are dropped so re-themed icons repaint.
+`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `prefer_no_csd` (next window to negotiate decorations), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn). `dpi`, `uclamp_min` and `vrr` are ignored on reload — they need a restart. It also rescans the app catalog (`.desktop` files + icons): newly installed apps land on Home, uninstalled ones leave pages/dock/hidden and lose their frecency stats, and the renderer's uploaded icon textures are dropped so re-themed icons repaint.
 
 `tests/integration.sh` is an older nested-winit smoke suite (sockets, multi-client, clean shutdown, keybinds); parts are being ported to the VM checks.
 
@@ -105,7 +105,7 @@ libinput/DRM/GBM/session types are used via `smithay::reexports::*` to avoid ver
 
 `config.example.toml` documents every option at its compiled-in default. Lookup order: `$SPRINGCHICK_CONFIG` → `$XDG_CONFIG_HOME/springchick/config.toml` → `/etc/springchick/config.toml`. Persisted *state* (dock, pages, frecency) is separate: `sc_shell_model::persist` → `state.toml`.
 
-Notable: `dpi` (default 3 — advertised via `wp_fractional_scale`; the FP5 panel is illegible at 1:1), `idle_blank_secs`, `card_radius`, `show_touches`, `prefer_no_csd`, `rotation_settle_ms` (default 400 — accelerometer debounce) and `rotation_fade_ms` (default 130 — half the dip-to-black that covers a turn), `uclamp_min` (default `"auto"` — scheduler `util_min` floor held on the render thread while drawing, derived from CPU topology; see `uclamp.rs`).
+Notable: `dpi` (default 3 — advertised via `wp_fractional_scale`; the FP5 panel is illegible at 1:1), `idle_blank_secs`, `card_radius`, `show_touches`, `prefer_no_csd`, `rotation_settle_ms` (default 400 — accelerometer debounce) and `rotation_fade_ms` (default 130 — half the dip-to-black that covers a turn), `vrr` (default `true` — asks the panel for variable refresh; DRM backend only, no-op unless the connector reports `vrr_capable`, startup-only), `uclamp_min` (default `"auto"` — scheduler `util_min` floor held on the render thread while drawing, derived from CPU topology; see `uclamp.rs`).
 
 Env vars: `SPRINGCHICK_BACKEND`, `SPRINGCHICK_CONFIG`, `SPRINGCHICK_IPC_SOCK`, `SPRINGCHICK_DEBUG_SOCK` (legacy), `SPRINGCHICK_WINIT_SIZE` (`WxH`), `SPRINGCHICK_OUTPUT`.
 

@@ -103,6 +103,11 @@ pub struct Config {
     /// Scheduler utilization floor (`util_min`) applied to the render thread
     /// while it is drawing. See [`UclampMin`].
     pub uclamp_min: UclampMin,
+    /// Enable variable refresh rate on the panel when the connector reports it
+    /// capable. With render-on-demand this lets the panel drop its own refresh
+    /// on a static screen instead of scanning out at the mode's rate forever.
+    /// Ignored where the driver exposes no `VRR_ENABLED`/`vrr_capable`.
+    pub vrr: bool,
     /// How long (ms) one accelerometer reading must hold before the app is
     /// turned to match it. Debounces the flip that happens the moment the phone
     /// crosses the diagonal. `0` turns as soon as the sensor reports.
@@ -163,6 +168,9 @@ pub const DEFAULT_UCLAMP_MIN: UclampMin = UclampMin::Auto;
 /// Orientation debounce when `[main]` does not say otherwise. Long enough to sit
 /// out a hand wobbling past the diagonal, short enough that a deliberate turn
 /// still feels like a response to what the user did.
+pub const DEFAULT_VRR: bool = true;
+
+/// Default for [`Config::rotation_settle_ms`].
 pub const DEFAULT_ROTATION_SETTLE_MS: u64 = 400;
 
 /// Half-duration of the rotation dip-to-black when `[main]` does not say
@@ -287,6 +295,7 @@ struct RawMain {
     prefer_no_csd: Option<bool>,
     /// `"auto"` (the default), `"off"`, or a number in 0..=1024. `0` means off.
     uclamp_min: Option<toml::Value>,
+    vrr: Option<bool>,
     rotation_settle_ms: Option<u64>,
     rotation_fade_ms: Option<u64>,
 }
@@ -323,6 +332,7 @@ impl Config {
                     show_touches: DEFAULT_SHOW_TOUCHES,
                     prefer_no_csd: DEFAULT_PREFER_NO_CSD,
                     uclamp_min: DEFAULT_UCLAMP_MIN,
+                    vrr: DEFAULT_VRR,
                     rotation_settle_ms: DEFAULT_ROTATION_SETTLE_MS,
                     rotation_fade_ms: DEFAULT_ROTATION_FADE_MS,
                     bindings: Vec::new(),
@@ -336,6 +346,7 @@ impl Config {
         let show_touches = main.show_touches.unwrap_or(DEFAULT_SHOW_TOUCHES);
         let prefer_no_csd = main.prefer_no_csd.unwrap_or(DEFAULT_PREFER_NO_CSD);
         let uclamp_min = parse_uclamp_min(main.uclamp_min.as_ref());
+        let vrr = main.vrr.unwrap_or(DEFAULT_VRR);
         let rotation_settle_ms = main
             .rotation_settle_ms
             .unwrap_or(DEFAULT_ROTATION_SETTLE_MS);
@@ -351,6 +362,7 @@ impl Config {
             show_touches,
             prefer_no_csd,
             uclamp_min,
+            vrr,
             rotation_settle_ms,
             rotation_fade_ms,
             bindings,
@@ -680,6 +692,13 @@ mod tests {
         let cfg = Config::parse("");
         assert_eq!(cfg.long_press_ms, DEFAULT_LONG_PRESS_MS);
         assert!(cfg.bindings.is_empty());
+    }
+
+    #[test]
+    fn vrr_defaults_on_and_parses() {
+        assert!(Config::parse("[main]\n").vrr);
+        assert!(Config::defaults().vrr);
+        assert!(!Config::parse("[main]\nvrr = false\n").vrr);
     }
 
     #[test]

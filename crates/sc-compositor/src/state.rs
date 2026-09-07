@@ -416,6 +416,10 @@ pub(crate) struct State {
     /// (`[main].uclamp_min`). Read at startup only: the floor is resolved
     /// against CPU topology once, so changing it needs a restart like `dpi`.
     pub uclamp_min: sc_config::UclampMin,
+    /// Ask the panel for variable refresh rate (`[main].vrr`). DRM backend only,
+    /// read at startup: the connector is probed once, so changing it needs a
+    /// restart like `dpi`.
+    pub vrr: bool,
     /// wlr-gamma-control state (night-light / color-temperature clients).
     pub gamma: gamma_control::GammaControl,
     /// wlr-output-power-management state (client-driven DPMS).
@@ -587,6 +591,7 @@ impl State {
         let show_touches = config.show_touches;
         let prefer_no_csd = config.prefer_no_csd;
         let uclamp_min = config.uclamp_min;
+        let vrr = config.vrr;
         let config_rotation_settle_ms = config.rotation_settle_ms;
         let config_rotation_fade_ms = config.rotation_fade_ms;
 
@@ -816,6 +821,7 @@ impl State {
             card_radius,
             prefer_no_csd,
             uclamp_min,
+            vrr,
             gamma,
             output_power,
             idle_notify,
