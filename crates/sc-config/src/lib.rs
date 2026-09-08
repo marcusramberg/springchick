@@ -70,6 +70,27 @@ pub enum Action {
     Screenshot,
 }
 
+impl Action {
+    /// Resolve a built-in action's config name. `Command` has no name: it
+    /// carries a shell string, so it is spelled `command = "..."` instead.
+    pub fn from_name(name: &str) -> Option<Action> {
+        Some(match name {
+            "close-app" => Action::CloseApp,
+            "home" => Action::Home,
+            "toggle-display" => Action::ToggleDisplay,
+            "volume-up" => Action::VolumeUp,
+            "volume-down" => Action::VolumeDown,
+            "volume-mute" => Action::VolumeMute,
+            "toggle-fullscreen" => Action::ToggleFullscreen,
+            "search" => Action::Search,
+            "switcher-next" => Action::SwitcherNext,
+            "switcher-prev" => Action::SwitcherPrev,
+            "screenshot" => Action::Screenshot,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Binding {
     /// xkb keysym name, resolved to a keysym by the compositor.
@@ -403,20 +424,10 @@ fn convert(raw: RawBinding) -> Option<Binding> {
 
     let action = match (raw.command, raw.action) {
         (Some(cmd), None) => Action::Command(cmd),
-        (None, Some(name)) => match name.as_str() {
-            "close-app" => Action::CloseApp,
-            "home" => Action::Home,
-            "toggle-display" => Action::ToggleDisplay,
-            "volume-up" => Action::VolumeUp,
-            "volume-down" => Action::VolumeDown,
-            "volume-mute" => Action::VolumeMute,
-            "toggle-fullscreen" => Action::ToggleFullscreen,
-            "search" => Action::Search,
-            "switcher-next" => Action::SwitcherNext,
-            "switcher-prev" => Action::SwitcherPrev,
-            "screenshot" => Action::Screenshot,
-            other => {
-                warn!(key = %raw.key, action = %other, "skipping keybinding: unknown action");
+        (None, Some(name)) => match Action::from_name(&name) {
+            Some(action) => action,
+            None => {
+                warn!(key = %raw.key, action = %name, "skipping keybinding: unknown action");
                 return None;
             }
         },

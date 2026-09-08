@@ -67,6 +67,10 @@ pub enum DebugCmd {
         app_id: String,
         new_window: bool,
     },
+    /// Run a built-in keybinding action by its config name, as a bound key
+    /// would. `command` is not reachable this way: the caller can run a shell
+    /// command itself.
+    Action(sc_config::Action),
 }
 
 /// Parse one command line. `w`/`h` are the logical output bounds used for the
@@ -209,6 +213,15 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
             };
             done(tok)?;
             DebugCmd::Launch { app_id, new_window }
+        }
+        "action" => {
+            let name = tok
+                .next()
+                .ok_or_else(|| "parse: missing action name".to_string())?;
+            done(tok)?;
+            let action = sc_config::Action::from_name(name)
+                .ok_or_else(|| format!("parse: unknown action {name}"))?;
+            DebugCmd::Action(action)
         }
         other => return Err(format!("parse: unknown verb {other}")),
     };
@@ -503,6 +516,12 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             tracing::info!("quit requested over ipc");
             state.running = false;
         }
+        DebugCmd::Action(action) => {
+            // `run_action` applies the session-lock policy itself, so a locked
+            // session drops the same actions here as it does from a key.
+            crate::keybinds::run_action(state, action);
+            let _ = reply.send("ok\n".into());
+        }
         DebugCmd::Launch { app_id, new_window } => {
             if !state.app_catalog.contains_key(&app_id) {
                 let _ = reply.send(format!("err unknown app {app_id}\n"));
@@ -784,6 +803,18 @@ mod tests {
         );
         assert!(parse_line("launch", W, H).is_err()); // needs an app id
         assert!(parse_line("launch foot copy", W, H).is_err()); // unknown flag
+    }
+
+    #[test]
+    fn parses_action() {
+        assert_eq!(
+            parse_line("action screenshot", W, H),
+            Ok(DebugCmd::Action(sc_config::Action::Screenshot))
+        );
+        assert!(parse_line("action", W, H).is_err()); // needs a name
+        assert!(parse_line("action nope", W, H).is_err());
+        // `command` takes a shell string, so it has no name to call by.
+        assert!(parse_line("action command", W, H).is_err());
     }
 
     #[test]
