@@ -211,13 +211,15 @@ fn capture_region_shm(
     };
     {
         // Rendering to our own FBO flips Y relative to winit's presented
-        // surface, so this matches the DRM path's Skia flip instead.
+        // surface: the Skia overlay takes the DRM path's flip, and the app pass
+        // drops the Flipped180 the presented frame needs (else captures come
+        // out with the app upside down while the shell is upright).
         // A screencopy draw goes into the client's buffer, never to the panel,
         // so any feedback it collects is discarded rather than presented.
         let mut sinks = render::FrameSinks::default();
         let mut ctx = state.draw_ctx(
             prep,
-            Transform::Flipped180,
+            Transform::Normal,
             true,
             false,
             rounded_tex_shader,
@@ -234,6 +236,57 @@ fn capture_region_shm(
     Some(crate::capture::readback_into_shm(
         renderer, &fb, buffer, target, src,
     ))
+}
+
+/// Serve a pending `screenshot` binding: recompose the scene offscreen, read it
+/// back, hand it to the clipboard.
+fn take_screenshot(
+    backend: &mut WinitGraphicsBackend<GlesRenderer>,
+    state: &mut State,
+    prep: &crate::FramePrep,
+    rounded_tex_shader: &GlesTexProgram,
+) {
+    use smithay::backend::renderer::Bind;
+
+    let size = backend.window_size();
+    let buf_size: smithay::utils::Size<i32, smithay::utils::Buffer> = (size.w, size.h).into();
+    let renderer = backend.renderer();
+    let Some(mut tex) = crate::capture::offscreen(
+        renderer,
+        smithay::backend::allocator::Fourcc::Xrgb8888,
+        buf_size,
+    ) else {
+        return;
+    };
+    let pixels = {
+        let mut fb = match renderer.bind(&mut tex) {
+            Ok(fb) => fb,
+            Err(e) => {
+                warn!("screenshot: offscreen bind failed: {e}");
+                return;
+            }
+        };
+        let mut sinks = render::FrameSinks::default();
+        let mut ctx = state.draw_ctx(
+            prep,
+            Transform::Normal,
+            true,
+            false,
+            rounded_tex_shader,
+            &mut sinks,
+        );
+        let draw = render::draw_scene(renderer, &mut fb, size, &mut ctx);
+        crate::presentation::discard(sinks.presented);
+        crate::pacing::clear_blockers(state, sinks.unblocked);
+        if let Err(e) = draw {
+            warn!("screenshot: draw_scene failed: {e}");
+            return;
+        }
+        crate::capture::readback_rgba(renderer, &fb, buf_size)
+    };
+    if let Some(pixels) = pixels {
+        crate::screenshot::to_clipboard(state, &pixels, buf_size);
+    }
 }
 
 /// Handle input events from the winit backend.
@@ -346,6 +399,10 @@ fn render_frame(
                 frame.failed();
             }
         }
+    }
+
+    if std::mem::take(&mut state.screenshot_pending) {
+        take_screenshot(backend, state, &prep, rounded_tex_shader);
     }
 
     if state.pending_captures.is_empty() {

@@ -230,7 +230,8 @@ pub fn allowed_while_locked(action: &Action) -> bool {
         | Action::ToggleFullscreen
         | Action::Search
         | Action::SwitcherNext
-        | Action::SwitcherPrev => false,
+        | Action::SwitcherPrev
+        | Action::Screenshot => false,
     }
 }
 
@@ -262,6 +263,10 @@ pub fn run_action(state: &mut State, action: Action) {
         // previously-used app first.
         Action::SwitcherNext => state.switcher_step(1),
         Action::SwitcherPrev => state.switcher_step(-1),
+        Action::Screenshot => {
+            state.screenshot_pending = true;
+            state.needs_render = true;
+        }
     }
 }
 
@@ -315,6 +320,7 @@ pub fn action_name(action: &Action) -> &'static str {
         Action::Search => "search",
         Action::SwitcherNext => "switcher-next",
         Action::SwitcherPrev => "switcher-prev",
+        Action::Screenshot => "screenshot",
     }
 }
 
@@ -335,9 +341,10 @@ mod tests {
 
     #[test]
     fn every_default_binding_resolves() {
-        // Distinct (keysym, mods) pairs: vol up, vol down, power, and the five
-        // Super shortcuts (home, fullscreen, search, switcher next/prev).
-        assert_eq!(resolve(Config::defaults()).len(), 8);
+        // Distinct (keysym, mods) pairs: vol up, vol down, power, Print, and
+        // the five Super shortcuts (home, fullscreen, search, switcher
+        // next/prev).
+        assert_eq!(resolve(Config::defaults()).len(), 9);
     }
 
     #[test]

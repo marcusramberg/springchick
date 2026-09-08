@@ -93,7 +93,8 @@ long_press_ms = 800
 # Optional `mods` = list of ["Ctrl", "Alt", "Shift", "Super"].
 #
 # Built-in actions: close-app, home, toggle-display, volume-up, volume-down,
-# volume-mute, toggle-fullscreen, search, switcher-next, switcher-prev.
+# volume-mute, toggle-fullscreen, search, switcher-next, switcher-prev,
+# screenshot (PNG of the screen onto the clipboard).
 #
 # switcher-next / switcher-prev are meant to be bound with Super held: each
 # press steps the deck one card, and releasing Super opens the focused one.
@@ -145,6 +146,11 @@ key = "s"
 mods = ["Super"]
 press = "short"
 action = "search"
+
+[[keybinds.binding]]
+key = "Print"
+press = "short"
+action = "screenshot"
 
 [[keybinds.binding]]
 key = "Tab"

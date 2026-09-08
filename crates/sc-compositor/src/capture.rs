@@ -66,6 +66,36 @@ pub fn offscreen(
     }
 }
 
+/// Read the drawn framebuffer back into a tightly packed RGBA `Vec`, for the
+/// compositor's own screenshot (no client buffer involved).
+pub fn readback_rgba(
+    renderer: &mut GlesRenderer,
+    framebuffer: &<GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, smithay::utils::Buffer>,
+) -> Option<Vec<u8>> {
+    let src = Rectangle::from_size(size);
+    let mapping = match renderer.copy_framebuffer(framebuffer, src, Fourcc::Xrgb8888) {
+        Ok(m) => m,
+        Err(e) => {
+            warn!("screenshot: copy_framebuffer failed: {e}");
+            return None;
+        }
+    };
+    let mut out = match renderer.map_texture(&mapping) {
+        Ok(p) => p.to_vec(),
+        Err(e) => {
+            warn!("screenshot: map_texture failed: {e}");
+            return None;
+        }
+    };
+    // Xrgb8888 is B,G,R,X in memory; PNG wants R,G,B,A.
+    for px in out.chunks_exact_mut(4) {
+        px.swap(0, 2);
+        px[3] = 0xff;
+    }
+    Some(out)
+}
+
 /// Read the drawn framebuffer back and copy it into the client's shm pool.
 ///
 /// `framebuffer` must be the one bound to the texture from [`offscreen`], with

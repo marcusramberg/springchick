@@ -43,6 +43,7 @@ mod provenance;
 mod render;
 mod rotation;
 pub mod scene;
+mod screenshot;
 mod sensor;
 mod session;
 mod session_lock;

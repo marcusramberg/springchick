@@ -40,7 +40,7 @@ use smithay::wayland::selection::wlr_data_control::{
     DataControlHandler as WlrDataControlHandler, DataControlState as WlrDataControlState,
 };
 use smithay::wayland::selection::ext_data_control::{DataControlHandler, DataControlState};
-use smithay::wayland::selection::SelectionHandler;
+use smithay::wayland::selection::{SelectionHandler, SelectionTarget};
 use smithay::wayland::shell::xdg::dialog::{ToplevelDialogHint, XdgDialogHandler};
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
@@ -280,7 +280,20 @@ impl DmabufHandler for State {
 }
 
 impl SelectionHandler for State {
-    type SelectionUserData = ();
+    /// The compositor only ever owns the selection for a screenshot, so the
+    /// user data *is* the PNG.
+    type SelectionUserData = std::sync::Arc<Vec<u8>>;
+
+    fn send_selection(
+        &mut self,
+        _ty: SelectionTarget,
+        _mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: Seat<Self>,
+        data: &Self::SelectionUserData,
+    ) {
+        crate::screenshot::serve(fd, data.clone());
+    }
 }
 
 impl DataDeviceHandler for State {

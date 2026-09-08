@@ -285,6 +285,9 @@ pub(crate) struct State {
     /// vblank-driven DRM loop re-primes a page-flip on the next wake. Inert
     /// under winit (which renders every loop iteration).
     pub needs_render: bool,
+    /// A `screenshot` binding fired: the next composited frame is read back and
+    /// put on the clipboard. Served by the backends, which own the renderer.
+    pub screenshot_pending: bool,
     /// Commit cursor for the partial page-flip damage hint: the fullscreen app
     /// surface and the `CommitCounter` last presented for it. See
     /// [`crate::render::DrawCtx::last_present`].
@@ -779,6 +782,7 @@ impl State {
             idle: blank::Idle::new(idle_blank_secs, std::time::Instant::now()),
             external_display: false,
             needs_render: false,
+            screenshot_pending: false,
             last_present: None,
             osd: osd::Osd::new(),
             layer_shell_state,
