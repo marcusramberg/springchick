@@ -17,6 +17,7 @@ sc-catalog = { path = "../sc-catalog" }
 sc-layout = { path = "../sc-layout" }
 sc-icons = { path = "../sc-icons" }
 sc-keys = { path = "../sc-keys" }
+png = "0.17"
 
 # Upstream smithay@7ddcd17 (needed for xkbcommon 0.9 → wvkbd keymap fix).
 #

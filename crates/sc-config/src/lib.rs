@@ -66,6 +66,8 @@ pub enum Action {
     SwitcherNext,
     /// Step the switcher deck one card toward more-recent apps.
     SwitcherPrev,
+    /// Capture the screen as PNG and put it on the clipboard.
+    Screenshot,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -256,6 +258,11 @@ press = "short"
 action = "search"
 
 [[keybinds.binding]]
+key = "Print"
+press = "short"
+action = "screenshot"
+
+[[keybinds.binding]]
 key = "Tab"
 mods = ["Super"]
 press = "short"
@@ -407,6 +414,7 @@ fn convert(raw: RawBinding) -> Option<Binding> {
             "search" => Action::Search,
             "switcher-next" => Action::SwitcherNext,
             "switcher-prev" => Action::SwitcherPrev,
+            "screenshot" => Action::Screenshot,
             other => {
                 warn!(key = %raw.key, action = %other, "skipping keybinding: unknown action");
                 return None;

@@ -2769,6 +2769,7 @@ dependencies = [
  "calloop 0.14.4",
  "dbus",
  "libc",
+ "png 0.17.16",
  "sc-anim",
  "sc-catalog",
  "sc-config",

@@ -1017,6 +1017,39 @@ impl App {
         // Screencopy: satisfy any pending capture requests from the same scene.
         self.capture_pending_frames(&prep);
         self.wlr_capture_pending_frames(&prep);
+        self.take_screenshot(&prep);
+    }
+
+    /// Serve a pending `screenshot` binding from the scene just composited.
+    fn take_screenshot(&mut self, prep: &crate::FramePrep) {
+        if !std::mem::take(&mut self.state.screenshot_pending) {
+            return;
+        }
+        let size: smithay::utils::Size<i32, smithay::utils::Buffer> =
+            (self.drm.output_size.w, self.drm.output_size.h).into();
+        let Some(mut tex) = crate::capture::offscreen(
+            &mut self.drm.renderer,
+            smithay::backend::allocator::Fourcc::Xrgb8888,
+            size,
+        ) else {
+            return;
+        };
+        let pixels = {
+            let mut fb = match self.drm.renderer.bind(&mut tex) {
+                Ok(fb) => fb,
+                Err(e) => {
+                    warn!("screenshot: offscreen bind failed: {e}");
+                    return;
+                }
+            };
+            if self.draw_scene_into(&mut fb, prep, false).is_none() {
+                return;
+            }
+            crate::capture::readback_rgba(&mut self.drm.renderer, &fb, size)
+        };
+        if let Some(pixels) = pixels {
+            crate::screenshot::to_clipboard(&mut self.state, &pixels, size);
+        }
     }
 
     /// Copy the primary's just-composited scanout buffer onto every external
