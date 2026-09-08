@@ -71,9 +71,13 @@ A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`
 (override with `SPRINGCHICK_IPC_SOCK`). The shipped `springchick ipc <verb>`
 client sends one line and prints the reply (exit non-zero on error). Verbs are
 the debug-input gestures: `tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`,
-`keydown NAME` / `keyup NAME`, `down/move/up`, `settle [MS]`, plus the control
-verb `reload` (re-read `config.toml`), `quit` (end the session), and the query
-verb `layers`. Used by
+`keydown NAME` / `keyup NAME`, `down/move/up`, `settle [MS]`, plus
+`action NAME` (run a built-in keybinding action — `screenshot`, `home`,
+`close-app`, … — without going through a key), the control verb `reload`
+(re-read `config.toml`), `quit` (end the session), and the query verb `layers`.
+Prefer `action` over `key` for testing a binding: injected keys are drained one
+per frame, so press→release lands ~1s apart and always classifies as a *long*
+press. Used by
 `nix/vm-switcher-test.nix`; also works
 on-device. From the test driver (root reaching the tester's socket):
 

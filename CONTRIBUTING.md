@@ -149,9 +149,11 @@ springchick ipc tap 640 400
 springchick ipc swipe 640 788 1080 788 500
 springchick ipc key XF86AudioRaiseVolume 900
 springchick ipc settle 1000
+springchick ipc action screenshot
 ```
 
-Verbs: `tap`, `swipe`, `key`, `down`/`move`/`up`, `settle`. Works nested, in the
+Verbs: `tap`, `swipe`, `key`, `down`/`move`/`up`, `settle`, `action` (run a
+built-in keybinding action by its `config.toml` name, no key needed). Works nested, in the
 VM, and on-device. Coordinates are in the **actual** output size — a nested host
 compositor may clamp the window well below the FP5 constants.
 

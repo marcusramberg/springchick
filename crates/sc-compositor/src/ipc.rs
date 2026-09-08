@@ -4,8 +4,9 @@
 //! The compositor always listens on [`socket_path`]; `springchick ipc <verb>
 //! [args...]` connects there, sends one line, prints the reply, and exits
 //! non-zero if the reply is an error. The verbs are the debug-input gestures
-//! (`tap`, `swipe`, `key`, `settle`, …) plus control and query verbs (`reload`,
-//! `layers`, `quit`); further verbs (`state`, …) slot in the same way.
+//! (`tap`, `swipe`, `key`, `settle`, …) plus `action` (run a built-in
+//! keybinding action by name) and control and query verbs (`reload`, `layers`,
+//! `quit`); further verbs (`state`, …) slot in the same way.
 //!
 //! A reply is always a single line. A query that answers with several records
 //! (`layers`) packs them into that line separated by ` | `, which the client
