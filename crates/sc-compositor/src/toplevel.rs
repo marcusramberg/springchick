@@ -438,6 +438,54 @@ impl State {
         );
     }
 
+    /// Raise the mapped window owning `surface`, if there is one. Backs
+    /// xdg-activation: an app handing a URL to an already-running browser
+    /// activates the browser's existing window rather than mapping a new one.
+    pub(crate) fn raise_activated_surface(&mut self, surface: &WlSurface) -> bool {
+        let Some(tid) = self.toplevels.iter().position(|s| {
+            s.as_ref()
+                .is_some_and(|t| t.surface.wl_surface() == surface)
+        }) else {
+            return false;
+        };
+        self.raise_toplevel_activated(tid);
+        true
+    }
+
+    /// Bring `tid` to the front the way a bar flick does: if another app is
+    /// currently fullscreen, run the quick-switch slide (new app in from the
+    /// right) instead of popping. From anywhere else there is nothing to slide
+    /// against, so zoom in from centre.
+    pub(crate) fn raise_toplevel_activated(&mut self, tid: ToplevelId) {
+        let (current, current_app) = match &self.ui {
+            ui_state::UiState::App { toplevel, app_id } if *toplevel != tid => {
+                (*toplevel, app_id.clone())
+            }
+            _ => return self.raise_toplevel_centered(tid, true),
+        };
+        let Some(Some(tl)) = self.toplevels.get(tid) else {
+            return;
+        };
+        let target = (tid, tl.app_id.clone());
+        self.history.push_foreground(tid);
+        let mut offset = sc_anim::Spring::new(0.0);
+        offset.stiffness = 280.0;
+        offset.damping = 32.0;
+        offset.retarget(-1.0);
+        self.ui = ui_state::UiState::QuickSwitch {
+            current,
+            current_app,
+            prev: None,
+            next: Some(target.clone()),
+            offset,
+            commit: Some(target),
+            releasing: true,
+            start_x: 0.0,
+            origin: sc_input::Pt { x: 0.5, y: 1.0 },
+        };
+        self.needs_render = true;
+    }
+
     /// Slide an already-running app in from the right edge — the Home-bar
     /// rightward swipe. Unlike [`Self::raise_toplevel_centered`] this plays an
     /// entrance animation (Home travels leftwards off the app), and it counts as

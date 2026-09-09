@@ -1568,4 +1568,26 @@ mod tests {
         };
         assert_eq!(state.foreground_toplevel(), Some(5));
     }
+
+    #[test]
+    fn released_quick_switch_lands_on_commit() {
+        let mut offset = Spring::new(0.0);
+        offset.retarget(-1.0);
+        let mut state = UiState::QuickSwitch {
+            current: 1,
+            current_app: "a".into(),
+            prev: None,
+            next: Some((2, "b".into())),
+            offset,
+            commit: Some((2, "b".into())),
+            releasing: true,
+            start_x: 0.0,
+            origin: sc_input::Pt { x: 0.5, y: 1.0 },
+        };
+        assert!(state.needs_animation());
+        for _ in 0..600 {
+            transition(&mut state, UiEvent::Tick { dt: 1.0 / 60.0 });
+        }
+        assert!(matches!(state, UiState::App { toplevel: 2, .. }));
+    }
 }

@@ -379,12 +379,15 @@ impl XdgActivationHandler for State {
         _token_data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
-        // Springboard decides what is in front, so an activation request never
-        // raises anything by itself. What it is good for is identity: a client
+        // Already-mapped window: raise it (a browser handed a URL by another
+        // app). Otherwise the token is identity, not focus — a client
         // presenting a token we minted at spawn time names the launch it came
         // from, which beats guessing from its xdg `app_id`. The surface may not
         // be a registered toplevel yet (clients commonly activate before their
         // first commit), so park it for `register_toplevel` to claim.
+        if self.raise_activated_surface(&surface) {
+            return;
+        }
         self.pending_activation
             .insert(surface, token.as_str().to_string());
     }
