@@ -166,8 +166,10 @@ pub fn classify_card_drag(
             (-travel).min(1.0)
         } else {
             // Downward: nothing to commit to below the stack, so the card only
-            // rubber-bands a short way and springs back on release.
-            -(travel * th::CARD_PUSH_DOWN_RUBBER).min(th::CARD_PUSH_DOWN_MAX)
+            // rubber-bands a short way and springs back on release. Asymptotic,
+            // not clamped — a hard cap reads as the card snapping off the finger.
+            let max = th::CARD_PUSH_DOWN_MAX;
+            -max * (1.0 - (-travel * th::CARD_PUSH_DOWN_RUBBER / max).exp())
         };
         CardDrag::Close { progress }
     } else {
@@ -472,10 +474,17 @@ mod tests {
             panic!("downward drag should be a close drag");
         };
         assert!(
-            (progress + th::CARD_PUSH_DOWN_MAX).abs() < 1e-6,
+            (progress + th::CARD_PUSH_DOWN_MAX).abs() < 1e-3,
             "{progress}"
         );
         assert!(!card_close_commits(progress, 0.0));
+        // Approaches the cap smoothly — no discontinuity where it used to clip.
+        let near = |dy: f32| match classify_card_drag(0.0, dy, W, H, 0.0) {
+            CardDrag::Close { progress } => progress,
+            _ => panic!("downward drag should be a close drag"),
+        };
+        let step = near(600.0) - near(560.0);
+        assert!(step < 0.0 && step > -0.01, "step={step}");
     }
 
     #[test]
