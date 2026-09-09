@@ -636,6 +636,7 @@ impl State {
             lock_view: self.session_lock.view(),
             lock_surface: self.session_lock.wl_surface().cloned(),
             icon_menu,
+            closing: self.layers.closing_view(),
             card_chrome,
             dim: self.rotation_fade.dim(std::time::Instant::now()),
         }
@@ -712,6 +713,7 @@ impl State {
             lock_surface: prep.lock_surface.as_ref(),
             layers_below: &prep.layers_below,
             layers_above: &prep.layers_above,
+            closing: prep.closing.as_ref().map(|(b, r)| (b, *r)),
             app_popups: &prep.app_popups,
             layer_popups: &prep.layer_popups,
             bar_alpha: prep.bar_alpha,

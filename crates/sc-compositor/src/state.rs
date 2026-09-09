@@ -160,6 +160,9 @@ pub(crate) struct FramePrep {
     pub lock_surface: Option<WlSurface>,
     /// Open icon context menu, laid out for this frame. `None` when closed.
     pub icon_menu: Option<crate::render::MenuView>,
+    /// The OSK sliding out after its client hid it: the held buffer and where it
+    /// is drawn this frame. `None` when no slide-out is running.
+    pub closing: Option<(smithay::backend::renderer::utils::Buffer, sc_layout::Rect)>,
     /// Per-card chrome for the switcher deck: badge opacity plus the focused
     /// card's title and its own cross-fade.
     pub card_chrome: crate::render::CardChromeView,

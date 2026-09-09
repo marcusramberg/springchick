@@ -843,6 +843,10 @@ impl App {
                 for m in &mut self.drm.mirrors {
                     m.pending_flip = false;
                 }
+                // `render` returns before `advance_frame` while dark, so a slide
+                // in flight would never tick again — and a slide-out holds the
+                // client's buffer until it does.
+                self.state.layers.end_slides();
                 self.drm.set_mirror_dpms(false);
                 // Nothing will be composited until the panel comes back, so the
                 // renderer's texture and dmabuf import caches are dead weight
@@ -939,6 +943,9 @@ impl App {
             && prep.cursor.is_none()
             && prep.layers_below.is_empty()
             && prep.layers_above.is_empty()
+            // The OSK sliding out: a texture the app-shaped damage hint doesn't
+            // know about, like the Skia overlays above.
+            && prep.closing.is_none()
             // A popup draws over the app in its own pass; the app-shaped damage
             // hint doesn't cover it, so it would never reach scanout (and its
             // pixels would go stale on dismiss).

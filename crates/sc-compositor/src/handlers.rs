@@ -500,15 +500,26 @@ impl smithay::wayland::shell::wlr_layer::WlrLayerShellHandler for State {
         namespace: String,
     ) {
         info!(%namespace, ?layer, "new layer surface");
+        // See the OSK slide-out: the hook holds the surface's last buffer
+        // before a null commit resets it, so the dismissal can be animated.
+        smithay::wayland::compositor::add_pre_commit_hook::<State, _>(
+            surface.wl_surface(),
+            |state, _dh, surface| {
+                state.layers.note_hide(surface, state.dpi);
+            },
+        );
         // smithay's LayerMap tracks geometry + reservations and sends the
         // initial configure on the surface's first commit.
         self.layers.new_surface(surface, namespace);
     }
 
     fn layer_destroyed(&mut self, surface: smithay::wayland::shell::wlr_layer::LayerSurface) {
-        if self.layers.destroyed(&surface) {
+        if self.layers.destroyed(&surface, self.dpi) {
             self.recompute_layers();
         }
+        // The OSK slide-out installed by `destroyed` needs a frame to start
+        // moving — a destroy is not a commit, so nothing else asks for one.
+        self.needs_render = true;
     }
 }
 
