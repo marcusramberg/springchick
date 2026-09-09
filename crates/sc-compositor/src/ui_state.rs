@@ -43,19 +43,28 @@ impl CardClose {
     /// `vy` is in screen heights/s, negative upward — the opposite sign to
     /// close progress.
     pub fn release(&mut self, vy: f32) {
-        self.progress.velocity = -vy;
+        // Unclamped, a fast release throws the spring far past the rubber-band
+        // limit and back — the card dives off-screen and returns. Anything
+        // above the flick speed upward would have committed instead, and
+        // downward there is nothing to travel to.
+        self.progress.velocity = (-vy).clamp(-CLOSE_RELEASE_MAX_SPEED, CLOSE_RELEASE_MAX_SPEED);
         self.progress.retarget(0.0);
         self.releasing = true;
     }
 }
 
-/// Springback for a cancelled close drag: deliberately under-damped
-/// (critical ≈ 2·√320 ≈ 36) so overshooting past rest reads as a bounce —
-/// most visible when the card was pushed *down* below the stack.
+/// Cap on the release velocity carried into the springback, in close-progress
+/// units per second. Matches the close flick threshold.
+const CLOSE_RELEASE_MAX_SPEED: f32 = 0.9;
+
+/// Springback for a cancelled close drag: under-damped (critical ≈ 2·√320 ≈ 36)
+/// so overshooting past rest reads as a bounce — most visible when the card was
+/// pushed *down* below the stack. Not *too* soft: a single small bounce, not a
+/// wobble.
 fn close_spring() -> Spring {
     let mut s = Spring::new(0.0);
     s.stiffness = 320.0;
-    s.damping = 17.0;
+    s.damping = 26.0;
     s
 }
 
@@ -1437,13 +1446,38 @@ mod tests {
             }
         }
         // Under-damped: it overshoots rest (upward) before settling...
-        assert!(peak > 0.005, "no bounce past rest: peak={peak}");
+        assert!(peak > 0.001, "no bounce past rest: peak={peak}");
         // ...but the bounce stays small — nowhere near the close commit.
-        assert!(peak < 0.4, "bounce too big: peak={peak}");
+        assert!(peak < 0.02, "bounce too big: peak={peak}");
         assert!(
             matches!(&state, UiState::Switcher { close: None, .. }),
             "springback never settled"
         );
+    }
+
+    #[test]
+    fn fast_downward_release_does_not_dive() {
+        let mut c = CardClose::dragging(2, -0.08);
+        c.release(6.0); // flung downward hard
+        let mut state = UiState::Switcher {
+            cards: vec![1, 2, 3],
+            scroll: Spring::new(0.0),
+            close: Some(c),
+            enter: Spring::new(1.0),
+        };
+        let dt = 1.0 / 90.0;
+        let mut low = 0.0_f32;
+        for _ in 0..600 {
+            transition(&mut state, UiEvent::Tick { dt });
+            let UiState::Switcher { close, .. } = &state else {
+                panic!("left the switcher");
+            };
+            match close {
+                Some(c) => low = low.min(c.progress.value),
+                None => break,
+            }
+        }
+        assert!(low > -0.15, "card dove off the deck: low={low}");
     }
 
     #[test]
