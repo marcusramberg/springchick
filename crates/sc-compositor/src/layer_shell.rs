@@ -20,12 +20,12 @@
 //! with the physical buffers they produce.
 
 use sc_layout::Rect;
-use smithay::backend::renderer::utils::with_renderer_surface_state;
+use smithay::backend::renderer::utils::{with_renderer_surface_state, Buffer};
 use smithay::desktop::{layer_map_for_output, LayerSurface, WindowSurfaceType};
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Rectangle};
-use smithay::wayland::compositor::with_states;
+use smithay::wayland::compositor::{with_states, SurfaceAttributes};
 use smithay::wayland::shell::wlr_layer::{
     KeyboardInteractivity, Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData,
 };
@@ -150,6 +150,28 @@ pub fn format_layer(idx: usize, l: &LayerInfo) -> String {
     s
 }
 
+/// A bottom-docked layer surface (the OSK) whose client just hid it — by
+/// null-committing or by destroying the layer surface — still drawn from its
+/// last committed buffer while it slides back down.
+///
+/// The buffer is captured before smithay's `update_buffer` reset (a pre-commit
+/// hook) or the wl_surface destruction hook wipes the state — both are what
+/// make an unmap disappear instantly, and neither can be seen after the fact.
+/// Holding the clone (an Arc) withholds the client's `wl_buffer.release` until
+/// the animation drops it, so the client cannot legally reuse the pixels first.
+struct ClosingLayer {
+    /// Identity only — to tell a remap of the same surface (the null-commit
+    /// path) from a different keyboard. May already be destroyed (the destroy
+    /// path), which is fine: only handle equality is used.
+    surface: WlSurface,
+    buffer: Buffer,
+    /// Where it was drawn when the client hid it, physical px (a mid-flight
+    /// slide-in included — the slide-out continues from there).
+    rect: Rect,
+    /// Slide-out progress, `0..=1`.
+    progress: f32,
+}
+
 /// Owns the per-output [`LayerMap`] handle and the not-yet-mapped surface set.
 pub struct LayerShell {
     output: Output,
@@ -173,6 +195,9 @@ pub struct LayerShell {
     /// Last layer surface a finger went down on. An `OnDemand` surface only
     /// takes keyboard focus after such a tap, per the layer-shell protocol.
     focus_tap: Option<WlSurface>,
+    /// The OSK (or another bottom-docked surface) sliding out after its client
+    /// unmapped it. One at a time — a second unmap replaces the first.
+    closing: Option<ClosingLayer>,
 }
 
 /// Rate limiting on *growing* the app area back.
@@ -222,6 +247,13 @@ impl RegrowGuard {
         self.pending = None;
     }
 
+    /// Pre-arm the debounce to expire at `deadline`. Used when an OSK
+    /// slide-out starts, so the held-back grow lands the moment the keyboard
+    /// finishes leaving instead of a debounce-length beat after it.
+    fn hold_until(&mut self, deadline: f32) {
+        self.pending = Some(deadline);
+    }
+
     /// A surface flapped: pin the area at its smallest for [`FLAP_HOLD`].
     fn latch(&mut self) {
         self.flap_until = self.now + FLAP_HOLD;
@@ -265,24 +297,99 @@ impl LayerShell {
             regrow: RegrowGuard::default(),
             map_events: HashMap::new(),
             focus_tap: None,
+            closing: None,
         }
     }
 
     /// Advance every in-flight slide by `dt` seconds, dropping the ones that
     /// finished. Returns true while any is still moving, so the frame loop keeps
-    /// presenting.
+    /// presenting. Covers the slide-in (`slides`) and the slide-out (`closing`);
+    /// dropping a finished `closing` releases its held buffer back to the
+    /// client.
     pub fn tick_slides(&mut self, dt: f32) -> bool {
         self.regrow.tick(dt);
         self.slides.retain(|_, p| {
             *p = (*p + dt / SLIDE_SECS).min(1.0);
             *p < 1.0
         });
-        !self.slides.is_empty()
+        if let Some(c) = &mut self.closing {
+            c.progress = (c.progress + dt / SLIDE_SECS).min(1.0);
+        }
+        if self.closing.as_ref().is_some_and(|c| c.progress >= 1.0) {
+            self.closing = None;
+        }
+        !self.slides.is_empty() || self.closing.is_some()
     }
 
-    /// True while any layer surface is still sliding in.
+    /// Drop every in-flight slide, releasing a closing surface's held buffer.
+    /// For when frames stop entirely (the panel blanks): nothing would tick
+    /// them, so a slide-out would hang mid-air and sit on the client's buffer
+    /// until the screen came back.
+    pub fn end_slides(&mut self) {
+        self.slides.clear();
+        self.closing = None;
+    }
+
+    /// True while any layer surface is still sliding in or out.
     pub fn sliding(&self) -> bool {
-        !self.slides.is_empty()
+        !self.slides.is_empty() || self.closing.is_some()
+    }
+
+    /// A layer surface is about to null-commit (its pending commit removes the
+    /// buffer). Called from a pre-commit hook, so the surface state — and with
+    /// it the last buffer — is still intact. If the surface is a mapped
+    /// bottom-docked one, hold its buffer and start a slide-out next frame.
+    ///
+    /// Non-docked surfaces (a top bar, a fullscreen overlay) just vanish as
+    /// before: they would travel the wrong way.
+    pub fn note_hide(&mut self, surface: &WlSurface, dpi: f64) {
+        let removing = with_states(surface, |states| {
+            matches!(
+                states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .pending()
+                    .buffer,
+                Some(smithay::wayland::compositor::BufferAssignment::Removed)
+            )
+        });
+        if !removing || self.unmapped.contains(surface) {
+            return;
+        }
+        let Some(buffer) = with_renderer_surface_state(surface, |s| s.buffer().cloned()).flatten()
+        else {
+            return;
+        };
+        let map = layer_map_for_output(&self.output);
+        let rect = map
+            .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+            .and_then(|l| map.layer_geometry(l))
+            .filter(|geo| self.is_docked(to_physical(*geo, dpi)))
+            .map(|geo| self.place(surface, geo, dpi));
+        drop(map);
+        let Some(rect) = rect else { return };
+        self.closing = Some(ClosingLayer {
+            surface: surface.clone(),
+            buffer,
+            rect,
+            progress: 0.0,
+        });
+        // Sync the app's resize to the slide's end: `recompute_layers` bails
+        // while any slide runs, so the first `usable_changed` after the
+        // slide-out lands must find the debounce already expired.
+        self.regrow.hold_until(self.regrow.now + SLIDE_SECS);
+    }
+
+    /// The closing keyboard for this frame: its held buffer and where it is
+    /// drawn now, slide offset included. `None` when no slide-out is running.
+    pub fn closing_view(&self) -> Option<(Buffer, Rect)> {
+        let c = self.closing.as_ref()?;
+        let mut rect = c.rect;
+        let dist = self.output_h - rect.y;
+        // Ease-out on the way *out* too: the slide-in curve run backwards would
+        // hang for most of the duration and then snap off screen.
+        rect.y += sc_anim::ease_out_cubic(c.progress) * dist;
+        Some((c.buffer.clone(), rect))
     }
 
     /// Recompute the usable area after an arrange. Returns `Some(new)` if it
@@ -329,22 +436,48 @@ impl LayerShell {
         let _ = map.map_layer(&LayerSurface::new(surface, namespace));
     }
 
-    /// A layer surface was destroyed. Returns true if it was mapped (so the
-    /// caller recomputes the app area).
-    pub fn destroyed(&mut self, surface: &WlrLayerSurface) -> bool {
-        self.unmapped.remove(surface.wl_surface());
-        self.slides.remove(surface.wl_surface());
+    /// A layer surface was destroyed — wvkbd 0.20's hide path, and any shell
+    /// client exiting. The role is gone but its `wl_surface` is still alive
+    /// (its own destruction hook — the one that resets the buffer state —
+    /// runs after the role's), so the last buffer can still be held for a
+    /// slide-out, the same animation the null-commit path gets via
+    /// [`Self::note_hide`]. Returns true if it was mapped (so the caller
+    /// recomputes the app area).
+    pub fn destroyed(&mut self, surface: &WlrLayerSurface, dpi: f64) -> bool {
+        let wl = surface.wl_surface();
+        let was_mapped = !self.unmapped.contains(wl);
+        self.unmapped.remove(wl);
+        self.slides.remove(wl);
         // A client that exits and relaunches its keyboard is not the cycle this
         // guards against, so its history goes with it.
-        self.map_events.remove(surface.wl_surface());
-        if self.focus_tap.as_ref() == Some(surface.wl_surface()) {
+        self.map_events.remove(wl);
+        if self.focus_tap.as_ref() == Some(wl) {
             self.focus_tap = None;
         }
         let mut map = layer_map_for_output(&self.output);
         let Some(layer) = map.layers().find(|l| l.layer_surface() == surface).cloned() else {
             return false;
         };
+        // Capture before `unmap_layer`, which drops the geometry.
+        let geo = map.layer_geometry(&layer).filter(|_| was_mapped);
+        let buffer = was_mapped
+            .then(|| with_renderer_surface_state(wl, |s| s.buffer().cloned()))
+            .flatten()
+            .flatten();
         map.unmap_layer(&layer);
+        drop(map);
+        if let (Some(geo), Some(buffer)) = (geo, buffer) {
+            let phys = to_physical(geo, dpi);
+            if self.is_docked(phys) {
+                self.closing = Some(ClosingLayer {
+                    surface: wl.clone(),
+                    buffer,
+                    rect: self.place(wl, geo, dpi),
+                    progress: 0.0,
+                });
+                self.regrow.hold_until(self.regrow.now + SLIDE_SECS);
+            }
+        }
         true
     }
 
@@ -377,6 +510,13 @@ impl LayerShell {
             if self.unmapped.remove(surface) {
                 self.slides.insert(surface.clone(), 0.0);
                 self.record_map(surface);
+                // The keyboard came back mid slide-out (wvkbd swapping
+                // layouts): stop drawing the held old buffer and let the
+                // pre-armed regrow drop with the shrink below it.
+                if self.closing.as_ref().is_some_and(|c| &c.surface == surface) {
+                    self.closing = None;
+                    self.regrow.resolved();
+                }
             }
         } else if !self.unmapped.contains(surface) {
             // Was mapped, now unmapped via a null commit: it must redo the
@@ -524,8 +664,13 @@ impl LayerShell {
     /// of the regrow guard, which is what suppresses an app resize.
     pub fn dump_header(&self, dpi: f64) -> String {
         let u = self.usable(dpi);
+        let closing = self
+            .closing
+            .as_ref()
+            .map(|c| format!(" closing={:.2}", c.progress))
+            .unwrap_or_default();
         format!(
-            "usable={} regrow={} sliding={}",
+            "usable={} regrow={} sliding={}{closing}",
             fmt_rect(u),
             if self.regrow.now < self.regrow.flap_until {
                 "flap-latched"
@@ -698,6 +843,17 @@ mod tests {
         let mut g = RegrowGuard::default();
         assert!(!g.allow_grow());
         g.tick(REGROW_DELAY + 0.01);
+        assert!(g.allow_grow());
+    }
+
+    /// The pre-armed deadline from an OSK slide-out replaces the debounce:
+    /// the grow lands when the slide ends, not a full debounce later.
+    #[test]
+    fn hold_until_expires_at_the_slide_end() {
+        let mut g = RegrowGuard::default();
+        g.hold_until(g.now + SLIDE_SECS);
+        assert!(!g.allow_grow(), "the slide is still running");
+        g.tick(SLIDE_SECS + 0.01);
         assert!(g.allow_grow());
     }
 

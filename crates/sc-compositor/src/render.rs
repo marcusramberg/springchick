@@ -18,15 +18,18 @@ use sc_shell_model::ShellModel;
 use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
 };
+use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::utils::{
     Relocate, RelocateRenderElement, RescaleRenderElement,
 };
-use smithay::backend::renderer::element::{Element, Kind};
+use smithay::backend::renderer::element::{Element, Id as ElementId, Kind};
 use smithay::backend::renderer::gles::{
     GlesError, GlesRenderer, GlesTexProgram, Uniform, UniformName, UniformType,
 };
 use smithay::backend::renderer::utils::{draw_render_elements, CommitCounter};
-use smithay::backend::renderer::{Color32F, Frame, Renderer, RendererSuper};
+use smithay::backend::renderer::{
+    buffer_type, BufferType, Color32F, Frame, ImportDmaWl, ImportMemWl, Renderer, RendererSuper,
+};
 use smithay::backend::SwapBuffersError;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Physical, Point, Rectangle, Scale, Size, Transform};
@@ -268,6 +271,13 @@ pub struct DrawCtx<'a> {
     pub layers_below: &'a [(WlSurface, (i32, i32))],
     /// Layer-shell surfaces above the app (top/overlay): `(surface, origin)`.
     pub layers_above: &'a [(WlSurface, (i32, i32))],
+    /// A keyboard sliding out after its client hid it: the held buffer and the
+    /// physical rect it is drawn at this frame. `None` when no slide-out is
+    /// running.
+    pub closing: Option<(
+        &'a smithay::backend::renderer::utils::Buffer,
+        sc_layout::Rect,
+    )>,
     /// xdg_popups whose root is the fullscreen app, ordered root→leaf. Each is a
     /// popup surface + its clamped physical origin. Drawn above the app, below
     /// the top/overlay layers.
@@ -1223,29 +1233,121 @@ fn pass_overlays(
     let app_rotation = ctx.rotation;
     let (app_popups, layers_above, layer_popups) =
         (ctx.app_popups, ctx.layers_above, ctx.layer_popups);
-    let overlays = app_popups.iter().map(|e| (e, app_rotation)).chain(
-        layers_above
-            .iter()
-            .chain(layer_popups)
-            .filter(|_| !rotated)
-            .map(|e| (e, crate::rotation::Rotation::None)),
-    );
-    for ((surface, origin), rotation) in overlays {
-        // Skia draws portrait, in output space; a turned popup's backdrop rects
-        // are in the app's space, so blurring them would smear the wrong strip
-        // of screen. Skip it while rotated — the popup itself still draws.
-        if !rotation.swaps_axes() {
-            blur_behind(
-                ctx.skia,
-                size,
-                surface,
-                *origin,
-                ctx.app_scale,
-                ctx.skia_flip_y,
-            );
-        }
-        draw_layer(renderer, framebuffer, size, ctx, surface, *origin, rotation)?;
+    for (surface, origin) in app_popups {
+        draw_overlay(
+            renderer,
+            framebuffer,
+            size,
+            ctx,
+            surface,
+            *origin,
+            app_rotation,
+        )?;
     }
+    if rotated {
+        return Ok(());
+    }
+    let upright = crate::rotation::Rotation::None;
+    for (surface, origin) in layers_above {
+        draw_overlay(renderer, framebuffer, size, ctx, surface, *origin, upright)?;
+    }
+    // A keyboard sliding out after its client hid it: drawn from the held last
+    // buffer, in the slot its live entry held — which is gone from the render
+    // lists now (the surface has no buffer), the instant disappearance this
+    // replaces.
+    if let Some((buffer, rect)) = ctx.closing {
+        draw_closing(renderer, framebuffer, size, ctx, buffer, rect)?;
+    }
+    for (surface, origin) in layer_popups {
+        draw_overlay(renderer, framebuffer, size, ctx, surface, *origin, upright)?;
+    }
+    Ok(())
+}
+
+/// One overlay surface tree: its backdrop blur, then the tree itself.
+fn draw_overlay(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    ctx: &mut DrawCtx<'_>,
+    surface: &WlSurface,
+    origin: (i32, i32),
+    rotation: crate::rotation::Rotation,
+) -> Result<(), SwapBuffersError> {
+    // Skia draws portrait, in output space; a turned popup's backdrop rects are
+    // in the app's space, so blurring them would smear the wrong strip of
+    // screen. Skip it while rotated — the popup itself still draws.
+    if !rotation.swaps_axes() {
+        blur_behind(
+            ctx.skia,
+            size,
+            surface,
+            origin,
+            ctx.app_scale,
+            ctx.skia_flip_y,
+        );
+    }
+    draw_layer(renderer, framebuffer, size, ctx, surface, origin, rotation)
+}
+
+/// Draw one frame of an OSK slide-out: the client's last buffer as a texture
+/// at the animated rect.
+///
+/// The import passes no surface state and an empty damage list, so it is a
+/// full upload every frame — the buffer may already belong to a destroyed
+/// surface (wvkbd's hide path), which rules out smithay's per-surface cache.
+/// That is one ~0.5ms 1224x750 upload per frame for the ~0.18s the dismissal
+/// lasts; caching the upload would mean plumbing the renderer's texture back
+/// into `LayerShell`, which is not worth it for a one-shot animation.
+///
+/// A dmabuf keyboard imports through the dmabuf path; anything else fails
+/// the import and vanishes without animation, exactly like before this
+/// existed.
+fn draw_closing(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    ctx: &DrawCtx<'_>,
+    buffer: &smithay::backend::renderer::utils::Buffer,
+    rect: sc_layout::Rect,
+) -> Result<(), SwapBuffersError> {
+    let texture = match buffer_type(buffer) {
+        Some(BufferType::Shm) => renderer.import_shm_buffer(buffer, None, &[]).ok(),
+        Some(BufferType::Dma) => renderer.import_dma_buffer(buffer, None, &[]).ok(),
+        _ => None,
+    };
+    let Some(texture) = texture else {
+        return Ok(());
+    };
+    // 1:1 physical: the layer client renders at `dpi`, so its buffer is already
+    // physical-sized and lands at `rect` unscaled — the same model `draw_layer`
+    // applies to the live surface.
+    let elements = vec![TextureRenderElement::from_static_texture(
+        ElementId::new(),
+        renderer.context_id(),
+        (rect.x as f64, rect.y as f64),
+        texture,
+        1,
+        Transform::Normal,
+        Some(1.0),
+        None,
+        None,
+        None,
+        Kind::Unspecified,
+    )];
+    let mut frame = renderer
+        .render(framebuffer, size, ctx.transform)
+        .map_err(SwapBuffersError::from)?;
+    let damage = [Rectangle::from_size(size)];
+    if let Err(e) = draw_render_elements::<
+        GlesRenderer,
+        f64,
+        TextureRenderElement<smithay::backend::renderer::gles::GlesTexture>,
+    >(&mut frame, 1.0, &elements, &damage)
+    {
+        warn!(?e, "failed to draw closing layer surface");
+    }
+    let _sync = frame.finish().map_err(SwapBuffersError::from)?;
     Ok(())
 }
 
