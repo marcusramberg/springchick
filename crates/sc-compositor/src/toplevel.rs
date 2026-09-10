@@ -626,9 +626,10 @@ impl State {
         let want = self.layers.keyboard_focus().or_else(|| {
             app.as_ref()
                 .and_then(|s| {
+                    // smithay yields the tree topmost-first, so the first grab
+                    // hit is the deepest open menu, not the oldest.
                     PopupManager::popups_for_surface(s)
-                        .filter(|(kind, _)| self.popup_grabs.contains(kind.wl_surface()))
-                        .last()
+                        .find(|(kind, _)| self.popup_grabs.contains(kind.wl_surface()))
                         .map(|(kind, _)| kind.wl_surface().clone())
                 })
                 .or(app)
