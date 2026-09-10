@@ -491,6 +491,7 @@ pub fn compute_scene(
             scroll,
             close,
             enter,
+            exit_left,
         } => {
             let close_geo = close.map(|c| (c.toplevel, c.progress.value));
             let mut card_rects =
@@ -498,10 +499,16 @@ pub fn compute_scene(
             // Entrance from Home: the whole deck rises from below the bottom
             // edge into its rest layout. Entered from a grab the spring is
             // already at 1 and this is a no-op.
-            let rise = (1.0 - enter.value.clamp(0.0, 1.0)) * h;
-            if rise > 0.0 {
+            let travel = 1.0 - enter.value.clamp(0.0, 1.0);
+            if travel > 0.0 {
                 for c in &mut card_rects {
-                    c.center_y += rise;
+                    // Far enough that the rightmost (front) card clears the left
+                    // edge, not just its own centre.
+                    if *exit_left {
+                        c.center_x -= travel * w * 1.7;
+                    } else {
+                        c.center_y += travel * h;
+                    }
                 }
             }
             // Sort ascending z for back-to-front draw order.
@@ -645,6 +652,7 @@ mod tests {
             scroll: sc_anim::Spring::new(0.0),
             close: None,
             enter: sc_anim::Spring::new(enter),
+            exit_left: false,
         };
         let opening = compute_scene(&mk(0.0), TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         let settled = compute_scene(&mk(1.0), TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
@@ -666,6 +674,7 @@ mod tests {
             scroll: sc_anim::Spring::new(0.0),
             close: None,
             enter: entering,
+            exit_left: false,
         };
         let rising = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         let at_rest = compute_scene(
@@ -674,6 +683,7 @@ mod tests {
                 scroll: sc_anim::Spring::new(0.0),
                 close: None,
                 enter: sc_anim::Spring::new(1.0),
+                exit_left: false,
             },
             TEST_SIZE,
             (0.0, 0.0),
@@ -894,12 +904,34 @@ mod tests {
     }
 
     #[test]
+    fn dismissed_deck_slides_off_the_left_edge() {
+        let mk = |enter: f32, exit_left: bool| UiState::Switcher {
+            cards: vec![0, 1],
+            scroll: sc_anim::Spring::new(0.0),
+            close: None,
+            enter: sc_anim::Spring::new(enter),
+            exit_left,
+        };
+        let at_rest = compute_scene(&mk(1.0, true), TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
+        let gone = compute_scene(&mk(0.0, true), TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
+        let w = TEST_SIZE.0 as f32;
+        for (a, b) in at_rest.cards.iter().zip(&gone.cards) {
+            assert!(b.center_x < a.center_x, "cards travel left");
+            // Fully clear of the screen: right edge past x = 0.
+            assert!(b.center_x + w * b.scale / 2.0 < 0.0);
+            assert_eq!(b.center_y, a.center_y, "no vertical travel on this exit");
+        }
+        assert_eq!(gone.backdrop_blur, 0.0, "home unblurs as the deck leaves");
+    }
+
+    #[test]
     fn switcher_scene_has_cards_back_to_front() {
         let state = UiState::Switcher {
             cards: vec![0, 1, 2],
             scroll: sc_anim::Spring::new(0.0),
             close: None,
             enter: sc_anim::Spring::new(1.0),
+            exit_left: false,
         };
         let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert_eq!(scene.cards.len(), 3);
