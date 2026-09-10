@@ -214,6 +214,9 @@ pub enum UiState {
         /// Home shortcut leaves the deck (see [`UiEvent::ReturnHome`]), and a
         /// settled spring aimed at 0 is what tells `Tick` the exit is done.
         enter: Spring,
+        /// While `enter` runs backwards: slide the deck off the left edge
+        /// instead of sinking it down. Set by the tap-outside dismiss.
+        exit_left: bool,
     },
 }
 
@@ -735,6 +738,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 scroll: Spring::new(0.0),
                 close: None,
                 enter: Spring::new(1.0),
+                exit_left: false,
             };
             Effect::None
         }
@@ -747,6 +751,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     scroll: Spring::new(0.0),
                     close: None,
                     enter: Spring::zoom(0.0, 1.0),
+                    exit_left: false,
                 };
             }
             Effect::None
@@ -825,7 +830,18 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             Effect::None
         }
         UiEvent::SwitcherDismiss => {
-            *state = UiState::home(0, 1);
+            // Play the entrance backwards, sideways: the deck slides off the
+            // left edge and the backdrop unblurs. `Tick` lands Home when the
+            // spring settles at 0.
+            if let UiState::Switcher {
+                enter, exit_left, ..
+            } = state
+            {
+                *exit_left = true;
+                enter.retarget(0.0);
+            } else {
+                *state = UiState::home(0, 1);
+            }
             Effect::None
         }
     }
@@ -1220,6 +1236,7 @@ mod tests {
             scroll: Spring::new(0.0),
             close: None,
             enter: Spring::new(1.0),
+            exit_left: false,
         };
         transition(&mut state, UiEvent::SwitcherStep { delta: 1 });
         let UiState::Switcher { scroll, .. } = &state else {
@@ -1257,6 +1274,7 @@ mod tests {
             scroll: Spring::new(0.0),
             close: None,
             enter: Spring::new(1.0),
+            exit_left: false,
         };
         transition(
             &mut state,
@@ -1384,6 +1402,7 @@ mod tests {
             scroll: Spring::new(0.0),
             close: None,
             enter: Spring::new(1.0),
+            exit_left: false,
         };
         // Events carry the toplevel id, not a positional index — so the render
         // z-order and the MRU order can never desync (regression: tapping the
@@ -1411,6 +1430,7 @@ mod tests {
             scroll: Spring::new(0.0),
             close: None,
             enter: Spring::new(1.0),
+            exit_left: false,
         };
         let eff = transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 2 });
         assert_eq!(eff, Effect::CloseToplevel { toplevel: 2 });
@@ -1431,6 +1451,7 @@ mod tests {
             scroll: Spring::new(0.0),
             close: Some(c),
             enter: Spring::new(1.0),
+            exit_left: false,
         };
         let dt = 1.0 / 90.0;
         let mut peak = -1.0_f32;
@@ -1464,6 +1485,7 @@ mod tests {
             scroll: Spring::new(0.0),
             close: Some(c),
             enter: Spring::new(1.0),
+            exit_left: false,
         };
         let dt = 1.0 / 90.0;
         let mut low = 0.0_f32;
@@ -1487,6 +1509,7 @@ mod tests {
             scroll: Spring::new(0.0),
             close: None,
             enter: Spring::new(1.0),
+            exit_left: false,
         };
         transition(
             &mut state,
@@ -1506,20 +1529,33 @@ mod tests {
             scroll: Spring::new(0.0),
             close: None,
             enter: Spring::new(1.0),
+            exit_left: false,
         };
         transition(&mut state, UiEvent::SwitcherCloseCard { toplevel: 9 });
         assert!(matches!(state, UiState::Home { .. }));
     }
 
     #[test]
-    fn dismiss_goes_home() {
+    fn dismiss_slides_the_deck_out_left_then_lands_home() {
         let mut state = UiState::Switcher {
             cards: vec![1, 2],
             scroll: Spring::new(0.0),
             close: None,
             enter: Spring::new(1.0),
+            exit_left: false,
         };
         transition(&mut state, UiEvent::SwitcherDismiss);
+        let UiState::Switcher {
+            enter, exit_left, ..
+        } = &state
+        else {
+            panic!("still on the deck while it slides out");
+        };
+        assert!(*exit_left && enter.target == 0.0);
+
+        for _ in 0..600 {
+            transition(&mut state, UiEvent::Tick { dt: 1.0 / 60.0 });
+        }
         assert!(matches!(state, UiState::Home { .. }));
     }
 
@@ -1530,6 +1566,7 @@ mod tests {
             scroll: Spring::new(0.0),
             close: None,
             enter: Spring::new(1.0),
+            exit_left: false,
         };
         transition(
             &mut state,
@@ -1554,6 +1591,7 @@ mod tests {
             scroll: spring,
             close: None,
             enter: Spring::new(1.0),
+            exit_left: false,
         };
         assert!(state.needs_animation());
     }
@@ -1565,6 +1603,7 @@ mod tests {
             scroll: Spring::new(0.0),
             close: None,
             enter: Spring::new(1.0),
+            exit_left: false,
         };
         assert_eq!(state.foreground_toplevel(), Some(5));
     }
