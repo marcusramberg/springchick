@@ -84,6 +84,10 @@ impl State {
     /// `root_origin` is where the root surface's `(0, 0)` is drawn, physical.
     /// `bound` is the space the origin is clamped into — the output, except for
     /// popups of a rotated app, which live in the app's turned space.
+    /// smithay yields a popup tree topmost-first (each node's children, newest
+    /// first, then the node itself). Everything here wants root→leaf: painter's
+    /// order for the draw, `rposition` for the hit-test, and `popups_to_dismiss`'s
+    /// "descendants are above me". So it is reversed on the way out.
     fn popup_chain(
         &self,
         root: &WlSurface,
@@ -91,7 +95,7 @@ impl State {
         bound: (i32, i32),
     ) -> Vec<PopupRect> {
         let dpi = self.dpi;
-        PopupManager::popups_for_surface(root)
+        let mut chain: Vec<PopupRect> = PopupManager::popups_for_surface(root)
             .map(|(kind, loc)| {
                 let geo = kind.geometry();
                 let size = (
@@ -105,7 +109,9 @@ impl State {
                 let clamped = popups::clamp_origin(origin, size, bound);
                 (kind, clamped, size)
             })
-            .collect()
+            .collect();
+        chain.reverse();
+        chain
     }
 
     /// The rect a new/repositioned popup's positioner is unconstrained against,
