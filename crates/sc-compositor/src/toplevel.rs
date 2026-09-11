@@ -676,11 +676,7 @@ impl State {
             // for policy that wants to tell video from a fullscreen text app.
             info!(target: "springchick::debug", "landscape hint {hint}");
         }
-        // The accelerometer is only worth powering while something can act on
-        // it, which is exactly while an app is fullscreen.
-        if let Some(sensor) = &mut self.sensor {
-            sensor.set_wanted(fullscreen);
-        }
+        self.sync_sensor_claim();
         // A rotation change here means the app only just became (or stopped
         // being) fullscreen while the device was already turned, so it is still
         // drawing at the old size — re-configure it.
@@ -692,6 +688,17 @@ impl State {
                     self.configure_maximized(&surface);
                 }
             }
+        }
+    }
+
+    /// iio-sensor-proxy powers the accelerometer for as long as anyone holds a
+    /// claim, so hold one only while something can act on a reading: an app is
+    /// fullscreen *and* the panel is lit. Idempotent; call it from anywhere
+    /// either of those changes.
+    pub(crate) fn sync_sensor_claim(&mut self) {
+        let wanted = self.foreground_is_fullscreen() && !self.blank.is_blanked();
+        if let Some(sensor) = &mut self.sensor {
+            sensor.set_wanted(wanted);
         }
     }
 

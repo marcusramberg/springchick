@@ -825,6 +825,9 @@ impl App {
         let Some(blanked) = self.state.blank.take_change() else {
             return;
         };
+        // A dark panel can't act on an orientation, so drop the accelerometer
+        // claim for as long as it stays dark.
+        self.state.sync_sensor_claim();
         if blanked {
             // The phone panel powers down either way. An external display is a
             // second screen the user is still looking at (video out, a
@@ -907,6 +910,11 @@ impl App {
             // state is the backstop. Every mirror still waiting means the frame
             // would be composited and then dropped by `present_mirrors`.
             if !self.drm.mirroring() || self.drm.mirrors.iter().all(|m| m.pending_flip) {
+                // Drop the request instead of deferring it: nothing will present
+                // this frame, and a `needs_render` left set keeps `is_animating`
+                // true, which pins the loop at ACTIVE_TIMEOUT (2ms) for as long
+                // as the panel is dark. Unblanking renders unconditionally.
+                self.state.needs_render = false;
                 return;
             }
         }
