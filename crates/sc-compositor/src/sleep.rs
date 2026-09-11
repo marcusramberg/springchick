@@ -44,8 +44,11 @@ const MANAGER: &str = "org.freedesktop.login1.Manager";
 /// D-Bus call timeout, matching [`crate::sensor`]: local service, off the render
 /// thread, but a hung call must not wedge the worker for good.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long the worker parks in `process` before re-checking its own state.
-const POLL: Duration = Duration::from_millis(200);
+/// How long the worker parks in `process`. Long on purpose: `PrepareForSleep`
+/// is dispatched the moment it arrives and wakes `process` early, so this only
+/// sets the idle wakeup rate, and the thread must keep running while the panel
+/// is dark — a suspend is exactly what happens then.
+const POLL: Duration = Duration::from_secs(30);
 /// How long to hold up the suspend waiting for the compositor to confirm the
 /// blank. Well under logind's `InhibitDelayMaxSec` so a wedged compositor
 /// delays the suspend rather than having logind override us.
