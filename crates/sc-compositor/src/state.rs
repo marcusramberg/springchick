@@ -76,6 +76,12 @@ pub(crate) struct AppToplevel {
     /// Last client-set xdg window geometry logged for this toplevel, so the
     /// size log fires on change instead of on every commit.
     pub logged_size: Option<(i32, i32)>,
+    /// Transient systemd scope of the launch this window was attributed to —
+    /// the cgroup holding the app and everything it forked. `None` for windows
+    /// no launch claimed (and for every launch when there is no user manager).
+    // Recorded for the resource tiering that will set limits on it.
+    #[allow(dead_code)]
+    pub scope: Option<String>,
     /// The rotation this window was last *configured* at — i.e. how its current
     /// buffer is oriented, not how the shell is drawing right now.
     ///
@@ -102,6 +108,10 @@ pub(crate) struct Launching {
     /// xdg-activation token handed to the child in its environment. A client
     /// that presents it back identifies its launch exactly.
     pub token: String,
+    /// Transient systemd scope the app runs in, or `None` when there was no
+    /// user manager to register one with. Carried onto [`AppToplevel`] when the
+    /// window is attributed, since that is what resource limits address.
+    pub scope: Option<String>,
     pub started: std::time::Instant,
 }
 
