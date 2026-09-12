@@ -95,9 +95,11 @@ impl State {
         self.history.push_foreground(tid);
         transition(
             &mut self.ui,
-            UiEvent::RaiseApp {
+            UiEvent::AppMapped {
                 toplevel: tid,
                 app_id,
+                origin,
+                open_mode: ui_state::OpenMode::Zoom,
             },
         );
     }
@@ -147,9 +149,11 @@ impl State {
             self.history.push_foreground(idx);
             transition(
                 &mut self.ui,
-                UiEvent::RaiseApp {
+                UiEvent::AppMapped {
                     toplevel: idx,
                     app_id: app_id.to_string(),
+                    origin,
+                    open_mode: ui_state::OpenMode::Zoom,
                 },
             );
             return;
