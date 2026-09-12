@@ -184,6 +184,19 @@ pub struct Resources {
     /// slowed rather than merely deprioritized — which is why the default is
     /// well above what idling costs.
     pub bg_cpu_quota: String,
+    /// `AllowedCPUs` for everything not focused: `"auto"` to pin them to the
+    /// efficiency cluster, `"off"` to leave CPU placement alone, or an explicit
+    /// list (`"0-3"`).
+    ///
+    /// `"auto"` is derived from `cpu_capacity` per device rather than written
+    /// down, because the layout is not the same on two phones — the FP5 is
+    /// 4x382 + 3x889 + 1x1024, not the 4+4 the label suggests. It disables
+    /// itself where every CPU is the same size.
+    ///
+    /// Complements the quota: a cap bounds how much CPU a background app may
+    /// burn, this decides *where* it burns it, and 30% of a little core costs
+    /// materially less than 30% of a prime core woken up for the purpose.
+    pub bg_allowed_cpus: String,
 }
 
 /// How to pick the `util_min` floor for the render thread.
@@ -256,6 +269,7 @@ impl Default for Resources {
             bg_cpu_weight: 20,
             bg_memory_high: "infinity".to_string(),
             bg_cpu_quota: "30%".to_string(),
+            bg_allowed_cpus: "auto".to_string(),
         }
     }
 }
@@ -290,13 +304,38 @@ fn parse_resources(raw: Option<RawResources>) -> Resources {
         }
         None => d.bg_cpu_quota,
     };
+    let bg_allowed_cpus = match raw.bg_allowed_cpus {
+        Some(s) if is_cpu_list(&s) => s,
+        Some(s) => {
+            warn!(value = %s, "bg_allowed_cpus must be \"auto\", \"off\", or a CPU list (\"0-3\")");
+            d.bg_allowed_cpus
+        }
+        None => d.bg_allowed_cpus,
+    };
     Resources {
         enable: raw.enable.unwrap_or(d.enable),
         fg_cpu_weight: weight(raw.fg_cpu_weight, "fg_cpu_weight", d.fg_cpu_weight),
         bg_cpu_weight: weight(raw.bg_cpu_weight, "bg_cpu_weight", d.bg_cpu_weight),
         bg_memory_high,
         bg_cpu_quota,
+        bg_allowed_cpus,
     }
+}
+
+/// Whether `s` is `auto`, `off`, or a CPU list systemd will take for
+/// `AllowedCPUs` (`0`, `0-3`, `0-1,4`).
+fn is_cpu_list(s: &str) -> bool {
+    if s == "auto" || s == "off" {
+        return true;
+    }
+    !s.is_empty()
+        && s.split(',').all(|part| {
+            let mut ends = part.split('-');
+            let ok = |v: Option<&str>| {
+                v.is_some_and(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()))
+            };
+            ok(ends.next()) && ends.next().is_none_or(|e| !e.is_empty() && ok(Some(e)))
+        })
 }
 
 /// Whether `s` is something systemd will accept for `CPUQuota`: `infinity`, or
@@ -449,6 +488,7 @@ struct RawResources {
     bg_cpu_weight: Option<u32>,
     bg_memory_high: Option<String>,
     bg_cpu_quota: Option<String>,
+    bg_allowed_cpus: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1041,7 +1081,7 @@ mod tests {
     #[test]
     fn resources_section_parses() {
         let c = Config::parse(
-            "[resources]\nenable = false\nfg_cpu_weight = 500\nbg_cpu_weight = 5\nbg_memory_high = \"512M\"\nbg_cpu_quota = \"10%\"\n",
+            "[resources]\nenable = false\nfg_cpu_weight = 500\nbg_cpu_weight = 5\nbg_memory_high = \"512M\"\nbg_cpu_quota = \"10%\"\nbg_allowed_cpus = \"0-3\"\n",
         );
         assert_eq!(
             c.resources,
@@ -1051,6 +1091,7 @@ mod tests {
                 bg_cpu_weight: 5,
                 bg_memory_high: "512M".to_string(),
                 bg_cpu_quota: "10%".to_string(),
+                bg_allowed_cpus: "0-3".to_string(),
             }
         );
     }
@@ -1077,6 +1118,16 @@ mod tests {
         }
         for bad in ["", "lots", "M", "512MB", "-1", "1.5G"] {
             assert!(!is_memory_size(bad), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn cpu_lists_systemd_accepts() {
+        for ok in ["auto", "off", "0", "0-3", "0-1,4", "2,5,7"] {
+            assert!(is_cpu_list(ok), "{ok} should be accepted");
+        }
+        for bad in ["", "0-", "-3", "0,,1", "big", "0-3%"] {
+            assert!(!is_cpu_list(bad), "{bad} should be rejected");
         }
     }
 

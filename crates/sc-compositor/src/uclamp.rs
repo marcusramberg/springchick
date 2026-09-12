@@ -51,8 +51,11 @@ pub fn derive_floor(capacities: &[u32]) -> Option<u32> {
     Some(floor.min(1024))
 }
 
-/// Read `cpu_capacity` for every CPU the kernel exposes.
-fn read_capacities() -> Vec<u32> {
+/// Read `(cpu index, cpu_capacity)` for every CPU the kernel exposes.
+///
+/// Shared with [`crate::resources`], which derives the efficiency cluster from
+/// the same asymmetry this uses to place the render thread.
+pub fn read_capacities() -> Vec<(u32, u32)> {
     let Ok(entries) = std::fs::read_dir(CPU_DIR) else {
         return Vec::new();
     };
@@ -63,9 +66,12 @@ fn read_capacities() -> Vec<u32> {
         if !name.starts_with("cpu") || !name[3..].chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
+        let Ok(cpu) = name[3..].parse::<u32>() else {
+            continue;
+        };
         if let Ok(s) = std::fs::read_to_string(e.path().join("cpu_capacity")) {
             if let Ok(v) = s.trim().parse::<u32>() {
-                out.push(v);
+                out.push((cpu, v));
             }
         }
     }
@@ -92,7 +98,7 @@ impl Uclamp {
             UclampMin::Off => None,
             UclampMin::Fixed(v) => Some(v.min(1024)),
             UclampMin::Auto => {
-                let caps = read_capacities();
+                let caps: Vec<u32> = read_capacities().into_iter().map(|(_, c)| c).collect();
                 let derived = derive_floor(&caps);
                 if derived.is_none() {
                     debug!(

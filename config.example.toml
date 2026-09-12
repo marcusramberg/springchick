@@ -115,6 +115,25 @@ bg_cpu_weight = 20
 # decode, a download, a sync. 30% leaves plenty of room for all three.
 bg_cpu_quota = "30%"
 
+# Which CPUs backgrounded apps may run on (AllowedCPUs). Where bg_cpu_quota
+# bounds how much CPU they get, this decides where they spend it: 30% of an
+# efficiency core costs materially less battery than 30% of a prime core woken
+# up for the purpose.
+#
+#   "auto"  pin to the efficiency cluster, derived per device from
+#           /sys/devices/system/cpu/cpu*/cpu_capacity (the lowest-capacity
+#           CPUs). Not hardcoded because the layout differs per phone — the
+#           FP5 is 4x382 + 3x889 + 1x1024, not the 4+4 the name suggests.
+#           Disables itself where every CPU is the same size (a dev box, a VM).
+#   "off"   leave CPU placement to the scheduler.
+#   "0-3"   an explicit list, if you know your device better than the heuristic.
+#
+# Needs the cpuset controller delegated to the user manager, which the NixOS
+# module does (`systemd.services."user@".serviceConfig.Delegate`). Without it
+# the compositor logs "cpuset not delegated" once and skips pinning; the CPU
+# weight and quota above are applied in a separate call, so they still work.
+bg_allowed_cpus = "auto"
+
 # MemoryHigh for everything not focused: a throttle-and-reclaim ceiling, not a
 # kill, so a backgrounded app goes slow rather than losing its state.
 #
