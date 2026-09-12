@@ -430,10 +430,13 @@ pub(crate) struct State {
     /// Per-app resource tiers (`[resources]`), applied on focus change. See
     /// [`crate::resources`].
     pub resources: sc_config::Resources,
-    /// The scope unit currently held in the foreground tier, so a focus change
-    /// knows what to demote. `None` when nothing is promoted (on Home, and
-    /// before the first app is focused).
-    pub tiered: Option<String>,
+    /// `[resources].bg_allowed_cpus` resolved against this machine's topology:
+    /// the CPU list backgrounded apps are pinned to, or `None` for no pinning.
+    pub bg_allowed_cpus: Option<String>,
+    /// The app currently held in the foreground tier, so a focus change knows
+    /// what to demote. `None` when nothing is promoted (on Home, and before the
+    /// first app is focused).
+    pub tiered: Option<resources::AppCgroup>,
     /// wlr-gamma-control state (night-light / color-temperature clients).
     pub gamma: gamma_control::GammaControl,
     /// wlr-output-power-management state (client-driven DPMS).
@@ -607,6 +610,7 @@ impl State {
         let uclamp_min = config.uclamp_min;
         let vrr = config.vrr;
         let resources = config.resources.clone();
+        let bg_allowed_cpus = resources::resolve_allowed_cpus(&resources.bg_allowed_cpus);
         let config_rotation_settle_ms = config.rotation_settle_ms;
         let config_rotation_fade_ms = config.rotation_fade_ms;
 
@@ -839,6 +843,7 @@ impl State {
             uclamp_min,
             vrr,
             resources,
+            bg_allowed_cpus,
             tiered: None,
             gamma,
             output_power,
@@ -966,6 +971,7 @@ impl State {
         // duration it started with rather than jumping mid-dip.
         self.rotation_fade.set_duration(config.rotation_fade_ms);
         self.resources = config.resources.clone();
+        self.bg_allowed_cpus = resources::resolve_allowed_cpus(&self.resources.bg_allowed_cpus);
         // Same path as startup; `children` (spawned binding commands, still to
         // be reaped) stays on the existing `Keys`.
         self.keys.tracker = keybinds::Keys::from_config(config).tracker;
@@ -997,24 +1003,30 @@ impl State {
         if want == self.tiered {
             return;
         }
+        let cpus = self.bg_allowed_cpus.clone();
         if let Some(old) = self.tiered.take() {
-            if let Some(child) =
-                resources::apply(&old, resources::Tier::Background, &self.resources)
-            {
-                self.children.push(child);
-            }
+            let children = resources::apply(
+                &old,
+                resources::Tier::Background,
+                &self.resources,
+                cpus.as_deref(),
+            );
+            self.children.extend(children);
         }
         if let Some(new) = &want {
-            if let Some(child) = resources::apply(new, resources::Tier::Foreground, &self.resources)
-            {
-                self.children.push(child);
-            }
+            let children = resources::apply(
+                new,
+                resources::Tier::Foreground,
+                &self.resources,
+                cpus.as_deref(),
+            );
+            self.children.extend(children);
         }
         self.tiered = want;
     }
 
-    /// The scope unit the client behind `tid` is running in.
-    fn toplevel_unit(&self, tid: usize) -> Option<String> {
+    /// The scope the client behind `tid` is running in.
+    fn toplevel_unit(&self, tid: usize) -> Option<resources::AppCgroup> {
         let tl = self.toplevels.get(tid)?.as_ref()?;
         let client = tl.surface.wl_surface().client()?;
         let pid = client.get_credentials(&self.dh).ok()?.pid;

@@ -55,6 +55,14 @@ in
     # greeters (greetd's regreet/gtkgreet, GDM, …) list springchick as a session.
     services.displayManager.sessionPackages = [ cfg.package ];
 
+    # Add cpuset to what the user manager may control, so the compositor can pin
+    # backgrounded apps to the efficiency cluster (`[resources].bg_allowed_cpus`).
+    # systemd ships `Delegate=pids memory cpu` on user@.service and nothing
+    # enables cpuset further down the user tree, so without this the whole
+    # AllowedCPUs= call is refused. The other four are systemd's own defaults,
+    # repeated because Delegate= replaces the list rather than adding to it.
+    systemd.services."user@".serviceConfig.Delegate = "cpu cpuset io memory pids";
+
     # The compositor runs as a Type=notify user service rather than being exec'd
     # straight from the greeter. This is the niri model and the only correct way
     # to satisfy the graphical-session.target contract: the service
