@@ -733,9 +733,17 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             // The settle already held the fan fully open (neighbours fanned
             // around the front card into their rest slots), so the deck is simply
             // presented at rest — there is no fan-in animation.
+            //
+            // Focus starts on cards[1]: you came *from* cards[0], so the useful
+            // target is the one behind it. Scrolled there rather than started
+            // there, so the card you left slides out to the right edge.
+            let mut scroll = Spring::new(0.0);
+            if cards.len() > 1 {
+                scroll.retarget(1.0);
+            }
             *state = UiState::Switcher {
                 cards,
-                scroll: Spring::new(0.0),
+                scroll,
                 close: None,
                 enter: Spring::new(1.0),
                 exit_left: false,
@@ -1137,6 +1145,47 @@ mod tests {
         if let UiState::Switcher { cards, .. } = &state {
             assert_eq!(cards, &vec![1, 2, 3]);
         }
+    }
+
+    #[test]
+    fn entering_the_deck_from_an_app_focuses_the_second_card() {
+        let mut state = UiState::App {
+            toplevel: 1,
+            app_id: "a".into(),
+        };
+        transition(&mut state, UiEvent::EnterSwitcher { cards: vec![1, 2] });
+        let UiState::Switcher { scroll, .. } = &state else {
+            panic!("not in switcher");
+        };
+        assert_eq!(scroll.target, 1.0, "focus lands behind the app you left");
+        assert_eq!(
+            scroll.value, 0.0,
+            "…by scrolling there, so card 1 slides off"
+        );
+
+        // Sole card: nowhere to go, stay on it.
+        let mut state = UiState::App {
+            toplevel: 1,
+            app_id: "a".into(),
+        };
+        transition(&mut state, UiEvent::EnterSwitcher { cards: vec![1] });
+        let UiState::Switcher { scroll, .. } = &state else {
+            panic!("not in switcher");
+        };
+        assert_eq!(scroll.target, 0.0);
+    }
+
+    #[test]
+    fn entering_the_deck_from_home_focuses_the_front_card() {
+        let mut state = UiState::home(0, 1);
+        transition(
+            &mut state,
+            UiEvent::OpenSwitcherFromHome { cards: vec![1, 2] },
+        );
+        let UiState::Switcher { scroll, .. } = &state else {
+            panic!("not in switcher");
+        };
+        assert_eq!(scroll.target, 0.0);
     }
 
     #[test]
