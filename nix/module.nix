@@ -37,24 +37,19 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    environment.systemPackages = [ cfg.package ];
+    environment = {
 
-    # GSettings schemas for the session's own helpers. nixpkgs installs schemas
-    # under share/gsettings-schemas/<name>/glib-2.0/schemas, which is not on
-    # XDG_DATA_DIRS by default — GUI apps normally get it baked in by
-    # wrapGAppsHook, but xdg-desktop-portal-phosh's libexec binaries are
-    # unwrapped ELFs and read the ambient environment. Without this the phrosh
-    # backend aborts at startup ("No GSettings schemas are installed on the
-    # system") the moment xdg-desktop-portal tries to activate it, which takes
-    # the FileChooser portal down with it. Same idiom as nixos/modules/programs/
-    # plotinus.nix.
-    environment.sessionVariables.XDG_DATA_DIRS = [
-      # mobi.phosh.FileSelector — the file selector's own settings.
-      "${pkgs.xdg-desktop-portal-phosh}/share/gsettings-schemas/${pkgs.xdg-desktop-portal-phosh.name}"
-      # org.gnome.desktop.{interface,privacy,sound,…} — read by libadwaita/GTK
-      # for theme, fonts and animation preferences.
-      "${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}"
-    ];
+      systemPackages = [ cfg.package ];
+
+      # GSettings schemas for the session's own helpers.
+      sessionVariables.XDG_DATA_DIRS = [
+        # mobi.phosh.FileSelector — the file selector's own settings.
+        "${pkgs.xdg-desktop-portal-phosh}/share/gsettings-schemas/${pkgs.xdg-desktop-portal-phosh.name}"
+        # org.gnome.desktop.{interface,privacy,sound,…} — read by libadwaita/GTK
+        # for theme, fonts and animation preferences.
+        "${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}"
+      ];
+    };
 
     # Puts share/wayland-sessions/springchick.desktop into the system profile so
     # greeters (greetd's regreet/gtkgreet, GDM, …) list springchick as a session.
@@ -64,11 +59,7 @@ in
     # straight from the greeter. This is the niri model and the only correct way
     # to satisfy the graphical-session.target contract: the service
     # BindsTo=+Before= that target, so when the compositor sends sd_notify READY
-    # the target is pulled active. graphical-session.target is RefuseManualStart,
-    # so nothing may start it by hand — the binding is the sanctioned path. Once
-    # active, xdg-desktop-portal-*, the OSK and anything else gating on a live
-    # graphical session can finally start. nix/springchick-session drives this:
-    # import-environment → start this service → force springchick-shutdown.target.
+    # the target is pulled active.
     systemd.user.services.springchick = {
       description = "springchick Wayland compositor";
       documentation = [ "https://github.com/marcusramberg/springchick" ];
@@ -105,6 +96,13 @@ in
         Restart = "no";
         # Compositor holds the DRM master + input; give it room to shut down.
         TimeoutStopSec = "10s";
+        # A thrashing app must not stall the render thread. Weight only bites
+        # under contention (default is 100); MemoryMin keeps the compositor's
+        # pages off the reclaim list, so a memory-hungry app gets squeezed
+        # before the shell does. Requires the cpu and memory controllers to be
+        # delegated to user@.service, which is the NixOS default.
+        CPUWeight = 200;
+        MemoryMin = "128M";
       };
     };
 
@@ -156,7 +154,10 @@ in
         pkgs.xdg-desktop-portal-phosh
       ];
       config.springchick = {
-        default = [ "gnome" "gtk" ];
+        default = [
+          "gnome"
+          "gtk"
+        ];
         # Secret portal only works with gnome backend (delegates to gnome-keyring).
         "org.freedesktop.impl.portal.Secret" = "gnome-keyring";
         # GNOME's/GTK's file and app pickers have a widget minimum width well
