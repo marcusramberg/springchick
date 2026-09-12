@@ -44,15 +44,32 @@ pub fn unit_of_pid(pid: i32) -> Option<String> {
     unit_from_cgroup(&std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?)
 }
 
+/// `""` for "no limit", which is the only spelling `CPUQuota=` accepts.
+fn clear_infinity(quota: &str) -> &str {
+    if quota.eq_ignore_ascii_case("infinity") {
+        ""
+    } else {
+        quota
+    }
+}
+
 /// The `systemctl set-property` arguments putting `unit` in `tier`.
 ///
 /// Both properties are set in both tiers: promoting an app has to *clear* the
 /// ceiling the demotion put on it, and a property left unmentioned keeps its
 /// old value.
 fn args(unit: &str, tier: Tier, res: &Resources) -> Vec<String> {
-    let (weight, high) = match tier {
-        Tier::Foreground => (res.fg_cpu_weight, "infinity".to_string()),
-        Tier::Background => (res.bg_cpu_weight, res.bg_memory_high.clone()),
+    let (weight, high, quota) = match tier {
+        Tier::Foreground => (
+            res.fg_cpu_weight,
+            "infinity".to_string(),
+            "infinity".to_string(),
+        ),
+        Tier::Background => (
+            res.bg_cpu_weight,
+            res.bg_memory_high.clone(),
+            res.bg_cpu_quota.clone(),
+        ),
     };
     vec![
         "--user".into(),
@@ -64,6 +81,14 @@ fn args(unit: &str, tier: Tier, res: &Resources) -> Vec<String> {
         unit.into(),
         format!("CPUWeight={weight}"),
         format!("MemoryHigh={high}"),
+        // The cap that actually saves power: CPUWeight is proportional, so it
+        // does nothing for a background app spinning alone on an idle phone.
+        //
+        // `CPUQuota=` is the only one of the three that rejects `infinity`
+        // ("Failed to parse CPUQuota= value") — an empty value is how it is
+        // cleared. Since `set-property` applies all-or-nothing, getting this
+        // wrong drops the CPUWeight in the same call.
+        format!("CPUQuota={}", clear_infinity(&quota)),
     ]
 }
 
@@ -139,14 +164,31 @@ mod tests {
             fg_cpu_weight: 200,
             bg_cpu_weight: 20,
             bg_memory_high: "512M".into(),
+            bg_cpu_quota: "30%".into(),
         };
         let fg = args("a.scope", Tier::Foreground, &res);
         assert!(fg.contains(&"CPUWeight=200".to_string()));
         assert!(fg.contains(&"MemoryHigh=infinity".to_string()));
+        // Empty, not "infinity": CPUQuota= refuses that word, and set-property
+        // applies all-or-nothing, so the CPUWeight above would go with it.
+        assert!(fg.contains(&"CPUQuota=".to_string()));
         let bg = args("a.scope", Tier::Background, &res);
         assert!(bg.contains(&"CPUWeight=20".to_string()));
         assert!(bg.contains(&"MemoryHigh=512M".to_string()));
+        assert!(bg.contains(&"CPUQuota=30%".to_string()));
         // Nothing is persisted across reboots.
         assert!(bg.contains(&"--runtime".to_string()));
+    }
+
+    /// `bg_cpu_quota = "infinity"` is how the config says "don't cap", and has
+    /// to reach systemd as the empty value it actually accepts.
+    #[test]
+    fn background_quota_of_infinity_is_sent_empty() {
+        let res = Resources {
+            bg_cpu_quota: "infinity".into(),
+            ..Resources::default()
+        };
+        let bg = args("a.scope", Tier::Background, &res);
+        assert!(bg.contains(&"CPUQuota=".to_string()));
     }
 }

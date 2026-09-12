@@ -102,6 +102,19 @@ enable = true
 fg_cpu_weight = 200
 bg_cpu_weight = 20
 
+# CPUQuota for everything not focused: a hard ceiling on CPU time, as a
+# percentage of ONE core (so values over 100% are legal and mean more than one
+# core). This is the knob that saves battery — a background app spinning on an
+# otherwise idle phone meets no contention, so bg_cpu_weight alone lets it run
+# flat out at full clocks.
+#
+# Backgrounded apps are capped, never frozen: a chat client keeps its
+# connection open and still wakes for notifications, which costs a few percent
+# of a core. Do lower this with care — the cap covers the whole app (all its
+# processes share it), so too low a value slows real background work: audio
+# decode, a download, a sync. 30% leaves plenty of room for all three.
+bg_cpu_quota = "30%"
+
 # MemoryHigh for everything not focused: a throttle-and-reclaim ceiling, not a
 # kill, so a backgrounded app goes slow rather than losing its state.
 #
