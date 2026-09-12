@@ -517,6 +517,10 @@ impl State {
             debug!(target: "springchick::debug", "state changed to {:?} cards={}", self.ui, scene.cards.len());
         }
 
+        // Resource tiers follow focus. Self-gated on a settled state, so this is
+        // a no-op on all but the frame an app arrives in front or leaves it.
+        self.apply_resource_tiers();
+
         let app_surface = scene.window.as_ref().and_then(|(tid, _)| {
             self.toplevels
                 .get(*tid)

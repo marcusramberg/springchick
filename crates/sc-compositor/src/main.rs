@@ -41,6 +41,7 @@ mod popups;
 mod presentation;
 mod provenance;
 mod render;
+mod resources;
 mod rotation;
 pub mod scene;
 mod screenshot;

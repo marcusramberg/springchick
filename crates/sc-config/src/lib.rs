@@ -138,7 +138,36 @@ pub struct Config {
     /// How long (ms) each half of the dip-to-black that covers an orientation
     /// change takes. `0` disables the transition (instant swap).
     pub rotation_fade_ms: u64,
+    /// Per-app resource tiers applied on focus change. See [`Resources`].
+    pub resources: Resources,
     pub bindings: Vec<Binding>,
+}
+
+/// What the focused app is given and what everything behind it is squeezed to.
+///
+/// The compositor launches each app into its own systemd scope and moves these
+/// limits onto that scope's cgroup as focus changes — there is no migrating of
+/// processes between tiers, only a property change on the cgroup the app (and
+/// everything it forked) already lives in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resources {
+    /// Whether to tier at all. Off leaves every app at the systemd defaults.
+    pub enable: bool,
+    /// `CPUWeight` for the focused app. Proportional, and only bites under
+    /// contention: it decides who yields when two apps want the CPU at once, it
+    /// does not cap either of them.
+    pub fg_cpu_weight: u32,
+    /// `CPUWeight` for everything not focused.
+    pub bg_cpu_weight: u32,
+    /// `MemoryHigh` for everything not focused, in systemd's spelling
+    /// (`"512M"`, `"infinity"` for no limit). A throttle-and-reclaim ceiling,
+    /// not a kill: a backgrounded app goes slow rather than losing its state.
+    ///
+    /// Set below what an app actually uses and it will reclaim continuously for
+    /// as long as it is backgrounded, which costs more power than it saves —
+    /// hence `"infinity"` by default, with the real value left to be measured
+    /// per device against the apps that are actually installed.
+    pub bg_memory_high: String,
 }
 
 /// How to pick the `util_min` floor for the render thread.
@@ -199,6 +228,66 @@ pub const DEFAULT_ROTATION_SETTLE_MS: u64 = 400;
 /// Half-duration of the rotation dip-to-black when `[main]` does not say
 /// otherwise: out in 130ms, back in 130ms around the swap.
 pub const DEFAULT_ROTATION_FADE_MS: u64 = 130;
+
+impl Default for Resources {
+    /// Tiering on, CPU only. The weights are a 10:1 split, which is what
+    /// decides a fight between the app in front and one behind it; the
+    /// compositor itself sits above both at 200 (see `nix/module.nix`).
+    fn default() -> Resources {
+        Resources {
+            enable: true,
+            fg_cpu_weight: 200,
+            bg_cpu_weight: 20,
+            bg_memory_high: "infinity".to_string(),
+        }
+    }
+}
+
+/// Parse `[resources]`. Each bad value is dropped back to its default rather
+/// than failing the section, like the rest of the config.
+fn parse_resources(raw: Option<RawResources>) -> Resources {
+    let d = Resources::default();
+    let Some(raw) = raw else { return d };
+    // 1..=10000 is systemd's accepted CPUWeight range.
+    let weight = |v: Option<u32>, name: &str, default: u32| match v {
+        Some(w) if (1..=10_000).contains(&w) => w,
+        Some(w) => {
+            warn!(value = w, name, "cpu weight must be 1..=10000");
+            default
+        }
+        None => default,
+    };
+    let bg_memory_high = match raw.bg_memory_high {
+        Some(s) if is_memory_size(&s) => s,
+        Some(s) => {
+            warn!(value = %s, "bg_memory_high must be a systemd size (\"512M\") or \"infinity\"");
+            d.bg_memory_high
+        }
+        None => d.bg_memory_high,
+    };
+    Resources {
+        enable: raw.enable.unwrap_or(d.enable),
+        fg_cpu_weight: weight(raw.fg_cpu_weight, "fg_cpu_weight", d.fg_cpu_weight),
+        bg_cpu_weight: weight(raw.bg_cpu_weight, "bg_cpu_weight", d.bg_cpu_weight),
+        bg_memory_high,
+    }
+}
+
+/// Whether `s` is something systemd will accept for `MemoryHigh`: `infinity`, a
+/// percentage, or a byte count with an optional unit suffix. Checked here so a
+/// typo shows up as a config warning rather than as a tier that silently never
+/// applies (the `systemctl` call is fire-and-forget).
+fn is_memory_size(s: &str) -> bool {
+    if s.eq_ignore_ascii_case("infinity") {
+        return true;
+    }
+    let (digits, suffix) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    !digits.is_empty()
+        && matches!(
+            suffix,
+            "" | "%" | "K" | "M" | "G" | "T" | "Ki" | "Mi" | "Gi" | "Ti"
+        )
+}
 
 /// Parse the `uclamp_min` value: `"auto"`, `"off"`, or 0..=1024 (`0` = off).
 /// Anything else is dropped with a warning and the default applies.
@@ -312,6 +401,15 @@ struct RawConfig {
 struct RawConfigFile {
     main: Option<RawMain>,
     keybinds: Option<RawConfig>,
+    resources: Option<RawResources>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawResources {
+    enable: Option<bool>,
+    fg_cpu_weight: Option<u32>,
+    bg_cpu_weight: Option<u32>,
+    bg_memory_high: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -363,6 +461,7 @@ impl Config {
                     vrr: DEFAULT_VRR,
                     rotation_settle_ms: DEFAULT_ROTATION_SETTLE_MS,
                     rotation_fade_ms: DEFAULT_ROTATION_FADE_MS,
+                    resources: Resources::default(),
                     bindings: Vec::new(),
                 };
             }
@@ -379,6 +478,7 @@ impl Config {
             .rotation_settle_ms
             .unwrap_or(DEFAULT_ROTATION_SETTLE_MS);
         let rotation_fade_ms = main.rotation_fade_ms.unwrap_or(DEFAULT_ROTATION_FADE_MS);
+        let resources = parse_resources(file.resources);
         let raw = file.keybinds.unwrap_or_default();
 
         let bindings = raw.binding.into_iter().filter_map(convert).collect();
@@ -393,6 +493,7 @@ impl Config {
             vrr,
             rotation_settle_ms,
             rotation_fade_ms,
+            resources,
             bindings,
         }
     }
@@ -891,5 +992,51 @@ mod tests {
             candidate_paths(env),
             vec![PathBuf::from("/etc/springchick/config.toml")],
         );
+    }
+
+    #[test]
+    fn resources_default_when_section_absent() {
+        assert_eq!(Config::parse("").resources, Resources::default());
+    }
+
+    #[test]
+    fn resources_section_parses() {
+        let c = Config::parse(
+            "[resources]\nenable = false\nfg_cpu_weight = 500\nbg_cpu_weight = 5\nbg_memory_high = \"512M\"\n",
+        );
+        assert_eq!(
+            c.resources,
+            Resources {
+                enable: false,
+                fg_cpu_weight: 500,
+                bg_cpu_weight: 5,
+                bg_memory_high: "512M".to_string(),
+            }
+        );
+    }
+
+    /// A bad value falls back to its own default; the rest of the section still
+    /// applies.
+    #[test]
+    fn resources_bad_values_drop_to_defaults() {
+        let c = Config::parse(
+            "[resources]\nfg_cpu_weight = 99999\nbg_cpu_weight = 7\nbg_memory_high = \"lots\"\n",
+        );
+        let d = Resources::default();
+        assert_eq!(c.resources.fg_cpu_weight, d.fg_cpu_weight);
+        assert_eq!(c.resources.bg_memory_high, d.bg_memory_high);
+        assert_eq!(c.resources.bg_cpu_weight, 7);
+    }
+
+    #[test]
+    fn memory_sizes_systemd_accepts() {
+        for ok in [
+            "infinity", "Infinity", "512M", "1G", "2Gi", "80%", "1048576",
+        ] {
+            assert!(is_memory_size(ok), "{ok} should be accepted");
+        }
+        for bad in ["", "lots", "M", "512MB", "-1", "1.5G"] {
+            assert!(!is_memory_size(bad), "{bad} should be rejected");
+        }
     }
 }
