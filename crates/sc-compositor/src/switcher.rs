@@ -40,6 +40,9 @@ const FOLDED_PEEK_FRAC: f32 = 0.17;
 /// How far (fraction of front card width) a card slides right per unit of scroll
 /// once it has passed the front slot and is leaving to the right.
 const SLIDE_OFF_FRAC: f32 = 1.15;
+/// Fraction of its own width a passed card keeps on screen: it parks against the
+/// right edge instead of leaving, so the deck always shows what you came from.
+const PASSED_PEEK_FRAC: f32 = 0.28;
 /// Extra darkening per step back in the stack. Continuous in the (fractional)
 /// depth so scrolling ramps a card's dim smoothly as it moves toward the front.
 const DIM_PER_STEP: f32 = 0.16;
@@ -79,6 +82,7 @@ pub fn layout(
     let front_w = w * FRONT_SCALE;
     let gap_back = w * FOLDED_PEEK_FRAC; // fanned peek behind the front slot
     let slide_off = front_w * SLIDE_OFF_FRAC; // travel per unit once past the front
+    let passed_cap = w + front_w * (0.5 - PASSED_PEEK_FRAC); // right-edge park
 
     let focus = clamp_focus(scroll, n);
 
@@ -92,7 +96,7 @@ pub fn layout(
             let center_x = if rel >= 0.0 {
                 front_cx - rel * gap_back // fanned to the left
             } else {
-                front_cx + (-rel) * slide_off // passed: sliding off right
+                (front_cx + (-rel) * slide_off).min(passed_cap) // passed: parks right
             };
             // A card being closed only slides — its size never changes.
             let close_progress = match close {
@@ -331,6 +335,23 @@ mod tests {
         assert!(c0.center_x > front_x);
         // The card leaving to the right renders on top of the deck.
         assert!(c0.z > c1.z);
+    }
+
+    #[test]
+    fn passed_cards_park_at_the_right_edge() {
+        let (w, _) = SIZE;
+        let front_w = w * FRONT_SCALE;
+        for scroll in [1.0_f32, 2.0, 5.0] {
+            let rects = layout(&[0, 1, 2], scroll, SIZE, None, CORNER);
+            let c0 = rects.iter().find(|r| r.toplevel == 0).unwrap();
+            let left = c0.center_x - front_w / 2.0;
+            assert!(left < w, "card vanished off the right at scroll {scroll}");
+            assert!(
+                (w - left) >= front_w * PASSED_PEEK_FRAC - 0.01,
+                "peek too thin at scroll {scroll}: {}",
+                w - left
+            );
+        }
     }
 
     #[test]
