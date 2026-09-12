@@ -168,6 +168,22 @@ pub struct Resources {
     /// hence `"infinity"` by default, with the real value left to be measured
     /// per device against the apps that are actually installed.
     pub bg_memory_high: String,
+    /// `CPUQuota` for everything not focused: a hard ceiling on CPU *time*,
+    /// as a percentage of one core (`"30%"`, `"infinity"` for no cap).
+    ///
+    /// This is the knob that saves power, and the reason no app is frozen
+    /// instead. [`Self::bg_cpu_weight`] is proportional — a backgrounded app
+    /// spinning on an otherwise idle phone meets no contention and so runs at
+    /// full speed and full clocks. A quota bounds it whether or not anything
+    /// else wants the CPU, while still letting the app run: a chat client keeps
+    /// its connection, wakes for a notification and goes back to sleep, all of
+    /// which fits in a few percent of a core.
+    ///
+    /// The cap covers the whole cgroup, so an app's processes share it. Set it
+    /// too low and legitimate background work (a download, audio decode) is
+    /// slowed rather than merely deprioritized — which is why the default is
+    /// well above what idling costs.
+    pub bg_cpu_quota: String,
 }
 
 /// How to pick the `util_min` floor for the render thread.
@@ -239,6 +255,7 @@ impl Default for Resources {
             fg_cpu_weight: 200,
             bg_cpu_weight: 20,
             bg_memory_high: "infinity".to_string(),
+            bg_cpu_quota: "30%".to_string(),
         }
     }
 }
@@ -265,11 +282,32 @@ fn parse_resources(raw: Option<RawResources>) -> Resources {
         }
         None => d.bg_memory_high,
     };
+    let bg_cpu_quota = match raw.bg_cpu_quota {
+        Some(s) if is_cpu_quota(&s) => s,
+        Some(s) => {
+            warn!(value = %s, "bg_cpu_quota must be a percentage (\"30%\") or \"infinity\"");
+            d.bg_cpu_quota
+        }
+        None => d.bg_cpu_quota,
+    };
     Resources {
         enable: raw.enable.unwrap_or(d.enable),
         fg_cpu_weight: weight(raw.fg_cpu_weight, "fg_cpu_weight", d.fg_cpu_weight),
         bg_cpu_weight: weight(raw.bg_cpu_weight, "bg_cpu_weight", d.bg_cpu_weight),
         bg_memory_high,
+        bg_cpu_quota,
+    }
+}
+
+/// Whether `s` is something systemd will accept for `CPUQuota`: `infinity`, or
+/// a percentage of one core. Over 100% is legal and means more than one core.
+fn is_cpu_quota(s: &str) -> bool {
+    if s.eq_ignore_ascii_case("infinity") {
+        return true;
+    }
+    match s.strip_suffix('%') {
+        Some(n) => !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()),
+        None => false,
     }
 }
 
@@ -410,6 +448,7 @@ struct RawResources {
     fg_cpu_weight: Option<u32>,
     bg_cpu_weight: Option<u32>,
     bg_memory_high: Option<String>,
+    bg_cpu_quota: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1002,7 +1041,7 @@ mod tests {
     #[test]
     fn resources_section_parses() {
         let c = Config::parse(
-            "[resources]\nenable = false\nfg_cpu_weight = 500\nbg_cpu_weight = 5\nbg_memory_high = \"512M\"\n",
+            "[resources]\nenable = false\nfg_cpu_weight = 500\nbg_cpu_weight = 5\nbg_memory_high = \"512M\"\nbg_cpu_quota = \"10%\"\n",
         );
         assert_eq!(
             c.resources,
@@ -1011,6 +1050,7 @@ mod tests {
                 fg_cpu_weight: 500,
                 bg_cpu_weight: 5,
                 bg_memory_high: "512M".to_string(),
+                bg_cpu_quota: "10%".to_string(),
             }
         );
     }
@@ -1037,6 +1077,17 @@ mod tests {
         }
         for bad in ["", "lots", "M", "512MB", "-1", "1.5G"] {
             assert!(!is_memory_size(bad), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn cpu_quotas_systemd_accepts() {
+        // Over 100% is legal: it means more than one core's worth.
+        for ok in ["infinity", "30%", "5%", "200%"] {
+            assert!(is_cpu_quota(ok), "{ok} should be accepted");
+        }
+        for bad in ["", "30", "%", "30.5%", "-30%", "lots"] {
+            assert!(!is_cpu_quota(bad), "{bad} should be rejected");
         }
     }
 }
