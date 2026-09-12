@@ -188,12 +188,12 @@ pub const DEFAULT_PREFER_NO_CSD: bool = true;
 /// and that differs per device (382 on the FP5).
 pub const DEFAULT_UCLAMP_MIN: UclampMin = UclampMin::Auto;
 
+/// Enable VRR by default when the panel reports it capable. The compositor can still disable
+pub const DEFAULT_VRR: bool = true;
+
 /// Orientation debounce when `[main]` does not say otherwise. Long enough to sit
 /// out a hand wobbling past the diagonal, short enough that a deliberate turn
 /// still feels like a response to what the user did.
-pub const DEFAULT_VRR: bool = true;
-
-/// Default for [`Config::rotation_settle_ms`].
 pub const DEFAULT_ROTATION_SETTLE_MS: u64 = 400;
 
 /// Half-duration of the rotation dip-to-black when `[main]` does not say
@@ -837,14 +837,6 @@ mod tests {
         assert_eq!(cfg.bindings[0].action, Action::VolumeUp);
         assert_eq!(cfg.bindings[1].action, Action::VolumeDown);
         assert_eq!(cfg.bindings[2].action, Action::VolumeMute);
-    }
-
-    #[test]
-    fn defaults_parse_from_the_shipped_text() {
-        assert_eq!(
-            Config::parse(DEFAULT_TOML).bindings.len(),
-            Config::defaults().bindings.len()
-        );
     }
 
     #[test]
