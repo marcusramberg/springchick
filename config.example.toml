@@ -83,6 +83,35 @@ uclamp_min = "auto"
 # Read at startup only — `springchick ipc reload` will not pick this up.
 vrr = true
 
+# Per-app resource limits, applied on focus change. Every app is launched into
+# its own transient systemd scope, and these are set on that scope's cgroup —
+# so they cover the app and every process it forks, and no process is ever
+# moved between cgroups.
+#
+# Needs the cpu (and, for memory limits, memory) controller delegated to
+# user@.service; check with
+#   cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers
+[resources]
+# Off leaves every app at the systemd defaults.
+enable = true
+
+# CPUWeight for the app in front, and for everything behind it. Proportional,
+# not a cap: the weights only decide who yields when two apps want the CPU at
+# the same time, so a backgrounded app alone on an idle phone still runs at
+# full speed. The compositor itself sits at 200 (see nix/module.nix).
+fg_cpu_weight = 200
+bg_cpu_weight = 20
+
+# MemoryHigh for everything not focused: a throttle-and-reclaim ceiling, not a
+# kill, so a backgrounded app goes slow rather than losing its state.
+#
+# "infinity" by default — deliberately. Set below what an app actually uses and
+# it reclaims continuously for as long as it is backgrounded, which costs more
+# power than the limit saves. Measure your own apps before picking a number
+# (`systemctl --user show <scope> -p MemoryCurrent`); "512M" is a reasonable
+# first guess on a 6-8GB phone.
+bg_memory_high = "infinity"
+
 [keybinds]
 # Long-press threshold (ms): how long a button is held before its "long" action
 # fires instead of its "short" one.

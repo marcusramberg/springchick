@@ -178,7 +178,6 @@ impl State {
                 pid: child.id() as i32,
                 child,
                 token,
-                scope,
                 started: std::time::Instant::now(),
             });
         }
@@ -279,21 +278,19 @@ impl State {
         // pulse, so only the icon that is genuinely still waiting keeps
         // breathing. `unknown_N` remains for windows nothing claimed and whose
         // client id isn't a catalog app; `resolve_app_id` may still fix those up.
-        let claimed = (!is_search)
+        let claimed_app_id = (!is_search)
             .then(|| self.claim_launch(surface.wl_surface()))
             .flatten()
             .map(|l| {
                 info!(
                     toplevel = self.toplevels.len(),
-                    app_id = %l.app_id, wl_app_id = %wl_app_id, scope = ?l.scope,
+                    app_id = %l.app_id, wl_app_id = %wl_app_id,
                     "toplevel attributed to launch"
                 );
                 self.forget_token(&l.token);
                 self.children.push(l.child);
-                (l.app_id, l.scope)
+                l.app_id
             });
-        let scope = claimed.as_ref().and_then(|(_, s)| s.clone());
-        let claimed_app_id = claimed.map(|(id, _)| id);
         let id_from_launch = claimed_app_id.is_some();
         let app_id = if is_search {
             SEARCH_APP_ID.to_string()
@@ -323,7 +320,6 @@ impl State {
             app_id: app_id.clone(),
             id_from_launch,
             wl_app_id,
-            scope,
             logged_size: None,
             rotation: rotation::Rotation::None,
         }));

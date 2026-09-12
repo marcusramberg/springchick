@@ -53,9 +53,10 @@ use crate::arrange::ArrangeState;
 use crate::ui_state::{ToplevelId, UiState, ZoomOrigin};
 use crate::{
     background_effect, blank, content_type, debug_input, frame_stats, gamma_control, idle_inhibit,
-    idle_notify, input_common, keybinds, layer_shell, osd, output_power, rotation, scene, sensor,
-    session_lock, skia_gl::SkiaGl, switcher, touch_viz,
+    idle_notify, input_common, keybinds, layer_shell, osd, output_power, resources, rotation,
+    scene, sensor, session_lock, skia_gl::SkiaGl, switcher, touch_viz,
 };
+use smithay::reexports::wayland_server::Resource;
 
 /// A running app's toplevel state.
 pub(crate) struct AppToplevel {
@@ -76,12 +77,6 @@ pub(crate) struct AppToplevel {
     /// Last client-set xdg window geometry logged for this toplevel, so the
     /// size log fires on change instead of on every commit.
     pub logged_size: Option<(i32, i32)>,
-    /// Transient systemd scope of the launch this window was attributed to —
-    /// the cgroup holding the app and everything it forked. `None` for windows
-    /// no launch claimed (and for every launch when there is no user manager).
-    // Recorded for the resource tiering that will set limits on it.
-    #[allow(dead_code)]
-    pub scope: Option<String>,
     /// The rotation this window was last *configured* at — i.e. how its current
     /// buffer is oriented, not how the shell is drawing right now.
     ///
@@ -108,10 +103,6 @@ pub(crate) struct Launching {
     /// xdg-activation token handed to the child in its environment. A client
     /// that presents it back identifies its launch exactly.
     pub token: String,
-    /// Transient systemd scope the app runs in, or `None` when there was no
-    /// user manager to register one with. Carried onto [`AppToplevel`] when the
-    /// window is attributed, since that is what resource limits address.
-    pub scope: Option<String>,
     pub started: std::time::Instant,
 }
 
@@ -436,6 +427,13 @@ pub(crate) struct State {
     /// read at startup: the connector is probed once, so changing it needs a
     /// restart like `dpi`.
     pub vrr: bool,
+    /// Per-app resource tiers (`[resources]`), applied on focus change. See
+    /// [`crate::resources`].
+    pub resources: sc_config::Resources,
+    /// The scope unit currently held in the foreground tier, so a focus change
+    /// knows what to demote. `None` when nothing is promoted (on Home, and
+    /// before the first app is focused).
+    pub tiered: Option<String>,
     /// wlr-gamma-control state (night-light / color-temperature clients).
     pub gamma: gamma_control::GammaControl,
     /// wlr-output-power-management state (client-driven DPMS).
@@ -608,6 +606,7 @@ impl State {
         let prefer_no_csd = config.prefer_no_csd;
         let uclamp_min = config.uclamp_min;
         let vrr = config.vrr;
+        let resources = config.resources.clone();
         let config_rotation_settle_ms = config.rotation_settle_ms;
         let config_rotation_fade_ms = config.rotation_fade_ms;
 
@@ -839,6 +838,8 @@ impl State {
             prefer_no_csd,
             uclamp_min,
             vrr,
+            resources,
+            tiered: None,
             gamma,
             output_power,
             idle_notify,
@@ -964,9 +965,60 @@ impl State {
         // Takes effect on the next turn; a fade already in flight keeps the
         // duration it started with rather than jumping mid-dip.
         self.rotation_fade.set_duration(config.rotation_fade_ms);
+        self.resources = config.resources.clone();
         // Same path as startup; `children` (spawned binding commands, still to
         // be reaped) stays on the existing `Keys`.
         self.keys.tracker = keybinds::Keys::from_config(config).tracker;
+        // Re-assert the new numbers on whatever is focused right now, instead of
+        // waiting for the next focus change to notice them.
+        self.tiered = None;
+        self.apply_resource_tiers();
+    }
+
+    /// Put the focused app in the foreground tier and the one it replaced in the
+    /// background tier. See [`crate::resources`].
+    ///
+    /// Only resting states are acted on: `App` promotes its window, `Home`
+    /// demotes (nothing is in front, so nothing needs the CPU), and every
+    /// transition between them leaves the tiers alone — the two `systemctl`
+    /// spawns fork the compositor, which is not something to do in the middle of
+    /// a zoom. Deliberately *not* gated on `needs_animation`: a compositor whose
+    /// frames have stalled (a nested window nobody is presenting) would then
+    /// never leave the transition it is stuck in, and never tier at all.
+    pub(crate) fn apply_resource_tiers(&mut self) {
+        if !self.resources.enable {
+            return;
+        }
+        let want = match &self.ui {
+            UiState::App { toplevel, .. } => self.toplevel_unit(*toplevel),
+            UiState::Home { .. } => None,
+            _ => return,
+        };
+        if want == self.tiered {
+            return;
+        }
+        if let Some(old) = self.tiered.take() {
+            if let Some(child) =
+                resources::apply(&old, resources::Tier::Background, &self.resources)
+            {
+                self.children.push(child);
+            }
+        }
+        if let Some(new) = &want {
+            if let Some(child) = resources::apply(new, resources::Tier::Foreground, &self.resources)
+            {
+                self.children.push(child);
+            }
+        }
+        self.tiered = want;
+    }
+
+    /// The scope unit the client behind `tid` is running in.
+    fn toplevel_unit(&self, tid: usize) -> Option<String> {
+        let tl = self.toplevels.get(tid)?.as_ref()?;
+        let client = tl.surface.wl_surface().client()?;
+        let pid = client.get_credentials(&self.dh).ok()?.pid;
+        resources::unit_of_pid(pid)
     }
 
     /// Re-scan `.desktop` files and icons, for `springchick ipc reload`.
