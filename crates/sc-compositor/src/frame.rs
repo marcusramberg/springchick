@@ -271,7 +271,7 @@ impl State {
             .map(|p| p.len().to_string())
             .collect();
         let mut parts = vec![format!(
-            "ui={} page={page}/{page_count} pages=[{}] arrange={} gen={}",
+            "ui={} page={page}/{page_count} pages=[{}] arrange={} gen={} anim=[{}]",
             // Variant name only; the payloads are noise here.
             format!("{:?}", self.ui)
                 .split([' ', '{', '('])
@@ -281,6 +281,7 @@ impl State {
             lens.join(","),
             self.arrange.is_some(),
             self.catalog_gen,
+            self.animating_reasons(std::time::Instant::now()).join(","),
         )];
         parts.push(format!(
             "dock={}",
@@ -418,61 +419,68 @@ impl State {
     /// CPU/GPU idle. A fresh commit, input, or animation start re-arms rendering
     /// via `needs_render` and the animation springs below.
     pub(crate) fn is_animating(&self, now: std::time::Instant) -> bool {
-        self.needs_render
-            || self.ui.needs_animation()
-            || !self.launching.is_empty()
-            || self.osd.is_active(now)
-            || self.bar_fading()
-            // A layer surface (the OSK) sliding up into place.
-            || self.layers.sliding()
-            // An app resize held back while the OSK's unmap is debounced: the
-            // deadline is only checked from a frame, so keep them coming.
-            || self.layers.regrow_pending()
-            // A lock is engaged but not yet confirmed to the client: keep
-            // page-flipping so the locked frame it is waiting on is actually
-            // presented (see `session_lock::SessionLock::tick`).
-            || self.session_lock.needs_frame()
-            // A finger held on an icon, waiting to become a long-press. The hold
-            // is checked in `advance_frame`, so without this the timer only
-            // advances while some *other* input keeps the loop awake: a
-            // perfectly still finger emits no further events, page-flips stop,
-            // and arrange mode never engages. Real panels jitter enough to hide
-            // this most of the time; synthetic input (the debug socket) does not
-            // jitter at all, so it fails there every time.
-            //
-            // Gated on `pointer_down` — the same guard `maybe_engage_arrange_hold`
-            // uses — so this can only spin while a finger is actually down. A
-            // stale `icon_press` left behind by a lost touch-up would otherwise
-            // pin the render loop on for good, which on a phone is a battery bug.
-            || (self.pointer_down && (self.icon_press.is_some() || self.bg_press.is_some()))
-            // The icon menu's open animation.
-            || self
-                .icon_menu
+        !self.animating_reasons(now).is_empty()
+    }
+
+    /// Which [`Self::is_animating`] terms are true, for `springchick ipc home`.
+    /// A render loop that never idles is a battery bug whose only symptom is
+    /// CPU; this names the term holding it awake.
+    pub(crate) fn animating_reasons(&self, now: std::time::Instant) -> Vec<&'static str> {
+        let mut r = Vec::new();
+        let mut push = |cond: bool, name: &'static str| {
+            if cond {
+                r.push(name);
+            }
+        };
+        push(self.needs_render, "needs_render");
+        push(self.ui.needs_animation(), "ui");
+        push(!self.launching.is_empty(), "launching");
+        push(self.osd.is_active(now), "osd");
+        push(self.bar_fading(), "bar_fading");
+        // A layer surface (the OSK) sliding up into place.
+        push(self.layers.sliding(), "layers_sliding");
+        // An app resize held back while the OSK's unmap is debounced: the
+        // deadline is only checked from a frame, so keep them coming.
+        push(self.layers.regrow_pending(), "regrow_pending");
+        // A lock engaged but not yet confirmed: keep page-flipping so the
+        // locked frame the client waits on is presented.
+        push(self.session_lock.needs_frame(), "session_lock");
+        // A finger held, waiting to become a long-press: the hold is checked in
+        // `advance_frame`, and a still finger emits no further events. Gated on
+        // `pointer_down` so a stale `icon_press` from a lost touch-up cannot pin
+        // the loop on for good, which on a phone is a battery bug.
+        push(
+            self.pointer_down && (self.icon_press.is_some() || self.bg_press.is_some()),
+            "press_hold",
+        );
+        push(
+            self.icon_menu
                 .as_ref()
-                .is_some_and(|m| !m.open.is_settled())
-            // The deck's badge/title fades, which outlive the deck itself on the
-            // way out (and the scroll spring on a focus change).
-            || self.card_chrome.is_animating()
-            // A debug-input gesture/key/touch/settle in flight must keep the DRM
-            // loop rendering each tick so it advances (page-flips otherwise stop
-            // on an idle screen). Inert in normal runs — these are always None.
-            || self.active_gesture.is_some()
-            || self.active_key.is_some()
-            || self.active_touch.is_some()
-            || self.pending_settle.is_some()
-            // A turn waiting out its debounce, or the fade covering one. Without
-            // this an orientation reported to an otherwise idle screen never
-            // gets a frame in which to settle, so nothing turns at all.
-            || self.orientation_settle.is_pending()
-            || self.rotation_fade.is_active()
-            || self
-                .grid_anim
+                .is_some_and(|m| !m.open.is_settled()),
+            "icon_menu",
+        );
+        // The deck's badge/title fades, which outlive the deck itself.
+        push(self.card_chrome.is_animating(), "card_chrome");
+        // Debug-input playback: inert in normal runs, always None.
+        push(self.active_gesture.is_some(), "debug_gesture");
+        push(self.active_key.is_some(), "debug_key");
+        push(self.active_touch.is_some(), "debug_touch");
+        push(self.pending_settle.is_some(), "debug_settle");
+        push(self.orientation_settle.is_pending(), "orientation_settle");
+        push(self.rotation_fade.is_active(), "rotation_fade");
+        push(
+            self.grid_anim
                 .values()
-                .any(|(sx, sy)| !sx.is_settled() || !sy.is_settled())
-            || self
-                .dock_anim
+                .any(|(sx, sy)| !sx.is_settled() || !sy.is_settled()),
+            "grid_anim",
+        );
+        push(
+            self.dock_anim
                 .values()
-                .any(|(sx, sy)| !sx.is_settled() || !sy.is_settled())
+                .any(|(sx, sy)| !sx.is_settled() || !sy.is_settled()),
+            "dock_anim",
+        );
+        r
     }
 
     /// Advance the shell by one frame and produce the render snapshot: tick the
