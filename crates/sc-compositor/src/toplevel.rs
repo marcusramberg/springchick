@@ -29,12 +29,33 @@ impl State {
         // user just asked for — Super+h then releasing Super landed back in an
         // app instead of Home.
         self.kbd_switch = None;
-        transition(
-            &mut self.ui,
-            UiEvent::ReturnHome {
-                origin: self.last_origin,
-            },
-        );
+        let origin = self.home_origin();
+        transition(&mut self.ui, UiEvent::ReturnHome { origin });
+    }
+
+    /// Where the foreground app should shrink to on its way Home: its *own*
+    /// icon on page 0 (or the dock), not `last_origin` — after switching apps
+    /// the launch origin belongs to some other app.
+    pub(crate) fn home_origin(&self) -> ZoomOrigin {
+        let app_id = match self
+            .ui
+            .foreground_toplevel()
+            .and_then(|tid| self.toplevels.get(tid))
+            .and_then(|s| s.as_ref())
+        {
+            Some(tl) => tl.app_id.clone(),
+            None => return self.last_origin,
+        };
+        let (w, h) = self.output_size_f();
+        let layout = sc_layout::compute(w, h, 0, &self.model);
+        layout
+            .grid
+            .iter()
+            .chain(layout.dock.iter())
+            .find(|s| s.app_id == app_id)
+            .map(|s| ZoomOrigin::icon((s.icon_rect.center_x(), s.icon_rect.center_y())))
+            // Not on the page Home lands on: centre beats another app's icon.
+            .unwrap_or_else(|| ZoomOrigin::icon((w / 2.0, h / 2.0)))
     }
 
     /// Flip the foreground app between immersive fullscreen and the normal
