@@ -126,6 +126,10 @@ impl ShellModel {
             }
             self.frecency.seed(id, now, first_run);
         }
+        // A persisted state.toml is not trusted to respect PAGE_CAP: an
+        // over-full page hides every icon past the 24th, with no further page
+        // to swipe to.
+        self.repack();
     }
 
     /// Append an app to the first page with room, creating a page if needed.
@@ -459,6 +463,17 @@ mod tests {
         m.place("b".into());
         m.reconcile(&["a".into(), "b".into(), "c".into()], 0, false);
         assert_eq!(m.pages[0], vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn reconcile_splits_an_overfull_persisted_page() {
+        let mut m = ShellModel::default();
+        let ids: Vec<AppId> = (0..PAGE_CAP + 5).map(|i| format!("app{i}")).collect();
+        m.pages = vec![ids.clone()]; // as loaded from a bad state.toml
+        m.reconcile(&ids, 0, false);
+        assert_eq!(m.pages.len(), 2);
+        assert_eq!(m.pages[0].len(), PAGE_CAP);
+        assert_eq!(m.pages[1].len(), 5);
     }
 
     #[test]

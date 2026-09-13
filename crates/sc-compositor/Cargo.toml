@@ -49,6 +49,9 @@ smithay = { git = "https://github.com/Smithay/smithay.git", rev = "7ddcd1736b472
 # (smithay::reexports::{input, drm, gbm, ...}) to avoid version skew.
 libc = "0.2"
 
+# inotify + poll for the app-catalog watch (already in the tree via smithay).
+rustix = { version = "1", features = ["fs", "event"] }
+
 # iio-sensor-proxy client (accelerometer orientation) over the system bus.
 # Bindings to libdbus rather than a pure-Rust stack: 3 transitive crates against
 # zbus's 142, for one interface read from one worker thread.

@@ -86,6 +86,7 @@ pub(crate) fn run_winit() {
     // Control/IPC socket (`springchick ipc …`). Always listening; the client
     // connects to the same path. Shared setup with the DRM backend.
     let debug_chan = debug_input::spawn_listener(state.output_size);
+    let catalog_dirty = crate::catalog_watch::spawn();
 
     info!("entering frame loop");
 
@@ -116,6 +117,10 @@ pub(crate) fn run_winit() {
         // Drain debug input (dev harness) before rendering this frame.
         if let Some(chan) = &debug_chan {
             debug_input::drain(&mut state, chan);
+        }
+
+        if crate::catalog_watch::take(&catalog_dirty) {
+            state.reload_catalog();
         }
 
         // ext-idle-notify timeouts (polled; see `idle_notify`).

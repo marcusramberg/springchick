@@ -16,6 +16,7 @@ mod background_effect;
 mod bar_hint;
 mod blank;
 mod capture;
+mod catalog_watch;
 mod content_type;
 mod debug_input;
 mod drm_backend;
