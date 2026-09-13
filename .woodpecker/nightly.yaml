@@ -1,0 +1,66 @@
+## Nightly distro packages -> Forgejo registries.
+##
+## Create the cron job named "nightly" in the repo settings; `event: manual`
+## keeps the pipeline runnable by hand from the UI.
+##
+## Needs an agent per architecture (`labels: platform` below) and a
+## `forgejo_token` secret with package write scope.
+
+when:
+  - event: cron
+    cron: nightly
+  - event: manual
+
+matrix:
+  include:
+    - DISTRO: alpine
+      ARCH: arm64
+      IMAGE: docker.io/library/alpine:edge
+    - DISTRO: alpine
+      ARCH: amd64
+      IMAGE: docker.io/library/alpine:edge
+    - DISTRO: debian
+      ARCH: arm64
+      IMAGE: docker.io/library/debian:trixie
+    - DISTRO: debian
+      ARCH: amd64
+      IMAGE: docker.io/library/debian:trixie
+    # No official archlinux image for arm64.
+    - DISTRO: arch
+      ARCH: arm64
+      IMAGE: docker.io/menci/archlinuxarm:base-devel
+    - DISTRO: arch
+      ARCH: amd64
+      IMAGE: docker.io/library/archlinux:base-devel
+
+labels:
+  platform: linux/${ARCH}
+
+steps:
+  - name: build
+    image: ${IMAGE}
+    environment:
+      DISTRO: ${DISTRO}
+      PKG_ARCH: ${ARCH}
+    commands:
+      - sh packaging/compile.sh
+
+  - name: package
+    image: ghcr.io/goreleaser/nfpm:latest
+    commands:
+      # Date-stamped version: each upload must be a new filename, the
+      # registries reject a repeat. Dots only — Arch pkgver rejects '-' and '~'.
+      - export PKG_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/sc-compositor/Cargo.toml | head -1).$(date -u +%Y%m%d)"
+      - sh packaging/package.sh ${DISTRO} ${ARCH}
+
+  - name: publish
+    image: docker.io/curlimages/curl:latest
+    environment:
+      FORGEJO_TOKEN:
+        from_secret: forgejo_token
+      # Nightlies stay out of the stable repos.
+      APK_REPO: nightly
+      DEB_COMPONENT: nightly
+      ARCH_GROUP: springchick-nightly
+    commands:
+      - sh packaging/publish.sh

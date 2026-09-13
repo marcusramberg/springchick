@@ -1,0 +1,20 @@
+[Unit]
+Description=springchick Wayland compositor
+Documentation=https://code.bas.es/marcus/springchick
+BindsTo=graphical-session.target
+Before=graphical-session.target xdg-desktop-autostart.target
+After=graphical-session-pre.target
+Wants=graphical-session-pre.target xdg-desktop-autostart.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+Slice=session.slice
+Environment=SPRINGCHICK_BACKEND=drm
+Environment=XDG_CURRENT_DESKTOP=springchick
+Environment=XDG_SESSION_TYPE=wayland
+ExecStart=/usr/bin/springchick
+Restart=no
+TimeoutStopSec=10s
+CPUWeight=200
+MemoryMin=128M
