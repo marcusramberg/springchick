@@ -1,0 +1,101 @@
+name: springchick
+arch: ${PKG_ARCH}
+version: ${PKG_VERSION}
+release: ${PKG_RELEASE}
+section: x11
+priority: optional
+maintainer: Marcus Ramberg <marcus.ramberg@gmail.com>
+description: |
+  iOS Springboard-style Wayland compositor for mobile Linux.
+vendor: springchick
+homepage: https://code.bas.es/marcus/springchick
+license: MIT
+
+# Top-level list is the Arch one; deb and apk override it below.
+depends:
+  - wayland
+  - libxkbcommon
+  - libinput
+  - mesa
+  - seatd
+  - systemd-libs
+  - dbus
+  - fontconfig
+  - freetype2
+  - zlib
+
+overrides:
+  deb:
+    depends:
+      - libwayland-client0
+      - libwayland-server0
+      - libxkbcommon0
+      - libinput10
+      - libgbm1
+      - libegl1
+      - libgles2
+      - libudev1
+      - libseat1
+      - libdbus-1-3
+      - libfontconfig1
+      - libfreetype6
+      - zlib1g
+    recommends:
+      - xwayland
+      - xdg-desktop-portal-gnome
+  apk:
+    depends:
+      - wayland-libs-client
+      - wayland-libs-server
+      - libxkbcommon
+      - libinput
+      - mesa-gbm
+      - mesa-egl
+      - mesa-gles
+      - eudev-libs
+      - libseat
+      - dbus-libs
+      - fontconfig
+      - freetype
+      - zlib
+  archlinux:
+    recommends:
+      - xorg-xwayland
+      - xdg-desktop-portal-gnome
+
+contents:
+  - src: ${PKG_BIN}/springchick
+    dst: /usr/bin/springchick
+  - src: ${PKG_BIN}/sc-search
+    dst: /usr/bin/sc-search
+  - src: ${PKG_BIN}/springchick-session
+    dst: /usr/bin/springchick-session
+  - src: nix/springchick.desktop
+    dst: /usr/share/wayland-sessions/springchick.desktop
+  - src: config.example.toml
+    dst: /usr/share/springchick/config.example.toml
+  - src: packaging/files/springchick-portals.conf
+    dst: /usr/share/xdg-desktop-portal/springchick-portals.conf
+
+  # systemd session plumbing. Alpine/postmarketOS is OpenRC, where
+  # springchick-session falls back to exec'ing the compositor directly.
+  - src: packaging/files/springchick.service
+    dst: /usr/lib/systemd/user/springchick.service
+    packager: deb
+  - src: packaging/files/springchick.service
+    dst: /usr/lib/systemd/user/springchick.service
+    packager: archlinux
+  - src: packaging/files/springchick-shutdown.target
+    dst: /usr/lib/systemd/user/springchick-shutdown.target
+    packager: deb
+  - src: packaging/files/springchick-shutdown.target
+    dst: /usr/lib/systemd/user/springchick-shutdown.target
+    packager: archlinux
+  # cpuset delegation for [resources].bg_allowed_cpus; systemd's own
+  # Delegate= list is replaced, not extended, so its four defaults repeat.
+  - src: packaging/files/50-springchick-cpuset.conf
+    dst: /usr/lib/systemd/system/user@.service.d/50-springchick-cpuset.conf
+    packager: deb
+  - src: packaging/files/50-springchick-cpuset.conf
+    dst: /usr/lib/systemd/system/user@.service.d/50-springchick-cpuset.conf
+    packager: archlinux

@@ -90,6 +90,16 @@ vm-all:
 		just "$$check" || exit 1; \
 	done
 
+# -- Distro packages -------------------------------------------------
+
+# Build a package in a container (e.g. `just pkg debian arm64`)
+pkg distro arch='':
+	packaging/build.sh {{distro}} {{arch}}
+
+# Upload everything in dist/ to the Forgejo registries
+pkg-publish:
+	packaging/publish.sh
+
 # -- Misc ------------------------------------------------------------
 
 # Warm up the devshell (builds nothing, just enters the environment)

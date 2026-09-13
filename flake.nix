@@ -117,6 +117,8 @@
             # `cargo llvm-cov` — see the coverage note in CONTRIBUTING.md.
             pkgs.cargo-llvm-cov
             pkgs.just
+            # Distro packaging (packaging/build.sh): one manifest → apk/deb/pkg.tar.zst.
+            pkgs.nfpm
           ];
           # skia-safe's build script runs bindgen — point it at libclang up front.
           # winit's Wayland backend + EGL/GLES dlopen their libs at RUNTIME; in a nix
