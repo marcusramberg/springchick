@@ -299,11 +299,8 @@ impl State {
             target: "springchick::debug",
             "icon menu opened app_id={app_id} source={source:?} running={running}"
         );
-        self.icon_menu = Some(crate::icon_menu::IconMenu::new(
-            app_id,
-            anchor,
-            crate::icon_menu::items_for(&windows),
-        ));
+        let items = crate::icon_menu::items_for(&windows, self.is_flatpak(&app_id));
+        self.icon_menu = Some(crate::icon_menu::IconMenu::new(app_id, anchor, items));
         self.icon_press = None;
         self.pending_launch = None;
         self.cancel_page_drag();

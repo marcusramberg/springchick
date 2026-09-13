@@ -391,6 +391,9 @@ pub(crate) struct State {
     /// launch icons. An entry is dropped when its window maps, its process
     /// exits, or it times out.
     pub launching: Vec<Launching>,
+    /// Running `flatpak uninstall` children; the catalog is rescanned when one
+    /// exits.
+    pub uninstalling: Vec<Child>,
     /// xdg-activation token pool. Tokens minted here are passed to spawned
     /// children so a client can name the launch it came from.
     pub xdg_activation_state: XdgActivationState,
@@ -831,6 +834,7 @@ impl State {
             toplevels: Vec::new(),
             children: Vec::new(),
             launching: Vec::new(),
+            uninstalling: Vec::new(),
             xdg_activation_state,
             pending_activation: HashMap::new(),
             history: AppHistory::new(),

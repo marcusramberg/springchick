@@ -251,6 +251,15 @@ impl State {
         // through here.
         keybinds::reap(&mut self.children);
 
+        if !self.uninstalling.is_empty() {
+            let before = self.uninstalling.len();
+            keybinds::reap(&mut self.uninstalling);
+            if self.uninstalling.len() < before {
+                self.reload_catalog();
+                self.needs_render = true;
+            }
+        }
+
         let mut done = Vec::new();
         for (i, l) in self.launching.iter_mut().enumerate() {
             let exited = matches!(l.child.try_wait(), Ok(Some(_)) | Err(_));

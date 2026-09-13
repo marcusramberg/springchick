@@ -24,12 +24,22 @@ pub(crate) enum MenuAction {
     CloseAll,
     /// Take the app off the home screen (same edit as the arrange remove badge).
     Remove,
+    /// Flatpak apps only: arm the confirm row. Does not uninstall anything.
+    Uninstall,
+    /// Actually run `flatpak uninstall`.
+    UninstallConfirm,
 }
 
 impl MenuAction {
     /// Whether the row reads as destructive (drawn in a warning tint).
     pub(crate) fn is_destructive(self) -> bool {
-        matches!(self, MenuAction::CloseAll | MenuAction::Remove)
+        matches!(
+            self,
+            MenuAction::CloseAll
+                | MenuAction::Remove
+                | MenuAction::Uninstall
+                | MenuAction::UninstallConfirm
+        )
     }
 }
 
@@ -45,8 +55,8 @@ pub(crate) struct MenuItem {
 /// A single window gets a plain "Open" — its title would just repeat the app
 /// name under the icon the finger is already on. Several windows are listed
 /// individually, because picking between them is the only reason to look.
-pub(crate) fn items_for(windows: &[(ToplevelId, String)]) -> Vec<MenuItem> {
-    let mut items = Vec::with_capacity(windows.len() + 3);
+pub(crate) fn items_for(windows: &[(ToplevelId, String)], flatpak: bool) -> Vec<MenuItem> {
+    let mut items = Vec::with_capacity(windows.len() + 4);
     match windows {
         [] => {}
         [(id, _)] => items.push(MenuItem {
@@ -83,7 +93,22 @@ pub(crate) fn items_for(windows: &[(ToplevelId, String)]) -> Vec<MenuItem> {
         action: MenuAction::Remove,
         label: "Remove".into(),
     });
+    if flatpak {
+        items.push(MenuItem {
+            action: MenuAction::Uninstall,
+            label: "Uninstall".into(),
+        });
+    }
     items
+}
+
+/// The rows the Uninstall row swaps in: deleting an app is not a thing a single
+/// stray tap should be able to do.
+fn confirm_items(name: &str) -> Vec<MenuItem> {
+    vec![MenuItem {
+        action: MenuAction::UninstallConfirm,
+        label: format!("Delete {name}?"),
+    }]
 }
 
 /// An open icon menu.
@@ -119,6 +144,15 @@ impl IconMenu {
 }
 
 impl crate::state::State {
+    /// The flatpak ref backing `app_id`, if it came from one.
+    pub(crate) fn flatpak_ref(&self, app_id: &str) -> Option<&str> {
+        self.app_catalog.get(app_id)?.flatpak.as_deref()
+    }
+
+    pub(crate) fn is_flatpak(&self, app_id: &str) -> bool {
+        self.flatpak_ref(app_id).is_some()
+    }
+
     /// Carry out a menu row. The menu itself has already been closed.
     pub(crate) fn run_menu_action(&mut self, menu: &IconMenu, action: MenuAction) {
         let app_id = menu.app_id.clone();
@@ -138,24 +172,55 @@ impl crate::state::State {
                 self.raise_toplevel(id, origin);
             }
             MenuAction::NewWindow => self.spawn_instance(&app_id, origin),
-            MenuAction::CloseAll => {
-                for id in self.instances(&app_id) {
-                    self.detach_toplevel(id);
-                    crate::ui_state::transition(
-                        &mut self.ui,
-                        crate::ui_state::UiEvent::ToplevelClosed {
-                            toplevel: id,
-                            next: None,
-                        },
-                    );
-                }
-            }
+            MenuAction::CloseAll => self.close_all(&app_id),
             MenuAction::Remove => {
                 self.model.hide(&app_id);
                 self.after_arrange_edit();
             }
+            // Reopen on the same anchor with only the confirm row, so the
+            // destructive tap is never the one the finger is already making.
+            MenuAction::Uninstall => {
+                let name = self
+                    .app_catalog
+                    .get(&app_id)
+                    .map(|e| e.name.clone())
+                    .unwrap_or_else(|| app_id.clone());
+                self.icon_menu = Some(IconMenu::new(app_id, menu.anchor, confirm_items(&name)));
+            }
+            MenuAction::UninstallConfirm => self.uninstall_flatpak(&app_id),
         }
         self.needs_render = true;
+    }
+
+    fn close_all(&mut self, app_id: &str) {
+        for id in self.instances(app_id) {
+            self.detach_toplevel(id);
+            crate::ui_state::transition(
+                &mut self.ui,
+                crate::ui_state::UiEvent::ToplevelClosed {
+                    toplevel: id,
+                    next: None,
+                },
+            );
+        }
+    }
+
+    /// Uninstall the flatpak behind `app_id`. The icon stays until the child
+    /// exits and `poll_launching` rescans the catalog.
+    fn uninstall_flatpak(&mut self, app_id: &str) {
+        let Some(reference) = self.flatpak_ref(app_id).map(str::to_string) else {
+            return;
+        };
+        // flatpak refuses to remove a running app.
+        self.close_all(app_id);
+        tracing::info!(app_id, reference, "uninstalling flatpak");
+        match std::process::Command::new("flatpak")
+            .args(["uninstall", "--noninteractive", &reference])
+            .spawn()
+        {
+            Ok(child) => self.uninstalling.push(child),
+            Err(e) => tracing::warn!(%e, reference, "failed to run flatpak uninstall"),
+        }
     }
 }
 
@@ -169,19 +234,19 @@ mod tests {
 
     #[test]
     fn a_stopped_app_can_only_be_started_or_removed() {
-        assert_eq!(labels(&items_for(&[])), ["New window", "Remove"]);
+        assert_eq!(labels(&items_for(&[], false)), ["New window", "Remove"]);
     }
 
     #[test]
     fn a_single_window_gets_a_plain_open() {
-        let items = items_for(&[(3, "some terminal".into())]);
+        let items = items_for(&[(3, "some terminal".into())], false);
         assert_eq!(labels(&items), ["Open", "New window", "Close", "Remove"]);
         assert_eq!(items[0].action, MenuAction::Open(3));
     }
 
     #[test]
     fn several_windows_are_listed_by_title_in_mru_order() {
-        let items = items_for(&[(7, "notes.md".into()), (2, "~/src".into())]);
+        let items = items_for(&[(7, "notes.md".into()), (2, "~/src".into())], false);
         assert_eq!(
             labels(&items),
             ["notes.md", "~/src", "New window", "Close all", "Remove"]
@@ -194,7 +259,24 @@ mod tests {
     /// its siblings.
     #[test]
     fn untitled_windows_fall_back_to_their_position() {
-        let items = items_for(&[(7, String::new()), (2, String::new())]);
+        let items = items_for(&[(7, String::new()), (2, String::new())], false);
         assert_eq!(labels(&items)[..2], ["Window 1", "Window 2"]);
+    }
+
+    #[test]
+    fn only_flatpak_apps_offer_uninstall() {
+        assert_eq!(
+            labels(&items_for(&[], true)),
+            ["New window", "Remove", "Uninstall"]
+        );
+        assert!(!labels(&items_for(&[], false)).contains(&"Uninstall"));
+    }
+
+    #[test]
+    fn uninstall_needs_a_second_tap() {
+        let confirm = confirm_items("Maps");
+        assert_eq!(labels(&confirm), ["Delete Maps?"]);
+        assert_eq!(confirm[0].action, MenuAction::UninstallConfirm);
+        assert!(MenuAction::Uninstall.is_destructive());
     }
 }

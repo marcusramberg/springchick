@@ -39,6 +39,8 @@ pub struct AppEntry {
     pub dbus_activatable: bool,
     /// Where this entry was read from; `%k` expands to it.
     pub desktop_file: PathBuf,
+    /// `X-Flatpak=`: the flatpak ref this entry was exported from, if any.
+    pub flatpak: Option<String>,
 }
 
 /// Scan `.desktop` files from every XDG data dir's `applications/`, highest
@@ -246,6 +248,7 @@ pub fn parse_desktop_in(path: &Path, contents: &str, env: &DesktopEnv) -> Option
     let mut work_path = None;
     let mut try_exec = None;
     let (mut only_show_in, mut not_show_in) = (None, None);
+    let mut flatpak = None;
 
     for line in contents.lines() {
         let line = line.trim();
@@ -289,6 +292,7 @@ pub fn parse_desktop_in(path: &Path, contents: &str, env: &DesktopEnv) -> Option
             "DBusActivatable" => dbus_activatable = v == "true",
             "OnlyShowIn" => only_show_in = Some(v),
             "NotShowIn" => not_show_in = Some(v),
+            "X-Flatpak" => flatpak = Some(v).filter(|v| !v.is_empty()),
             _ => {}
         }
     }
@@ -325,6 +329,7 @@ pub fn parse_desktop_in(path: &Path, contents: &str, env: &DesktopEnv) -> Option
         path: work_path,
         dbus_activatable,
         desktop_file: path.to_path_buf(),
+        flatpak,
     })
 }
 
@@ -552,6 +557,15 @@ mod tests {
         assert_eq!(e.name, "Maps");
         assert_eq!(e.exec, "gnome-maps %U");
         assert_eq!(e.icon, "org.gnome.Maps");
+    }
+
+    #[test]
+    fn picks_up_the_flatpak_ref() {
+        let e = parse_desktop(Path::new("/x/a.desktop"), SAMPLE).unwrap();
+        assert_eq!(e.flatpak, None);
+        let fp = format!("{SAMPLE}X-Flatpak=org.gnome.Maps\n");
+        let e = parse_desktop(Path::new("/x/a.desktop"), &fp).unwrap();
+        assert_eq!(e.flatpak.as_deref(), Some("org.gnome.Maps"));
     }
 
     #[test]
