@@ -53,32 +53,42 @@ struct SearchApp {
     /// Icon search path, built once at startup rather than per icon lookup.
     icon_dirs: Vec<std::path::PathBuf>,
     focus_requested: bool,
+    /// Last known viewport focus, to spot the edge where we are raised again.
+    focused: bool,
     /// Kept alive for the process lifetime: dropping it drops the blur.
     _blur: Option<blur::ExtBackgroundEffectSurfaceV1>,
 }
 
 impl SearchApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let catalog: HashMap<String, AppEntry> = sc_catalog::scan_apps()
-            .into_iter()
-            .map(|e| (e.id.clone(), e))
-            .collect();
-        // Frecency is read-only here; the compositor stays the sole writer.
-        let frecency = sc_shell_model::persist::load(&sc_shell_model::persist::state_path())
-            .map(|m| m.frecency)
-            .unwrap_or_default();
         let mut app = Self {
-            catalog,
-            frecency,
+            catalog: HashMap::new(),
+            frecency: FrecencyStore::default(),
             query: String::new(),
             results: Vec::new(),
             textures: HashMap::new(),
             icon_dirs: sc_icons::theme_dirs(&sc_catalog::xdg_data_dirs()),
             focus_requested: false,
+            focused: true,
             _blur: blur::blur_whole_window(cc),
         };
-        app.recompute();
+        app.rescan();
         app
+    }
+
+    /// Re-read the catalog and frecency from disk. The compositor raises this
+    /// process rather than respawning it, so a scan done only at startup goes
+    /// stale the moment anything is installed or launched.
+    fn rescan(&mut self) {
+        self.catalog = sc_catalog::scan_apps()
+            .into_iter()
+            .map(|e| (e.id.clone(), e))
+            .collect();
+        // Frecency is read-only here; the compositor stays the sole writer.
+        self.frecency = sc_shell_model::persist::load(&sc_shell_model::persist::state_path())
+            .map(|m| m.frecency)
+            .unwrap_or_default();
+        self.recompute();
     }
 
     fn recompute(&mut self) {
@@ -182,6 +192,12 @@ impl eframe::App for SearchApp {
             std::process::exit(0);
         }
         let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        if focused && !self.focused {
+            self.rescan();
+        }
+        self.focused = focused;
 
         // Translucent panel over the blurred backdrop. Without the compositor's
         // blur this is still legible, just a plain dark scrim.

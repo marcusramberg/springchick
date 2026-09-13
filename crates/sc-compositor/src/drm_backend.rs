@@ -331,6 +331,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Control/IPC socket (`springchick ipc …`), same as the winit backend.
     // Always listening; carries the debug-input gestures the VM tests drive too.
     let debug_chan = crate::debug_input::spawn_listener(state.output_size);
+    let catalog_dirty = crate::catalog_watch::spawn();
 
     // Screencopy dmabuf constraints: the render node + format/modifier set a
     // recorder must allocate its capture buffers with, so we can blit into them
@@ -648,6 +649,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // Long presses are polled here, not in `render`: page-flips stop when
         // nothing animates, so a frame-driven poll would never fire on an idle
         // screen.
+        if crate::catalog_watch::take(&catalog_dirty) {
+            app.state.reload_catalog();
+        }
         crate::keybinds::poll(&mut app.state);
         app.state.poll_launching();
         app.state.drain_sensor();
