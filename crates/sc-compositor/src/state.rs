@@ -1051,6 +1051,11 @@ impl State {
         if let Err(e) = persist::save(&self.model, &persist::state_path()) {
             warn!(?e, "failed to persist shell model after catalog reload");
         }
+        // The grid draws from the per-app springs, not from the model: without
+        // this an installed app has no spring and is invisible, and a removed
+        // one leaves its neighbours parked at their old slots.
+        self.reflow_grid();
+        self.reflow_dock();
         // A pruned page can leave the model shorter than the page the shell is
         // sitting on.
         let page_count = self.model.pages.len().max(1);
