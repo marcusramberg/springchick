@@ -59,6 +59,8 @@ pub enum DebugCmd {
     /// geometry, buffer and map state. A query, not input — see
     /// [`State::layers_dump`].
     Layers,
+    /// Dump the home grid model + which slots resolve in the catalog.
+    Home,
     /// Open a catalog app by id, exactly as an icon tap would: raise its most
     /// recent window if it has one, else launch it. `new_window` forces a fresh
     /// instance instead. This is how the search app opens things, so its
@@ -155,6 +157,10 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
         "layers" => {
             done(tok)?;
             DebugCmd::Layers
+        }
+        "home" => {
+            done(tok)?;
+            DebugCmd::Home
         }
         "quit" => {
             done(tok)?;
@@ -375,7 +381,11 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
     // of them must reset the countdown.
     if !matches!(
         cmd,
-        DebugCmd::Settle { .. } | DebugCmd::Reload | DebugCmd::Layers | DebugCmd::Quit
+        DebugCmd::Settle { .. }
+            | DebugCmd::Reload
+            | DebugCmd::Layers
+            | DebugCmd::Home
+            | DebugCmd::Quit
     ) {
         state.idle_notify.activity(Instant::now());
     }
@@ -508,6 +518,9 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
         DebugCmd::Layers => {
             // Allowed while locked: it reads state and drives nothing.
             let _ = reply.send(format!("ok {}\n", state.layers_dump()));
+        }
+        DebugCmd::Home => {
+            let _ = reply.send(format!("ok {}\n", state.home_dump()));
         }
         DebugCmd::Quit => {
             // Answer before stopping: once the loop exits nothing drains this
@@ -820,6 +833,8 @@ mod tests {
     #[test]
     fn parses_layers() {
         assert_eq!(parse_line("layers", W, H), Ok(DebugCmd::Layers));
+        assert_eq!(parse_line("home", W, H), Ok(DebugCmd::Home));
+        assert!(parse_line("home now", W, H).is_err());
         assert!(parse_line("layers all", W, H).is_err()); // no args
     }
 

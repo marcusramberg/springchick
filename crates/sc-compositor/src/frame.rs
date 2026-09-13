@@ -240,6 +240,69 @@ impl State {
     /// still drawn after its client moved on (stale buffer, stale geometry, or a
     /// popup left behind) is visible without a rebuild. Fields are `key=value`,
     /// entries separated by ` | ` — the ipc client prints one entry per line.
+    /// What the home grid is actually drawing, answered by `springchick ipc
+    /// home`. Same purpose as [`Self::layers_dump`], for the "the model says
+    /// the app is on page 3 but the screen shows a hole" class of bug: a slot
+    /// whose id is missing from the catalog draws nothing, and only this tells
+    /// them apart. `!` marks such a slot.
+    pub(crate) fn home_dump(&self) -> String {
+        let (page, page_count) = match &self.ui {
+            UiState::Home {
+                page, page_count, ..
+            } => (*page, *page_count),
+            _ => (0, self.model.pages.len().max(1)),
+        };
+        // `!` = not in the catalog (draws nothing). `~` = no reflow spring, so
+        // the grid cannot place it however good the model looks.
+        let slot = |id: &String, anim: &HashMap<String, (sc_anim::Spring, sc_anim::Spring)>| {
+            let mut s = id.clone();
+            if !self.app_catalog.contains_key(id) {
+                s.push('!');
+            }
+            if !anim.contains_key(id) {
+                s.push('~');
+            }
+            s
+        };
+        let lens: Vec<String> = self
+            .model
+            .pages
+            .iter()
+            .map(|p| p.len().to_string())
+            .collect();
+        let mut parts = vec![format!(
+            "ui={} page={page}/{page_count} pages=[{}] arrange={} gen={}",
+            // Variant name only; the payloads are noise here.
+            format!("{:?}", self.ui)
+                .split([' ', '{', '('])
+                .next()
+                .unwrap_or("?")
+                .to_string(),
+            lens.join(","),
+            self.arrange.is_some(),
+            self.catalog_gen,
+        )];
+        parts.push(format!(
+            "dock={}",
+            self.model
+                .dock
+                .iter()
+                .map(|id| slot(id, &self.dock_anim))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        for (i, p) in self.model.pages.iter().enumerate() {
+            parts.push(format!(
+                "page{i}={}",
+                p.iter()
+                    .map(|id| slot(id, &self.grid_anim))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ));
+        }
+        parts.join(" | ")
+    }
+
     pub(crate) fn layers_dump(&self) -> String {
         let infos = self.layers.dump(self.dpi);
         let popups = self.layer_popups();

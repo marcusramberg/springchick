@@ -41,6 +41,7 @@ pub fn run_client(args: &[String]) -> ExitCode {
         eprintln!("       springchick ipc launch org.gnome.Maps [new]");
         eprintln!("       springchick ipc reload   # re-read config.toml + rescan apps");
         eprintln!("       springchick ipc layers   # dump layer surfaces + their popups");
+        eprintln!("       springchick ipc home     # dump home grid + catalog resolution");
         eprintln!("       springchick ipc quit     # end the session");
         return ExitCode::from(2);
     }
