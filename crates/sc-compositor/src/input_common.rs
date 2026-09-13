@@ -1118,7 +1118,7 @@ fn release_grab(state: &mut State) {
             transition(&mut state.ui, UiEvent::RaiseApp { toplevel, app_id });
         }
         _ => {
-            let last_origin = state.last_origin;
+            let home_origin = state.home_origin();
             let size = state.output_size_f();
             transition(&mut state.ui, UiEvent::GrabRelease);
             // Settling toward Home zooms back to the launcher icon; toward the
@@ -1129,7 +1129,7 @@ fn release_grab(state: &mut State) {
                     let (cx, cy, s) = switcher::front_slot(size);
                     ZoomOrigin::card((cx, cy), s)
                 } else {
-                    last_origin
+                    home_origin
                 };
             }
         }
