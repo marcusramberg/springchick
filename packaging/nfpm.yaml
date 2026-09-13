@@ -77,25 +77,14 @@ contents:
   - src: packaging/files/springchick-portals.conf
     dst: /usr/share/xdg-desktop-portal/springchick-portals.conf
 
-  # systemd session plumbing. Alpine/postmarketOS is OpenRC, where
-  # springchick-session falls back to exec'ing the compositor directly.
+  # systemd session plumbing. Shipped everywhere: postmarketOS is systemd now,
+  # and springchick-session needs the Type=notify unit to raise
+  # graphical-session.target.
   - src: packaging/files/springchick.service
     dst: /usr/lib/systemd/user/springchick.service
-    packager: deb
-  - src: packaging/files/springchick.service
-    dst: /usr/lib/systemd/user/springchick.service
-    packager: archlinux
   - src: packaging/files/springchick-shutdown.target
     dst: /usr/lib/systemd/user/springchick-shutdown.target
-    packager: deb
-  - src: packaging/files/springchick-shutdown.target
-    dst: /usr/lib/systemd/user/springchick-shutdown.target
-    packager: archlinux
   # cpuset delegation for [resources].bg_allowed_cpus; systemd's own
   # Delegate= list is replaced, not extended, so its four defaults repeat.
   - src: packaging/files/50-springchick-cpuset.conf
     dst: /usr/lib/systemd/system/user@.service.d/50-springchick-cpuset.conf
-    packager: deb
-  - src: packaging/files/50-springchick-cpuset.conf
-    dst: /usr/lib/systemd/system/user@.service.d/50-springchick-cpuset.conf
-    packager: archlinux

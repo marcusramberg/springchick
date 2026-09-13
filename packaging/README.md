@@ -39,9 +39,10 @@ including Skia from source on Alpine.
 binary has to link against that distro's glibc/musl — then `package.sh` turns
 the staged binaries into a package with
 [nfpm](https://nfpm.goreleaser.com/): one `nfpm.yaml` produces all three
-formats, with per-packager dependency lists and content filters. Arch and
-Debian get the systemd user units; Alpine/postmarketOS is OpenRC, where
-`springchick-session` falls back to exec'ing the compositor directly.
+formats, with per-packager dependency lists. All three ship the same payload,
+systemd user units included — postmarketOS is systemd now, and the
+`Type=notify` unit is how `springchick-session` raises
+`graphical-session.target`.
 
 Foreign-arch builds go through qemu-user (`--platform`), which is slow and
 needs a binfmt handler registered with the `F` flag — NixOS's
