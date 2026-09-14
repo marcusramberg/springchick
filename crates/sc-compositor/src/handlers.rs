@@ -71,7 +71,11 @@ impl CompositorHandler for State {
         // A client presented new content; ask the DRM loop to render. Without
         // this, an app committing while the screen is otherwise idle never
         // gets its frame callback (only sent during a render), so it stalls.
-        self.needs_render = true;
+        // Skipped for a toplevel that isn't in the frame at all — see
+        // `commit_affects_frame`.
+        if self.commit_affects_frame(surface) {
+            self.needs_render = true;
+        }
 
         // Advance popup configure/geometry state (initial configure, acks,
         // reposition) for any tracked popup in this surface's tree.

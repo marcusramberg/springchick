@@ -380,6 +380,30 @@ impl State {
         id
     }
 
+    /// Whether a commit on `surface` can change the next frame, and so is worth
+    /// rendering for.
+    ///
+    /// A backgrounded app's commits cannot: nothing of it is drawn. They still
+    /// arrive, because a client is free to keep drawing without frame callbacks
+    /// — waydroid's Android stack runs on its own vsync and does exactly that
+    /// (a stuck `bootanimation` commits forever), and rendering each one pins
+    /// the DRM loop at `ACTIVE_TIMEOUT` compositing pixels nobody can see.
+    ///
+    /// Only tracked toplevels are judged. Everything else — layer surfaces,
+    /// popups, the lock, subsurfaces of any of them, and a surface still on its
+    /// way to being mapped — renders as before.
+    pub(crate) fn commit_affects_frame(&self, surface: &WlSurface) -> bool {
+        let mut root = surface.clone();
+        while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
+            root = parent;
+        }
+        let owner = self.toplevels.iter().position(|slot| {
+            slot.as_ref()
+                .is_some_and(|tl| tl.surface.wl_surface() == &root)
+        });
+        commit_needs_frame(owner, &self.drawn_toplevels)
+    }
+
     pub(crate) fn unregister_toplevel(&mut self, surface: &WlSurface) {
         let mut closed = None;
         for (idx, slot) in self.toplevels.iter_mut().enumerate() {
@@ -1086,5 +1110,34 @@ impl State {
         {
             tl.rotation = rotation;
         }
+    }
+}
+
+/// The rule behind [`State::commit_affects_frame`], split out so it can be
+/// tested without a live surface: only a toplevel that isn't drawn is skipped.
+fn commit_needs_frame(owner: Option<ToplevelId>, drawn: &[ToplevelId]) -> bool {
+    match owner {
+        Some(id) => drawn.contains(&id),
+        None => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_undrawn_toplevels_skip_the_frame() {
+        assert!(commit_needs_frame(Some(2), &[0, 2]), "drawn app renders");
+        assert!(
+            !commit_needs_frame(Some(1), &[0, 2]),
+            "backgrounded app does not"
+        );
+        assert!(
+            !commit_needs_frame(Some(0), &[]),
+            "nothing drawn: no app commit renders"
+        );
+        // Layer surfaces, popups, the lock, and not-yet-mapped surfaces.
+        assert!(commit_needs_frame(None, &[]));
     }
 }
