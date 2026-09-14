@@ -15,7 +15,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-license = "MIT"
+license = "GPL-2.0-only"
 
 [profile.dev]
 opt-level = 1
