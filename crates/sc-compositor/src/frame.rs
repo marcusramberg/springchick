@@ -571,6 +571,13 @@ impl State {
             self.card_radius,
         );
         self.switcher_cards = scene.cards.clone();
+        // Refilled in place: a commit from a toplevel absent here doesn't get a
+        // frame (`commit_affects_frame`).
+        self.drawn_toplevels.clear();
+        self.drawn_toplevels
+            .extend(scene.window.as_ref().map(|(tid, _)| *tid));
+        self.drawn_toplevels
+            .extend(scene.cards.iter().map(|c| c.toplevel));
         let disc = (
             std::mem::discriminant(&self.ui),
             ui_state::desired_focus(&self.ui),
