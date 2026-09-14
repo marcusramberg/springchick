@@ -1,0 +1,15 @@
+{{- $src := .Destination -}}
+{{- $res := resources.Get (printf "img/%s" (path.Base $src)) -}}
+{{- if and $res (ne $res.MediaType.SubType "svg") -}}
+  {{- $sm := $res.Resize "360x webp q80" -}}
+  {{- $lg := $res.Resize "720x webp q80" -}}
+  <img src="{{ $sm.RelPermalink }}"
+       srcset="{{ $sm.RelPermalink }} 360w, {{ $lg.RelPermalink }} 720w"
+       sizes="(min-width: 40rem) 20rem, 72vw"
+       width="{{ $sm.Width }}" height="{{ $sm.Height }}"
+       loading="lazy" alt="{{ .Text }}">
+{{- else if $res -}}
+  <img src="{{ $res.RelPermalink }}" alt="{{ .Text }}">
+{{- else -}}
+  <img src="{{ $src }}" alt="{{ .Text }}">
+{{- end -}}

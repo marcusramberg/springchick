@@ -1,0 +1,6 @@
+{{- $d := .Destination -}}
+{{- /* README links are repo-relative; send them to the forge. */ -}}
+{{- if not (or (strings.HasPrefix $d "http") (strings.HasPrefix $d "#") (strings.HasPrefix $d "mailto:")) -}}
+  {{- $d = printf "%s/src/branch/main/%s" .Page.Site.Params.repo (strings.TrimPrefix "./" $d) -}}
+{{- end -}}
+<a href="{{ $d }}"{{ with .Title }} title="{{ . }}"{{ end }}>{{ .Text }}</a>

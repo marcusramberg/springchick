@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{{ .Site.Title }} — {{ .Site.Params.tagline }}</title>
+<meta name="description" content="{{ .Site.Params.tagline }}: an iOS-Springboard-style Wayland compositor written in Rust with Smithay and Skia.">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#1b1408">
+<meta property="og:title" content="Springchick">
+<meta property="og:description" content="{{ .Site.Params.tagline }}">
+<meta property="og:type" content="website">
+{{ with resources.Get "img/springchick.svg" }}<link rel="icon" href="{{ .RelPermalink }}">{{ end }}
+{{ $css := resources.Get "css/main.css" | minify | fingerprint }}
+<link rel="stylesheet" href="{{ $css.RelPermalink }}">
+</head>
+<body>
+{{ block "main" . }}{{ end }}
+{{ $js := resources.Get "js/chick.js" | minify | fingerprint }}
+<script src="{{ $js.RelPermalink }}" defer></script>
+<footer>
+  <p>GPL-2.0 licensed. Built with Rust, <a href="https://smithay.github.io/">Smithay</a> and <a href="https://skia.org/">Skia</a>.</p>
+  <p><a href="{{ .Site.Params.repo }}">code.bas.es</a> · <a href="{{ .Site.Params.mirror }}">GitHub mirror</a></p>
+</footer>
+</body>
+</html>
