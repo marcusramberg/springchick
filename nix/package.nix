@@ -181,7 +181,7 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "iOS Springboard-style Wayland compositor";
     mainProgram = "springchick";
-    license = lib.licenses.mit;
+    license = lib.licenses.gpl2Only;
     platforms = lib.platforms.linux;
   };
 }

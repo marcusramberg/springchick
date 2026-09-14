@@ -9,7 +9,7 @@ description: |
   iOS Springboard-style Wayland compositor for mobile Linux.
 vendor: springchick
 homepage: https://code.bas.es/marcus/springchick
-license: MIT
+license: GPL-2.0-only
 
 # Top-level list is the Arch one; deb and apk override it below.
 depends:
