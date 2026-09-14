@@ -426,8 +426,8 @@ impl SkiaGl {
         // Draw page indicator dots.
         draw_dots(canvas, &current_layout, page);
 
-        // Draw bar.
-        draw_bar(canvas, &current_layout, 1.0);
+        // No bar here: the pill is the chrome overlay's, drawn at whatever alpha
+        // `bar_hint` says (nothing, on Home).
 
         // Arrange mode: remove-badges, Done button, dock drop highlight, and
         // the lifted (dragged) icon on top of everything else.

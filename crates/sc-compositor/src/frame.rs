@@ -19,6 +19,17 @@ use crate::ui_state::{self, transition, UiEvent, UiState};
 
 use std::collections::{HashMap, HashSet};
 
+/// Pill visibility policy per UI state: gone on Home, lit for the whole of a
+/// drag (it is the thing under the finger), blink-then-hide once an app is up.
+fn bar_mode(ui: &UiState) -> crate::bar_hint::BarMode {
+    use crate::bar_hint::BarMode;
+    match ui {
+        UiState::Home { .. } | UiState::AppClosing { .. } => BarMode::Off,
+        UiState::App { .. } | UiState::AppOpening { .. } => BarMode::Auto,
+        _ => BarMode::Shown,
+    }
+}
+
 /// Refill `out` from the reflow springs in `springs`, shifted left by `scroll`
 /// (the live page scroll for the grid; zero for the dock, which doesn't page).
 ///
@@ -370,7 +381,7 @@ impl State {
         self.popup_grabs.contains(surface)
     }
 
-    /// Bar fade target: 0 when a Top/Overlay layer surface covers the pill,
+    /// Bar-fade target: 0 when a Top/Overlay layer surface covers the pill,
     /// else 1. The OSK is lifted above the pill's strip (see `shift_docked`),
     /// so it no longer fades the bar; only a surface actually over the pill
     /// (e.g. a fullscreen overlay) does.
@@ -388,10 +399,11 @@ impl State {
     /// ~0.13s fade (0.15 per 90Hz frame).
     ///
     /// Two independent things dim the pill, and they multiply: `bar_alpha` is
-    /// the occlusion fade above, while [`crate::bar_hint`] owns the fullscreen
-    /// policy (blink once on the way in, then stay out of the way). Keeping
-    /// them separate means neither has to know about the other's timing.
+    /// the occlusion fade above, while [`crate::bar_hint`] owns the visibility
+    /// policy (never on Home, lit through a drag, blink-then-hide in an app).
+    /// Keeping them separate means neither has to know about the other's timing.
     fn tick_bar_alpha(&mut self, now: std::time::Instant) -> f32 {
+        self.bar_hint.set_mode(bar_mode(&self.ui), now);
         let target = self.bar_alpha_target();
         let step = 0.15;
         if (self.bar_alpha - target).abs() <= step {
