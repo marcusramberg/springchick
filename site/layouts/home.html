@@ -1,0 +1,19 @@
+{{ define "main" }}
+<header class="hero">
+  <div class="chick" aria-hidden="true">
+    {{ (resources.Get "svg/chick.svg").Content | safeHTML }}
+  </div>
+  <h1>Springchick</h1>
+  <p class="tagline">{{ .Site.Params.tagline }}</p>
+  <p class="sub">
+    An iOS-Springboard-style shell, fused into the compositor. Rust, Smithay,
+    Skia.
+  </p>
+  <nav class="cta">
+    <a class="btn primary" href="#install">Install</a>
+    <a class="btn" href="{{ .Site.Params.repo }}">Source</a>
+  </nav>
+</header>
+
+<main class="prose readme">{{ .Content }}</main>
+{{ end }}

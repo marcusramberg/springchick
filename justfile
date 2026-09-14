@@ -100,6 +100,16 @@ pkg distro arch='':
 pkg-publish:
 	packaging/publish.sh
 
+# -- Website ---------------------------------------------------------
+
+# Serve the marketing site at http://localhost:1313 with live reload
+site:
+	nix run nixpkgs#hugo -- server --source site --baseURL http://localhost:1313/
+
+# Build the site into site/public
+site-build:
+	nix run nixpkgs#hugo -- --minify --source site --baseURL /
+
 # -- Misc ------------------------------------------------------------
 
 # Warm up the devshell (builds nothing, just enters the environment)

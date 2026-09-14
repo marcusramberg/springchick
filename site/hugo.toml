@@ -1,0 +1,29 @@
+baseURL = "https://marcusramberg.github.io/springchick/"
+title = "Springchick"
+locale = "en-us"
+disableKinds = ["taxonomy", "term", "rss", "sitemap"]
+
+[markup.goldmark.renderer]
+unsafe = true
+
+[markup.highlight]
+noClasses = false
+style = "nord"
+
+[[module.mounts]]
+source = "assets"
+target = "assets"
+
+# The README is the single source of truth for the page body.
+[[module.mounts]]
+source = "../README.md"
+target = "content/_index.md"
+
+[[module.mounts]]
+source = "../assets"
+target = "assets/img"
+
+[params]
+repo = "https://code.bas.es/marcus/springchick"
+mirror = "https://github.com/marcusramberg/springchick"
+tagline = "A Wayland compositor for Linux phones"

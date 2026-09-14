@@ -1,0 +1,282 @@
+:root {
+  --bg: #16110a;
+  --bg2: #201709;
+  --fg: #f3e9d6;
+  --dim: #b9a889;
+  --accent: #f8bb3e;
+  --accent2: #e8a526;
+  --card: #241a0d;
+  --line: #3a2c16;
+  --radius: 14px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #fff8ea;
+    --bg2: #ffeecb;
+    --fg: #2a1f0d;
+    --dim: #6b5a3c;
+    --card: #fffdf7;
+    --line: #eadcbd;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-text-size-adjust: 100%;
+  overflow-x: hidden;
+}
+
+a { color: var(--accent); }
+
+h1, h2, h3 { line-height: 1.2; letter-spacing: -0.02em; }
+
+/* ---- hero ---- */
+
+.hero {
+  padding: 2rem 1.25rem 2.5rem;
+  padding-top: max(2rem, env(safe-area-inset-top));
+  text-align: center;
+  background: radial-gradient(120% 80% at 50% 0%, var(--bg2), var(--bg) 70%);
+}
+
+.chick {
+  width: min(58vw, 230px);
+  margin: 0 auto 1.25rem;
+  position: relative;
+  touch-action: none;
+  cursor: grab;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.chick:active { cursor: grabbing; }
+
+.chick.drag #sc-chick,
+.chick.drag #sc-legs,
+.chick.drag #sc-body,
+.chick.drag #sc-wing-l,
+.chick.drag #sc-wing-r,
+.chick.drag::after { animation: none; }
+
+.chick.drag::after {
+  transform: scaleX(var(--sx, 1));
+  opacity: var(--so, 0.45);
+}
+
+.chick::after {
+  content: "";
+  position: absolute;
+  left: 22%;
+  right: 22%;
+  bottom: 2%;
+  height: 10px;
+  border-radius: 50%;
+  background: #0006;
+  filter: blur(5px);
+  animation: shadow 2.6s ease-in-out infinite;
+}
+
+.chick svg { display: block; width: 100%; height: auto; }
+
+.hero h1 { margin: 0; font-size: clamp(2.2rem, 11vw, 3.5rem); }
+
+.tagline { margin: 0.4rem 0 0; font-size: 1.1rem; color: var(--accent); }
+
+.sub { margin: 0.6rem auto 0; max-width: 30rem; color: var(--dim); }
+
+.cta { display: flex; gap: 0.75rem; justify-content: center; margin-top: 1.5rem; flex-wrap: wrap; }
+
+.btn {
+  display: inline-block;
+  padding: 0.7rem 1.4rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  text-decoration: none;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.btn.primary { background: var(--accent); color: #2a1f0d; border-color: var(--accent); }
+
+/* ---- bird animation ---- */
+
+#sc-chick, #sc-legs, #sc-body, #sc-wing-l, #sc-wing-r { transform-box: view-box; }
+
+#sc-chick { transform-origin: 256px 470px; animation: hop 2.6s cubic-bezier(.4, 0, .3, 1) infinite; }
+#sc-legs  { transform-origin: 256px 470px; animation: legs 2.6s cubic-bezier(.4, 0, .3, 1) infinite; }
+#sc-body  { transform-origin: 256px 400px; animation: body 2.6s cubic-bezier(.4, 0, .3, 1) infinite; }
+#sc-wing-l { transform-origin: 144.85px 281.65px; animation: flapL 2.6s ease-in-out infinite; }
+#sc-wing-r { transform-origin: 367.15px 281.65px; animation: flapR 2.6s ease-in-out infinite; }
+
+@keyframes hop {
+  0%, 18%, 70%, 100% { transform: translateY(0); }
+  42% { transform: translateY(-16px); }
+  52% { transform: translateY(-34px); }
+  62% { transform: translateY(-14px); }
+}
+
+@keyframes legs {
+  0%, 18%, 86%, 100% { transform: scaleY(1); }
+  30% { transform: scaleY(0.80); }
+  42%, 52% { transform: scaleY(1.10); }
+  62% { transform: scaleY(1.05); }
+  70% { transform: scaleY(0.82); }
+  78% { transform: scaleY(1.04); }
+}
+
+@keyframes body {
+  0%, 18%, 86%, 100% { transform: translateY(0) scale(1); }
+  30% { transform: translateY(12px) scale(1.05, 0.95); }
+  42%, 52% { transform: translateY(-6px) scale(0.96, 1.05); }
+  62% { transform: translateY(-3px) scale(1, 1); }
+  70% { transform: translateY(11px) scale(1.06, 0.94); }
+  78% { transform: translateY(-2px) scale(0.98, 1.02); }
+}
+
+@keyframes flapL {
+  0%, 18%, 96%, 100% { transform: translateY(0) rotate(0deg); }
+  30% { transform: translateY(12px) rotate(-12deg); }
+  42% { transform: translateY(-6px) rotate(10deg); }
+  52% { transform: translateY(-6px) rotate(14deg); }
+  62% { transform: translateY(-3px) rotate(4deg); }
+  70% { transform: translateY(11px) rotate(-16deg); }
+  82% { transform: translateY(-2px) rotate(4deg); }
+}
+
+@keyframes flapR {
+  0%, 18%, 96%, 100% { transform: translateY(0) rotate(0deg); }
+  30% { transform: translateY(12px) rotate(12deg); }
+  42% { transform: translateY(-6px) rotate(-10deg); }
+  52% { transform: translateY(-6px) rotate(-14deg); }
+  62% { transform: translateY(-3px) rotate(-4deg); }
+  70% { transform: translateY(11px) rotate(16deg); }
+  82% { transform: translateY(-2px) rotate(-4deg); }
+}
+
+@keyframes shadow {
+  0%, 18%, 100% { transform: scaleX(1); opacity: 0.45; }
+  30% { transform: scaleX(1.1); opacity: 0.5; }
+  52% { transform: scaleX(0.65); opacity: 0.2; }
+  70% { transform: scaleX(1.12); opacity: 0.5; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chick *, .chick::after { animation: none !important; }
+}
+
+/* ---- content ---- */
+
+main { padding: 0 1.25rem 3rem; max-width: 46rem; margin: 0 auto; }
+
+/* The page body is README.md. The hero already shows the title and the
+   tagline, and the forge-only logo has no place here. */
+.readme > h1:first-child,
+.readme > h1:first-child + h2,
+.readme > p > img[align="right"],
+.readme > img[align="right"] { display: none; }
+
+.readme h2 { margin-top: 2.5rem; }
+
+/* Feature bullets become cards. */
+#what-it-does + ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.75rem; }
+
+#what-it-does + ul > li {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.9rem 1rem;
+}
+
+#what-it-does + ul strong { color: var(--accent); }
+
+/* The screenshot paragraph becomes a swipeable strip. */
+#screenshots + p {
+  display: flex;
+  gap: 1rem;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  margin: 0 -1.25rem;
+  padding: 0 1.25rem 0.5rem;
+  scrollbar-width: none;
+}
+
+#screenshots + p::-webkit-scrollbar { display: none; }
+
+#screenshots + p img {
+  flex: 0 0 72vw;
+  max-width: 20rem;
+  scroll-snap-align: center;
+  height: auto;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--card);
+}
+
+/* GitHub-style alerts (> [!NOTE] etc), rendered by the blockquote hook. */
+.alert {
+  --alert: var(--accent);
+  margin: 1.5rem 0;
+  padding: 0.75rem 1rem;
+  border-left: 3px solid var(--alert);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--card);
+}
+
+.alert > :first-child { margin-top: 0; }
+.alert > :last-child { margin-bottom: 0; }
+
+.alert-title {
+  color: var(--alert);
+  font-weight: 700;
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.alert[data-alert="note"] { --alert: #4f9dea; }
+.alert[data-alert="tip"] { --alert: #3fb27f; }
+.alert[data-alert="important"] { --alert: #a97ce0; }
+.alert[data-alert="warning"] { --alert: #d9a441; }
+.alert[data-alert="caution"] { --alert: #e06c6c; }
+
+.prose h2 { font-size: 1.5rem; margin-top: 2rem; }
+.prose h3 { font-size: 1.1rem; margin-top: 1.75rem; color: var(--accent); }
+
+.prose pre {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.9rem;
+  overflow-x: auto;
+  font-size: 0.85rem;
+}
+
+.prose :not(pre) > code {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 0.1em 0.35em;
+  font-size: 0.9em;
+}
+
+footer {
+  border-top: 1px solid var(--line);
+  padding: 1.5rem 1.25rem;
+  padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
+  text-align: center;
+  color: var(--dim);
+  font-size: 0.9rem;
+}
+
+footer p { margin: 0.3rem 0; }
+
+@media (min-width: 46rem) {
+  #what-it-does + ul { grid-template-columns: 1fr 1fr; }
+  #screenshots + p img { flex-basis: 20rem; }
+}
