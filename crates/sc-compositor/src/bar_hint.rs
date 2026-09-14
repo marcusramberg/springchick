@@ -1,11 +1,11 @@
-//! Home-bar visibility while an app is fullscreen.
+//! Home-bar visibility.
 //!
-//! Outside fullscreen the pill is simply always there. Fullscreen is the case
-//! where a permanent bar is wrong — it sits over video, over a game, over
-//! whatever the user went immersive for — but hiding it outright leaves no
-//! clue that the gesture exists at all. So on entering fullscreen the pill
-//! blinks once to say "here", then fades away; touching the bar zone brings it
-//! back for a moment.
+//! The pill is not a permanent fixture: it sits over video, over a game, over
+//! whatever is in front. Hiding it outright leaves no clue the gesture exists,
+//! so on arriving in an app it blinks once to say "here", then fades away.
+//! Touching the bar zone brings it back for a moment, and it stays lit for the
+//! whole of a drag (switcher, quick-switch, grab), where it is the thing being
+//! dragged. On Home it is never drawn at all.
 //!
 //! Only the *drawn* alpha changes. The gesture zone is untouched, so a hidden
 //! pill still swipes exactly like a visible one — which is what makes fading it
@@ -16,7 +16,7 @@
 
 use std::time::Instant;
 
-/// Entering fullscreen: hold, blink down and back, hold, then fade away.
+/// Arriving in an app: hold, blink down and back, hold, then fade away.
 const BLINK_HOLD: f32 = 0.30;
 const BLINK_DIP: f32 = 0.15;
 /// How dark the blink's dip goes. Not to zero: a pill that vanishes completely
@@ -30,16 +30,28 @@ const REVEAL_IN: f32 = 0.12;
 const REVEAL_HOLD: f32 = 1.00;
 const REVEAL_OUT: f32 = 0.45;
 
+/// What the shell is showing, as far as the pill is concerned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarMode {
+    /// Home: never drawn (the gesture still works).
+    Off,
+    /// A drag is in flight — the pill is what the finger is holding, so it
+    /// stays lit for the duration.
+    Shown,
+    /// In an app: blink once on arrival, then keep out of the way.
+    Auto,
+}
+
 /// What the bar is doing right now.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
-    /// Not fullscreen: always drawn.
+    /// Drawn unconditionally (a drag is in flight).
     Steady,
-    /// Just went fullscreen: the blink-then-fade sequence, started at `Instant`.
+    /// Just arrived in an app: the blink-then-fade sequence, started at `Instant`.
     Blink(Instant),
-    /// Fullscreen and out of the way.
+    /// Out of the way.
     Hidden,
-    /// Fullscreen, but the bar zone was touched: shown again from `Instant`.
+    /// The bar zone was touched: shown again from `Instant`.
     Reveal(Instant),
 }
 
@@ -47,14 +59,14 @@ enum Phase {
 #[derive(Clone, Copy, Debug)]
 pub struct BarHint {
     phase: Phase,
-    fullscreen: bool,
+    mode: BarMode,
 }
 
 impl Default for BarHint {
     fn default() -> Self {
         BarHint {
-            phase: Phase::Steady,
-            fullscreen: false,
+            phase: Phase::Hidden,
+            mode: BarMode::Off,
         }
     }
 }
@@ -72,26 +84,25 @@ impl BarHint {
         BarHint::default()
     }
 
-    /// The foreground app's fullscreen state, as committed by the client.
-    /// Idempotent: only a change starts (or ends) the sequence, so the
-    /// per-commit caller can hand it the same value every frame.
-    pub fn set_fullscreen(&mut self, fullscreen: bool, now: Instant) {
-        if fullscreen == self.fullscreen {
+    /// What the shell is showing. Idempotent: only a change restarts a
+    /// sequence, so the per-frame caller can hand it the same value forever.
+    pub fn set_mode(&mut self, mode: BarMode, now: Instant) {
+        if mode == self.mode {
             return;
         }
-        self.fullscreen = fullscreen;
-        self.phase = if fullscreen {
-            Phase::Blink(now)
-        } else {
-            Phase::Steady
+        self.mode = mode;
+        self.phase = match mode {
+            BarMode::Off => Phase::Hidden,
+            BarMode::Shown => Phase::Steady,
+            BarMode::Auto => Phase::Blink(now),
         };
     }
 
     /// A finger landed in the bar's gesture zone. Brings a hidden pill back so
-    /// the user can see what they are dragging; a no-op outside fullscreen,
-    /// where it never went away.
+    /// the user can see what they are dragging; a no-op on Home, where the pill
+    /// stays out of it.
     pub fn touched(&mut self, now: Instant) {
-        if self.fullscreen {
+        if self.mode == BarMode::Auto {
             self.phase = Phase::Reveal(now);
         }
     }
@@ -177,18 +188,30 @@ mod tests {
     }
 
     #[test]
-    fn outside_fullscreen_the_bar_is_simply_drawn() {
-        let hint = BarHint::new();
+    fn on_home_the_bar_is_never_drawn() {
+        let mut hint = BarHint::new();
         let t0 = Instant::now();
-        assert_eq!(hint.alpha(t0), 1.0);
+        hint.set_mode(BarMode::Off, t0);
+        assert_eq!(hint.alpha(t0), 0.0);
+        hint.touched(t0);
+        assert_eq!(hint.alpha(at(t0, REVEAL_IN)), 0.0);
         assert!(!hint.is_animating(t0));
     }
 
     #[test]
-    fn entering_fullscreen_blinks_then_fades_out() {
+    fn during_a_drag_the_bar_is_simply_drawn() {
         let mut hint = BarHint::new();
         let t0 = Instant::now();
-        hint.set_fullscreen(true, t0);
+        hint.set_mode(BarMode::Shown, t0);
+        assert_eq!(hint.alpha(at(t0, 10.0)), 1.0);
+        assert!(!hint.is_animating(t0));
+    }
+
+    #[test]
+    fn arriving_in_an_app_blinks_then_fades_out() {
+        let mut hint = BarHint::new();
+        let t0 = Instant::now();
+        hint.set_mode(BarMode::Auto, t0);
 
         // Visible at first, so the eye catches it where it already was.
         assert_eq!(hint.alpha(t0), 1.0);
@@ -209,7 +232,7 @@ mod tests {
     fn touching_the_bar_brings_it_back_then_hides_it_again() {
         let mut hint = BarHint::new();
         let t0 = Instant::now();
-        hint.set_fullscreen(true, t0);
+        hint.set_mode(BarMode::Auto, t0);
         let settled = at(t0, BarHint::BLINK_TOTAL + 1.0);
         hint.advance(settled);
         assert_eq!(hint.alpha(settled), 0.0);
@@ -225,27 +248,29 @@ mod tests {
     }
 
     #[test]
-    fn leaving_fullscreen_restores_a_permanent_bar() {
+    fn a_drag_ending_back_in_the_app_blinks_again() {
         let mut hint = BarHint::new();
         let t0 = Instant::now();
-        hint.set_fullscreen(true, t0);
+        hint.set_mode(BarMode::Auto, t0);
         let hidden = at(t0, BarHint::BLINK_TOTAL + 1.0);
         hint.advance(hidden);
         assert_eq!(hint.alpha(hidden), 0.0);
 
-        hint.set_fullscreen(false, hidden);
+        hint.set_mode(BarMode::Shown, hidden);
         assert_eq!(hint.alpha(hidden), 1.0);
-        assert!(!hint.is_animating(hidden));
+        hint.set_mode(BarMode::Auto, hidden);
+        assert_eq!(hint.alpha(hidden), 1.0);
+        assert!(hint.alpha(at(hidden, BarHint::BLINK_TOTAL)) < 0.001);
     }
 
     #[test]
-    fn the_same_fullscreen_value_does_not_restart_the_blink() {
+    fn the_same_mode_does_not_restart_the_blink() {
         let mut hint = BarHint::new();
         let t0 = Instant::now();
-        hint.set_fullscreen(true, t0);
+        hint.set_mode(BarMode::Auto, t0);
         // A commit every frame must not hold the pill on screen forever.
         for ms in [10, 200, 800, 1600] {
-            hint.set_fullscreen(true, at(t0, ms as f32 / 1000.0));
+            hint.set_mode(BarMode::Auto, at(t0, ms as f32 / 1000.0));
         }
         let late = at(t0, BarHint::BLINK_TOTAL + 0.5);
         hint.advance(late);
@@ -253,19 +278,10 @@ mod tests {
     }
 
     #[test]
-    fn touching_outside_fullscreen_changes_nothing() {
-        let mut hint = BarHint::new();
-        let t0 = Instant::now();
-        hint.touched(t0);
-        assert_eq!(hint.alpha(t0), 1.0);
-        assert!(!hint.is_animating(t0));
-    }
-
-    #[test]
     fn a_touch_mid_blink_takes_over_from_it() {
         let mut hint = BarHint::new();
         let t0 = Instant::now();
-        hint.set_fullscreen(true, t0);
+        hint.set_mode(BarMode::Auto, t0);
         // Grabbing the bar while it is still blinking must leave it lit, not
         // let the blink's own fade run out from under the finger.
         let mid = at(t0, BLINK_HOLD + BLINK_DIP);
