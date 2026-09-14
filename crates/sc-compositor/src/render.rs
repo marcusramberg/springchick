@@ -1356,8 +1356,13 @@ fn draw_closing(
 fn pass_chrome(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, rotated: bool) {
     // Always draw the bar on top: it is the only way back out of a fullscreen
     // app, so it stays even while rotated (where it reads as a side handle).
-    ctx.skia
-        .draw_bar_overlay(size.w, size.h, ctx.bar_alpha, ctx.skia_flip_y);
+    ctx.skia.draw_bar_overlay(
+        size.w,
+        size.h,
+        ctx.bar_alpha,
+        ctx.skia_flip_y,
+        ctx.scene.active_card(),
+    );
 
     // The OSD sits above everything, including a fullscreen app — but it is
     // drawn portrait, so it is suppressed while the app is rotated rather than

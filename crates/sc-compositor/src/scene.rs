@@ -179,6 +179,17 @@ impl Scene {
     pub fn window_covers_screen(&self) -> bool {
         self.window.is_none_or(|(_, t)| t.scale >= 0.99)
     }
+
+    /// `(center_x, center_y, scale)` of the card the home pill rides: the live
+    /// window when there is one, else the deck's front card (`cards` is sorted
+    /// ascending z). `None` on Home, where there is no card and no pill.
+    /// Fullscreen is the identity transform, so the pill sits where it always
+    /// did without the caller having to special-case it.
+    pub fn active_card(&self) -> Option<(f32, f32, f32)> {
+        self.window
+            .map(|(_, t)| (t.center_x, t.center_y, t.scale))
+            .or_else(|| self.cards.last().map(|c| (c.center_x, c.center_y, c.scale)))
+    }
 }
 
 /// Compute the scene from the current UiState. `usable_origin` is the physical
@@ -536,6 +547,44 @@ mod tests {
 
     const TEST_SIZE: (i32, i32) = (1224, 2700);
     const TEST_RADIUS: f32 = 40.0;
+
+    #[test]
+    fn the_pill_rides_the_front_card_and_stays_off_home() {
+        let (w, h) = (TEST_SIZE.0 as f32, TEST_SIZE.1 as f32);
+        let home = compute_scene(&UiState::home(0, 1), TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
+        assert_eq!(home.active_card(), None);
+
+        // A deck: the front card is the top of the ascending-z list, not the
+        // first one laid out.
+        let card = |z: usize, cx: f32| switcher::CardRect {
+            toplevel: 0,
+            center_x: cx,
+            center_y: h / 2.0,
+            scale: 0.62,
+            corner_radius: TEST_RADIUS,
+            z,
+            alpha: 1.0,
+            dim: 0.0,
+        };
+        let deck = Scene {
+            cards: vec![card(0, 100.0), card(1, 700.0)],
+            ..home.clone()
+        };
+        assert_eq!(deck.active_card(), Some((700.0, h / 2.0, 0.62)));
+
+        // Fullscreen is the identity transform, so the pill lands where it
+        // always did.
+        let app = compute_scene(
+            &UiState::App {
+                toplevel: 0,
+                app_id: "a".into(),
+            },
+            TEST_SIZE,
+            (0.0, 0.0),
+            TEST_RADIUS,
+        );
+        assert_eq!(app.active_card(), Some((w / 2.0, h / 2.0, 1.0)));
+    }
 
     #[test]
     fn home_state_no_window() {

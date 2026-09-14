@@ -533,17 +533,37 @@ impl SkiaGl {
         }
     }
 
-    /// Draw bar overlay on top of the app (return-home affordance).
     /// Draw the home-affordance bar over the app. `alpha` (0..=1) fades it out
     /// when an exclusive-zone layer surface (e.g. the OSK) covers the bottom.
-    pub fn draw_bar_overlay(&mut self, width: i32, height: i32, alpha: f32, flip_y: bool) {
+    ///
+    /// `card` is the dragged card's `(center_x, center_y, scale)`, which the
+    /// pill rides: the same scale-about-screen-centre map the card is drawn
+    /// with, so it stays in the card's own bottom band instead of sitting on the
+    /// screen edge while the card flies around above it.
+    pub fn draw_bar_overlay(
+        &mut self,
+        width: i32,
+        height: i32,
+        alpha: f32,
+        flip_y: bool,
+        card: Option<(f32, f32, f32)>,
+    ) {
         if alpha <= 0.0 {
             return;
         }
         let model = ShellModel::default();
         let layout = sc_layout::compute(width as f32, height as f32, 0, &model);
         self.with_overlay_canvas(width, height, flip_y, |canvas| {
-            draw_bar(canvas, &layout, alpha)
+            if let Some((cx, cy, scale)) = card {
+                canvas.save();
+                canvas.translate((cx, cy));
+                canvas.scale((scale, scale));
+                canvas.translate((-width as f32 / 2.0, -height as f32 / 2.0));
+                draw_bar(canvas, &layout, alpha);
+                canvas.restore();
+            } else {
+                draw_bar(canvas, &layout, alpha);
+            }
         });
     }
 
