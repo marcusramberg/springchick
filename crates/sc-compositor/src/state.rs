@@ -386,6 +386,10 @@ pub(crate) struct State {
     /// them — otherwise a re-themed or reinstalled app keeps its old pixels.
     pub catalog_gen: u64,
     pub toplevels: Vec<Option<AppToplevel>>,
+    /// Toplevels the last frame actually drew (foreground app + deck cards).
+    /// A commit from anything else can't change the screen — see
+    /// [`State::commit_affects_frame`].
+    pub drawn_toplevels: Vec<ToplevelId>,
     pub children: Vec<Child>,
     /// Apps spawned and awaiting their first toplevel — drives the pulsing
     /// launch icons. An entry is dropped when its window maps, its process
@@ -832,6 +836,7 @@ impl State {
             icon_cache,
             catalog_gen: 0,
             toplevels: Vec::new(),
+            drawn_toplevels: Vec::new(),
             children: Vec::new(),
             launching: Vec::new(),
             uninstalling: Vec::new(),
