@@ -2,16 +2,6 @@
 
 ## A Wayland compositor for Linux phones, written in Rust with Smithay and Skia
 
-_The Authorative home for this repo is <https://code.bas.es/marcus/springchick/> -
-Github is a mirror to allow easier contributions and visibility._
-
-> [!IMPORTANT]
->
-> This project is made with LLMs assist, so if you have philosophical
-> objections to that, please don't use it. I do not consider this to be a "slop"
-> project as I've sunk a lot of time and effort into it, but I accept everyone has
-> their own opinions on the matter.
-
 <img align="right" src="./assets/springchick.svg" alt="Right aligned icon">
 
 ## What it does
@@ -30,6 +20,13 @@ Github is a mirror to allow easier contributions and visibility._
 - **Power efficient** uses systemd user slices for background
   tasks, uclamp to ensur smooth animations, and avoids unnecessary redraws. Also
   supports VRR (Depending on GPU support)
+
+> [!IMPORTANT]
+>
+> This project is made with LLMs assist, so if you have philosophical
+> objections to that, please don't use it. I do not consider this to be a "slop"
+> project as I've sunk a lot of time and effort into it, but I accept everyone has
+> their own opinions on the matter.
 
 ## Screenshots
 
@@ -107,3 +104,8 @@ Building the packages yourself: [packaging/README.md](packaging/README.md).
 - First class PWA integration with firefoxpwa
 - Closer integration with waydroid
 - Folder support
+
+## Source Code
+
+_The Authorative home for this repo is <https://code.bas.es/marcus/springchick/> -
+Github is a mirror to allow easier contributions and visibility._
