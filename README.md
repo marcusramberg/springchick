@@ -55,8 +55,13 @@ sudo curl -JO --output-dir /etc/apk/keys \
   https://code.bas.es/api/packages/marcus/alpine/key
 echo 'https://code.bas.es/api/packages/marcus/alpine/edge/nightly' \
   | sudo tee -a /etc/apk/repositories
-sudo apk update && sudo apk add springchick
+sudo apk update && sudo apk add postmarketos-ui-springchick
 ```
+
+`postmarketos-ui-springchick` pulls in `springchick` plus the session bits
+(wvkbd + its systemd user unit, the portal stack, gnome-keyring, tinydm). If
+you would rather wire that up yourself, `apk add springchick` alone is just the
+compositor and its `springchick-session` wrapper.
 
 ### Mobian / Debian
 

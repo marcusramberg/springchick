@@ -1,0 +1,51 @@
+# Session wiring for postmarketOS / Alpine — the apk equivalent of what
+# nix/module.nix does on NixOS: pull in the pieces a usable phone session needs
+# around the compositor, and ship the session's own systemd user units.
+# Alpine-only by design: the same wiring on Debian/Arch is a different package
+# set, and the binaries themselves stay in the distro-agnostic `springchick`
+# package (see nfpm.yaml).
+name: postmarketos-ui-springchick
+arch: ${PKG_ARCH}
+version: ${PKG_VERSION}
+release: ${PKG_RELEASE}
+section: x11
+priority: optional
+maintainer: Marcus Ramberg <marcus.ramberg@gmail.com>
+description: |
+  springchick phone session for postmarketOS: keyboard, portals, keyring, greeter.
+vendor: springchick
+homepage: https://code.bas.es/marcus/springchick
+license: GPL-2.0-only
+
+# Version-unpinned on purpose: both land in the same repo from one build, so
+# apk just resolves the newest springchick. An exact pin would break partial
+# upgrades for no gain.
+depends:
+  # The compositor, the session entry point and the wayland-sessions entry.
+  - springchick
+  # Greeter that reads /usr/share/wayland-sessions and runs springchick-session.
+  - tinydm
+  # wvkbd.service below.
+  - wvkbd-mobintl
+  # xdg-desktop-portal is D-Bus activated; the backends are what
+  # /usr/share/xdg-desktop-portal/springchick-portals.conf (main package)
+  # selects: gnome;gtk; default, plus phrosh for the file/app choosers.
+  - xdg-desktop-portal
+  - xdg-desktop-portal-gnome
+  - xdg-desktop-portal-gtk
+  - xdg-desktop-portal-phosh
+  # org.freedesktop.secrets for the Secret portal and plain libsecret apps.
+  - gnome-keyring
+  # Suspend/power-off from the shell's own keybinds.
+  - polkit
+  # wpctl, which the volume keybinds shell out to.
+  - wireplumber
+
+contents:
+  - src: packaging/files/wvkbd.service
+    dst: /usr/lib/systemd/user/wvkbd.service
+  # Enabling a user unit at install time has to be a .wants symlink — there is
+  # no user manager running for apk's scriptlets to talk to.
+  - dst: /usr/lib/systemd/user/springchick.service.wants/wvkbd.service
+    type: symlink
+    src: ../wvkbd.service
