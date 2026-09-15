@@ -554,34 +554,26 @@ impl SkiaGl {
     /// Draw the home-affordance bar over the app. `alpha` (0..=1) fades it out
     /// when an exclusive-zone layer surface (e.g. the OSK) covers the bottom.
     ///
-    /// `card` is the dragged card's `(center_x, center_y, scale)`, which the
-    /// pill rides: the same scale-about-screen-centre map the card is drawn
-    /// with, so it stays in the card's own bottom band instead of sitting on the
-    /// screen edge while the card flies around above it.
+    /// `card` is the drawn rect of the card the pill rides, which puts it just
+    /// under that card's own bottom edge instead of on the screen edge while the
+    /// card flies around above it. `None` draws it in the screen's bar band.
     pub fn draw_bar_overlay(
         &mut self,
         width: i32,
         height: i32,
         alpha: f32,
         flip_y: bool,
-        card: Option<(f32, f32, f32)>,
+        card: Option<sc_layout::Rect>,
     ) {
         if alpha <= 0.0 {
             return;
         }
-        let model = ShellModel::default();
-        let layout = sc_layout::compute(width as f32, height as f32, 0, &model);
+        let pill = match card {
+            Some(c) => sc_layout::pill_under(c, width as f32, height as f32),
+            None => sc_layout::pill_rect(width as f32, height as f32),
+        };
         self.with_overlay_canvas(width, height, flip_y, |canvas| {
-            if let Some((cx, cy, scale)) = card {
-                canvas.save();
-                canvas.translate((cx, cy));
-                canvas.scale((scale, scale));
-                canvas.translate((-width as f32 / 2.0, -height as f32 / 2.0));
-                draw_bar(canvas, &layout, alpha);
-                canvas.restore();
-            } else {
-                draw_bar(canvas, &layout, alpha);
-            }
+            draw_pill(canvas, pill, alpha)
         });
     }
 
@@ -1341,9 +1333,7 @@ fn draw_dots(canvas: &skia_safe::Canvas, layout: &Layout, current_page: usize) {
     }
 }
 
-fn draw_bar(canvas: &skia_safe::Canvas, layout: &Layout, alpha: f32) {
-    let pill = sc_layout::pill_in_bar(layout.bar_rect);
-
+fn draw_pill(canvas: &skia_safe::Canvas, pill: sc_layout::Rect, alpha: f32) {
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     let a = (180.0 * alpha.clamp(0.0, 1.0)).round() as u8;

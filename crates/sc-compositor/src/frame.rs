@@ -809,6 +809,7 @@ impl State {
             app_popups: &prep.app_popups,
             layer_popups: &prep.layer_popups,
             bar_alpha: prep.bar_alpha,
+            pill_anchor: None,
             pressed_app,
             launch_pulses: &self.icon_overlays.launch_pulses,
             running_apps: &self.icon_overlays.running_apps,

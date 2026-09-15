@@ -165,6 +165,28 @@ pub fn pill_rect(width: f32, height: f32) -> Rect {
     pill_in_bar(bar_rect(width, height))
 }
 
+/// The home-pill rectangle for a card the pill is riding, given the card's
+/// *drawn* rect (the app's actual pixels, not the nominal card slot) and the
+/// output size.
+///
+/// Same relationship the screen-edge pill has to a fullscreen app — centered on
+/// the app, its own height below the app's bottom edge — scaled down with the
+/// card, so nothing jumps as a card grows back to fullscreen. Anchoring to the
+/// drawn rect is the load-bearing part: the card slot is the whole output
+/// scaled, but the buffer inside it is only the *usable* area, so measuring from
+/// the slot leaves a gap as wide as everything reserved above (a top bar) plus
+/// the gesture zone.
+pub fn pill_under(card: Rect, width: f32, height: f32) -> Rect {
+    let scale = if width > 0.0 { card.w / width } else { 1.0 };
+    let pill_w = card.w * 0.35;
+    Rect {
+        x: card.x + (card.w - pill_w) / 2.0,
+        y: card.y + card.h + (gesture_exclusive_zone(height) / 2.0 - PILL_HEIGHT) * scale,
+        w: pill_w,
+        h: PILL_HEIGHT * scale,
+    }
+}
+
 /// Shared grid-cell geometry, derived once from output dimensions.
 struct GridMetrics {
     /// Top of the dock band, i.e. the bottom edge of the page-dots band.
@@ -476,6 +498,41 @@ pub fn hit_test_arrange(layout: &Layout, x: f32, y: f32) -> Hit {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_pill_meets_a_fullscreen_card_exactly_where_the_screen_pill_sits() {
+        let (w, h) = (1224.0, 2700.0);
+        // A fullscreen app fills the usable area: the whole output minus the
+        // gesture zone it reserves at the bottom.
+        let app = Rect {
+            x: 0.0,
+            y: 0.0,
+            w,
+            h: h - gesture_exclusive_zone(h),
+        };
+        let under = pill_under(app, w, h);
+        let screen = pill_rect(w, h);
+        // Continuity: a card settling back to fullscreen must not make the pill
+        // hop, so the two placements have to agree at scale 1.
+        assert!((under.x - screen.x).abs() < 0.01, "{under:?} vs {screen:?}");
+        assert!((under.y - screen.y).abs() < 0.01, "{under:?} vs {screen:?}");
+        assert!((under.w - screen.w).abs() < 0.01);
+        assert!((under.h - screen.h).abs() < 0.01);
+
+        // Half-size card: everything about the pill halves with it, including
+        // the gap below the card's own pixels.
+        let half = Rect {
+            x: 100.0,
+            y: 200.0,
+            w: w / 2.0,
+            h: app.h / 2.0,
+        };
+        let small = pill_under(half, w, h);
+        assert!((small.w - under.w / 2.0).abs() < 0.01);
+        assert!((small.h - under.h / 2.0).abs() < 0.01);
+        let gap = |p: Rect, card: Rect| p.y - (card.y + card.h);
+        assert!((gap(small, half) - gap(under, app) / 2.0).abs() < 0.01);
+    }
+
     use super::*;
     use sc_shell_model::{ShellModel, PAGE_CAP};
 
