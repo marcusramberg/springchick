@@ -4,6 +4,12 @@ Binary packages for postmarketOS/Alpine (`.apk`), Mobian/Debian (`.deb`) and
 Arch (`.pkg.tar.zst`), hosted in the Forgejo package registries on
 code.bas.es. NixOS is not packaged here — it has the flake.
 
+Alpine gets a second package, `postmarketos-ui-springchick`: the apk equivalent
+of `nix/module.nix` (session dependencies + the wvkbd user unit), built from
+`packaging/nfpm-ui.yaml` by `package.sh`. Other distros do not have it — the
+equivalent wiring there is a differently-named package with a different
+dependency set.
+
 ```bash
 packaging/build.sh debian arm64        # -> dist/springchick_0.1.0-1_arm64.deb
 FORGEJO_TOKEN=... packaging/publish.sh # uploads everything in dist/
@@ -101,4 +107,8 @@ echo "deb [signed-by=/etc/apt/keyrings/forgejo-marcus.asc] https://code.bas.es/a
 No native source recipes (APKBUILD / `debian/` / PKGBUILD). These are binary
 packages built from this tree; upstream inclusion in aports or Debian would
 need real recipes and a vendored-source tarball (the `smithay` git dependency
-means `cargo build` needs network otherwise).
+means `cargo build` needs network otherwise). `postmarketos-ui-springchick`
+borrows the postmarketOS UI naming convention but cannot carry the
+`pmbootstrap` half of it (`_pmb_groups`, `_pmb_recommends`, listing in
+`pmbootstrap init`) — that metadata is read from the pmaports tree, not from a
+compiled package.

@@ -1,0 +1,22 @@
+[Unit]
+Description=On-screen keyboard
+Documentation=https://git.sr.ht/~proycon/wvkbd
+# Torn down with the session, whatever starts us.
+PartOf=graphical-session.target
+
+[Service]
+# --hidden + --auto: stay off screen until an app focuses a text input.
+# SIGRTMIN cycles the layout — springchick's stock config.toml binds that to
+# a long press on volume-down ("pkill -SIGRTMIN -f wvkbd-mobintl").
+ExecStart=/usr/bin/wvkbd-mobintl --alpha 220 --hidden --auto
+# Wanted by springchick.service, so we come up alongside it and the socket
+# may not exist yet; keep retrying until the compositor publishes
+# WAYLAND_DISPLAY into the user environment (see session.rs).
+Restart=always
+RestartSec=5
+
+[Install]
+# Not graphical-session.target: the compositor is what pulls that target up,
+# and only after it has imported WAYLAND_DISPLAY. Pulling off the compositor
+# unit is how the FP5 image does it.
+WantedBy=springchick.service
