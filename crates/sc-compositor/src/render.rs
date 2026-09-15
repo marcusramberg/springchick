@@ -287,6 +287,13 @@ pub struct DrawCtx<'a> {
     pub layer_popups: &'a [(WlSurface, (i32, i32))],
     /// Home-bar opacity (faded out when the OSK covers it).
     pub bar_alpha: f32,
+    /// Drawn rect of the card the home pill rides, filled in by the card passes
+    /// as they draw (the deck leaves the front card's, since it walks ascending
+    /// z). `None` means no card this frame and the pill sits in the screen's own
+    /// bar band. Tracks *drawn* bounds, not the nominal slot: a card is the
+    /// client's buffer anchored at the slot's top-left, so with anything
+    /// reserved above (a top bar) the pixels end well short of the slot bottom.
+    pub pill_anchor: Option<sc_layout::Rect>,
     /// Screen-wide black scrim, `0.0`..=`1.0`: the dip that covers an
     /// orientation change. `0.0` on any ordinary frame.
     pub dim: f32,
@@ -1060,6 +1067,10 @@ fn pass_app_card(
             ctx.skia_flip_y,
         );
     }
+    if !rotation.swaps_axes() {
+        let (x, y, w, h) = card.drawn_bounds(&plan.app_elements, ctx.app_scale);
+        ctx.pill_anchor = Some(sc_layout::Rect { x, y, w, h });
+    }
     let elements = std::mem::take(&mut plan.app_elements);
     draw_scaled_card(renderer, framebuffer, size, ctx, elements, card, rotation)
 }
@@ -1158,6 +1169,16 @@ fn pass_switcher_cards(
         } else {
             placement.drawn_bounds(&elements, ctx.app_scale)
         };
+        if !rotation.swaps_axes() {
+            // Ascending z: the last card to draw is the front one, and its rect
+            // is what stays here for the pill.
+            ctx.pill_anchor = Some(sc_layout::Rect {
+                x: dx,
+                y: dy,
+                w: dw,
+                h: dh,
+            });
+        }
         let decor = crate::skia_gl::CardDecor {
             x: dx,
             y: dy,
@@ -1361,7 +1382,7 @@ fn pass_chrome(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, rotated: bool) 
         size.h,
         ctx.bar_alpha,
         ctx.skia_flip_y,
-        ctx.scene.active_card(),
+        ctx.pill_anchor,
     );
 
     // The OSD sits above everything, including a fullscreen app — but it is
