@@ -30,12 +30,14 @@ use tracing::{debug, warn};
 const GL_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
 type GlGetIntegerv = unsafe extern "system" fn(pname: u32, params: *mut c_int);
 type GlFinish = unsafe extern "system" fn();
+type GlFlush = unsafe extern "system" fn();
 
 /// Skia Ganesh-GL renderer bound to Smithay's existing GLES/EGL context.
 pub struct SkiaGl {
     context: Option<DirectContext>,
     gl_get_integerv: Option<GlGetIntegerv>,
     gl_finish: Option<GlFinish>,
+    gl_flush: Option<GlFlush>,
     setup_failed: bool,
     cached_surface: Option<CachedSurface>,
     icon_images: HashMap<String, Image>,
@@ -189,6 +191,7 @@ impl SkiaGl {
             context: None,
             gl_get_integerv: None,
             gl_finish: None,
+            gl_flush: None,
             setup_failed: false,
             cached_surface: None,
             icon_images: HashMap::new(),
@@ -239,6 +242,12 @@ impl SkiaGl {
                 Some(unsafe { std::mem::transmute::<*const c_void, GlFinish>(finish_ptr) });
         }
 
+        let flush_ptr = loader("glFlush");
+        if !flush_ptr.is_null() {
+            self.gl_flush =
+                Some(unsafe { std::mem::transmute::<*const c_void, GlFlush>(flush_ptr) });
+        }
+
         self.context = Some(context);
         self.gl_get_integerv = Some(gl_get_integerv);
         debug!("Skia Ganesh-GL context initialized");
@@ -251,6 +260,15 @@ impl SkiaGl {
     pub fn finish_gpu(&self) {
         if let Some(finish) = self.gl_finish {
             unsafe { finish() };
+        }
+    }
+
+    /// Push all submitted GL commands to the GPU without waiting for them.
+    /// Needed after inserting a fence: the fence only becomes signalable once
+    /// the commands before it have actually been flushed to the hardware.
+    pub fn flush_gpu(&self) {
+        if let Some(flush) = self.gl_flush {
+            unsafe { flush() };
         }
     }
 

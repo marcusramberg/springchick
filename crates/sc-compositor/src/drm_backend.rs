@@ -17,13 +17,15 @@ use smithay::backend::drm::{
     DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata, DrmEventTime, DrmNode, GbmBufferedSurface,
     NodeType, VrrSupport,
 };
+use smithay::backend::egl::fence::EGLFence;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
     AbsolutePositionEvent, ButtonState, Event as InputEventTrait, InputEvent, KeyboardKeyEvent,
     PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexProgram};
+use smithay::backend::renderer::gles::{Capability, GlesRenderer, GlesTexProgram};
+use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::renderer::{Bind, ImportDma, Renderer, RendererSuper};
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
@@ -900,6 +902,25 @@ impl App {
         }
     }
 
+    /// Insert a GPU fence after the frame's draw calls so the KMS commit can
+    /// wait on it instead of the CPU. `None` when the driver can't export one,
+    /// which leaves the caller on the glFinish path.
+    fn frame_fence(&mut self) -> Option<SyncPoint> {
+        if !self
+            .drm
+            .renderer
+            .capabilities()
+            .contains(&Capability::ExportFence)
+        {
+            return None;
+        }
+        let fence = EGLFence::create(self.drm.renderer.egl_context().display()).ok()?;
+        // The fence can only signal once the commands ahead of it have reached
+        // the hardware.
+        self.state.skia.flush_gpu();
+        Some(SyncPoint::from(fence))
+    }
+
     /// Render one frame to the scanout buffer and queue a page-flip.
     fn render(&mut self) {
         if !self.drm.active || self.drm.pending_flip {
@@ -987,10 +1008,16 @@ impl App {
             };
         drop(framebuffer);
 
-        // Fence the frame: block until smithay + Skia GL work has completed so
-        // the page-flip never scans out a half-rendered buffer (tearing). We
-        // have ~6ms of slack under the 11ms 90Hz budget, so the stall is free.
-        self.state.skia.finish_gpu();
+        // Fence the frame so the page-flip never scans out a half-rendered
+        // buffer (tearing). An exportable fence is handed to the atomic commit
+        // as IN_FENCE_FD and the *display controller* does the waiting; only
+        // when the driver can't export one do we fall back to glFinish, which
+        // stalls the CPU for the whole GPU composite and costs us the rest of
+        // the frame budget we'd otherwise spend dispatching client commits.
+        let sync = self.frame_fence();
+        if sync.is_none() {
+            self.state.skia.finish_gpu();
+        }
 
         // Queue the page-flip; vblank fires the next render.
         //
@@ -1007,7 +1034,7 @@ impl App {
             match self
                 .drm
                 .gbm_surface
-                .queue_buffer(None, Some(flip_damage), ())
+                .queue_buffer(sync, Some(flip_damage), ())
             {
                 Ok(()) => {
                     self.drm.pending_flip = true;
