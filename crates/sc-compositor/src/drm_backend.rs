@@ -624,7 +624,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // primes a frame when no page-flip is in flight and a 50ms gap there would
     // be a visible stutter. Idle, nothing needs that: the long-press threshold
     // and the idle-blank countdown are decided on timescales where 50ms is
-    // invisible, and polling faster than that only burns battery.
+    // invisible, and polling faster than that only burns battery. See
+    // `active_tick` for why a dark panel is idle regardless of `is_animating`.
     const ACTIVE_TIMEOUT: Duration = Duration::from_millis(2);
     const IDLE_TIMEOUT: Duration = Duration::from_millis(50);
 
@@ -632,7 +633,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut uclamp = crate::uclamp::Uclamp::new(app.state.uclamp_min);
 
     while running.load(Ordering::Relaxed) && app.state.running {
-        let timeout = if app.state.is_animating(Instant::now()) {
+        // Dark with no mirror means no target to present to, so nothing
+        // `is_animating` reports can be made visible — and since `render`
+        // returns before `advance_frame` in that state, anything unsettled when
+        // the panel went off never advances again and would pin the 2ms timeout
+        // for as long as the screen is dark.
+        let timeout = if active_tick(
+            app.state.blank.is_blanked(),
+            app.drm.mirroring(),
+            app.state.is_animating(Instant::now()),
+        ) {
             ACTIVE_TIMEOUT
         } else {
             IDLE_TIMEOUT
@@ -678,6 +688,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let blanked = app.state.blank.is_blanked();
         app.state.output_power.sync(blanked);
         app.apply_blanking();
+        // After the panel is actually off: a lock engaged while dark gets no
+        // frame to confirm from.
+        if blanked && !app.drm.mirroring() {
+            app.state.session_lock.confirm_dark();
+        }
         app.apply_gamma();
         // Drive frames that no vblank is priming: a fresh commit/input
         // (`needs_render`) or an animation that started on an otherwise idle
@@ -706,6 +721,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     app.shutdown();
 
     Ok(())
+}
+
+/// Whether the event loop should run at its tight timeout.
+///
+/// Dark with no mirror means no target to present to, so nothing `is_animating`
+/// reports can be made visible — and `render` returns before `advance_frame` in
+/// that state, so anything unsettled when the panel went off never advances
+/// again and would otherwise pin the tight timeout until the screen came back.
+fn active_tick(blanked: bool, mirroring: bool, animating: bool) -> bool {
+    animating && (!blanked || mirroring)
 }
 
 /// Aggregate owned by the calloop loop.
@@ -1423,4 +1448,27 @@ fn find_output(
         }
     }
     Ok((first.connector, first.crtc, first.mode))
+}
+
+#[cfg(test)]
+mod tick_tests {
+    use super::active_tick;
+
+    #[test]
+    fn dark_panel_never_takes_the_tight_timeout() {
+        assert!(!active_tick(true, false, true));
+        assert!(!active_tick(true, false, false));
+    }
+
+    #[test]
+    fn a_mirror_is_still_a_target_while_dark() {
+        assert!(active_tick(true, true, true));
+        assert!(!active_tick(true, true, false));
+    }
+
+    #[test]
+    fn lit_panel_follows_the_animation() {
+        assert!(active_tick(false, false, true));
+        assert!(!active_tick(false, false, false));
+    }
 }

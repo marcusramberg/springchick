@@ -187,6 +187,18 @@ impl SessionLock {
             self.frames += 1;
         }
     }
+
+    /// Confirm without waiting for a frame. Only valid with the panel dark:
+    /// `render` returns before `advance_frame` while blanked, so `tick` never
+    /// runs and a lock engaged then would stay pending until the screen came
+    /// back — measured at 63s, pinning the event loop at its active timeout the
+    /// whole time. Nothing is displayed, so the confirmation is already earned.
+    pub fn confirm_dark(&mut self) {
+        if let Some(confirmation) = self.pending.take() {
+            confirmation.lock();
+            info!("session locked (panel dark)");
+        }
+    }
 }
 
 impl SessionLockHandler for State {
