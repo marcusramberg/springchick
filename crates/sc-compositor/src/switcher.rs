@@ -40,8 +40,9 @@ const FOLDED_PEEK_FRAC: f32 = 0.17;
 /// How far (fraction of front card width) a card slides right per unit of scroll
 /// once it has passed the front slot and is leaving to the right.
 const SLIDE_OFF_FRAC: f32 = 1.15;
-/// Fraction of its own width a passed card keeps on screen: it parks against the
-/// right edge instead of leaving, so the deck always shows what you came from.
+/// Fraction of its own width the newest passed card keeps on screen: it parks
+/// against the right edge instead of leaving, so the deck shows what you came
+/// from. Cards older than that keep sliding right and off screen.
 const PASSED_PEEK_FRAC: f32 = 0.28;
 /// Extra darkening per step back in the stack. Continuous in the (fractional)
 /// depth so scrolling ramps a card's dim smoothly as it moves toward the front.
@@ -59,8 +60,9 @@ fn depth_dim(depth: f32) -> f32 {
 ///
 /// `scroll` is a continuous focus index into the deck (carousel): `0` puts
 /// `cards[0]` in the front slot with the rest fanned behind to the left; as it
-/// grows the whole deck pans right — the focused card slides off the right edge
-/// and the next card scales up into the front slot.
+/// grows the whole deck pans right — the focused card slides off the right edge,
+/// parks as the right-hand sliver, and pushes the sliver it replaces away off
+/// screen, while the next card scales up into the front slot.
 ///
 /// `close` optionally names a toplevel being dragged along the close axis and
 /// its signed progress: positive lifts the card upward by `progress * h` until
@@ -96,7 +98,16 @@ pub fn layout(
             let center_x = if rel >= 0.0 {
                 front_cx - rel * gap_back // fanned to the left
             } else {
-                (front_cx + (-rel) * slide_off).min(passed_cap) // passed: parks right
+                // Passed cards: the newest slides out of the front slot and
+                // parks at the right edge; each older step continues a further
+                // card-width right, so swiping on pushes the outgoing sliver
+                // off screen instead of piling cards up behind it.
+                let p = -rel;
+                if p <= 1.0 {
+                    (front_cx + p * slide_off).min(passed_cap)
+                } else {
+                    passed_cap + (p - 1.0) * front_w
+                }
             };
             // A card being closed only slides — its size never changes.
             let close_progress = match close {
@@ -104,9 +115,16 @@ pub fn layout(
                 _ => 0.0,
             };
 
-            // Draw/hit priority: front slot on top, passed cards above it (they
-            // slide over the deck), cards behind lowest. Monotonic in -rel.
-            let z = ((-rel + 100.0) * 10.0) as usize;
+            // Draw/hit priority: of the cards parked against the right edge the
+            // nearest one (the card immediately above the focused card in the
+            // stack) is topmost, so the right-hand sliver is what you just came
+            // from, not always the front of the whole MRU list. Above the front
+            // slot (they slide over the deck), then the fan behind it by depth.
+            let z = if rel < 0.0 {
+                (2000.0 + rel * 10.0) as usize
+            } else {
+                (1000.0 - rel * 10.0) as usize
+            };
 
             CardRect {
                 toplevel,
@@ -338,20 +356,39 @@ mod tests {
     }
 
     #[test]
-    fn passed_cards_park_at_the_right_edge() {
+    fn newest_passed_card_parks_and_the_older_one_leaves() {
         let (w, _) = SIZE;
         let front_w = w * FRONT_SCALE;
-        for scroll in [1.0_f32, 2.0, 5.0] {
-            let rects = layout(&[0, 1, 2], scroll, SIZE, None, CORNER);
-            let c0 = rects.iter().find(|r| r.toplevel == 0).unwrap();
-            let left = c0.center_x - front_w / 2.0;
-            assert!(left < w, "card vanished off the right at scroll {scroll}");
+        // At integer focus, cards[focus-1] just left the front slot: it parks
+        // with a visible peek. Everything older has slid off the right edge.
+        for focus in [1.0_f32, 2.0, 3.0] {
+            let rects = layout(&[0, 1, 2, 3], focus, SIZE, None, CORNER);
+            let f = focus as usize;
+            let sliver = &rects[f - 1];
+            let left = sliver.center_x - front_w / 2.0;
+            assert!(left < w, "card vanished off the right at focus {focus}");
             assert!(
                 (w - left) >= front_w * PASSED_PEEK_FRAC - 0.01,
-                "peek too thin at scroll {scroll}: {}",
+                "peek too thin at focus {focus}: {}",
                 w - left
             );
+            for r in &rects[..f - 1] {
+                assert!(
+                    r.center_x - front_w / 2.0 >= w,
+                    "superseded card still on screen at focus {focus}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn right_sliver_is_the_card_above_the_active_one() {
+        // Focus cards[2]: the parked pile must show cards[1] (one step above the
+        // active card in the stack), not cards[0] (top of the MRU list).
+        let rects = layout(&[0, 1, 2, 3], 2.0, SIZE, None, CORNER);
+        let top = rects.iter().max_by_key(|r| r.z).unwrap();
+        assert_eq!(top.toplevel, 1, "wrong card shows in the right sliver");
+        assert!(rects[1].z > rects[0].z, "nearer parked card must win");
     }
 
     #[test]
