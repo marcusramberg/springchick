@@ -1188,6 +1188,7 @@ fn pass_switcher_cards(
             alpha: card.alpha,
             dim: card.dim,
             chrome: ctx.card_chrome.icon_alpha,
+            dpi: ctx.app_scale as f32,
         };
         ctx.skia
             .draw_card_shadow(size.w, size.h, &decor, ctx.skia_flip_y);
