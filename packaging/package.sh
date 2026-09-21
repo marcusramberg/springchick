@@ -35,6 +35,11 @@ nfpm package -f "dist/nfpm-$distro-$pkgarch.yaml" -p "$packager" -t dist/
 # The session-wiring package: units and dependencies only, no staged binaries,
 # so it exists for Alpine/postmarketOS alone.
 if [ "$distro" = alpine ]; then
+  # Forgejo's alpine download route matches the filename by substring, so
+  # postmarketos-ui-springchick-<v>-r1.apk also answers requests for
+  # springchick-<v>-r1.apk (whichever row the DB returns first). A different
+  # release keeps the two filenames from being suffixes of each other.
+  PKG_RELEASE=$(( ${PKG_RELEASE:-1} + 1 ))
   render packaging/nfpm-ui.yaml "dist/nfpm-ui-$pkgarch.yaml"
   nfpm package -f "dist/nfpm-ui-$pkgarch.yaml" -p apk -t dist/
 fi
