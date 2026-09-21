@@ -65,6 +65,8 @@ pub struct CardDecor {
     /// faded in, 0..1. Multiplied by `alpha`, not folded into it: the shadow and
     /// the scrim belong to the card itself and must not ride the chrome fade.
     pub chrome: f32,
+    /// Output scale (`[main].dpi`), for the chrome that is sized in logical px.
+    pub dpi: f32,
 }
 
 /// Drop-shadow tuning, as fractions of the card's width so the cue scales with
@@ -91,6 +93,10 @@ const SHADOW_ALPHA: f32 = 0.30;
 /// pixels, so it reads as a label floating over the card. The space to its
 /// right is where the focused card's window title will go.
 const CARD_ICON_FRAC: f32 = 0.20;
+/// Ceiling on the badge side in logical px. A wide, low-dpi panel (tablet) has
+/// a card wide enough that the fraction alone draws a badge several times the
+/// apparent size it has on a phone.
+const CARD_ICON_MAX_LOGICAL: f32 = 45.0;
 const CARD_ICON_INSET_FRAC: f32 = 0.05;
 const CARD_ICON_GAP_FRAC: f32 = 0.3;
 const CARD_ICON_SHADOW_OFFSET_FRAC: f32 = 0.06;
@@ -169,7 +175,9 @@ struct IconCues {
 /// edge and inset from its left. Shared by the badge and the title beside it so
 /// the two can't drift apart.
 fn card_icon_rect(card: &CardDecor) -> Rect {
-    let side = (card.w * CARD_ICON_FRAC).max(1.0);
+    let side = (card.w * CARD_ICON_FRAC)
+        .min(CARD_ICON_MAX_LOGICAL * card.dpi)
+        .max(1.0);
     Rect::from_xywh(
         card.x + card.w * CARD_ICON_INSET_FRAC,
         card.y - side - side * CARD_ICON_GAP_FRAC,
