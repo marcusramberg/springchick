@@ -296,14 +296,14 @@ mod tests {
     fn foreground_clears_the_background_ceiling() {
         let res = Resources {
             enable: true,
-            fg_cpu_weight: 200,
+            fg_cpu_weight: 100,
             bg_cpu_weight: 20,
             bg_memory_high: "512M".into(),
             bg_cpu_quota: "30%".into(),
             bg_allowed_cpus: "auto".into(),
         };
         let fg = args("a.scope", Tier::Foreground, &res);
-        assert!(fg.contains(&"CPUWeight=200".to_string()));
+        assert!(fg.contains(&"CPUWeight=100".to_string()));
         assert!(fg.contains(&"MemoryHigh=infinity".to_string()));
         // Empty, not "infinity": CPUQuota= refuses that word, and set-property
         // applies all-or-nothing, so the CPUWeight above would go with it.
