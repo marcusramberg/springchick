@@ -127,6 +127,12 @@ pub fn exceeds_icon_tap_slop(dx: f32, dy: f32) -> bool {
     (dx * dx + dy * dy).sqrt() > th::ICON_TAP_SLOP_PX
 }
 
+/// Whether movement from a press has exceeded the *hold* slop, cancelling the
+/// long press it was waiting on.
+pub fn exceeds_icon_hold_slop(dx: f32, dy: f32) -> bool {
+    (dx * dx + dy * dy).sqrt() > th::ICON_HOLD_SLOP_PX
+}
+
 /// Whether a press on the switcher deck stayed still enough to be a tap.
 pub fn is_switcher_tap(dx: f32, dy: f32) -> bool {
     dx.abs() < th::SWITCHER_TAP_SLOP_PX && dy.abs() < th::SWITCHER_TAP_SLOP_PX
@@ -358,6 +364,9 @@ mod tests {
         assert!(!exceeds_icon_tap_slop(8.0, 8.0), "11.3px is inside 12px");
         assert!(exceeds_icon_tap_slop(9.0, 9.0), "12.7px is outside");
         assert!(exceeds_icon_tap_slop(-13.0, 0.0), "sign does not matter");
+        // A wobble that cancels the launch must still keep the hold alive.
+        assert!(!exceeds_icon_hold_slop(-13.0, 0.0));
+        assert!(exceeds_icon_hold_slop(33.0, 0.0));
     }
 
     #[test]

@@ -15,11 +15,12 @@ use crate::ui_state::UiState;
 pub(crate) const HOLD_MS: u128 = 500;
 
 /// A finger held on an icon on Home, waiting to see if it becomes a long-press
-/// (which opens the icon menu). Cancelled if the finger moves past the tap slop
+/// (which opens the icon menu). Cancelled if the finger moves past the hold slop
 /// (becomes a swipe) or releases before `HOLD_MS`.
 pub(crate) struct IconPress {
     pub app_id: String,
     pub source: input_dispatch::IconSource,
+    pub start: (f32, f32),
     pub at: std::time::Instant,
 }
 

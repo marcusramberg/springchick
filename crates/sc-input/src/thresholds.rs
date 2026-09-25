@@ -39,6 +39,11 @@ pub const VELOCITY_SMOOTHING: f32 = 0.6;
 /// In pixels, not a fraction: it models finger jitter, which does not scale
 /// with screen size.
 pub const ICON_TAP_SLOP_PX: f32 = 12.0;
+
+/// Pixels a finger may travel and still be waiting out a long press. Looser
+/// than the tap slop: holding still for half a second drifts more than tapping
+/// does, and a swipe that meant to page has left by 32px anyway.
+pub const ICON_HOLD_SLOP_PX: f32 = 32.0;
 /// Same idea for a press on the switcher deck: below this drift the release is
 /// a tap (open the card / dismiss), above it a scroll.
 pub const SWITCHER_TAP_SLOP_PX: f32 = 15.0;

@@ -146,6 +146,7 @@ impl State {
                 self.icon_press = Some(IconPress {
                     app_id,
                     source: IconSource::Library,
+                    start: (x, y),
                     at: std::time::Instant::now(),
                 });
             }
