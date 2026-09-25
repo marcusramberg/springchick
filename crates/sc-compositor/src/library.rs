@@ -24,15 +24,24 @@ pub(crate) struct OpenFolder {
     /// Finger position and scroll offset when the current drag began:
     /// `(x, y, scroll)`.
     pub drag: Option<(f32, f32, f32)>,
+    /// Tile center the panel zooms out of, in screen coordinates.
+    pub anchor: (f32, f32),
+    /// 0→1 open animation, retargeted to 0 on close.
+    pub open: sc_anim::Spring,
+    /// Closing: the folder is inert and is dropped once `open` settles.
+    pub closing: bool,
 }
 
 impl OpenFolder {
-    pub fn new(index: usize) -> Self {
+    pub fn new(index: usize, anchor: (f32, f32)) -> Self {
         Self {
             index,
             scroll: 0.0,
             pressed: None,
             drag: None,
+            anchor,
+            open: sc_anim::Spring::zoom(0.0, 1.0),
+            closing: false,
         }
     }
 }
@@ -75,6 +84,39 @@ impl State {
         sc_layout::library::folders(w, h, &names)
     }
 
+    /// Start the folder's zoom-out. It stays in `State::folder`, inert, until
+    /// the spring settles and `advance_frame` drops it.
+    pub(crate) fn close_folder(&mut self) {
+        if let Some(f) = &mut self.folder {
+            f.closing = true;
+            f.pressed = None;
+            f.drag = None;
+            f.open.retarget(0.0);
+        }
+        self.needs_render = true;
+    }
+
+    /// Whether a folder is open and still taking input (a closing one is not).
+    fn folder_live(&self) -> bool {
+        self.folder.as_ref().is_some_and(|f| !f.closing)
+    }
+
+    /// Screen-space center of a library tile, the point its panel zooms out of.
+    fn folder_anchor(&self, index: usize) -> (f32, f32) {
+        let (w, h) = self.output_size_f();
+        let dx = self.library_x_offset();
+        self.library_tiles()
+            .get(index)
+            .map(|t| (t.tile_rect.center_x() + dx, t.tile_rect.center_y()))
+            .unwrap_or((w / 2.0, h / 2.0))
+    }
+
+    /// Open the folder at `index`, zooming out of its tile.
+    pub(crate) fn open_folder(&mut self, index: usize) {
+        let anchor = self.folder_anchor(index);
+        self.folder = Some(OpenFolder::new(index, anchor));
+    }
+
     /// Layout for the open folder's panel, if one is open.
     pub(crate) fn folder_panel(&self) -> Option<PanelLayout> {
         let open = self.folder.as_ref()?;
@@ -87,6 +129,9 @@ impl State {
     /// its launch, the card swallows and starts a scroll drag, and anywhere
     /// outside closes the folder without falling through to the page beneath.
     pub(crate) fn folder_press(&mut self, x: f32, y: f32) -> bool {
+        if !self.folder_live() {
+            return false;
+        }
         let Some(panel) = self.folder_panel() else {
             return false;
         };
@@ -110,7 +155,7 @@ impl State {
                     f.drag = Some((x, y, f.scroll));
                 }
             }
-            PanelHit::Outside => self.folder = None,
+            PanelHit::Outside => self.close_folder(),
         }
         self.needs_render = true;
         true
@@ -124,6 +169,9 @@ impl State {
     /// the member's context menu — and sideways is the direction the home pages
     /// are in anyway.
     pub(crate) fn folder_motion(&mut self, x: f32, y: f32) -> bool {
+        if !self.folder_live() {
+            return false;
+        }
         let Some(panel) = self.folder_panel() else {
             return false;
         };
@@ -167,7 +215,7 @@ impl State {
             target: "springchick::debug",
             "library drag lifted app_id={app_id}"
         );
-        self.folder = None;
+        self.close_folder();
         self.icon_press = None;
         self.pending_folder = None;
         self.cancel_page_drag();
@@ -186,6 +234,9 @@ impl State {
 
     /// Release inside an open folder: launch the armed member and close.
     pub(crate) fn folder_release(&mut self) -> bool {
+        if !self.folder_live() {
+            return false;
+        }
         let Some(panel) = self.folder_panel() else {
             return false;
         };
@@ -207,7 +258,7 @@ impl State {
             slot.app_id.clone(),
             ZoomOrigin::icon((slot.icon_rect.center_x(), slot.icon_rect.center_y())),
         );
-        self.folder = None;
+        self.close_folder();
         self.launch_or_raise(&app_id, origin);
         self.needs_render = true;
         true

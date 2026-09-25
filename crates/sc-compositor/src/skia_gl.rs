@@ -365,7 +365,9 @@ impl SkiaGl {
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
         let canvas = surface.canvas();
 
-        canvas.save();
+        // One restore at the end unwinds the flip, the zoom, its alpha layer
+        // and the row clip together.
+        let base = canvas.save();
         if flip_y {
             canvas.translate((0.0, height as f32));
             canvas.scale((1.0, -1.0));
@@ -373,9 +375,17 @@ impl SkiaGl {
 
         // Backdrop: dim the page behind so the card reads as modal, and so a
         // press outside it obviously means "close".
+        let open = folder.progress.clamp(0.0, 1.0);
         let mut dim = Paint::default();
-        dim.set_color(Color::from_argb(140, 0, 0, 0));
+        dim.set_color(Color::from_argb((140.0 * open) as u8, 0, 0, 0));
         canvas.draw_rect(Rect::new(0.0, 0.0, width as f32, height as f32), &dim);
+
+        // Grow out of (and shrink back into) the tile that was tapped.
+        let scale = 0.4 + 0.6 * open;
+        canvas.translate((folder.anchor.0, folder.anchor.1));
+        canvas.scale((scale, scale));
+        canvas.translate((-folder.anchor.0, -folder.anchor.1));
+        canvas.save_layer_alpha_f(None, open);
 
         let p = folder.layout.panel;
         let card = Rect::new(p.x, p.y, p.x + p.w, p.y + p.h);
@@ -398,7 +408,6 @@ impl SkiaGl {
         // Rows are clipped to the card below the title — the same rect the
         // panel hit-test uses, so what is tappable is exactly what is drawn.
         let title = folder.layout.title_rect;
-        canvas.save();
         canvas.clip_rect(
             Rect::new(
                 p.x,
@@ -426,8 +435,7 @@ impl SkiaGl {
                 },
             );
         }
-        canvas.restore();
-        canvas.restore();
+        canvas.restore_to_count(base);
 
         if let Some(ctx) = self.context.as_mut() {
             ctx.flush_and_submit();

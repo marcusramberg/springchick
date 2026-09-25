@@ -980,7 +980,7 @@ fn release_folder_tap(state: &mut State) -> Stage {
         state.folders.get(index).map_or("?", |f| f.name),
         state.folders.get(index).map_or(0, |f| f.apps.len()),
     );
-    state.folder = Some(crate::library::OpenFolder::new(index));
+    state.open_folder(index);
     state.needs_render = true;
     Stage::Done
 }

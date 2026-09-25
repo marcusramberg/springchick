@@ -194,7 +194,7 @@ impl crate::state::State {
             }
             MenuAction::AddToHome => {
                 self.model.place(app_id.clone());
-                self.folder = None;
+                self.close_folder();
                 self.after_arrange_edit();
             }
             // Reopen on the same anchor with only the confirm row, so the

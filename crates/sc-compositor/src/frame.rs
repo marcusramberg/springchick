@@ -462,6 +462,8 @@ impl State {
                 .icon_menu
                 .as_ref()
                 .is_some_and(|m| !m.open.is_settled())
+            // The library folder's zoom in/out.
+            || self.folder.as_ref().is_some_and(|f| !f.open.is_settled())
             // The deck's badge/title fades, which outlive the deck itself on the
             // way out (and the scroll spring on a focus change).
             || self.card_chrome.is_animating()
@@ -506,6 +508,12 @@ impl State {
         self.maybe_open_icon_menu();
         if let Some(menu) = &mut self.icon_menu {
             menu.open.step(dt);
+        }
+        if let Some(f) = &mut self.folder {
+            f.open.step(dt);
+            if f.closing && f.open.is_settled() {
+                self.folder = None;
+            }
         }
 
         // Lazy-seed the grid-reflow springs on first use so they snap to the
@@ -731,6 +739,8 @@ impl State {
                 .and_then(|f| self.folders.get(f.index))
                 .map_or(String::new(), |f| f.name.to_string()),
             pressed: self.folder.as_ref().and_then(|f| f.pressed),
+            anchor: self.folder.as_ref().map_or((0.0, 0.0), |f| f.anchor),
+            progress: self.folder.as_ref().map_or(1.0, |f| f.open.value),
         });
 
         FramePrep {
