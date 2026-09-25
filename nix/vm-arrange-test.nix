@@ -22,10 +22,10 @@
 let
   inherit (import ./test-support.nix { inherit self pkgs; }) mkTest phone;
 
-  # Three catalog apps with names that sort deterministically, so the initial
-  # grid order is known before the first gesture. They never need to run — the
-  # test only reorders their icons — but the exec must be valid for the catalog
-  # to accept the entry.
+  # Three catalog apps placed on home by `homePages` below, in a known order so
+  # the initial grid is fixed before the first gesture. They never need to run —
+  # the test only reorders their icons — but the exec must be valid for the
+  # catalog to accept the entry.
   gridApp =
     name:
     pkgs.makeDesktopItem {
@@ -36,6 +36,16 @@ let
 in
 mkTest {
   name = "springchick-arrange";
+
+  # A fresh install leaves home empty (everything lives in the library), so the
+  # grid this test drags around has to be seeded.
+  homePages = [
+    [
+      "aaa"
+      "bbb"
+      "ccc"
+    ]
+  ];
 
   packages = [
     pkgs.foot
@@ -136,9 +146,8 @@ mkTest {
     machine.fail(f"{JOURNAL} | grep -qF 'state changed to App'")
 
     # --- The reorder landed in the model, and was persisted ---
-    # First-run seeding orders the grid alphabetically by .desktop id, so page 0
-    # starts [aaa, bbb, ccc, ...]. Dragging slot 0 to slot 2 must rotate exactly
-    # those three and leave everything after them alone.
+    # `homePages` seeded page 0 as [aaa, bbb, ccc]. Dragging slot 0 to slot 2
+    # must rotate exactly those three.
     after = order()
     assert after is not None, "state.toml was never written after the arrange edit"
     assert after[:3] == ["bbb", "ccc", "aaa"], (

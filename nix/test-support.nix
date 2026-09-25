@@ -41,14 +41,49 @@ let
       cores ? 2,
       # Escape hatch for test-specific machine config, merged over the base.
       extraMachineConfig ? { },
+      # Apps to put on the home screen before the test runs, as a list of pages
+      # (each a list of .desktop ids). A fresh install has an *empty* home — the
+      # catalog only reaches the library page — so any test that presses a grid
+      # icon has to say what is on the grid.
+      homePages ? [ ],
     }:
+    let
+      stateToml =
+        "pages = ["
+        + pkgs.lib.concatMapStringsSep ", " (
+          page: "[" + pkgs.lib.concatMapStringsSep ", " (app: ''"${app}"'') page + "]"
+        ) homePages
+        + "]\ndock = []\n";
+
+      # Written after boot and the service restarted onto it, rather than
+      # seeded via tmpfiles: the home directory does not reliably exist that
+      # early, and a restart is both cheap and exactly what the compositor
+      # does on a real login.
+      seedPrelude = pkgs.lib.optionalString (homePages != [ ]) ''
+        machine.wait_for_unit("multi-user.target")
+        machine.wait_until_succeeds(
+            "systemctl --user -M tester@.host is-active springchick.service", timeout=90
+        )
+        machine.succeed("mkdir -p /home/tester/.config/springchick")
+        machine.succeed(
+            "printf '%s' ${pkgs.lib.escapeShellArg stateToml}"
+            " > /home/tester/.config/springchick/state.toml"
+        )
+        machine.succeed("chown -R tester:users /home/tester/.config")
+        machine.succeed("systemctl --user -M tester@.host restart springchick.service")
+        machine.wait_until_succeeds(
+            "systemctl --user -M tester@.host is-active springchick.service", timeout=90
+        )
+        machine.wait_until_succeeds("ls /run/user/1000/springchick-ipc.sock", timeout=30)
+      '';
+    in
     pkgs.testers.runNixOSTest {
       inherit
         name
         enableOCR
         extraPythonPackages
-        testScript
         ;
+      testScript = seedPrelude + testScript;
 
       nodes.machine =
         {

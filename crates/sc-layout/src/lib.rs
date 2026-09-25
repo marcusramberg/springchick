@@ -7,6 +7,7 @@
 //! Also provides the inverse: `point → Hit`.
 
 pub mod layer;
+pub mod library;
 pub mod menu;
 
 use sc_shell_model::{ShellModel, COLS, DOCK_CAP, ROWS};
@@ -232,6 +233,35 @@ fn grid_metrics(width: f32, height: f32) -> GridMetrics {
     }
 }
 
+/// The `IconSlot` for grid cell `index` (0..PAGE_CAP) on the page whose origin
+/// is `x_offset` to the right. Single source for the cell arithmetic shared by
+/// `compute` and the library page.
+fn grid_slot(gm: &GridMetrics, index: usize, x_offset: f32, app_id: String) -> IconSlot {
+    let col = index % COLS;
+    let row = index / COLS;
+    let cell_x = gm.grid_left + col as f32 * gm.cell_w + x_offset;
+    let cell_y = gm.grid_top + row as f32 * gm.cell_h;
+    let icon_rect = Rect {
+        x: cell_x + (gm.cell_w - gm.icon_size) / 2.0,
+        y: cell_y + (gm.cell_h - gm.icon_size - gm.label_h) / 2.0,
+        w: gm.icon_size,
+        h: gm.icon_size,
+    };
+    let label_rect = Rect {
+        x: cell_x,
+        y: icon_rect.y + gm.icon_size,
+        w: gm.cell_w,
+        h: gm.label_h,
+    };
+    IconSlot {
+        app_id,
+        icon_rect,
+        label_rect,
+        badge_rect: badge_of(icon_rect),
+        dot_rect: dot_of(icon_rect, label_rect, cell_y + gm.cell_h),
+    }
+}
+
 /// Remove-badge rect for a given icon rect, centered on its top-left corner.
 /// Single source shared by `compute` and `slot_at_center`.
 fn badge_of(ir: Rect) -> Rect {
@@ -271,16 +301,8 @@ fn dot_of(icon: Rect, label: Rect, bottom: f32) -> Rect {
 /// for the reflow/paging animation.
 pub fn global_slot_pos(page: usize, index: usize, width: f32, height: f32) -> (f32, f32) {
     let gm = grid_metrics(width, height);
-    let col = index % COLS;
-    let row = index / COLS;
-    let cell_x = gm.grid_left + col as f32 * gm.cell_w;
-    let cell_y = gm.grid_top + row as f32 * gm.cell_h;
-    let icon_x = cell_x + (gm.cell_w - gm.icon_size) / 2.0;
-    let icon_y = cell_y + (gm.cell_h - gm.icon_size - gm.label_h) / 2.0;
-    (
-        icon_x + gm.icon_size / 2.0 + page as f32 * width,
-        icon_y + gm.icon_size / 2.0,
-    )
+    let icon = grid_slot(&gm, index, page as f32 * width, String::new()).icon_rect;
+    (icon.center_x(), icon.center_y())
 }
 
 /// Slot index (0..PAGE_CAP) whose cell is nearest the on-screen point (x, y)
@@ -328,9 +350,14 @@ pub fn slot_at_center(app_id: String, cx: f32, cy: f32, width: f32, height: f32)
     }
 }
 
+/// Full layout for `page`. `page == model.pages.len()` is the library page: it
+/// has no grid icons of its own (see [`library`]) but keeps the dock, dots and
+/// bar, so the shared chrome comes from here for every page alike.
 pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layout {
-    let page_count = model.pages.len().max(1);
-    let clamped_page = page.min(page_count.saturating_sub(1));
+    // +1 for the library, which is always the last page and is never stored in
+    // the model. Every caller reads its page count from here, so the dots and
+    // the paging clamp pick the extra page up for free.
+    let page_count = model.pages.len().max(1) + 1;
 
     let bar_rect = bar_rect(width, height);
 
@@ -344,49 +371,21 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
         h: height * DOTS_HEIGHT,
     };
 
-    let grid_top = gm.grid_top;
     let usable_width = width * (1.0 - 2.0 * H_MARGIN);
     let grid_left = gm.grid_left;
-    let cell_w = gm.cell_w;
-    let cell_h = gm.cell_h;
-    let icon_size = gm.icon_size;
-    let label_h = gm.label_h;
 
-    // Grid icons
-    let grid = if let Some(apps) = model.pages.get(clamped_page) {
-        apps.iter()
-            .enumerate()
-            .map(|(i, app_id)| {
-                let col = i % COLS;
-                let row = i / COLS;
-                let cell_x = grid_left + col as f32 * cell_w;
-                let cell_y = grid_top + row as f32 * cell_h;
-                let icon_x = cell_x + (cell_w - icon_size) / 2.0;
-                let icon_y = cell_y + (cell_h - icon_size - label_h) / 2.0;
-                let icon_rect = Rect {
-                    x: icon_x,
-                    y: icon_y,
-                    w: icon_size,
-                    h: icon_size,
-                };
-                let label_rect = Rect {
-                    x: cell_x,
-                    y: icon_y + icon_size,
-                    w: cell_w,
-                    h: label_h,
-                };
-                IconSlot {
-                    app_id: app_id.clone(),
-                    icon_rect,
-                    label_rect,
-                    badge_rect: badge_of(icon_rect),
-                    dot_rect: dot_of(icon_rect, label_rect, cell_y + cell_h),
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // Grid icons. `get` rather than a clamp: the library page (and anything
+    // past it) has no grid of its own.
+    let grid = model
+        .pages
+        .get(page)
+        .map(|apps| {
+            apps.iter()
+                .enumerate()
+                .map(|(i, app_id)| grid_slot(&gm, i, 0.0, app_id.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Dock icons
     let dock_cell_w = usable_width / DOCK_CAP as f32;
@@ -684,7 +683,7 @@ mod tests {
         let l = compute(1224.0, 2700.0, 0, &m);
         assert_eq!(l.grid.len(), 6);
         assert_eq!(l.dock.len(), 2);
-        assert_eq!(l.page_count, 1);
+        assert_eq!(l.page_count, 2); // one user page + the library
     }
 
     #[test]
@@ -759,7 +758,7 @@ mod tests {
             m.place(format!("app{i}"));
         }
         let l = compute(1224.0, 2700.0, 0, &m);
-        assert_eq!(l.page_count, 2);
+        assert_eq!(l.page_count, 3); // two user pages + the library
     }
 
     #[test]
@@ -779,17 +778,20 @@ mod tests {
         let l = compute(1224.0, 2700.0, 0, &m);
         assert!(l.grid.is_empty());
         assert!(l.dock.is_empty());
-        assert_eq!(l.page_count, 1);
+        assert_eq!(l.page_count, 2); // the empty home page + the library
     }
 
     #[test]
-    fn clamped_page_beyond_max() {
+    fn library_page_has_no_grid_of_its_own() {
         let mut m = ShellModel::default();
         m.place("x".into());
-        let l = compute(1224.0, 2700.0, 99, &m);
-        // Should clamp to last page
-        assert_eq!(l.grid.len(), 1);
-        assert_eq!(l.grid[0].app_id, "x");
+        m.dock.push("d".into());
+        let l = compute(1224.0, 2700.0, 1, &m); // page 1 == the library
+        assert!(l.grid.is_empty());
+        assert_eq!(l.dock.len(), 1); // dock chrome stays
+        assert_eq!(l.page_count, 2);
+        // Past the library there is nothing at all, and no panic.
+        assert!(compute(1224.0, 2700.0, 99, &m).grid.is_empty());
     }
 
     #[test]

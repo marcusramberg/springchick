@@ -151,6 +151,9 @@ pub fn on_motion(state: &mut State, x: f32, y: f32) {
     if motion_icon_menu(state, x, y) == Stage::Done {
         return;
     }
+    if state.folder_motion(x, y) {
+        return;
+    }
     if motion_arrange_drag(state, x, y) == Stage::Done {
         return;
     }
@@ -278,6 +281,11 @@ fn motion_cancel_icon_press(state: &mut State, x: f32, y: f32) {
         // is a page swipe or a pull-down, not a request for arrange mode.
         if home::exceeds_icon_tap_slop(x - p.start.0, y - p.start.1) {
             state.bg_press = None;
+        }
+    }
+    if let Some((_, start)) = state.pending_folder {
+        if home::exceeds_icon_tap_slop(x - start.0, y - start.1) {
+            state.pending_folder = None;
         }
     }
     let Some(p) = &state.pending_launch else {
@@ -558,6 +566,10 @@ pub fn on_press(state: &mut State) {
     if press_icon_menu(state, x, y) == Stage::Done {
         return;
     }
+    if state.folder_press(x, y) {
+        return;
+    }
+    state.library_press(x, y);
     if press_arrange(state, x, y) == Stage::Done {
         return;
     }
@@ -609,7 +621,7 @@ fn press_arrange(state: &mut State, x: f32, y: f32) -> Stage {
 
     match sc_layout::hit_test_arrange(&layout, x, y) {
         sc_layout::Hit::RemoveBadge { app_id } => {
-            state.model.hide(&app_id);
+            state.model.delete(&app_id);
             state.after_arrange_edit();
         }
         sc_layout::Hit::DoneButton | sc_layout::Hit::Bar => {
@@ -721,10 +733,13 @@ fn press_arm_gesture(state: &mut State, x: f32, y: f32) {
             state.search_arm = Some((x, y));
             // …and the long press that engages arrange mode, if the finger does
             // none of the above and simply stays put (see `advance_frame`).
-            state.bg_press = Some(BgPress {
-                start: (x, y),
-                at: std::time::Instant::now(),
-            });
+            // Not on the library page: there is nothing there to rearrange.
+            if !state.on_library_page() {
+                state.bg_press = Some(BgPress {
+                    start: (x, y),
+                    at: std::time::Instant::now(),
+                });
+            }
         }
         DownAction::StartBarDrag { start_x, start_y } => {
             state.bar_drag_start = Some((start_x, start_y));
@@ -780,6 +795,12 @@ pub fn on_release(state: &mut State) {
     if release_icon_menu(state) == Stage::Done {
         return;
     }
+    if state.folder_release() {
+        return;
+    }
+    if release_folder_tap(state) == Stage::Done {
+        return;
+    }
     if release_quick_switch(state) == Stage::Done {
         return;
     }
@@ -797,8 +818,9 @@ pub fn on_release(state: &mut State) {
     release_grab(state);
 
     // Update page_count after returning home.
+    let pages = state.home_page_count();
     if let UiState::Home { page_count, .. } = &mut state.ui {
-        *page_count = state.model.pages.len().max(1);
+        *page_count = pages;
     }
 }
 
@@ -884,6 +906,25 @@ fn resolve_arrange_drop(state: &mut State, drag: DragItem) {
     let page = state.current_home_page();
     let page_len = state.model.pages.get(page).map_or(0, |p| p.len());
     let layout = sc_layout::compute(w, h, page, &state.model);
+    // Dropped on the library page: the library is where an app lives when it is
+    // on no page, so this is the remove gesture. The dock still wins — it is
+    // drawn over the library page like any other — and an app dragged *out* of
+    // the library and back onto it has simply been put back.
+    if page == state.library_page() && !layout.dock_zone.contains(drag.cur.0, drag.cur.1) {
+        debug!(
+            target: "springchick::debug",
+            "arrange drop app_id={} action=RemoveToLibrary", drag.app_id
+        );
+        if drag.source != input_dispatch::IconSource::Library {
+            state.model.delete(&drag.app_id);
+            state.after_arrange_edit();
+        } else {
+            state.model.repack();
+            state.reflow_grid();
+            state.reflow_dock();
+        }
+        return;
+    }
     let action =
         input_dispatch::resolve_drop(drag.cur, &layout, drag.source, page, page_len, (w, h));
     // Logged so the VM test can assert the drop resolved the way the gesture
@@ -921,6 +962,21 @@ fn resolve_arrange_drop(state: &mut State, drag: DragItem) {
 /// Icon tap: the pending launch survived (the finger never passed the tap slop),
 /// so this was a tap, not a swipe. Launch and drop the page drag armed from the
 /// same press.
+/// A tap on a library folder tile opens it. Armed by `State::library_press` and
+/// dropped by the motion slop check, so a swipe that began on a tile pages
+/// instead of opening the folder it started under.
+fn release_folder_tap(state: &mut State) -> Stage {
+    let Some((index, _)) = state.pending_folder.take() else {
+        return Stage::Fallthrough;
+    };
+    // Same reason as an icon tap: the page drag armed by the same press has to
+    // be settled, not abandoned mid-scroll.
+    state.cancel_page_drag();
+    state.folder = Some(crate::library::OpenFolder::new(index));
+    state.needs_render = true;
+    Stage::Done
+}
+
 fn release_icon_tap(state: &mut State) -> Stage {
     if let Some(p) = state.pending_launch.take() {
         // The page drag armed by the same press is abandoned, not committed —

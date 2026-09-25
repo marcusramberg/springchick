@@ -24,6 +24,8 @@ pub(crate) enum MenuAction {
     CloseAll,
     /// Take the app off the home screen (same edit as the arrange remove badge).
     Remove,
+    /// Put a library app on the home screen, without making the user drag it.
+    AddToHome,
     /// Flatpak apps only: arm the confirm row. Does not uninstall anything.
     Uninstall,
     /// Actually run `flatpak uninstall`.
@@ -55,7 +57,13 @@ pub(crate) struct MenuItem {
 /// A single window gets a plain "Open" — its title would just repeat the app
 /// name under the icon the finger is already on. Several windows are listed
 /// individually, because picking between them is the only reason to look.
-pub(crate) fn items_for(windows: &[(ToplevelId, String)], flatpak: bool) -> Vec<MenuItem> {
+/// `in_library` swaps the "Remove" row for "Add to Home": the menu was opened
+/// on a folder member, which is by definition not on a page to remove it from.
+pub(crate) fn items_for(
+    windows: &[(ToplevelId, String)],
+    flatpak: bool,
+    in_library: bool,
+) -> Vec<MenuItem> {
     let mut items = Vec::with_capacity(windows.len() + 4);
     match windows {
         [] => {}
@@ -89,9 +97,16 @@ pub(crate) fn items_for(windows: &[(ToplevelId, String)], flatpak: bool) -> Vec<
             },
         });
     }
-    items.push(MenuItem {
-        action: MenuAction::Remove,
-        label: "Remove".into(),
+    items.push(if in_library {
+        MenuItem {
+            action: MenuAction::AddToHome,
+            label: "Add to Home".into(),
+        }
+    } else {
+        MenuItem {
+            action: MenuAction::Remove,
+            label: "Remove".into(),
+        }
     });
     if flatpak {
         items.push(MenuItem {
@@ -174,7 +189,12 @@ impl crate::state::State {
             MenuAction::NewWindow => self.spawn_instance(&app_id, origin),
             MenuAction::CloseAll => self.close_all(&app_id),
             MenuAction::Remove => {
-                self.model.hide(&app_id);
+                self.model.delete(&app_id);
+                self.after_arrange_edit();
+            }
+            MenuAction::AddToHome => {
+                self.model.place(app_id.clone());
+                self.folder = None;
                 self.after_arrange_edit();
             }
             // Reopen on the same anchor with only the confirm row, so the
@@ -234,19 +254,22 @@ mod tests {
 
     #[test]
     fn a_stopped_app_can_only_be_started_or_removed() {
-        assert_eq!(labels(&items_for(&[], false)), ["New window", "Remove"]);
+        assert_eq!(
+            labels(&items_for(&[], false, false)),
+            ["New window", "Remove"]
+        );
     }
 
     #[test]
     fn a_single_window_gets_a_plain_open() {
-        let items = items_for(&[(3, "some terminal".into())], false);
+        let items = items_for(&[(3, "some terminal".into())], false, false);
         assert_eq!(labels(&items), ["Open", "New window", "Close", "Remove"]);
         assert_eq!(items[0].action, MenuAction::Open(3));
     }
 
     #[test]
     fn several_windows_are_listed_by_title_in_mru_order() {
-        let items = items_for(&[(7, "notes.md".into()), (2, "~/src".into())], false);
+        let items = items_for(&[(7, "notes.md".into()), (2, "~/src".into())], false, false);
         assert_eq!(
             labels(&items),
             ["notes.md", "~/src", "New window", "Close all", "Remove"]
@@ -259,17 +282,24 @@ mod tests {
     /// its siblings.
     #[test]
     fn untitled_windows_fall_back_to_their_position() {
-        let items = items_for(&[(7, String::new()), (2, String::new())], false);
+        let items = items_for(&[(7, String::new()), (2, String::new())], false, false);
         assert_eq!(labels(&items)[..2], ["Window 1", "Window 2"]);
     }
 
     #[test]
     fn only_flatpak_apps_offer_uninstall() {
         assert_eq!(
-            labels(&items_for(&[], true)),
+            labels(&items_for(&[], true, false)),
             ["New window", "Remove", "Uninstall"]
         );
-        assert!(!labels(&items_for(&[], false)).contains(&"Uninstall"));
+        assert!(!labels(&items_for(&[], false, false)).contains(&"Uninstall"));
+    }
+
+    #[test]
+    fn a_library_member_offers_add_to_home_instead_of_remove() {
+        let items = items_for(&[], false, true);
+        assert_eq!(labels(&items), ["New window", "Add to Home"]);
+        assert!(!items.iter().any(|i| i.action.is_destructive()));
     }
 
     #[test]

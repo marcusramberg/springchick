@@ -41,6 +41,9 @@ pub struct AppEntry {
     pub desktop_file: PathBuf,
     /// `X-Flatpak=`: the flatpak ref this entry was exported from, if any.
     pub flatpak: Option<String>,
+    /// `Categories=`, in declaration order. Raw — both main and additional
+    /// categories, unvalidated; [`crate::folders`] picks the folder from these.
+    pub categories: Vec<String>,
 }
 
 /// Scan `.desktop` files from every XDG data dir's `applications/`, highest
@@ -249,6 +252,7 @@ pub fn parse_desktop_in(path: &Path, contents: &str, env: &DesktopEnv) -> Option
     let mut try_exec = None;
     let (mut only_show_in, mut not_show_in) = (None, None);
     let mut flatpak = None;
+    let mut categories = Vec::new();
 
     for line in contents.lines() {
         let line = line.trim();
@@ -293,6 +297,14 @@ pub fn parse_desktop_in(path: &Path, contents: &str, env: &DesktopEnv) -> Option
             "OnlyShowIn" => only_show_in = Some(v),
             "NotShowIn" => not_show_in = Some(v),
             "X-Flatpak" => flatpak = Some(v).filter(|v| !v.is_empty()),
+            "Categories" => {
+                categories = v
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            }
             _ => {}
         }
     }
@@ -330,6 +342,7 @@ pub fn parse_desktop_in(path: &Path, contents: &str, env: &DesktopEnv) -> Option
         dbus_activatable,
         desktop_file: path.to_path_buf(),
         flatpak,
+        categories,
     })
 }
 
