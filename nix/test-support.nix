@@ -48,26 +48,34 @@ let
       homePages ? [ ],
     }:
     let
-      stateToml =
-        "pages = ["
-        + pkgs.lib.concatMapStringsSep ", " (
-          page: "[" + pkgs.lib.concatMapStringsSep ", " (app: ''"${app}"'') page + "]"
-        ) homePages
-        + "]\ndock = []\n";
+      seedState = homePages != [ ];
 
-      # Written after boot and the service restarted onto it, rather than
+      # Shipped to the guest as a file rather than echoed from the test script:
+      # the TOML is multi-line, and a multi-line shell argument cannot sit
+      # inside the single-line Python string literal the script is made of.
+      stateFile = pkgs.writeText "springchick-seed-state.toml" ''
+        pages = [${
+          pkgs.lib.concatMapStringsSep ", " (
+            page: "[" + pkgs.lib.concatMapStringsSep ", " (app: ''"${app}"'') page + "]"
+          ) homePages
+        }]
+        dock = []
+      '';
+
+      # Copied in after boot and the service restarted onto it, rather than
       # seeded via tmpfiles: the home directory does not reliably exist that
       # early, and a restart is both cheap and exactly what the compositor
       # does on a real login.
-      seedPrelude = pkgs.lib.optionalString (homePages != [ ]) ''
+      seedPrelude = pkgs.lib.optionalString seedState ''
         machine.wait_for_unit("multi-user.target")
         machine.wait_until_succeeds(
             "systemctl --user -M tester@.host is-active springchick.service", timeout=90
         )
         machine.succeed("mkdir -p /home/tester/.config/springchick")
         machine.succeed(
-            "printf '%s' ${pkgs.lib.escapeShellArg stateToml}"
-            " > /home/tester/.config/springchick/state.toml"
+            "install -o tester -g users -m 0644"
+            " /etc/springchick-seed-state.toml"
+            " /home/tester/.config/springchick/state.toml"
         )
         machine.succeed("chown -R tester:users /home/tester/.config")
         machine.succeed("systemctl --user -M tester@.host restart springchick.service")
@@ -165,6 +173,9 @@ let
           };
 
           environment.systemPackages = packages;
+          environment.etc = lib.mkIf seedState {
+            "springchick-seed-state.toml".source = stateFile;
+          };
           # A font is required or many clients abort before mapping a window.
           fonts.packages = [ pkgs.dejavu_fonts ];
 
