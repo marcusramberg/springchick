@@ -161,6 +161,10 @@ pub(crate) struct FramePrep {
     pub lock_surface: Option<WlSurface>,
     /// Open icon context menu, laid out for this frame. `None` when closed.
     pub icon_menu: Option<crate::render::MenuView>,
+    /// The library page's folder tiles. `None` when Home isn't drawn.
+    pub library: Option<crate::render::LibraryView>,
+    /// The open library folder's panel. `None` when no folder is open.
+    pub folder: Option<crate::render::FolderView>,
     /// The OSK sliding out after its client hid it: the held buffer and where it
     /// is drawn this frame. `None` when no slide-out is running.
     pub closing: Option<(smithay::backend::renderer::utils::Buffer, sc_layout::Rect)>,
@@ -207,11 +211,17 @@ impl ClientData for ClientState {
 /// Scan installed `.desktop` files and resolve each entry's icon. Shared by
 /// startup and `reload_catalog`; the icon-theme search path is built once, not
 /// per icon.
-fn scan_catalog() -> (HashMap<String, AppEntry>, HashMap<String, IconPixels>) {
-    let app_catalog: HashMap<String, AppEntry> = sc_catalog::scan_apps()
-        .into_iter()
-        .map(|e| (e.id.clone(), e))
-        .collect();
+fn scan_catalog() -> (
+    HashMap<String, AppEntry>,
+    HashMap<String, IconPixels>,
+    Vec<sc_catalog::Folder>,
+) {
+    let entries = sc_catalog::scan_apps();
+    // Folders come off the ordered scan, not the map: the map's iteration order
+    // is arbitrary and the library page must not reshuffle between rescans.
+    let folders = sc_catalog::folders(&entries);
+    let app_catalog: HashMap<String, AppEntry> =
+        entries.into_iter().map(|e| (e.id.clone(), e)).collect();
     let icon_dirs = sc_icons::theme_dirs(&sc_catalog::xdg_data_dirs());
     let icon_cache = app_catalog
         .iter()
@@ -222,7 +232,7 @@ fn scan_catalog() -> (HashMap<String, AppEntry>, HashMap<String, IconPixels>) {
             )
         })
         .collect();
-    (app_catalog, icon_cache)
+    (app_catalog, icon_cache, folders)
 }
 
 /// Place newly installed apps, prune uninstalled ones, seed frecency.
@@ -381,6 +391,14 @@ pub(crate) struct State {
     pub model: ShellModel,
     pub app_catalog: HashMap<String, AppEntry>,
     pub icon_cache: HashMap<String, IconPixels>,
+    /// The app library's category folders, derived from the catalog scan. Never
+    /// persisted — the library is always the whole catalog.
+    pub folders: Vec<sc_catalog::Folder>,
+    /// The folder the user has open on the library page. `None` when closed.
+    pub folder: Option<crate::library::OpenFolder>,
+    /// Library folder tile pressed but not yet released: `(index, start pos)`.
+    /// A release that has not travelled past the tap slop opens it.
+    pub pending_folder: Option<(usize, (f32, f32))>,
     /// Bumped on every catalog rescan. The renderer's uploaded icon textures are
     /// keyed by app id alone, so a change of generation is what tells it to drop
     /// them — otherwise a re-themed or reinstalled app keeps its old pixels.
@@ -772,14 +790,15 @@ impl State {
 
         // Load shell model + app catalog.
         let model = persist::load(&persist::state_path()).unwrap_or_default();
-        let (app_catalog, icon_cache) = scan_catalog();
+        let (app_catalog, icon_cache, folders) = scan_catalog();
 
         // Seed new catalog apps, drop stats for uninstalled ones, derive order.
         let mut model = model;
         let first_run = model.frecency.apps.is_empty();
         reconcile_catalog(&mut model, &app_catalog, first_run);
 
-        let page_count = model.pages.len().max(1);
+        // +1 for the library page, which is always last and never in `pages`.
+        let page_count = model.pages.len().max(1) + 1;
         let ui = UiState::home(0, page_count);
 
         State {
@@ -834,6 +853,9 @@ impl State {
             model,
             app_catalog,
             icon_cache,
+            folders,
+            folder: None,
+            pending_folder: None,
             catalog_gen: 0,
             toplevels: Vec::new(),
             drawn_toplevels: Vec::new(),
@@ -1044,13 +1066,16 @@ impl State {
 
     /// Re-scan `.desktop` files and icons, for `springchick ipc reload`.
     ///
-    /// Newly installed apps get placed on Home, uninstalled ones disappear from
-    /// pages/dock/hidden and lose their frecency stats. `first_run` seeding is
+    /// Newly installed apps appear in the library, uninstalled ones disappear
+    /// from pages/dock and lose their frecency stats. `first_run` seeding is
     /// never re-triggered: an existing session has stats, so new apps seed cold.
     pub(crate) fn reload_catalog(&mut self) {
-        let (app_catalog, icon_cache) = scan_catalog();
+        let (app_catalog, icon_cache, folders) = scan_catalog();
         self.app_catalog = app_catalog;
         self.icon_cache = icon_cache;
+        self.folders = folders;
+        // Folder indices are positions in a list that just changed under us.
+        self.folder = None;
         self.catalog_gen = self.catalog_gen.wrapping_add(1);
         reconcile_catalog(&mut self.model, &self.app_catalog, false);
         if let Err(e) = persist::save(&self.model, &persist::state_path()) {
@@ -1063,7 +1088,7 @@ impl State {
         self.reflow_dock();
         // A pruned page can leave the model shorter than the page the shell is
         // sitting on.
-        let page_count = self.model.pages.len().max(1);
+        let page_count = self.home_page_count();
         if let UiState::Home {
             page,
             page_count: pc,

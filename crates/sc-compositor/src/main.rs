@@ -34,6 +34,7 @@ mod kbd_switch;
 mod keybinds;
 mod launcher;
 mod layer_shell;
+mod library;
 mod mirror;
 mod osd;
 mod output_power;

@@ -174,11 +174,33 @@ pub struct HomeView<'a> {
     /// Animated screen-space centers for grid and dock icons.
     pub grid_positions: &'a HashMap<String, (f32, f32)>,
     pub dock_positions: &'a HashMap<String, (f32, f32)>,
+    /// The library page's folder tiles, drawn in the same pass as the grid so
+    /// they page with it.
+    pub library: Option<&'a LibraryView>,
     /// Top of the usable area, which the arrange-mode Done button stays below.
     pub top_inset: f32,
     /// Whole-screen offsets: the Home bounce (up) and the drag-out (sideways).
     pub lift: f32,
     pub shift: f32,
+}
+
+/// Render-only view of the app library page: the folder tiles and the page
+/// offset they are drawn at. Tiles are laid out in page-local coordinates, so
+/// `x_offset` is what slides them on and off as the pages scroll.
+pub struct LibraryView {
+    pub tiles: Vec<sc_layout::library::FolderSlot>,
+    /// Up to four member app ids per tile, for the mini-icon preview. Same
+    /// order and length as `tiles`.
+    pub previews: Vec<Vec<String>>,
+    pub x_offset: f32,
+}
+
+/// Render-only view of an open library folder.
+pub struct FolderView {
+    pub layout: sc_layout::library::PanelLayout,
+    pub title: String,
+    /// Member index under the finger, drawn with a press highlight.
+    pub pressed: Option<usize>,
 }
 
 /// Render-only view of the open icon menu, derived from `State::icon_menu` the
@@ -310,6 +332,10 @@ pub struct DrawCtx<'a> {
     pub arrange: Option<ArrangeView<'a>>,
     /// Open icon context menu, drawn over Home. `None` when closed.
     pub icon_menu: Option<&'a MenuView>,
+    /// Folder tiles for the library page. `None` when Home isn't drawn.
+    pub library: Option<&'a LibraryView>,
+    /// The open library folder's panel. `None` when no folder is open.
+    pub folder: Option<&'a FolderView>,
     /// Fades for the switcher deck's icon badges and focused-card title.
     pub card_chrome: &'a CardChromeView,
     /// Screen-space animated center `(x, y)` for each grid app, driven by
@@ -866,6 +892,7 @@ fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan)
         arrange: ctx.arrange.as_ref(),
         grid_positions: ctx.grid_positions,
         dock_positions: ctx.dock_positions,
+        library: ctx.library,
         top_inset: ctx.app_origin.1 as f32,
         lift: scene.home_lift,
         shift: scene.home_shift,
@@ -884,6 +911,25 @@ fn pass_icon_menu(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &Scene
     }
     ctx.skia
         .draw_icon_menu(size.w, size.h, menu, ctx.skia_flip_y);
+}
+
+/// An open library folder's panel, over Home. Same gating as the icon menu.
+fn pass_folder(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan) {
+    let Some(folder) = ctx.folder else {
+        return;
+    };
+    if !ctx.scene.show_home || plan.app_fills_screen {
+        return;
+    }
+    let (icon_cache, app_catalog) = (ctx.icon_cache, ctx.app_catalog);
+    ctx.skia.draw_folder_panel(
+        size.w,
+        size.h,
+        folder,
+        icon_cache,
+        app_catalog,
+        ctx.skia_flip_y,
+    );
 }
 
 /// Rotated fullscreen app: its own pass, with the rotation composed on top of
@@ -1480,6 +1526,7 @@ pub fn draw_scene(
 
     pass_background(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_home(size, ctx, &plan);
+    pass_folder(size, ctx, &plan);
     pass_icon_menu(size, ctx, &plan);
     // Before any app/card pass: the backdrop is the shell behind the cards, and
     // a dragged card drawn first would be blurred along with it.

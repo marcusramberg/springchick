@@ -20,6 +20,9 @@ fn normalize(x: f32, y: f32, width: f32, height: f32) -> Pt {
 pub enum IconSource {
     Grid,
     Dock,
+    /// Dragged out of an open library folder. Not on any page yet, so a drop
+    /// places it rather than reordering it.
+    Library,
 }
 
 /// What a drop at a given point means, given the icon's origin.
@@ -46,8 +49,8 @@ pub fn resolve_drop(
     let (w, h) = size;
     let over_dock = layout.dock_zone.contains(x, y);
     match (source, over_dock) {
-        (IconSource::Grid, true) => DropAction::Pin, // grid -> dock: pin
-        (IconSource::Dock, true) => DropAction::SnapBack, // dock -> dock: no-op
+        (IconSource::Grid | IconSource::Library, true) => DropAction::Pin, // -> dock: pin
+        (IconSource::Dock, true) => DropAction::SnapBack,                  // dock -> dock: no-op
         (_, false) => {
             // any -> grid: reorder
             let idx = sc_layout::nearest_grid_index(w, h, x, y).min(page_len);
@@ -332,6 +335,11 @@ mod tests {
         let (x, y) = (l.dock_zone.center_x(), l.dock_zone.center_y());
         assert_eq!(
             resolve_drop((x, y), &l, IconSource::Grid, 0, 0, (w, h)),
+            DropAction::Pin
+        );
+        // Straight from a library folder onto the dock pins it too.
+        assert_eq!(
+            resolve_drop((x, y), &l, IconSource::Library, 0, 0, (w, h)),
             DropAction::Pin
         );
     }

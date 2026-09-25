@@ -137,6 +137,24 @@ impl State {
         {
             warn!(%e, "failed to save shell model after arrange edit");
         }
+        // The edit can have dropped a page (removing the last icon on it, or
+        // the trailing empty page an edge-dwell flip added), leaving the shell
+        // parked past the end — a blank page that is not even the library, with
+        // no dots lit and nothing to swipe back to but by luck.
+        let page_count = self.home_page_count();
+        if let UiState::Home {
+            page,
+            page_count: pc,
+            page_spring,
+            ..
+        } = &mut self.ui
+        {
+            *pc = page_count;
+            if *page >= page_count {
+                *page = page_count - 1;
+                page_spring.retarget(*page as f32);
+            }
+        }
         self.reflow_grid();
         self.reflow_dock();
     }
@@ -299,7 +317,8 @@ impl State {
             target: "springchick::debug",
             "icon menu opened app_id={app_id} source={source:?} running={running}"
         );
-        let items = crate::icon_menu::items_for(&windows, self.is_flatpak(&app_id));
+        let in_library = source == input_dispatch::IconSource::Library;
+        let items = crate::icon_menu::items_for(&windows, self.is_flatpak(&app_id), in_library);
         self.icon_menu = Some(crate::icon_menu::IconMenu::new(app_id, anchor, items));
         self.icon_press = None;
         self.pending_launch = None;
@@ -330,6 +349,16 @@ impl State {
                 if let Some((sx, sy)) = self.grid_anim.get(app_id) {
                     let page_scroll = self.home_page_scroll();
                     return (sx.value - page_scroll * w, sy.value);
+                }
+            }
+            // A folder member has no spring — it lives in the open panel, whose
+            // layout is the only place it is drawn.
+            input_dispatch::IconSource::Library => {
+                if let Some(slot) = self
+                    .folder_panel()
+                    .and_then(|p| p.apps.into_iter().find(|s| s.app_id == app_id))
+                {
+                    return (slot.icon_rect.center_x(), slot.icon_rect.center_y());
                 }
             }
         }
@@ -386,18 +415,23 @@ impl State {
         // Apply a flip.
         if let Some(dir) = flip {
             let cur_page = self.current_home_page();
+            // Rightward stops at the library page rather than growing pages
+            // past it: the library is always last, and dropping onto it is the
+            // remove gesture. A new page is added only to fill the gap before
+            // it, and only once.
             let new_page = if dir < 0 {
                 cur_page.saturating_sub(1)
             } else if cur_page + 1 < self.model.pages.len() {
                 cur_page + 1
-            } else if self.model.pages.last().is_some_and(|p| p.is_empty()) {
-                // Already a trailing empty page — go to it, don't add more.
-                self.model.pages.len() - 1
+            } else if cur_page < self.library_page() {
+                if !self.model.pages.last().is_some_and(|p| p.is_empty()) {
+                    self.model.pages.push(Vec::new());
+                }
+                cur_page + 1
             } else {
-                self.model.pages.push(Vec::new());
-                self.model.pages.len() - 1
+                cur_page
             };
-            let page_count = self.model.pages.len().max(1);
+            let page_count = self.home_page_count();
             if let UiState::Home {
                 page,
                 page_spring,

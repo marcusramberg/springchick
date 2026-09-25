@@ -32,6 +32,10 @@ in
 mkTest {
   name = "springchick-icon-menu";
 
+  # A fresh install leaves home empty (everything lives in the library), so the
+  # icon this test long-presses has to be put on the grid first.
+  homePages = [ [ "aaa" ] ];
+
   packages = [
     pkgs.foot
     pkgs.python3

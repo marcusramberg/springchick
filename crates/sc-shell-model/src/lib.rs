@@ -79,51 +79,34 @@ impl FrecencyStore {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ShellModel {
-    /// Grid view of apps, in manual (persisted) order. This is the source of
-    /// truth for on-screen grid order. Seeded alphabetically from the catalog
-    /// by `reconcile` on first run; reordered only by manual drag.
+    /// Home pages, in manual (persisted) order — only what the user placed
+    /// there. An app absent from `pages` and `dock` is not gone: it lives in
+    /// the library, which is derived from the catalog and never stored.
     #[serde(default)]
     pub pages: Vec<Vec<AppId>>,
     pub dock: Vec<AppId>, // len <= DOCK_CAP
     #[serde(default)]
     pub frecency: FrecencyStore,
-    #[serde(default)]
-    pub hidden: Vec<AppId>,
 }
 
 impl ShellModel {
-    /// Keep `pages` in sync with the installed catalog without reordering
-    /// existing slots. Appends catalog ids not yet in pages/dock/hidden (via
-    /// `place`), seeds their frecency, and prunes ids no longer installed.
-    /// `now`/`first_run` mirror the old startup seed loop (score 0 on a
-    /// first-run empty store, 1.0 for a later install).
+    /// Reconcile against the installed catalog: drop ids that are gone from
+    /// pages/dock/frecency and seed frecency for ids that are new.
+    ///
+    /// Deliberately does *not* place new apps on a home page — a fresh install
+    /// gets one empty page, and apps reach home only when the user drags them
+    /// out of the library. `now`/`first_run` mirror the old startup seed loop
+    /// (score 0 on a first-run empty store, 1.0 for a later install).
     pub fn reconcile(&mut self, catalog_ids: &[AppId], now: u64, first_run: bool) {
-        // Both halves are set lookups rather than linear scans: with a few
-        // hundred installed apps the naive form is O(installed × catalog) twice
-        // over, once for the prune and once for the placement pass.
+        // A set lookup rather than a linear scan: with a few hundred installed
+        // apps the naive form is O(placed × catalog).
         let installed: HashSet<&AppId> = catalog_ids.iter().collect();
         self.pages
             .iter_mut()
             .for_each(|p| p.retain(|a| installed.contains(a)));
-        self.pages.retain(|p| !p.is_empty());
         self.dock.retain(|a| installed.contains(a));
-        self.hidden.retain(|a| installed.contains(a));
         self.frecency.prune(catalog_ids);
-        // Built after the retains so pruned ids don't count as known. Grows as
-        // we place, which keeps a duplicated catalog id from being placed twice.
-        let mut known: HashSet<AppId> = self
-            .pages
-            .iter()
-            .flatten()
-            .chain(self.dock.iter())
-            .chain(self.hidden.iter())
-            .cloned()
-            .collect();
         for id in catalog_ids {
-            if !known.contains(id) {
-                known.insert(id.clone());
-                self.place(id.clone());
-            }
             self.frecency.seed(id, now, first_run);
         }
         // A persisted state.toml is not trusted to respect PAGE_CAP: an
@@ -141,23 +124,20 @@ impl ShellModel {
         }
     }
 
-    /// Remove an app entirely (delete from home).
+    /// Take an app off home (it remains in the library).
     pub fn delete(&mut self, app: &str) {
-        for page in &mut self.pages {
-            page.retain(|a| a != app);
-        }
+        self.remove_from_pages(app);
         self.dock.retain(|a| a != app);
-        self.pages.retain(|p| !p.is_empty());
+        self.repack();
     }
 
     /// Move `app` to the grid slot addressed by (page, index), treated as a
     /// global position `page*PAGE_CAP + index` in the flattened order. Removes
-    /// `app` from pages/dock/hidden first, inserts, then repacks. Used by drag
+    /// `app` from pages/dock first, inserts, then repacks. Used by drag
     /// reorder (grid- and dock-sourced).
     pub fn move_to(&mut self, app: &str, page: usize, index: usize) {
         let mut flat: Vec<AppId> = self.flat().into_iter().filter(|a| a != app).collect();
         self.dock.retain(|a| a != app);
-        self.hidden.retain(|a| a != app);
         let gi = page
             .saturating_mul(PAGE_CAP)
             .saturating_add(index)
@@ -185,24 +165,6 @@ impl ShellModel {
         }
     }
 
-    /// Hide `app` from the home grid.
-    pub fn hide(&mut self, app: &str) {
-        if !self.hidden.iter().any(|a| a == app) {
-            self.remove_from_pages(app);
-            self.unpin(app);
-            self.repack();
-            self.hidden.push(app.to_owned());
-        }
-    }
-
-    /// Unhide `app`, restoring it to the home grid.
-    pub fn unhide(&mut self, app: &str) {
-        if self.hidden.iter().any(|a| a == app) {
-            self.hidden.retain(|a| a != app);
-            self.place(app.to_owned());
-        }
-    }
-
     /// Remove `app` from all pages, dropping any pages left empty.
     fn remove_from_pages(&mut self, app: &str) {
         for page in &mut self.pages {
@@ -220,9 +182,15 @@ impl ShellModel {
     /// tail pages. The single packing invariant: every page but the last is
     /// full. A dense re-chunk can leave neither an interior hole nor an
     /// overflow, so this handles both backfill and overflow cascade.
+    ///
+    /// Home always keeps at least one page, even with nothing on it — that is
+    /// the fresh-install state, and page 0 has to exist to swipe away from.
     pub fn repack(&mut self) {
         let flat = self.flat();
         self.pages = flat.chunks(PAGE_CAP).map(|c| c.to_vec()).collect();
+        if self.pages.is_empty() {
+            self.pages.push(Vec::new());
+        }
     }
 }
 
@@ -242,11 +210,26 @@ mod tests {
     }
 
     #[test]
-    fn delete_removes_and_collapses_empty_pages() {
+    fn delete_removes_and_collapses_to_one_empty_page() {
         let mut m = ShellModel::default();
         m.place("a".into());
         m.delete("a");
-        assert!(m.pages.is_empty());
+        assert_eq!(m.pages, vec![Vec::<AppId>::new()]);
+    }
+
+    #[test]
+    fn delete_collapses_the_page_it_emptied() {
+        let mut m = ShellModel {
+            pages: vec![
+                (0..PAGE_CAP).map(|i| format!("a{i:02}")).collect(),
+                vec!["tail".into()],
+            ],
+            ..Default::default()
+        };
+        m.delete("a05");
+        assert_eq!(m.pages.len(), 1); // tail pulled back, page 1 dropped
+        assert_eq!(m.pages[0].len(), PAGE_CAP);
+        assert_eq!(m.pages[0][PAGE_CAP - 1], "tail");
     }
 
     #[test]
@@ -424,45 +407,28 @@ mod tests {
     }
 
     #[test]
-    fn hide_removes_from_pages_unhide_restores() {
-        let mut m = ShellModel::default();
-        m.place("a".into());
-        m.hide("a");
-        assert!(!m.pages.iter().any(|p| p.contains(&"a".to_string())));
-        assert!(m.hidden.contains(&"a".to_string()));
-        m.unhide("a");
-        assert!(!m.hidden.contains(&"a".to_string()));
-        assert!(m.pages.iter().any(|p| p.contains(&"a".to_string())));
+    fn legacy_hidden_key_is_ignored() {
+        // state.toml written before the library existed: `hidden` apps are now
+        // simply apps that are not on a page.
+        let m: ShellModel = toml::from_str("dock = []\nhidden = [\"a\"]\n").unwrap();
+        assert!(m.pages.is_empty());
     }
 
     #[test]
-    fn hide_unhide_toggle_hidden_set() {
-        let mut m = ShellModel::default();
-        m.hide("a");
-        assert_eq!(m.hidden, vec!["a"]);
-        m.hide("a");
-        assert_eq!(m.hidden, vec!["a"]);
-        m.unhide("a");
-        assert!(m.hidden.is_empty());
-    }
-
-    #[test]
-    fn hidden_serialized_with_default() {
-        let mut m = ShellModel::default();
-        m.hide("a");
-        let s = toml::to_string_pretty(&m).unwrap();
-        let back: ShellModel = toml::from_str(&s).unwrap();
-        assert_eq!(back.hidden, vec!["a"]);
-        let legacy: ShellModel = toml::from_str("dock = []\n").unwrap();
-        assert!(legacy.hidden.is_empty());
-    }
-
-    #[test]
-    fn reconcile_appends_new_catalog_ids_in_order() {
+    fn reconcile_does_not_place_new_catalog_ids() {
         let mut m = ShellModel::default();
         m.place("b".into());
         m.reconcile(&["a".into(), "b".into(), "c".into()], 0, false);
-        assert_eq!(m.pages[0], vec!["b", "a", "c"]);
+        assert_eq!(m.pages, vec![vec!["b"]]); // a and c stay in the library only
+    }
+
+    #[test]
+    fn reconcile_on_fresh_install_leaves_one_empty_page() {
+        let mut m = ShellModel::default();
+        m.reconcile(&["a".into(), "b".into()], 0, true);
+        assert_eq!(m.pages, vec![Vec::<AppId>::new()]);
+        assert!(m.dock.is_empty());
+        assert_eq!(m.frecency.apps.len(), 2);
     }
 
     #[test]
@@ -477,23 +443,14 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_places_a_duplicated_catalog_id_once() {
-        let mut m = ShellModel::default();
-        m.reconcile(&["a".into(), "a".into(), "b".into()], 0, false);
-        assert_eq!(m.pages[0], vec!["a", "b"]);
-    }
-
-    #[test]
-    fn reconcile_prunes_uninstalled_from_pages_dock_hidden() {
+    fn reconcile_prunes_uninstalled_from_pages_and_dock() {
         let mut m = ShellModel::default();
         m.place("gone".into());
         m.place("keep".into());
         m.dock.push("dgone".into());
-        m.hidden.push("hgone".into());
         m.reconcile(&["keep".into()], 0, false);
         assert_eq!(m.pages, vec![vec!["keep".to_string()]]);
         assert!(m.dock.is_empty());
-        assert!(m.hidden.is_empty());
     }
 
     #[test]
@@ -552,6 +509,16 @@ mod tests {
         assert!(m.dock.contains(&"a05".to_string()));
         assert_eq!(m.pages[0].len(), PAGE_CAP); // tail pulled back, no interior hole
         assert_eq!(m.pages.len(), 1);
+    }
+
+    #[test]
+    fn repack_keeps_one_page_when_home_is_empty() {
+        let mut m = ShellModel {
+            pages: vec![vec![], vec![]],
+            ..Default::default()
+        };
+        m.repack();
+        assert_eq!(m.pages, vec![Vec::<AppId>::new()]);
     }
 
     #[test]

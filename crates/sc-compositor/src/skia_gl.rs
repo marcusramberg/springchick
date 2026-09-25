@@ -338,6 +338,102 @@ impl SkiaGl {
         }
     }
 
+    /// Draw an open library folder: a dim backdrop, a rounded card, the
+    /// category name, and the member icons clipped to the card.
+    ///
+    /// Same manual surface acquisition as `draw_icon_menu`, for the same
+    /// reason: the icons need `&self.icon_images` while the canvas borrows
+    /// `&mut self.cached_surface`.
+    pub fn draw_folder_panel(
+        &mut self,
+        width: i32,
+        height: i32,
+        folder: &crate::render::FolderView,
+        icon_cache: &HashMap<String, IconPixels>,
+        app_catalog: &HashMap<String, AppEntry>,
+        flip_y: bool,
+    ) {
+        self.ensure_font();
+        for (app_id, pixels) in icon_cache {
+            if !self.icon_images.contains_key(app_id) {
+                self.get_or_upload_icon(app_id, pixels);
+            }
+        }
+        if !self.ensure_surface(width, height) {
+            return;
+        }
+        let surface = &mut self.cached_surface.as_mut().unwrap().surface;
+        let canvas = surface.canvas();
+
+        canvas.save();
+        if flip_y {
+            canvas.translate((0.0, height as f32));
+            canvas.scale((1.0, -1.0));
+        }
+
+        // Backdrop: dim the page behind so the card reads as modal, and so a
+        // press outside it obviously means "close".
+        let mut dim = Paint::default();
+        dim.set_color(Color::from_argb(140, 0, 0, 0));
+        canvas.draw_rect(Rect::new(0.0, 0.0, width as f32, height as f32), &dim);
+
+        let p = folder.layout.panel;
+        let card = Rect::new(p.x, p.y, p.x + p.w, p.y + p.h);
+        let radius = p.w * 0.06;
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(Color::from_argb(235, 28, 28, 32));
+        canvas.draw_rrect(RRect::new_rect_xy(card, radius, radius), &paint);
+
+        if let Some(f) = &self.font {
+            let mut text = Paint::default();
+            text.set_color(Color::WHITE);
+            if let Some(blob) = TextBlob::new(&folder.title, f) {
+                let tw = f.measure_str(&folder.title, None).0;
+                let t = folder.layout.title_rect;
+                canvas.draw_text_blob(&blob, (t.x + (t.w - tw) / 2.0, t.y + t.h * 0.7), &text);
+            }
+        }
+
+        // Rows are clipped to the card below the title — the same rect the
+        // panel hit-test uses, so what is tappable is exactly what is drawn.
+        let title = folder.layout.title_rect;
+        canvas.save();
+        canvas.clip_rect(
+            Rect::new(
+                p.x,
+                title.y + title.h,
+                p.x + p.w,
+                title.y + title.h + folder.layout.view_h,
+            ),
+            None,
+            Some(true),
+        );
+        let assets = IconAssets {
+            icon_images: &self.icon_images,
+            font: &self.font,
+            app_catalog,
+        };
+        for (i, slot) in folder.layout.apps.iter().enumerate() {
+            draw_icon_slot(
+                canvas,
+                slot,
+                assets,
+                IconCues {
+                    pressed: folder.pressed == Some(i),
+                    launching: None,
+                    running: false,
+                },
+            );
+        }
+        canvas.restore();
+        canvas.restore();
+
+        if let Some(ctx) = self.context.as_mut() {
+            ctx.flush_and_submit();
+        }
+    }
+
     /// Drop the uploaded icons when the catalog has been rescanned: they are
     /// keyed by app id, so a re-themed or reinstalled app would otherwise keep
     /// drawing its old pixels. Called once per frame, before any icon draw.
@@ -381,6 +477,7 @@ impl SkiaGl {
             arrange,
             grid_positions,
             dock_positions,
+            library,
             top_inset,
             lift,
             shift,
@@ -436,6 +533,17 @@ impl SkiaGl {
         };
         for slot in &anim_slots {
             draw_icon_slot(canvas, slot, assets, cues(slot));
+        }
+
+        // Library folder tiles, drawn in page-local space and slid into place
+        // by the page offset — the same way the grid icons ride their springs.
+        if let Some(lib) = library {
+            canvas.save();
+            canvas.translate((lib.x_offset, 0.0));
+            for (tile, preview) in lib.tiles.iter().zip(lib.previews.iter()) {
+                draw_folder_tile(canvas, tile, preview, &self.icon_images, &self.font);
+            }
+            canvas.restore();
         }
 
         // Dock and dots don't scroll with pages.
@@ -1206,12 +1314,50 @@ fn draw_icon_slot(
         if let Some(f) = font {
             let mut paint = Paint::default();
             paint.set_color(Color::WHITE);
-            if let Some(blob) = TextBlob::new(&entry.name, f) {
-                let text_width = f.measure_str(&entry.name, None).0;
+            // Clipped to the cell: a long name ("Thincast Remote Desktop
+            // Client") otherwise runs under its neighbours' labels.
+            let name = ellipsize(f, &entry.name, slot.label_rect.w);
+            if let Some(blob) = TextBlob::new(&name, f) {
+                let text_width = f.measure_str(&name, None).0;
                 let x = slot.label_rect.x + (slot.label_rect.w - text_width) / 2.0;
                 let y = slot.label_rect.y + slot.label_rect.h * 0.75;
                 canvas.draw_text_blob(&blob, (x, y), &paint);
             }
+        }
+    }
+}
+
+/// A library folder tile: a rounded backing plate with up to four member icons
+/// inside it, and the category name below.
+fn draw_folder_tile(
+    canvas: &skia_safe::Canvas,
+    slot: &sc_layout::library::FolderSlot,
+    preview: &[String],
+    icon_images: &HashMap<String, Image>,
+    font: &Option<Font>,
+) {
+    let t = slot.tile_rect;
+    let rect = Rect::new(t.x, t.y, t.x + t.w, t.y + t.h);
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(Color::from_argb(56, 255, 255, 255));
+    canvas.draw_rrect(RRect::new_rect_xy(rect, t.w * 0.22, t.w * 0.22), &paint);
+
+    for (r, app_id) in slot.preview.iter().zip(preview.iter()) {
+        let dst = Rect::new(r.x, r.y, r.x + r.w, r.y + r.h);
+        if let Some(image) = icon_images.get(app_id) {
+            canvas.draw_image_rect(image, None, dst, &Paint::default());
+        }
+    }
+
+    if let Some(f) = font {
+        let mut paint = Paint::default();
+        paint.set_color(Color::WHITE);
+        if let Some(blob) = TextBlob::new(&slot.name, f) {
+            let text_width = f.measure_str(&slot.name, None).0;
+            let x = slot.label_rect.x + (slot.label_rect.w - text_width) / 2.0;
+            let y = slot.label_rect.y + slot.label_rect.h * 0.75;
+            canvas.draw_text_blob(&blob, (x, y), &paint);
         }
     }
 }

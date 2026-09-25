@@ -261,7 +261,7 @@ impl State {
             UiState::Home {
                 page, page_count, ..
             } => (*page, *page_count),
-            _ => (0, self.model.pages.len().max(1)),
+            _ => (0, self.home_page_count()),
         };
         // `!` = not in the catalog (draws nothing). `~` = no reflow spring, so
         // the grid cannot place it however good the model looks.
@@ -570,9 +570,10 @@ impl State {
         // release itself — while the deck was still animating in.
         self.poll_kbd_switch();
 
-        // Animations that settle to home reset page_count to 1; restore from the model.
+        // Animations that settle to home reset page_count to 1; restore it.
+        let pages = self.home_page_count();
         if let UiState::Home { page_count, .. } = &mut self.ui {
-            *page_count = self.model.pages.len().max(1);
+            *page_count = pages;
         }
 
         let usable = self.layers.usable(self.dpi);
@@ -709,6 +710,29 @@ impl State {
             }
         });
 
+        let library = scene.show_home.then(|| {
+            let tiles = self.library_tiles();
+            let previews = self
+                .folders
+                .iter()
+                .map(|f| f.apps.iter().take(4).cloned().collect())
+                .collect();
+            render::LibraryView {
+                tiles,
+                previews,
+                x_offset: self.library_x_offset(),
+            }
+        });
+        let folder = self.folder_panel().map(|layout| render::FolderView {
+            layout,
+            title: self
+                .folder
+                .as_ref()
+                .and_then(|f| self.folders.get(f.index))
+                .map_or(String::new(), |f| f.name.to_string()),
+            pressed: self.folder.as_ref().and_then(|f| f.pressed),
+        });
+
         FramePrep {
             scene,
             app_surface,
@@ -728,6 +752,8 @@ impl State {
             lock_view: self.session_lock.view(),
             lock_surface: self.session_lock.wl_surface().cloned(),
             icon_menu,
+            library,
+            folder,
             closing: self.layers.closing_view(),
             card_chrome,
             dim: self.rotation_fade.dim(std::time::Instant::now()),
@@ -762,10 +788,10 @@ impl State {
         });
         let arrange = self.arrange.as_ref().map(|a| {
             let drag = a.drag.as_ref();
-            // Only a grid-sourced drag can pin, so only highlight the dock drop
-            // target for those (a dock→dock drag is a no-op).
+            // A dock→dock drag is a no-op, so only highlight the drop target
+            // for drags that can actually pin.
             let over_dock = drag.is_some_and(|d| {
-                d.source == crate::input_dispatch::IconSource::Grid
+                d.source != crate::input_dispatch::IconSource::Dock
                     && dock_zone.is_some_and(|z| z.contains(d.cur.0, d.cur.1))
             });
             render::ArrangeView {
@@ -815,6 +841,8 @@ impl State {
             running_apps: &self.icon_overlays.running_apps,
             arrange,
             icon_menu: prep.icon_menu.as_ref(),
+            library: prep.library.as_ref(),
+            folder: prep.folder.as_ref(),
             card_chrome: &prep.card_chrome,
             dim: prep.dim,
             report_partial_damage,
