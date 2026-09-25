@@ -277,10 +277,18 @@ fn motion_switcher_card(state: &mut State, x: f32, y: f32) -> Stage {
 /// movement: the swipe it just became still needs the stages below.
 fn motion_cancel_icon_press(state: &mut State, x: f32, y: f32) {
     if let Some(p) = &state.bg_press {
-        // Same slop as an icon press: a background hold that starts travelling
-        // is a page swipe or a pull-down, not a request for arrange mode.
-        if home::exceeds_icon_tap_slop(x - p.start.0, y - p.start.1) {
+        // A background hold that starts travelling is a page swipe or a
+        // pull-down, not a request for arrange mode.
+        if home::exceeds_icon_hold_slop(x - p.start.0, y - p.start.1) {
             state.bg_press = None;
+        }
+    }
+    if let Some(p) = &state.icon_press {
+        // Deliberately looser than the launch slop below: a finger holding still
+        // for half a second drifts further than one tapping, and losing the menu
+        // to a 15px wobble is the annoying failure.
+        if home::exceeds_icon_hold_slop(x - p.start.0, y - p.start.1) {
+            state.icon_press = None;
         }
     }
     if let Some((_, start)) = state.pending_folder {
@@ -293,8 +301,6 @@ fn motion_cancel_icon_press(state: &mut State, x: f32, y: f32) {
     };
     if home::exceeds_icon_tap_slop(x - p.start_x, y - p.start_y) {
         state.pending_launch = None;
-        // The gesture became a swipe — cancel the long-press hold too.
-        state.icon_press = None;
     }
 }
 
@@ -723,6 +729,7 @@ fn press_arm_gesture(state: &mut State, x: f32, y: f32) {
             state.icon_press = Some(IconPress {
                 app_id,
                 source,
+                start: (start_x, start_y),
                 at: std::time::Instant::now(),
             });
         }
