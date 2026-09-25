@@ -201,6 +201,10 @@ pub struct FolderView {
     pub title: String,
     /// Member index under the finger, drawn with a press highlight.
     pub pressed: Option<usize>,
+    /// The tile center the card grows out of.
+    pub anchor: (f32, f32),
+    /// Open animation, 0→1 (and back to 0 while closing).
+    pub progress: f32,
 }
 
 /// Render-only view of the open icon menu, derived from `State::icon_menu` the
