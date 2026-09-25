@@ -74,6 +74,10 @@ fn main() -> std::process::ExitCode {
     // a running compositor instead of starting one. Handled before tracing so
     // the client's stdout stays clean.
     let args: Vec<String> = std::env::args().collect();
+    if matches!(args.get(1).map(String::as_str), Some("--version" | "-V")) {
+        println!("springchick {}", env!("CARGO_PKG_VERSION"));
+        return std::process::ExitCode::SUCCESS;
+    }
     if args.get(1).map(String::as_str) == Some("ipc") {
         return ipc::run_client(&args[2..]);
     }
