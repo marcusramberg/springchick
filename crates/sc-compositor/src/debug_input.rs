@@ -572,15 +572,26 @@ fn advance_gesture(state: &mut State) {
         let _ = g.reply.send("ok locked\n".into());
         return;
     }
-    let elapsed = g.start.elapsed().as_millis() as f32;
-    let t = swipe_t(elapsed, g.dur_ms);
-
+    // The press tick emits no motion, and restarts the clock: the finger is at
+    // `from` at t=0 by definition.
+    //
+    // Emitting the first motion here instead would hand the velocity tracker a
+    // position already advanced along the path over a `motion_dt` of ~0 — the
+    // press has just stamped `last_motion` — which reads as tens of screens per
+    // second. The low-pass sheds it over a few samples, but a slow swipe on a
+    // slow output only gets a few samples in total, so the phantom speed
+    // survives to the release and every deliberate drag classifies as a flick.
     if !g.started {
         input_common::on_motion(state, g.from.0, g.from.1); // seed before press
         input_common::on_press(state);
         g.started = true;
+        g.start = Instant::now();
+        state.active_gesture = Some(g);
+        return;
     }
 
+    let elapsed = g.start.elapsed().as_millis() as f32;
+    let t = swipe_t(elapsed, g.dur_ms);
     let (px, py) = sc_anim::lerp_point(g.from, g.to, t);
     input_common::on_motion(state, px, py);
 

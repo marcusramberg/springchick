@@ -972,6 +972,14 @@ fn release_folder_tap(state: &mut State) -> Stage {
     // Same reason as an icon tap: the page drag armed by the same press has to
     // be settled, not abandoned mid-scroll.
     state.cancel_page_drag();
+    // Logged for the VM test: opening a folder changes no `UiState`
+    // discriminant (Home stays Home), so no `state changed to ...` line fires.
+    debug!(
+        target: "springchick::debug",
+        "folder opened index={index} name={} members={}",
+        state.folders.get(index).map_or("?", |f| f.name),
+        state.folders.get(index).map_or(0, |f| f.apps.len()),
+    );
     state.folder = Some(crate::library::OpenFolder::new(index));
     state.needs_render = true;
     Stage::Done
