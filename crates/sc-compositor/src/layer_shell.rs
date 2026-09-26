@@ -729,10 +729,11 @@ impl LayerShell {
     /// Note a touch-down on `surface`, so an `OnDemand` layer surface can take
     /// keyboard focus on tap. A tap anywhere else clears it.
     pub fn note_tap(&mut self, surface: &WlSurface) {
-        let is_layer = layer_map_for_output(&self.output)
+        // `surface` may be a subsurface the tap actually landed on; focus is a
+        // property of the layer surface itself, so resolve back to its root.
+        self.focus_tap = layer_map_for_output(&self.output)
             .layer_for_surface(surface, WindowSurfaceType::ALL)
-            .is_some();
-        self.focus_tap = is_layer.then(|| surface.clone());
+            .map(|l| l.wl_surface().clone());
     }
 
     /// The mapped layer surface that should hold keyboard focus, if any.
