@@ -108,6 +108,11 @@ impl State {
         let dpi = self.dpi;
         let mut chain: Vec<PopupRect> = PopupManager::popups_for_surface(root)
             .map(|(kind, loc)| {
+                // Deliberately the client's *geometry*, not the drawn bbox: a
+                // popup that never sets geometry (wvkbd's key preview) reports
+                // 0x0 and must stay hit-testable by nothing. Its buffer covers
+                // the whole keyboard, so sizing it from the bbox swallows every
+                // key tap.
                 let geo = kind.geometry();
                 let size = (
                     (geo.size.w as f64 * dpi).round() as i32,
@@ -316,7 +321,7 @@ impl State {
 
     pub(crate) fn layers_dump(&self) -> String {
         let infos = self.layers.dump(self.dpi);
-        let popups = self.layer_popups();
+        let popups = self.active_popups();
         // Layer surfaces and their popups are not drawn while the app is turned
         // (portrait chrome over a landscape app), so say so rather than let the
         // reader wonder why the dump lists surfaces they cannot see.
@@ -326,7 +331,7 @@ impl State {
             ""
         };
         let mut parts = vec![format!(
-            "out={}x{} dpi={} {}{} layers={} layer-popups={}",
+            "out={}x{} dpi={} {}{} layers={} popups={}",
             self.output_size.0,
             self.output_size.1,
             self.dpi,

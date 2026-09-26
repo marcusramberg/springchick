@@ -15,6 +15,8 @@ use crate::touch_viz;
 use crate::State;
 use smithay::backend::input::TouchSlot;
 use smithay::backend::input::{Axis, AxisRelativeDirection, AxisSource};
+use smithay::desktop::utils::under_from_surface_tree;
+use smithay::desktop::WindowSurfaceType;
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent as PointerMotionEvent};
 use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -28,6 +30,38 @@ use smithay::utils::{Point, SERIAL_COUNTER};
 /// surfaces (the OSK); everything else
 /// falls through to the gesture funnel by returning `None`.
 fn surface_under(state: &State, x: f32, y: f32) -> Option<Target> {
+    root_under(state, x, y).map(|t| descend(state, t, x, y))
+}
+
+/// Narrow a root-surface target to the subsurface actually under `(x, y)`.
+///
+/// Every target above is a *root* surface (toplevel, layer surface, popup,
+/// lock), but a client may put real content in subsurfaces of it, and
+/// `wl_pointer`/`wl_touch` enter carries the specific surface hit — a client
+/// that gets the root instead sees the event land on nothing. Firefox draws its
+/// doorhangers (the "allow notifications?" prompt) this way: they composite over
+/// the page but are not popups, so without this they take no input at all.
+///
+/// Also respects input regions: a subsurface that excludes the point is skipped.
+fn descend(state: &State, t: Target, x: f32, y: f32) -> Target {
+    let local = to_local(state, t.scale, t.rotated, x, y) - t.focus();
+    match under_from_surface_tree(&t.surface, local, (0, 0), WindowSurfaceType::ALL) {
+        Some((surface, loc)) if surface != t.surface => Target {
+            surface,
+            origin: (
+                t.origin.0 + loc.x as f64 * t.scale,
+                t.origin.1 + loc.y as f64 * t.scale,
+            ),
+            scale: t.scale,
+            rotated: t.rotated,
+        },
+        _ => t,
+    }
+}
+
+/// The root surface (toplevel, layer surface, popup, lock) input at `(x, y)`
+/// belongs to, before [`descend`] narrows it to a subsurface.
+fn root_under(state: &State, x: f32, y: f32) -> Option<Target> {
     // 0. A locked session routes everything to the lock surface and nothing
     //    else — no popups, no layers, no app. With no lock surface (client
     //    crashed, or hasn't made one yet) input goes nowhere at all; it must
@@ -240,12 +274,13 @@ fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
     match hit {
         Some(i) => {
             let (kind, origin, _) = &popups[i];
-            PopupPress::Route(Target {
+            let t = Target {
                 surface: kind.wl_surface().clone(),
                 origin: (origin.0 as f64, origin.1 as f64),
                 scale: state.dpi,
                 rotated: state.rotation.swaps_axes(),
-            })
+            };
+            PopupPress::Route(descend(state, t, x, y))
         }
         // Missed every popup. Only a modal (grabbing) popup consumes the tap;
         // if nothing grabbing was open, `dismiss` is empty and we fall through.
