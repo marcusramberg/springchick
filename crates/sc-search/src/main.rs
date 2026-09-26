@@ -9,6 +9,7 @@
 mod blur;
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use sc_catalog::AppEntry;
@@ -18,6 +19,12 @@ use sc_shell_model::{unix_now, FrecencyStore};
 /// task switcher. Must match `SEARCH_APP_ID` in the compositor.
 const APP_ID: &str = "chick.springchick.Search";
 const DEFAULT_LIMIT: usize = 5;
+/// How long a result has to be held before it becomes a drag. Matches the
+/// compositor's `arrange::HOLD_MS` so a hold feels the same here as on Home.
+const HOLD_MS: u128 = 500;
+/// How far a held finger may travel (egui points) before the press is read as a
+/// list scroll instead of a hold.
+const HOLD_SLOP: f32 = 12.0;
 const FILTER_LIMIT: usize = 8;
 
 fn main() -> eframe::Result<()> {
@@ -55,6 +62,10 @@ struct SearchApp {
     focus_requested: bool,
     /// Last known viewport focus, to spot the edge where we are raised again.
     focused: bool,
+    /// The result row currently held down: its id, when the press started, and
+    /// where — the press that may become a drag. Dropped if the finger travels,
+    /// because that press is a list scroll.
+    held: Option<(String, Instant, egui::Pos2)>,
     /// Kept alive for the process lifetime: dropping it drops the blur.
     _blur: Option<blur::ExtBackgroundEffectSurfaceV1>,
 }
@@ -70,6 +81,7 @@ impl SearchApp {
             icon_dirs: sc_icons::theme_dirs(&sc_catalog::xdg_data_dirs()),
             focus_requested: false,
             focused: true,
+            held: None,
             _blur: blur::blur_whole_window(cc),
         };
         app.rescan();
@@ -154,11 +166,28 @@ impl SearchApp {
 }
 
 /// Ask the running compositor to open `app_id`. True when it accepted.
-///
-/// Mirrors `springchick ipc launch <id>`: same socket resolution, same one-line
-/// protocol. Any failure (no compositor, no socket, an error reply) returns
-/// false so the caller can fall back to spawning the app itself.
 fn ipc_launch(app_id: &str) -> bool {
+    ipc_cmd(&format!("launch {app_id}"))
+}
+
+/// Ask the compositor to take over a drag of `app_id`, with the finger still
+/// down on us. True when it accepted, and then this process is done: the
+/// compositor has cancelled our touch and owns the gesture from here.
+///
+/// No coordinates: the compositor was routing that finger to us until a moment
+/// ago and knows where it is in output space, which we would have to convert
+/// our surface-local position into.
+fn ipc_drag(app_id: &str) -> bool {
+    ipc_cmd(&format!("drag {app_id}"))
+}
+
+/// Send one line to the compositor's control socket and report whether it
+/// replied `ok`.
+///
+/// Mirrors `springchick ipc <line>`: same socket resolution, same one-line
+/// protocol. Any failure (no compositor, no socket, an error reply) returns
+/// false so the caller can fall back.
+fn ipc_cmd(line: &str) -> bool {
     use std::io::{BufRead, BufReader, Write};
 
     let path = std::env::var("SPRINGCHICK_IPC_SOCK")
@@ -170,7 +199,7 @@ fn ipc_launch(app_id: &str) -> bool {
     let Ok(stream) = std::os::unix::net::UnixStream::connect(path) else {
         return false;
     };
-    if writeln!(&stream, "launch {app_id}").is_err() {
+    if writeln!(&stream, "{line}").is_err() {
         return false;
     }
     let mut reply = String::new();
@@ -223,6 +252,9 @@ impl eframe::App for SearchApp {
 
             let ids: Vec<String> = self.results.clone();
             let mut launch: Option<String> = None;
+            let mut drag: Option<String> = None;
+            let mut still_held: Option<(String, Instant, egui::Pos2)> = None;
+            let pointer = ctx.pointer_interact_pos();
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for id in &ids {
                     let name = self
@@ -235,10 +267,44 @@ impl eframe::App for SearchApp {
                     if resp.clicked() {
                         launch = Some(id.clone());
                     }
+                    if !resp.is_pointer_button_down_on() {
+                        continue;
+                    }
+                    // Held: keep the press this row started, or start one.
+                    let Some(now_at) = pointer else { continue };
+                    let (since, from) = match &self.held {
+                        Some((held_id, at, from)) if held_id == id => (*at, *from),
+                        _ => (Instant::now(), now_at),
+                    };
+                    // Travelled: this is the list being scrolled, not a hold.
+                    if (now_at - from).length() > HOLD_SLOP {
+                        continue;
+                    }
+                    if since.elapsed().as_millis() >= HOLD_MS {
+                        drag = Some(id.clone());
+                    } else {
+                        still_held = Some((id.clone(), since, from));
+                    }
                 }
             });
+            self.held = still_held;
+            // A perfectly still finger produces no further events, so egui would
+            // not repaint and the hold would never mature. Ask for the one
+            // wake-up that lands on the threshold.
+            if let Some((_, since, _)) = &self.held {
+                let remain = HOLD_MS.saturating_sub(since.elapsed().as_millis());
+                ctx.request_repaint_after(Duration::from_millis(remain as u64));
+            }
 
-            if let Some(id) = launch {
+            if let Some(id) = drag {
+                // The compositor cancels our touch and owns the gesture now, so
+                // there is nothing left for this process to do. If it refuses,
+                // fall through and leave the press alone — a long hold that goes
+                // nowhere beats a launch the user did not ask for.
+                if ipc_drag(&id) {
+                    std::process::exit(0);
+                }
+            } else if let Some(id) = launch {
                 self.launch(&id);
             }
             if enter {
