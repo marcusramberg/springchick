@@ -565,6 +565,7 @@ pub fn pointer_axis(
 /// a slot on empty space drives the gesture funnel — but only the first such
 /// slot (`gesture_slot`), since the funnel is single-touch.
 pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
+    state.last_touch_pos = Some((x, y));
     // A finger took over: park the mouse cursor until the pointer moves again,
     // the way a laptop hides it while you type.
     if state.cursor_visible {
@@ -614,6 +615,7 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
 
 /// A finger moved to `(x, y)`.
 pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
+    state.last_touch_pos = Some((x, y));
     if state.show_touches {
         state
             .touch_viz

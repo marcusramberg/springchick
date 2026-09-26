@@ -519,6 +519,11 @@ pub(crate) struct State {
 
     // Input
     pub last_pointer_pos: Option<(f32, f32)>,
+    /// Where the most recent finger was, in output pixels, whoever it was routed
+    /// to. Unlike `last_pointer_pos` (which only the shell's gesture funnel
+    /// feeds) this also tracks touches that went to a client, so the compositor
+    /// can pick a sequence up from one — see [`State::lift_from_search`].
+    pub last_touch_pos: Option<(f32, f32)>,
     pub pointer_down: bool,
     /// Page drag tracking: origin + velocity when dragging on the home screen.
     pub page_drag: Option<input_common::FingerDrag>,
@@ -898,6 +903,7 @@ impl State {
             skia: SkiaGl::new(),
             wayland_socket,
             last_pointer_pos: None,
+            last_touch_pos: None,
             pointer_down: false,
             page_drag: None,
             last_motion: None,

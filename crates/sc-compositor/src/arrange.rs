@@ -289,6 +289,61 @@ impl State {
         self.search_arm = None;
     }
 
+    /// Take a drag over from the search app: dismiss it and start an ordinary
+    /// arrange drag carrying `app_id`, with the finger still down.
+    ///
+    /// Search is a *client*, so it owns the touch sequence the drag started in.
+    /// The finger therefore has to be taken off it mid-press — `wl_touch.cancel`
+    /// so it stops tracking a contact it no longer has, then the slot is
+    /// re-pointed at the shell's own gesture funnel so the same unbroken finger
+    /// keeps driving the drag. From there `motion_arrange_drag` and
+    /// `release_arrange` own it exactly as they do for a library lift.
+    ///
+    /// `at` overrides where the finger is (output pixels) for callers driving
+    /// this by hand; a real handoff passes `None` and inherits the live touch.
+    pub(crate) fn lift_from_search(&mut self, app_id: String, at: Option<(f32, f32)>) {
+        let (w, h) = self.output_size_f();
+        let at = at
+            .or(self.last_touch_pos)
+            .or(self.last_pointer_pos)
+            .unwrap_or((w * 0.5, h * 0.5));
+        debug!(target: "springchick::debug", "search drag lifted app_id={app_id} at={at:?}");
+        // Whichever slot the search client is holding. A pointer-driven drag
+        // (desktop, `ipc drag` in a test) has none and already drives the
+        // funnel, so `None` is the right answer there, not a failure.
+        let slot = self.touch_targets.keys().copied().next();
+        let touch = self.touch.clone();
+        touch.cancel(self);
+        self.touch_targets.clear();
+        self.gesture_slot = slot;
+
+        // Deliberately not `cancel_gestures`: it clears `arrange.drag`, which is
+        // the thing being set up here.
+        self.handle_return_home();
+        self.icon_press = None;
+        self.bg_press = None;
+        self.search_arm = None;
+        self.pending_launch = None;
+        self.cancel_page_drag();
+
+        // `on_motion` bails unless a press is live, and `on_release` reads the
+        // last position — the handoff has to look like a press already in
+        // flight, because it is one.
+        self.pointer_down = true;
+        self.last_pointer_pos = Some(at);
+        self.arrange = Some(ArrangeState {
+            drag: Some(DragItem {
+                app_id,
+                source: input_dispatch::IconSource::Library,
+                cur: at,
+                hover: None,
+                edge_since: None,
+            }),
+            just_engaged: false,
+        });
+        self.needs_render = true;
+    }
+
     /// Long-press hold on an icon: opens its context menu. The launch armed by
     /// the same press is dropped — the hold was not a tap.
     pub(crate) fn maybe_open_icon_menu(&mut self) {

@@ -46,6 +46,17 @@ pub enum DebugCmd {
     /// A real touch-down+up tap at `(x, y)` through the surface-routing path
     /// (`touch::down`/`up`), for exercising layer-surface/app input.
     Touch(f32, f32),
+    /// Hand a drag of `app_id` over from the search app to the home grid, with
+    /// the finger still down. Sent by sc-search when a result is long-pressed.
+    ///
+    /// `at` (output pixels) is an override for driving this by hand, where there
+    /// is no finger to inherit; a real handoff omits it and the compositor uses
+    /// the live touch position, which it knows and the client would have to
+    /// convert out of its own surface space to express.
+    Drag {
+        app_id: String,
+        at: Option<(f32, f32)>,
+    },
     /// Pretend the device was turned. Drives the same path the accelerometer
     /// will, so rotation policy is testable with no sensor.
     Orientation(crate::rotation::DeviceOrientation),
@@ -219,6 +230,25 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
             };
             done(tok)?;
             DebugCmd::Launch { app_id, new_window }
+        }
+        "drag" => {
+            let app_id = tok
+                .next()
+                .ok_or_else(|| "parse: missing app id".to_string())?
+                .to_string();
+            let at = match tok.next() {
+                None => None,
+                Some(sx) => {
+                    let x: f32 = sx.parse().map_err(|_| "parse: not a number".to_string())?;
+                    let y = num(&mut tok)?;
+                    if !in_bounds(x, y) {
+                        return Err("range".to_string());
+                    }
+                    Some((x, y))
+                }
+            };
+            done(tok)?;
+            DebugCmd::Drag { app_id, at }
         }
         "action" => {
             let name = tok
@@ -405,6 +435,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
                 | DebugCmd::Tap(..)
                 | DebugCmd::Swipe { .. }
                 | DebugCmd::Launch { .. }
+                | DebugCmd::Drag { .. }
         )
     {
         let _ = reply.send("ok locked\n".into());
@@ -487,6 +518,14 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             };
             crate::keybinds::on_key_event(state, keycode, key_state, 0);
             let _ = reply.send("ok\n".into());
+        }
+        DebugCmd::Drag { app_id, at } => {
+            if state.app_catalog.contains_key(&app_id) {
+                state.lift_from_search(app_id, at);
+                let _ = reply.send("ok\n".into());
+            } else {
+                let _ = reply.send("err unknown-app\n".into());
+            }
         }
         DebugCmd::Orientation(o) => {
             state.set_device_orientation(o);
@@ -714,6 +753,39 @@ mod tests {
             parse_line("down 10 20", W, H),
             Ok(DebugCmd::Down(10.0, 20.0))
         );
+    }
+
+    #[test]
+    fn parses_drag_with_and_without_position() {
+        // No position: the compositor inherits the live finger.
+        assert_eq!(
+            parse_line("drag foo", W, H),
+            Ok(DebugCmd::Drag {
+                app_id: "foo".into(),
+                at: None
+            })
+        );
+        assert_eq!(
+            parse_line("drag foo 10 20", W, H),
+            Ok(DebugCmd::Drag {
+                app_id: "foo".into(),
+                at: Some((10.0, 20.0))
+            })
+        );
+        assert_eq!(
+            parse_line("drag", W, H),
+            Err("parse: missing app id".into())
+        );
+        assert_eq!(
+            parse_line("drag foo 10", W, H),
+            Err("parse: missing arg".into())
+        );
+        assert_eq!(
+            parse_line("drag foo 1 2 3", W, H),
+            Err("parse: trailing tokens".into())
+        );
+        // A half-offscreen finger is a typo, not a handoff.
+        assert_eq!(parse_line("drag foo 10 99999", W, H), Err("range".into()));
     }
 
     #[test]
