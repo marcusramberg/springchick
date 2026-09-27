@@ -68,6 +68,18 @@ fn close_spring() -> Spring {
     s
 }
 
+/// Window → icon shrink. Much stiffer than the shared `Spring::zoom` (critical
+/// ≈ 2·√760 ≈ 55): the open zoom has an icon to grow out of, the shrink has
+/// nothing to look at while it runs. Paired with `MINIMIZE_HANDOVER`, which cuts
+/// the tail.
+fn minimize_spring(from: f32, to: f32) -> Spring {
+    let mut s = Spring::new(from);
+    s.stiffness = 760.0;
+    s.damping = 55.0;
+    s.retarget(to);
+    s
+}
+
 /// Velocity kick (fractions of screen height per second) given to the Home
 /// bounce spring when a bar gesture has nowhere to go. Tuned against the
 /// bounce spring below for a ~3% lift that settles in under a third of a second.
@@ -78,6 +90,11 @@ const HOME_BOUNCE_KICK: f32 = 1.1;
 /// remainder is sub-pixel on a phone panel, and the deck can't be stepped or
 /// touched until it exists.
 const SWITCHER_HANDOVER: f32 = 0.985;
+
+/// Same idea for the minimize: the last few percent of the shrink is a window a
+/// few pixels wider than the icon, and the spring's tail there is long enough to
+/// read as a hitch before Home appears.
+const MINIMIZE_HANDOVER: f32 = 0.95;
 
 /// Origin of a zoom animation: where the window grows from / shrinks to.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -477,7 +494,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     *state = UiState::AppClosing {
                         toplevel,
                         app_id,
-                        progress: Spring::zoom(1.0, 0.0),
+                        progress: minimize_spring(1.0, 0.0),
                         origin,
                     };
                 }
@@ -569,9 +586,14 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     NavTarget::BackToApp => 0.0,
                     NavTarget::Home | NavTarget::Switcher | NavTarget::QuickSwitch(_) => 1.0,
                 };
-                let mut progress = Spring::new(current_progress);
-                progress.stiffness = 280.0;
-                progress.damping = 32.0;
+                let mut progress = if matches!(target, NavTarget::Home) {
+                    minimize_spring(current_progress, current_progress)
+                } else {
+                    let mut s = Spring::new(current_progress);
+                    s.stiffness = 280.0;
+                    s.damping = 32.0;
+                    s
+                };
                 progress.velocity = -tracker.velocity.y; // upward velocity → positive progress velocity
                 progress.retarget(settle_target);
                 *state = UiState::Settling {
@@ -630,7 +652,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 }
                 UiState::AppClosing { progress, .. } => {
                     progress.step(dt);
-                    if progress.is_settled() {
+                    if progress.is_settled() || progress.value <= 1.0 - MINIMIZE_HANDOVER {
                         *state = UiState::home(0, 1);
                     }
                 }
@@ -646,8 +668,12 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     // tail runs out: the last fraction of a percent is invisible
                     // motion, and holding it back only delays the first card
                     // step (Super+Tab) or the deck's first touch.
-                    let handover = matches!(target, NavTarget::Switcher)
-                        && progress.value >= SWITCHER_HANDOVER;
+                    let handover = progress.value
+                        >= match target {
+                            NavTarget::Switcher => SWITCHER_HANDOVER,
+                            NavTarget::Home => MINIMIZE_HANDOVER,
+                            _ => f32::INFINITY,
+                        };
                     if progress.is_settled() || handover {
                         debug!(target: "springchick::debug", "Settling resolved target={:?}", target);
                         match target {
