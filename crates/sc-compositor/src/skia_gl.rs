@@ -295,7 +295,9 @@ impl SkiaGl {
             let typeface = mgr
                 .match_family_style("sans-serif", FontStyle::normal())
                 .unwrap_or_else(|| mgr.legacy_make_typeface(None, FontStyle::normal()).unwrap());
-            self.font = Some(Font::from_typeface(typeface, 28.0));
+            let mut font = Font::from_typeface(typeface, 28.0);
+            font.set_subpixel(true);
+            self.font = Some(font);
         }
     }
 
