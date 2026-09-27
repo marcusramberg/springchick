@@ -138,6 +138,10 @@ pub struct Config {
     /// How long (ms) each half of the dip-to-black that covers an orientation
     /// change takes. `0` disables the transition (instant swap).
     pub rotation_fade_ms: u64,
+    /// Shell commands run once at startup, for setups without systemd user
+    /// units. Spawned with `sh -c` after the Wayland socket exists, so clients
+    /// launched here find `WAYLAND_DISPLAY`. Ignored on reload.
+    pub startup: Vec<String>,
     /// Per-app resource tiers applied on focus change. See [`Resources`].
     pub resources: Resources,
     pub bindings: Vec<Binding>,
@@ -503,6 +507,8 @@ struct RawMain {
     vrr: Option<bool>,
     rotation_settle_ms: Option<u64>,
     rotation_fade_ms: Option<u64>,
+    #[serde(default)]
+    startup: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -540,6 +546,7 @@ impl Config {
                     vrr: DEFAULT_VRR,
                     rotation_settle_ms: DEFAULT_ROTATION_SETTLE_MS,
                     rotation_fade_ms: DEFAULT_ROTATION_FADE_MS,
+                    startup: Vec::new(),
                     resources: Resources::default(),
                     bindings: Vec::new(),
                 };
@@ -557,6 +564,7 @@ impl Config {
             .rotation_settle_ms
             .unwrap_or(DEFAULT_ROTATION_SETTLE_MS);
         let rotation_fade_ms = main.rotation_fade_ms.unwrap_or(DEFAULT_ROTATION_FADE_MS);
+        let startup = main.startup;
         let resources = parse_resources(file.resources);
         let raw = file.keybinds.unwrap_or_default();
 
@@ -572,6 +580,7 @@ impl Config {
             vrr,
             rotation_settle_ms,
             rotation_fade_ms,
+            startup,
             resources,
             bindings,
         }
@@ -990,6 +999,13 @@ mod tests {
         let prev = find("ISO_Left_Tab", PressKind::Short).unwrap();
         assert_eq!(prev.action, Action::SwitcherPrev);
         assert!(prev.mods.logo && prev.mods.shift);
+    }
+
+    #[test]
+    fn parses_startup_commands() {
+        let cfg = Config::parse("[main]\nstartup = [\"foo\", \"bar --baz\"]\n");
+        assert_eq!(cfg.startup, vec!["foo", "bar --baz"]);
+        assert!(Config::defaults().startup.is_empty());
     }
 
     #[test]

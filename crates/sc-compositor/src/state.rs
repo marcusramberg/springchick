@@ -644,6 +644,13 @@ impl State {
         let config_rotation_settle_ms = config.rotation_settle_ms;
         let config_rotation_fade_ms = config.rotation_fade_ms;
 
+        // `WAYLAND_DISPLAY` is already in our own env (see `session`), so these
+        // inherit it and can connect.
+        let mut children = Vec::new();
+        for command in &config.startup {
+            crate::keybinds::spawn_command(command, &mut children);
+        }
+
         // v6 so clients like wvkbd that bind wl_compositor@6 can connect.
         let compositor_state = CompositorState::new_v6::<Self>(&dh);
         // Advertise only Fullscreen as a WM capability. Maximize/Minimize/
@@ -864,7 +871,7 @@ impl State {
             catalog_gen: 0,
             toplevels: Vec::new(),
             drawn_toplevels: Vec::new(),
-            children: Vec::new(),
+            children,
             launching: Vec::new(),
             uninstalling: Vec::new(),
             xdg_activation_state,
