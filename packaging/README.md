@@ -33,8 +33,8 @@ Two things must exist on the Woodpecker side:
 It also needs one agent per architecture; `labels: platform: linux/<arch>`
 selects them. Without an amd64 agent, drop those matrix entries.
 
-Versions are date-stamped (`0.1.0.20260913-1`) because the registries reject
-re-uploading an existing filename. Dots only: Arch `pkgver` rejects `-` and `~`.
+Versions are date- and pipeline-stamped (`0.1.0.20260913.42-1`) because the
+registries reject re-uploading an existing filename (409). Dots only: Arch `pkgver` rejects `-` and `~`.
 
 CI does not cache cargo between runs, so a nightly pays the full build —
 including Skia from source on Alpine.

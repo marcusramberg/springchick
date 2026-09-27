@@ -48,9 +48,10 @@ steps:
   - name: package
     image: ghcr.io/goreleaser/nfpm:latest
     commands:
-      # Date-stamped version: each upload must be a new filename, the
-      # registries reject a repeat. Dots only — Arch pkgver rejects '-' and '~'.
-      - export PKG_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/sc-compositor/Cargo.toml | head -1).$(date -u +%Y%m%d)"
+      # Each upload must be a new filename (the registries 409 a repeat), so a
+      # same-day rerun needs the pipeline number too. Pipeline-derived so every
+      # matrix job agrees. Dots only — Arch pkgver rejects '-' and '~'.
+      - export PKG_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/sc-compositor/Cargo.toml | head -1).$(date -u -d "@$CI_PIPELINE_CREATED" +%Y%m%d).$CI_PIPELINE_NUMBER"
       - sh packaging/package.sh ${DISTRO} ${ARCH}
 
   - name: publish
