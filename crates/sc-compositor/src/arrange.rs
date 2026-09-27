@@ -432,8 +432,8 @@ impl State {
     /// screen edge past EDGE_DWELL_MS flips the home page (auto-repeating), adding
     /// a trailing page if needed.
     pub(crate) fn tick_edge_page_flip(&mut self) {
-        const EDGE_FRAC: f32 = 0.06;
-        const EDGE_DWELL_MS: u128 = 400;
+        const EDGE_FRAC: f32 = 0.12;
+        const EDGE_DWELL_MS: u128 = 300;
         let Some((cur_x, mut es)) = self
             .arrange
             .as_ref()
