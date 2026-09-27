@@ -269,7 +269,7 @@ impl Default for Resources {
     fn default() -> Resources {
         Resources {
             enable: true,
-            fg_cpu_weight: 200,
+            fg_cpu_weight: 100,
             bg_cpu_weight: 20,
             bg_memory_high: "infinity".to_string(),
             bg_cpu_quota: "30%".to_string(),
