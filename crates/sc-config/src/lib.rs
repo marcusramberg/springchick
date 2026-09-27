@@ -117,6 +117,9 @@ pub struct Config {
     /// Draw a visual indicator under each touch/pointer contact. Off by default;
     /// meant for demo recordings, not daily use.
     pub show_touches: bool,
+    /// Invert touchpad scrolling so content follows the fingers. Mouse wheels
+    /// are unaffected. Applies to touchpads as they are added.
+    pub natural_scroll: bool,
     /// Prefer server-side (compositor-owned = no) decorations. When `true`,
     /// top-level app windows are told to skip their own client-side titlebars
     /// for a borderless phone look. Child windows (dialogs) always keep CSD
@@ -240,6 +243,9 @@ pub const DEFAULT_CARD_RADIUS: f32 = 120.0;
 
 /// Touch indicator is off unless `[main].show_touches = true`.
 pub const DEFAULT_SHOW_TOUCHES: bool = false;
+
+/// Touchpads scroll naturally unless `[main].natural_scroll = false`.
+pub const DEFAULT_NATURAL_SCROLL: bool = true;
 
 /// Prefer no client-side decorations by default: the phone shell wants
 /// borderless app windows. Dialogs keep CSD regardless (see [`Config`]).
@@ -501,6 +507,7 @@ struct RawMain {
     idle_blank_secs: Option<u64>,
     card_radius: Option<f32>,
     show_touches: Option<bool>,
+    natural_scroll: Option<bool>,
     prefer_no_csd: Option<bool>,
     /// `"auto"` (the default), `"off"`, or a number in 0..=1024. `0` means off.
     uclamp_min: Option<toml::Value>,
@@ -541,6 +548,7 @@ impl Config {
                     idle_blank_secs: DEFAULT_IDLE_BLANK_SECS,
                     card_radius: DEFAULT_CARD_RADIUS,
                     show_touches: DEFAULT_SHOW_TOUCHES,
+                    natural_scroll: DEFAULT_NATURAL_SCROLL,
                     prefer_no_csd: DEFAULT_PREFER_NO_CSD,
                     uclamp_min: DEFAULT_UCLAMP_MIN,
                     vrr: DEFAULT_VRR,
@@ -557,6 +565,7 @@ impl Config {
         let idle_blank_secs = main.idle_blank_secs.unwrap_or(DEFAULT_IDLE_BLANK_SECS);
         let card_radius = main.card_radius.unwrap_or(DEFAULT_CARD_RADIUS).max(0.0);
         let show_touches = main.show_touches.unwrap_or(DEFAULT_SHOW_TOUCHES);
+        let natural_scroll = main.natural_scroll.unwrap_or(DEFAULT_NATURAL_SCROLL);
         let prefer_no_csd = main.prefer_no_csd.unwrap_or(DEFAULT_PREFER_NO_CSD);
         let uclamp_min = parse_uclamp_min(main.uclamp_min.as_ref());
         let vrr = main.vrr.unwrap_or(DEFAULT_VRR);
@@ -575,6 +584,7 @@ impl Config {
             idle_blank_secs,
             card_radius,
             show_touches,
+            natural_scroll,
             prefer_no_csd,
             uclamp_min,
             vrr,
@@ -724,6 +734,12 @@ pub fn load() -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn natural_scroll_defaults_on_and_can_be_disabled() {
+        assert!(Config::parse("").natural_scroll);
+        assert!(!Config::parse("[main]\nnatural_scroll = false").natural_scroll);
+    }
 
     #[test]
     fn parses_a_command_binding() {

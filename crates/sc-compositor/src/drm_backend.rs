@@ -844,6 +844,13 @@ impl App {
                     event.time_msec(),
                 );
             }
+            // Only touchpads report tap fingers; mouse wheels keep their direction.
+            InputEvent::DeviceAdded { mut device } if device.config_tap_finger_count() > 0 => {
+                let natural = self.state.natural_scroll;
+                if let Err(e) = device.config_scroll_set_natural_scroll_enabled(natural) {
+                    warn!("natural scroll on {}: {e:?}", device.name());
+                }
+            }
             _ => {}
         }
     }

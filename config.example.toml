@@ -48,6 +48,10 @@ rotation_fade_ms = 130
 # fading ring on release). Off by default; turn on for demo recordings.
 show_touches = false
 
+# Touchpad scrolling moves content with the fingers, like a touchscreen. Mouse
+# wheels are unaffected. Reload applies it to touchpads plugged in afterwards.
+natural_scroll = true
+
 # Prefer server-side (= no client) decorations for top-level app windows, for a
 # borderless phone look. Child windows (dialogs) always keep client-side
 # decorations regardless, so toolkits like GTK still draw the header bar that

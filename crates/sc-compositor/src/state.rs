@@ -444,6 +444,8 @@ pub(crate) struct State {
     /// (`[main].prefer_no_csd`). Dialogs (child toplevels) always get CSD so
     /// their toolkit header bar — and its action buttons — stay present.
     pub prefer_no_csd: bool,
+    /// `[main].natural_scroll`, applied to each touchpad as libinput adds it.
+    pub natural_scroll: bool,
     /// Scheduler utilization floor policy for the render thread
     /// (`[main].uclamp_min`). Read at startup only: the floor is resolved
     /// against CPU topology once, so changing it needs a restart like `dpi`.
@@ -637,6 +639,7 @@ impl State {
         let card_radius = config.card_radius;
         let show_touches = config.show_touches;
         let prefer_no_csd = config.prefer_no_csd;
+        let natural_scroll = config.natural_scroll;
         let uclamp_min = config.uclamp_min;
         let vrr = config.vrr;
         let resources = config.resources.clone();
@@ -883,6 +886,7 @@ impl State {
             dpi,
             card_radius,
             prefer_no_csd,
+            natural_scroll,
             uclamp_min,
             vrr,
             resources,
@@ -1008,6 +1012,7 @@ impl State {
         let config = sc_config::load();
         self.card_radius = config.card_radius;
         self.prefer_no_csd = config.prefer_no_csd;
+        self.natural_scroll = config.natural_scroll;
         self.show_touches = config.show_touches;
         self.idle = blank::Idle::new(config.idle_blank_secs, std::time::Instant::now());
         self.orientation_settle.set_hold(config.rotation_settle_ms);
