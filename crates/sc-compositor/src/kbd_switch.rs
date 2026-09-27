@@ -64,8 +64,9 @@ impl State {
                         origin: ZoomOrigin::card((cx, cy), scale),
                     },
                 );
+                // EnterSwitcher already focuses cards[1]; that is this Tab's step.
                 self.kbd_switch = Some(KbdSwitch {
-                    pending: delta,
+                    pending: delta - 1,
                     commit: false,
                 });
             }
@@ -78,8 +79,10 @@ impl State {
                     return;
                 }
                 transition(&mut self.ui, UiEvent::OpenSwitcherFromHome { cards });
+                // The deck opens on the most recent app; Tab lands there, Shift+Tab
+                // steps back to the oldest.
                 self.kbd_switch = Some(KbdSwitch {
-                    pending: delta,
+                    pending: if delta > 0 { delta - 1 } else { delta },
                     commit: false,
                 });
             }
