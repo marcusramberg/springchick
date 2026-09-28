@@ -133,16 +133,14 @@ fn home_slide_out(progress: f32, width: f32) -> f32 {
     sc_anim::ease_out_cubic(progress) * width
 }
 
-/// Backdrop blur behind a card being dragged up off an app. Ramps in with the
-/// finger from the very first pixel of upward travel (full by the time the
-/// neighbour fan reveals) and back out as the drag crosses into the go-home
-/// band, where Home must be sharp again.
+/// Backdrop blur behind a card being dragged up off an app. Full from the
+/// first pixel through the switcher band, then eases out across the go-home
+/// band so Home is only sharp once the card reaches the top third. Also drives
+/// the settle to Home, which continues from `up`.
 fn grab_backdrop_blur(up: f32) -> f32 {
     use sc_input::thresholds as th;
-    const FADE_OUT: f32 = 0.06;
-    let a_in = (up / th::SWITCHER_REVEAL_PROGRESS).clamp(0.0, 1.0);
-    let a_out = ((th::HOME_MIN_PROGRESS - up) / FADE_OUT).clamp(0.0, 1.0);
-    a_in.min(a_out)
+    const SHARP_AT: f32 = 2.0 / 3.0;
+    ((SHARP_AT - up) / (SHARP_AT - th::HOME_MIN_PROGRESS)).clamp(0.0, 1.0)
 }
 
 /// Full scene state for one frame.
@@ -421,7 +419,11 @@ pub fn compute_scene(
                 home_lift: 0.0,
                 home_shift: 0.0,
                 home_page: 0,
-                backdrop_blur: 0.0,
+                backdrop_blur: match target {
+                    NavTarget::Home => grab_backdrop_blur(progress.value),
+                    NavTarget::Switcher => 1.0,
+                    _ => 0.0,
+                },
                 cards: Vec::new(),
             }
         }
@@ -666,6 +668,22 @@ mod tests {
     }
 
     #[test]
+    fn settling_into_the_switcher_stays_blurred() {
+        for cards in [vec![], vec![0, 1]] {
+            let state = UiState::Settling {
+                toplevel: 0,
+                app_id: "x".into(),
+                target: sc_input::NavTarget::Switcher,
+                progress: sc_anim::Spring::new(0.2),
+                origin: crate::ui_state::ZoomOrigin::icon((0.0, 0.0)),
+                cards,
+            };
+            let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
+            assert_eq!(scene.backdrop_blur, 1.0);
+        }
+    }
+
+    #[test]
     fn switcher_deck_rises_from_below_while_entering() {
         let mut entering = sc_anim::Spring::new(0.0);
         entering.retarget(1.0);
@@ -746,16 +764,15 @@ mod tests {
     }
 
     #[test]
-    fn grab_blur_ramps_from_the_first_upward_pixel() {
+    fn grab_blur_is_full_until_the_go_home_band() {
         use sc_input::thresholds as th;
-        assert_eq!(grab_backdrop_blur(0.0), 0.0);
-        let early = grab_backdrop_blur(0.03);
-        assert!(early > 0.2 && early < 0.5, "early={early}");
-        // Full by the time the neighbour fan reveals, and held through band B.
+        assert_eq!(grab_backdrop_blur(0.0), 1.0);
         assert_eq!(grab_backdrop_blur(th::SWITCHER_REVEAL_PROGRESS), 1.0);
         assert_eq!(grab_backdrop_blur(0.25), 1.0);
-        // Sharp Home again once the drag commits to going home.
-        assert_eq!(grab_backdrop_blur(th::HOME_MIN_PROGRESS), 0.0);
+        // Still mostly blurred mid-screen; sharp only in the top third.
+        assert_eq!(grab_backdrop_blur(th::HOME_MIN_PROGRESS), 1.0);
+        assert!(grab_backdrop_blur(0.5) > 0.4);
+        assert_eq!(grab_backdrop_blur(2.0 / 3.0), 0.0);
     }
 
     #[test]
