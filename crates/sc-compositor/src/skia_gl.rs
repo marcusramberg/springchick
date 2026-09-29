@@ -5,6 +5,7 @@
 //! recreating only on change.
 
 use crate::render::HomeView;
+use crate::rotation::Rotation;
 use sc_catalog::AppEntry;
 use sc_icons::IconPixels;
 use sc_layout::{self, IconSlot, Layout};
@@ -18,7 +19,7 @@ use skia_safe::image_filters;
 use skia_safe::PathOp;
 use skia_safe::{
     images, BlurStyle, ClipOp, Color, ColorType, Font, FontMgr, FontStyle, Image, ImageInfo,
-    MaskFilter, Paint, PathBuilder, RRect, Rect, Surface, TextBlob, TileMode,
+    MaskFilter, Matrix, Paint, PathBuilder, RRect, Rect, Surface, TextBlob, TileMode,
 };
 
 use std::collections::HashMap;
@@ -44,6 +45,9 @@ pub struct SkiaGl {
     /// Catalog generation `icon_images` was uploaded from.
     icon_gen: u64,
     font: Option<Font>,
+    /// How the view is turned against the panel; every draw takes view-space
+    /// sizes and coordinates. Set once per frame by [`Self::set_view`].
+    view: Rotation,
 }
 
 /// One switcher card's rect in physical output px (top-left origin, y down),
@@ -205,7 +209,12 @@ impl SkiaGl {
             icon_images: HashMap::new(),
             icon_gen: 0,
             font: None,
+            view: Rotation::None,
         }
+    }
+
+    pub fn set_view(&mut self, view: Rotation) {
+        self.view = view;
     }
 
     fn ensure_context(&mut self) -> bool {
@@ -317,14 +326,12 @@ impl SkiaGl {
         if !self.ensure_surface(width, height) {
             return;
         }
+        let view = self.view;
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
         let canvas = surface.canvas();
 
         canvas.save();
-        if flip_y {
-            canvas.translate((0.0, height as f32));
-            canvas.scale((1.0, -1.0));
-        }
+        orient(canvas, view, width, height, flip_y);
         // Grow from the anchor as it opens, so the panel reads as coming out of
         // the icon that was held rather than fading in over it.
         let p = menu.progress.clamp(0.0, 1.0);
@@ -364,16 +371,14 @@ impl SkiaGl {
         if !self.ensure_surface(width, height) {
             return;
         }
+        let view = self.view;
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
         let canvas = surface.canvas();
 
         // One restore at the end unwinds the flip, the zoom, its alpha layer
         // and the row clip together.
         let base = canvas.save();
-        if flip_y {
-            canvas.translate((0.0, height as f32));
-            canvas.scale((1.0, -1.0));
-        }
+        orient(canvas, view, width, height, flip_y);
 
         // Backdrop: dim the page behind so the card reads as modal, and so a
         // press outside it obviously means "close".
@@ -508,6 +513,7 @@ impl SkiaGl {
             return;
         }
 
+        let view = self.view;
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
         let canvas = surface.canvas();
 
@@ -516,15 +522,12 @@ impl SkiaGl {
         // upside-down on the panel. Mirror vertically for the DRM path.
         // Save/restore so the cached surface's matrix doesn't accumulate.
         canvas.save();
-        // Whole-screen offsets: the bounce lift and the sideways drag-out.
-        // Applied *before* the flip so they compose in screen space and move
-        // home up/right on the panel whichever way Y runs.
+        orient(canvas, view, width, height, flip_y);
+        // Whole-screen offsets: the bounce lift and the sideways drag-out. The
+        // lift's sign follows the flip so it moves home the same way on the
+        // panel as it always has.
         if lift != 0.0 || shift != 0.0 {
-            canvas.translate((shift, -lift));
-        }
-        if flip_y {
-            canvas.translate((0.0, height as f32));
-            canvas.scale((1.0, -1.0));
+            canvas.translate((shift, if flip_y { lift } else { -lift }));
         }
 
         // Grid icons: build the animated slot set once, in deterministic model
@@ -600,7 +603,9 @@ impl SkiaGl {
     /// Acquire (or reuse) the Skia surface wrapping the currently bound
     /// framebuffer. Returns false if the GL context or the wrap failed, in which
     /// case `cached_surface` must not be touched.
+    /// Takes the view size; the render target is the panel's.
     fn ensure_surface(&mut self, width: i32, height: i32) -> bool {
+        let (width, height) = self.view.app_size((width, height));
         if width <= 0 || height <= 0 {
             return false;
         }
@@ -661,14 +666,12 @@ impl SkiaGl {
             return;
         }
 
+        let view = self.view;
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
         let canvas = surface.canvas();
 
         canvas.save();
-        if flip_y {
-            canvas.translate((0.0, height as f32));
-            canvas.scale((1.0, -1.0));
-        }
+        orient(canvas, view, width, height, flip_y);
         f(canvas);
         canvas.restore();
 
@@ -748,13 +751,17 @@ impl SkiaGl {
         }
 
         // Region → clip path: Add rects union, Subtract rects punch holes.
+        let view = self.view;
+        let (pw, ph) = view.app_size((width, height));
         let to_canvas = |r: &crate::background_effect::BlurRect| {
-            let y = if flip_y {
-                height as f32 - (r.y + r.h)
-            } else {
-                r.y
+            // View → panel: the inverse of `Rotation::map_input`.
+            let (x, y, w, h) = match view {
+                Rotation::None => (r.x, r.y, r.w, r.h),
+                Rotation::LeftUp => (r.y, ph as f32 - r.x - r.w, r.h, r.w),
+                Rotation::RightUp => (pw as f32 - r.y - r.h, r.x, r.h, r.w),
             };
-            Rect::from_xywh(r.x, y, r.w, r.h)
+            let y = if flip_y { ph as f32 - (y + h) } else { y };
+            Rect::from_xywh(x, y, w, h)
         };
         let mut add = PathBuilder::new();
         let mut sub = PathBuilder::new();
@@ -952,13 +959,11 @@ impl SkiaGl {
         let (_, metrics) = font.metrics();
         let baseline = icon.center_y() - (metrics.ascent + metrics.descent) / 2.0;
 
+        let view = self.view;
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
         let canvas = surface.canvas();
         canvas.save();
-        if flip_y {
-            canvas.translate((0.0, height as f32));
-            canvas.scale((1.0, -1.0));
-        }
+        orient(canvas, view, width, height, flip_y);
         // The overflow fade is a DstIn gradient, which needs the text on its own
         // layer — applied straight to the canvas it would eat the card too.
         let bounds = Rect::new(x0, icon.top(), right, icon.bottom());
@@ -1079,6 +1084,23 @@ impl SkiaGl {
             draw_cursor_arrow(canvas, x, y, scale);
         });
     }
+}
+
+/// Map view-space drawing (`width`×`height`, y down) onto the panel: turn by
+/// `view` — the inverse of [`Rotation::map_input`], so what is drawn lines up
+/// with where input lands — then the DRM y-flip.
+fn orient(canvas: &skia_safe::Canvas, view: Rotation, width: i32, height: i32, flip_y: bool) {
+    let (pw, ph) = view.app_size((width, height));
+    if flip_y {
+        canvas.translate((0.0, ph as f32));
+        canvas.scale((1.0, -1.0));
+    }
+    let turn = match view {
+        Rotation::None => return,
+        Rotation::LeftUp => Matrix::new_all(0.0, 1.0, 0.0, -1.0, 0.0, ph as f32, 0.0, 0.0, 1.0),
+        Rotation::RightUp => Matrix::new_all(0.0, -1.0, pw as f32, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+    };
+    canvas.concat(&turn);
 }
 
 /// Draw a plain left-pointing arrow cursor with its tip exactly at `(x, y)`.

@@ -352,7 +352,7 @@ fn motion_page_drag(state: &mut State, x: f32, y: f32) {
 /// the two gestures a bar drag can become.
 fn motion_live_gesture(state: &mut State, x: f32, y: f32) {
     let dt = state.motion_dt();
-    if let Some(ev) = input_dispatch::on_move(&state.ui, x, y, dt, state.output_size) {
+    if let Some(ev) = input_dispatch::on_move(&state.ui, x, y, dt, state.output_size()) {
         transition(&mut state.ui, ev);
     }
 
@@ -438,7 +438,7 @@ fn settle_quick_switch(state: &mut State) {
 /// pins `velocity` to 0 every frame while tracking, so without this the flip
 /// starts from a standstill and reads as stiff no matter how hard it was flicked.
 fn commit_page_swipe(state: &mut State, dx: f32, vx: f32) {
-    let w = state.output_size.0 as f32;
+    let w = state.output_size().0 as f32;
     if let UiState::Home {
         page,
         page_spring,
@@ -695,7 +695,7 @@ fn press_switcher(state: &mut State, x: f32, y: f32) -> Stage {
 /// Normal press: hit-test Home/the app and arm whatever the gesture might turn
 /// into. Nothing is committed here — the release decides.
 fn press_arm_gesture(state: &mut State, x: f32, y: f32) {
-    match input_dispatch::on_press(&state.ui, x, y, &state.model, state.output_size) {
+    match input_dispatch::on_press(&state.ui, x, y, &state.model, state.output_size()) {
         DownAction::Event(ev) => {
             transition(&mut state.ui, ev);
             // Seed the live switcher-preview fan with the MRU deck (front =
@@ -893,7 +893,7 @@ fn release_arrange(state: &mut State, x: f32) -> Stage {
     // arrange; a still tap exits.
     match state.page_drag.take() {
         Some(drag) => {
-            let w = state.output_size.0 as f32;
+            let w = state.output_size().0 as f32;
             let dx = x - drag.start().x * w;
             if home::is_arrange_page_swipe(dx, w) {
                 commit_page_swipe(state, dx, drag.velocity().x);
@@ -1053,7 +1053,7 @@ fn release_bar_drag(state: &mut State, x: f32, y: f32) {
 /// Page swipe: snap based on distance travelled or release speed.
 fn release_page_swipe(state: &mut State, x: f32) {
     if let Some(drag) = state.page_drag.take() {
-        let w = state.output_size.0 as f32;
+        let w = state.output_size().0 as f32;
         commit_page_swipe(state, x - drag.start().x * w, drag.velocity().x);
     }
 }

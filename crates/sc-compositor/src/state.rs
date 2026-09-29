@@ -80,11 +80,10 @@ pub(crate) struct AppToplevel {
     /// The rotation this window was last *configured* at — i.e. how its current
     /// buffer is oriented, not how the shell is drawing right now.
     ///
-    /// The two part company the moment the app stops being the foreground one:
-    /// [`State::rotation`] falls back to portrait for the shell's own chrome
-    /// while the client keeps its landscape buffer until it is reconfigured. A
-    /// card drawn from that buffer has to be turned by this, or a landscape app
-    /// spills out of its portrait card slot in the switcher.
+    /// The two part company once the app is in the background: the view turns
+    /// with whatever is in front, while this client keeps its buffer until it
+    /// is reconfigured. A card drawn from that buffer is turned by the
+    /// difference, or it spills out of its slot in the switcher.
     pub rotation: crate::rotation::Rotation,
 }
 
@@ -353,7 +352,7 @@ pub(crate) struct State {
     /// Value is `(coord scale, rotated)`: the slot's `dpi` scale and whether it
     /// routes to the rotated fullscreen app (whose coords need turning first).
     /// Presence marks the slot client-routed.
-    pub touch_targets: HashMap<smithay::backend::input::TouchSlot, (f64, bool)>,
+    pub touch_targets: HashMap<smithay::backend::input::TouchSlot, f64>,
     /// The single slot currently driving the home-screen gesture funnel
     /// (`input_common`), which is inherently single-touch. Only this slot feeds
     /// press/motion/release; additional fingers on empty space are ignored until
@@ -427,9 +426,10 @@ pub(crate) struct State {
     pub history: AppHistory,
     /// Last zoom origin (cached when launching).
     pub last_origin: ZoomOrigin,
-    /// Actual output size in physical pixels (from the backend: DRM mode or
-    /// winit window size). Set at construction; drives layout and app sizing.
-    pub output_size: (i32, i32),
+    /// Physical panel size (DRM mode or winit window size), fixed at
+    /// construction. The shell lays out in [`Self::output_size`], which is this
+    /// turned by the view rotation.
+    pub panel_size: (i32, i32),
     /// The advertised output. Retained so surfaces can `enter` it (which is how
     /// clients learn the scale factor).
     pub output: Output,
@@ -486,9 +486,9 @@ pub(crate) struct State {
     /// globals alive; the work happens in [`crate::pacing`], driven per frame.
     _fifo_manager: smithay::wayland::fifo::FifoManagerState,
     _commit_timing_manager: smithay::wayland::commit_timing::CommitTimingManagerState,
-    /// Current app rotation, derived from [`Self::device_orientation`] and
-    /// whether the foreground app is fullscreen. Only the app surface rotates —
-    /// see [`crate::rotation`].
+    /// How the view is turned, derived from [`Self::device_orientation`] and
+    /// whether the app the shell is anchored to is fullscreen — see
+    /// [`crate::rotation`]. Read it through [`Self::view_rotation`].
     pub rotation: rotation::Rotation,
     /// How the device is physically held. Fed by the accelerometer (and by the
     /// `orientation` control-socket verb, which is how the tests drive it);
@@ -881,7 +881,7 @@ impl State {
             pending_activation: HashMap::new(),
             history: AppHistory::new(),
             last_origin: ZoomOrigin::icon((out_w as f32 / 2.0, out_h as f32 / 2.0)),
-            output_size,
+            panel_size: output_size,
             output,
             dpi,
             card_radius,
@@ -1119,10 +1119,35 @@ impl State {
         self.needs_render = true;
     }
 
-    /// Output size as floats — shorthand for the `(w, h)` pair every geometry
-    /// call needs.
+    /// The size the shell lays out and draws in: the panel, axis-swapped while
+    /// the view is turned.
+    pub(crate) fn output_size(&self) -> (i32, i32) {
+        self.view_rotation().app_size(self.panel_size)
+    }
+
     pub(crate) fn output_size_f(&self) -> (f32, f32) {
-        (self.output_size.0 as f32, self.output_size.1 as f32)
+        let (w, h) = self.output_size();
+        (w as f32, h as f32)
+    }
+
+    /// Top-left of the area apps are drawn in: below/right of any exclusive
+    /// zones, or the view's own origin while turned (layers are hidden then).
+    pub(crate) fn app_origin(&self) -> (f32, f32) {
+        if self.view_rotation().swaps_axes() {
+            return (0.0, 0.0);
+        }
+        let u = self.layers.usable(self.dpi);
+        (u.x, u.y)
+    }
+
+    /// How the whole view (shell and app) is turned relative to the panel. The
+    /// lock screen is always drawn and hit-tested upright.
+    pub(crate) fn view_rotation(&self) -> rotation::Rotation {
+        if self.session_lock.is_locked() {
+            rotation::Rotation::None
+        } else {
+            self.rotation
+        }
     }
 
     /// How long one refresh of the output lasts, from its current mode.

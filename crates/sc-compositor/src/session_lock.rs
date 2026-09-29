@@ -252,11 +252,8 @@ impl SessionLockHandler for State {
         self.output.enter(surface.wl_surface());
         // Configure it to fill the output. The size is logical (the client
         // scales its buffer up by `dpi`), matching how app toplevels are sized.
-        let (w, h) = self.output_size_f();
-        let size = (
-            (w as f64 / self.dpi).round() as u32,
-            (h as f64 / self.dpi).round() as u32,
-        );
+        let (w, h) = (self.panel_size.0 as f64, self.panel_size.1 as f64);
+        let size = ((w / self.dpi).round() as u32, (h / self.dpi).round() as u32);
         surface.with_pending_state(|state| {
             state.size = Some(size.into());
         });

@@ -12,13 +12,17 @@
 //! now an input rather than a guess: [`DeviceOrientation`] comes from the
 //! accelerometer and [`desired_rotation`] decides.
 //!
-//! Only the fullscreen app surface rotates. springchick's own chrome (Home, the
-//! bar, the switcher) and layer surfaces stay portrait, which is what phone
-//! shells do in practice and keeps the change to one render pass and one input
-//! mapping.
+//! The whole view turns, not just the app: the shell lays out in the turned
+//! size, so the switcher and bar come up landscape exactly as they do on a
+//! natively landscape panel. The turn holds while the shell is between apps
+//! (grab, switcher, quick switch), so cmd-tab between two landscape apps stays
+//! landscape, and clears once the shell lands on Home or a non-fullscreen app.
+//! Layer surfaces are laid out against the upright panel, so they are hidden
+//! while turned.
 //!
 //! The rotation is expressed as a [`Transform`] applied on top of the output
-//! transform when rendering the app, with input mapped through its inverse.
+//! transform for every view pass (and the matching matrix for Skia), with input
+//! mapped through its inverse once, where it enters.
 //!
 //! Two things stand between the sensor and that transform, both here and both
 //! pure: [`Settle`] debounces the reading (the sensor flips the moment the phone

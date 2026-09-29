@@ -19,7 +19,7 @@ use crate::launcher::{spawn_app, spawn_exec};
 use crate::state::{
     AppToplevel, Launching, State, LAUNCH_PULSE_TIMEOUT, SEARCH_APP_EXEC, SEARCH_APP_ID,
 };
-use crate::ui_state::{self, transition, ToplevelId, UiEvent, ZoomOrigin};
+use crate::ui_state::{self, transition, ToplevelId, UiEvent, UiState, ZoomOrigin};
 use crate::{content_type, keybinds, provenance, rotation};
 
 impl State {
@@ -648,11 +648,20 @@ impl State {
             (usable.w as f64 / self.dpi).round() as i32,
             (usable.h as f64 / self.dpi).round() as i32,
         );
-        for slot in self.toplevels.iter().flatten() {
+        let turned = self.view_rotation().swaps_axes();
+        for slot in self.toplevels.iter_mut().flatten() {
+            // Sized for the turned view, which hides layers: the panel-upright
+            // usable area would hand it the portrait width.
+            if turned && slot.rotation.swaps_axes() {
+                continue;
+            }
             slot.surface.with_pending_state(|state| {
                 state.size = Some(size.into());
             });
             slot.surface.send_configure();
+            // Now upright-sized; a stale landscape record makes
+            // `sync_anchor_orientation` skip the resize when it comes back.
+            slot.rotation = rotation::Rotation::None;
         }
     }
 
@@ -704,6 +713,28 @@ impl State {
         self.refresh_landscape_hint();
     }
 
+    /// A fullscreen app picked from the deck may have been configured for the
+    /// other orientation (it went to the background upright, or the phone was
+    /// turned the other way meanwhile). Same axes only needs the record fixed —
+    /// the buffer fits either way — while swapped axes needs a new size.
+    fn sync_anchor_orientation(&mut self) {
+        let Some(tid) = self.anchor_fullscreen() else {
+            return;
+        };
+        let Some(tl) = self.toplevels.get_mut(tid).and_then(|s| s.as_mut()) else {
+            return;
+        };
+        if tl.rotation == self.rotation {
+            return;
+        }
+        if tl.rotation.swaps_axes() == self.rotation.swaps_axes() {
+            tl.rotation = self.rotation;
+        } else {
+            let surface = tl.surface.clone();
+            self.configure_fullscreen(&surface);
+        }
+    }
+
     /// The wl_surface of the currently focused foreground app, if any.
     pub(crate) fn app_focus_surface(&self) -> Option<WlSurface> {
         ui_state::desired_focus(&self.ui)
@@ -734,7 +765,7 @@ impl State {
         // A rotation change here means the app only just became (or stopped
         // being) fullscreen while the device was already turned, so it is still
         // drawing at the old size — re-configure it.
-        if self.refresh_rotation(fullscreen) {
+        if self.refresh_rotation() {
             if let Some(surface) = self.foreground_toplevel_surface() {
                 if fullscreen {
                     self.configure_fullscreen(&surface);
@@ -750,7 +781,10 @@ impl State {
     /// fullscreen *and* the panel is lit. Idempotent; call it from anywhere
     /// either of those changes.
     pub(crate) fn sync_sensor_claim(&mut self) {
-        let wanted = self.foreground_is_fullscreen() && !self.blank.is_blanked();
+        // A turned view outlives the app (it holds through the switcher), and
+        // still needs the sensor to know when to come back upright.
+        let wanted = (self.foreground_is_fullscreen() || self.rotation.swaps_axes())
+            && !self.blank.is_blanked();
         if let Some(sensor) = &mut self.sensor {
             sensor.set_wanted(wanted);
         }
@@ -759,8 +793,12 @@ impl State {
     /// Whether the foreground app has *committed* the Fullscreen state — i.e.
     /// acked our fullscreen configure and drawn at that size.
     fn foreground_is_fullscreen(&self) -> bool {
-        ui_state::desired_focus(&self.ui)
-            .and_then(|tid| self.toplevels.get(tid))
+        ui_state::desired_focus(&self.ui).is_some_and(|tid| self.is_fullscreen(tid))
+    }
+
+    fn is_fullscreen(&self, tid: ToplevelId) -> bool {
+        self.toplevels
+            .get(tid)
             .and_then(|slot| slot.as_ref())
             .is_some_and(|tl| {
                 tl.surface.with_committed_state(|state| {
@@ -769,16 +807,46 @@ impl State {
             })
     }
 
-    /// Rotation follows the device, but only while an app is fullscreen — see
-    /// [`rotation::desired_rotation`]. Derived (rather than latched on the
+    /// The toplevel the view's orientation follows: `Some(Some(_))` for the app
+    /// on (or opening onto) the screen, `Some(None)` for Home, and `None` while
+    /// the shell is between the two (grab, switcher, quick switch, closing) —
+    /// there the view holds whatever it was, so cmd-tab between two landscape
+    /// apps never drops to portrait.
+    fn rotation_anchor(&self) -> Option<Option<ToplevelId>> {
+        match &self.ui {
+            UiState::App { toplevel, .. } | UiState::AppOpening { toplevel, .. } => {
+                Some(Some(*toplevel))
+            }
+            UiState::Home { .. } => Some(None),
+            _ => None,
+        }
+    }
+
+    /// The anchored app, if it is fullscreen — the one a turn re-configures.
+    fn anchor_fullscreen(&self) -> Option<ToplevelId> {
+        self.rotation_anchor()
+            .flatten()
+            .filter(|&tid| self.is_fullscreen(tid))
+    }
+
+    fn desired_view_rotation(&self) -> rotation::Rotation {
+        let fullscreen = match self.rotation_anchor() {
+            Some(Some(tid)) => self.is_fullscreen(tid),
+            Some(None) => false,
+            None => self.rotation.swaps_axes(),
+        };
+        rotation::desired_rotation(self.device_orientation, fullscreen)
+    }
+
+    /// Rotation follows the device, but only while a fullscreen app is anchored
+    /// — see [`Self::rotation_anchor`]. Derived (rather than latched on the
     /// fullscreen request) so it can only be on while a client is really drawing
-    /// at the rotated size — including when the app unmaps, is switched away
-    /// from, or leaves fullscreen without asking.
+    /// at the rotated size.
     ///
     /// Returns whether the rotation changed, so the caller can re-configure the
     /// app: turning the phone changes the size the client must draw at.
-    fn refresh_rotation(&mut self, fullscreen: bool) -> bool {
-        let want = rotation::desired_rotation(self.device_orientation, fullscreen);
+    fn refresh_rotation(&mut self) -> bool {
+        let want = self.desired_view_rotation();
         if want == self.rotation {
             return false;
         }
@@ -814,6 +882,15 @@ impl State {
         if let Some(orientation) = self.orientation_settle.poll(now) {
             self.apply_device_orientation(orientation, now);
         }
+        // The shell moved to (or opened) something that wants the other
+        // orientation — a portrait app picked from a landscape deck, or Home.
+        if !self.rotation_fade.is_active()
+            && self.desired_view_rotation() != self.rotation
+            && self.rotation_fade.begin(now)
+        {
+            self.swap_rotation(now);
+        }
+        self.sync_anchor_orientation();
         match self.rotation_fade.tick(now) {
             // The screen is black now: swap under cover of it.
             rotation::FadeStep::Apply => self.swap_rotation(now),
@@ -837,8 +914,7 @@ impl State {
         }
         info!(target: "springchick::debug", "device orientation {orientation:?}");
         self.device_orientation = orientation;
-        let fullscreen = self.foreground_is_fullscreen();
-        if rotation::desired_rotation(orientation, fullscreen) == self.rotation {
+        if self.desired_view_rotation() == self.rotation {
             return;
         }
         // `begin` returns true when there is no dark stretch to wait for.
@@ -853,11 +929,17 @@ impl State {
     /// fades disabled), because the client keeps drawing its old buffer until it
     /// gets round to the resize.
     fn swap_rotation(&mut self, now: std::time::Instant) {
-        let fullscreen = self.foreground_is_fullscreen();
-        let changed = self.refresh_rotation(fullscreen);
+        let changed = self.refresh_rotation();
+        self.sync_sensor_claim();
         let configured = changed
-            .then(|| self.foreground_toplevel_surface())
+            .then(|| self.anchor_fullscreen())
             .flatten()
+            .and_then(|tid| {
+                self.toplevels
+                    .get(tid)?
+                    .as_ref()
+                    .map(|tl| tl.surface.clone())
+            })
             .map(|surface| self.configure_fullscreen(&surface));
         self.rotation_await_size = configured;
         if configured.is_none() {
@@ -1072,7 +1154,7 @@ impl State {
     /// Returns the logical size the client was asked for, which the rotation
     /// fade matches commits against to know when the turn is really on screen.
     pub(crate) fn configure_fullscreen(&mut self, surface: &ToplevelSurface) -> (i32, i32) {
-        let (ow, oh) = self.rotation.app_size(self.output_size);
+        let (ow, oh) = self.rotation.app_size(self.panel_size);
         let w = (ow as f64 / self.dpi).round() as i32;
         let h = (oh as f64 / self.dpi).round() as i32;
         let orientation = self.rotation;

@@ -271,8 +271,9 @@ pub struct DrawCtx<'a> {
     pub app_origin: (i32, i32),
     /// Output transform (winit = Flipped180; DRM = connector transform).
     pub transform: Transform,
-    /// Rotation of the fullscreen app (see [`crate::rotation`]). Composed on top
-    /// of `transform` for the app pass only — chrome stays portrait.
+    /// How the view is turned (see [`crate::rotation`]). Composed on top of
+    /// `transform` for everything but the upright layer surfaces; Skia gets the
+    /// same turn through [`SkiaGl::set_view`].
     pub rotation: crate::rotation::Rotation,
     /// Mirror the Skia home/bar vertically — the DRM/GBM scanout buffer has the
     /// opposite Y-origin from Skia's BottomLeft surface. winit presents
@@ -371,6 +372,19 @@ pub struct DrawCtx<'a> {
     pub sinks: &'a mut FrameSinks,
 }
 
+impl DrawCtx<'_> {
+    /// The transform every view-space pass renders with.
+    fn base(&self) -> Transform {
+        self.transform + self.rotation.transform()
+    }
+
+    /// The view's size — element space for [`Self::base`], and what Skia and
+    /// the scene lay out in.
+    fn view(&self, size: Size<i32, Physical>) -> Size<i32, Physical> {
+        self.rotation.app_size((size.w, size.h)).into()
+    }
+}
+
 /// Render a layer surface's tree at `origin` in its own pass. Used for both the
 /// below-app and above-app layers.
 /// Blur the backdrop of `surface` (ext-background-effect-v1), if it asked for
@@ -404,7 +418,7 @@ fn draw_layer(
     ctx: &DrawCtx<'_>,
     surface: &WlSurface,
     origin: (i32, i32),
-    rotation: crate::rotation::Rotation,
+    in_view: bool,
 ) -> Result<(), SwapBuffersError> {
     // `origin` is physical; `app_scale` (= output `dpi`) scales the surface's
     // logical geometry to physical. Layer clients render at fractional scale
@@ -416,15 +430,9 @@ fn draw_layer(
     if elements.is_empty() {
         return Ok(());
     }
-    // A popup of a rotated app is placed in the app's turned space, so it draws
-    // in that space too: same composed transform and axis-swapped damage as the
-    // app pass. Anything else draws portrait, straight onto the output.
-    let (transform, damage) = if rotation.swaps_axes() {
-        let app_size: Size<i32, Physical> = rotation.app_size((size.w, size.h)).into();
-        (
-            ctx.transform + rotation.transform(),
-            Rectangle::from_size(app_size),
-        )
+    // App popups live in the view; layer surfaces are always panel-upright.
+    let (transform, damage) = if in_view {
+        (ctx.base(), Rectangle::from_size(ctx.view(size)))
     } else {
         (ctx.transform, Rectangle::from_size(size))
     };
@@ -491,44 +499,45 @@ impl Card {
         }
     }
 
-    /// A card for a window whose buffer is turned a quarter-turn.
+    /// A card whose window is drawn with `card_t` in a view rendered with
+    /// `base` — the two differ when the window's buffer is turned relative to
+    /// the view (a landscape app in an upright deck, or the other way round).
     ///
-    /// The slot stays exactly where [`Card::centered`] put it — the deck's
-    /// geometry, hit-testing and animations are all portrait. What changes is
-    /// the space the numbers are expressed in: the rotated pass renders with the
-    /// rotation composed onto the output transform, so the card has to be given
-    /// in *that* pass's element space.
+    /// The slot stays exactly where [`Card::centered`] put it in the view — the
+    /// deck's geometry, hit-testing and animations all live there. What changes
+    /// is the space the numbers are expressed in: the card's pass renders with
+    /// `card_t`, so the card has to be given in *that* pass's element space.
     ///
-    /// Which is why `out_transform` is a parameter rather than an assumption.
+    /// Which is why the output transform is part of both rather than assumed.
     /// The two backends do not agree on it — winit renders `Flipped180`, DRM
     /// renders `Normal` — and a mapping hardcoded for one comes out mirrored on
     /// the other: cards tracked the finger backwards on the phone while looking
     /// correct in the nested dev window. So the rect is carried through the
     /// output transform to the framebuffer and back through the *composed*
     /// transform, which is right for any output transform by construction.
-    fn centered_rotated(
-        output: Size<i32, Physical>,
+    #[allow(clippy::too_many_arguments)]
+    fn placed(
+        view: Size<i32, Physical>,
         center_x: f32,
         center_y: f32,
         scale: f32,
         corner_radius: f32,
-        rotation: crate::rotation::Rotation,
-        out_transform: Transform,
+        base: Transform,
+        card_t: Transform,
     ) -> Self {
-        let slot = Card::centered(output, center_x, center_y, scale, corner_radius);
-        if !rotation.swaps_axes() {
+        let slot = Card::centered(view, center_x, center_y, scale, corner_radius);
+        if card_t == base {
             return slot;
         }
         let rect: Rectangle<i32, Physical> = Rectangle::new(
             slot.origin(),
             (slot.size.0 as i32, slot.size.1 as i32).into(),
         );
-        // Where the unrotated pass would have put it on the framebuffer...
-        let framebuffer = out_transform.transform_size(output);
-        let on_screen = out_transform.transform_rect_in(rect, &output);
-        // ...and what the rotated pass has to be handed to land there.
-        let composed = out_transform + rotation.transform();
-        let turned = Card::inverse_transform(composed).transform_rect_in(on_screen, &framebuffer);
+        // Where the view pass would have put it on the framebuffer...
+        let framebuffer = base.transform_size(view);
+        let on_screen = base.transform_rect_in(rect, &view);
+        // ...and what the card's pass has to be handed to land there.
+        let turned = Card::inverse_transform(card_t).transform_rect_in(on_screen, &framebuffer);
         Card {
             x: turned.loc.x,
             y: turned.loc.y,
@@ -644,23 +653,16 @@ fn draw_scaled_card(
     ctx: &DrawCtx<'_>,
     elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
     card: Card,
-    rotation: crate::rotation::Rotation,
+    pass_transform: Transform,
 ) -> Result<(), SwapBuffersError> {
     if elements.is_empty() {
         return Ok(());
     }
     let app_scale = ctx.app_scale;
-    let pass_transform = ctx.transform + rotation.transform();
     // Taken before the elements are consumed below; the mask needs the rect the
     // root element actually lands on.
     let card_rect = card.fb_rect(&elements, app_scale, pass_transform, size);
-    // A turned card draws in the app's own space, so both the transform and the
-    // damage rect are the swapped ones — same pairing as `app_pass_geometry`.
-    let damage = Rectangle::from_size(if rotation.swaps_axes() {
-        rotation.app_size((size.w, size.h)).into()
-    } else {
-        size
-    });
+    let damage = Rectangle::from_size(pass_transform.transform_size(size));
     let scaled: Vec<
         RescaleRenderElement<RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
     > = elements
@@ -709,7 +711,7 @@ struct ScenePlan {
     window_transform: Option<crate::scene::WindowTransform>,
     /// The scene says the window covers the screen.
     is_fullscreen: bool,
-    /// The app is turned a quarter-turn (landscape video).
+    /// The view is turned a quarter-turn relative to the panel.
     rotated: bool,
     /// Fullscreen *and* the client actually has something to draw. The extra
     /// condition matters: a fullscreen-scaled window with no content yet must
@@ -727,8 +729,6 @@ struct ScenePlan {
 fn plan_scene(renderer: &mut GlesRenderer, ctx: &DrawCtx<'_>) -> ScenePlan {
     let scene = ctx.scene;
     let is_fullscreen = scene.window_covers_screen();
-    // A rotated app covers the whole output, so it starts at the origin of its
-    // own (rotated) space rather than at the usable-area origin.
     let rotated = ctx.rotation.swaps_axes();
 
     let app_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
@@ -736,7 +736,7 @@ fn plan_scene(renderer: &mut GlesRenderer, ctx: &DrawCtx<'_>) -> ScenePlan {
             render_elements_from_surface_tree(
                 renderer,
                 wl_surface,
-                if is_fullscreen && !rotated {
+                if is_fullscreen {
                     ctx.app_origin
                 } else {
                     (0, 0)
@@ -828,7 +828,12 @@ fn flip_damage(
     *ctx.last_present = Some((app_wl.clone(), elem.current_commit()));
     // First frame on a freshly-focused surface has no baseline: repaint all.
     if same_surface {
-        damage.to_vec()
+        let turn = ctx.rotation.transform();
+        let view = ctx.view(size);
+        damage
+            .iter()
+            .map(|r| turn.transform_rect_in(*r, &view))
+            .collect()
     } else {
         vec![full_damage]
     }
@@ -901,7 +906,8 @@ fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan)
         lift: scene.home_lift,
         shift: scene.home_shift,
     };
-    ctx.skia.draw_home(size.w, size.h, ctx.skia_flip_y, &view);
+    let v = ctx.view(size);
+    ctx.skia.draw_home(v.w, v.h, ctx.skia_flip_y, &view);
 }
 
 /// The icon context menu, over Home. Drawn only when Home itself is (an app
@@ -913,8 +919,8 @@ fn pass_icon_menu(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &Scene
     if !ctx.scene.show_home || plan.app_fills_screen {
         return;
     }
-    ctx.skia
-        .draw_icon_menu(size.w, size.h, menu, ctx.skia_flip_y);
+    let v = ctx.view(size);
+    ctx.skia.draw_icon_menu(v.w, v.h, menu, ctx.skia_flip_y);
 }
 
 /// An open library folder's panel, over Home. Same gating as the icon menu.
@@ -926,20 +932,15 @@ fn pass_folder(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePla
         return;
     }
     let (icon_cache, app_catalog) = (ctx.icon_cache, ctx.app_catalog);
-    ctx.skia.draw_folder_panel(
-        size.w,
-        size.h,
-        folder,
-        icon_cache,
-        app_catalog,
-        ctx.skia_flip_y,
-    );
+    let v = ctx.view(size);
+    ctx.skia
+        .draw_folder_panel(v.w, v.h, folder, icon_cache, app_catalog, ctx.skia_flip_y);
 }
 
-/// Rotated fullscreen app: its own pass, with the rotation composed on top of
-/// the output transform. The renderer swaps the projection's axes for a
-/// quarter-turn transform, so element space is the landscape one the client was
-/// configured at, while the framebuffer stays portrait.
+/// Fullscreen app in a turned view: its own pass with the view transform, since
+/// `pass_background` draws panel-upright (for the layers under it). The
+/// renderer swaps the projection's axes for a quarter-turn transform, so element
+/// space is the one the client was configured at.
 fn pass_rotated_app(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -955,7 +956,7 @@ fn pass_rotated_app(
     if !(plan.app_fills_screen && plan.rotated) || plan.app_blurred {
         return Ok(());
     }
-    let (transform, app_damage) = app_pass_geometry(size, ctx, plan);
+    let (transform, app_damage) = app_pass_geometry(size, ctx);
     let mut frame = renderer
         .render(framebuffer, size, transform)
         .map_err(SwapBuffersError::from)?;
@@ -968,23 +969,12 @@ fn pass_rotated_app(
     Ok(())
 }
 
-/// The transform and damage a fullscreen app pass draws with. A rotated app
-/// composes its quarter-turn on top of the output transform and lives in the
-/// (axis-swapped) space it was configured at, so its damage is that size too.
+/// The transform and damage a fullscreen app pass draws with: the view's.
 fn app_pass_geometry(
     size: Size<i32, Physical>,
     ctx: &DrawCtx<'_>,
-    plan: &ScenePlan,
 ) -> (Transform, Rectangle<i32, Physical>) {
-    if plan.rotated {
-        let app_size: Size<i32, Physical> = ctx.rotation.app_size((size.w, size.h)).into();
-        (
-            ctx.transform + ctx.rotation.transform(),
-            Rectangle::from_size(app_size),
-        )
-    } else {
-        (ctx.transform, Rectangle::from_size(size))
-    }
+    (ctx.base(), Rectangle::from_size(ctx.view(size)))
 }
 
 /// Blurred fullscreen app: home is behind it by now, so blur that backdrop and
@@ -999,16 +989,15 @@ fn pass_blurred_app(
     if !plan.app_blurred {
         return Ok(());
     }
+    let v = ctx.view(size);
     ctx.skia.blur_backdrop(
-        size.w,
-        size.h,
+        v.w,
+        v.h,
         &plan.app_blur,
         BLUR_SIGMA_LOGICAL * ctx.app_scale as f32,
         ctx.skia_flip_y,
     );
-    // Carries the rotation too, since this is now the only pass that draws a
-    // blurred fullscreen app whether or not it is turned.
-    let (transform, damage) = app_pass_geometry(size, ctx, plan);
+    let (transform, damage) = app_pass_geometry(size, ctx);
     let mut frame = renderer
         .render(framebuffer, size, transform)
         .map_err(SwapBuffersError::from)?;
@@ -1068,6 +1057,17 @@ fn card_rotation(
     }
 }
 
+/// The transform a window's card renders with: the output transform plus the
+/// window's own turn (see [`card_rotation`]), independent of the view's.
+fn card_transform(
+    ctx: &DrawCtx<'_>,
+    stored: crate::rotation::Rotation,
+    elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
+    size: Size<i32, Physical>,
+) -> Transform {
+    ctx.transform + card_rotation(stored, drawn_size(elements, ctx.app_scale), size).transform()
+}
+
 /// Pass 2: draw the scaled app card ON TOP of home (no clear), with rounded
 /// corners when the transform carries a non-zero radius (drag-up / zoom).
 /// Consumes `plan.app_elements` — no later pass uses them.
@@ -1084,45 +1084,46 @@ fn pass_app_card(
     let Some(t) = plan.window_transform else {
         return Ok(());
     };
-    // The window keeps its landscape buffer while the shell's own rotation has
-    // already fallen back to portrait (touching the bar drops focus), so the
-    // card follows the *window's* orientation, not `ctx.rotation`.
-    let rotation = card_rotation(
+    // The card follows the *window's* orientation, which need not be the
+    // view's: the window keeps whatever buffer it was configured for.
+    let card_t = card_transform(
+        ctx,
         ctx.app_surface
             .map(|s| surface_rotation(ctx, s))
             .unwrap_or_default(),
-        drawn_size(&plan.app_elements, ctx.app_scale),
+        &plan.app_elements,
         size,
     );
-    let card = Card::centered_rotated(
-        size,
+    let upright = card_t == ctx.base();
+    let card = Card::placed(
+        ctx.view(size),
         t.center_x,
         t.center_y,
         t.scale,
         t.corner_radius,
-        rotation,
-        ctx.transform,
+        ctx.base(),
+        card_t,
     );
     // Same blur as a layer surface, but the card is scaled: the surface-local
-    // region scales with it and lands at the card's origin. Skipped for a turned
-    // card: the blur regions are Skia draws in panel space and the card's own
-    // rect is in the app's rotated space, so they would land somewhere else.
-    if let (Some(surface), false) = (ctx.app_surface, rotation.swaps_axes()) {
+    // region scales with it and lands at the card's origin. Skipped for a card
+    // turned against the view: its rect is in its own turned space, not the
+    // view space Skia draws in, so the blur would land somewhere else.
+    if let (Some(surface), true) = (ctx.app_surface, upright) {
         blur_behind(
             ctx.skia,
-            size,
+            ctx.view(size),
             surface,
             (card.x, card.y),
             ctx.app_scale * t.scale as f64,
             ctx.skia_flip_y,
         );
     }
-    if !rotation.swaps_axes() {
+    if upright {
         let (x, y, w, h) = card.drawn_bounds(&plan.app_elements, ctx.app_scale);
         ctx.pill_anchor = Some(sc_layout::Rect { x, y, w, h });
     }
     let elements = std::mem::take(&mut plan.app_elements);
-    draw_scaled_card(renderer, framebuffer, size, ctx, elements, card, rotation)
+    draw_scaled_card(renderer, framebuffer, size, ctx, elements, card, card_t)
 }
 
 /// Frost the shell backdrop (Home, plus anything drawn under it) before the
@@ -1136,16 +1137,17 @@ fn pass_backdrop_blur(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>) {
     if strength <= 0.0 {
         return;
     }
+    let v = ctx.view(size);
     let full = [crate::background_effect::BlurRect {
         x: 0.0,
         y: 0.0,
-        w: size.w as f32,
-        h: size.h as f32,
+        w: v.w as f32,
+        h: v.h as f32,
         add: true,
     }];
     ctx.skia.blur_backdrop(
-        size.w,
-        size.h,
+        v.w,
+        v.h,
         &full,
         BACKDROP_BLUR_SIGMA_LOGICAL * ctx.app_scale as f32 * strength,
         ctx.skia_flip_y,
@@ -1189,37 +1191,39 @@ fn pass_switcher_cards(
         if elements.is_empty() {
             continue;
         }
-        let rotation = card_rotation(stored, drawn_size(&elements, ctx.app_scale), size);
-        let placement = Card::centered_rotated(
-            size,
+        let card_t = card_transform(ctx, stored, &elements, size);
+        let upright = card_t == ctx.base();
+        let view = ctx.view(size);
+        let placement = Card::placed(
+            view,
             card.center_x,
             card.center_y,
             card.scale,
             card.corner_radius,
-            rotation,
-            ctx.transform,
+            ctx.base(),
+            card_t,
         );
         // Both cues track the surface's real drawn bounds: a backgrounded app
         // keeps its old size, so the nominal card rect would put the shadow and
         // the scrim off the card's actual edges.
         //
-        // A turned card is the exception: `placement` is in the app's rotated
-        // space, while the shadow and scrim are Skia draws in panel space. Its
-        // buffer fills the slot exactly once turned, so the panel-space slot is
-        // the right rect for both.
-        let (dx, dy, dw, dh) = if rotation.swaps_axes() {
+        // A card turned against the view is the exception: `placement` is in
+        // its own turned space, while the shadow and scrim are Skia draws in
+        // view space. Its buffer fills the slot exactly once turned, so the
+        // view-space slot is the right rect for both.
+        let (dx, dy, dw, dh) = if upright {
+            placement.drawn_bounds(&elements, ctx.app_scale)
+        } else {
             let slot = Card::centered(
-                size,
+                view,
                 card.center_x,
                 card.center_y,
                 card.scale,
                 card.corner_radius,
             );
             (slot.x as f32, slot.y as f32, slot.size.0, slot.size.1)
-        } else {
-            placement.drawn_bounds(&elements, ctx.app_scale)
         };
-        if !rotation.swaps_axes() {
+        if upright {
             // Ascending z: the last card to draw is the front one, and its rect
             // is what stays here for the pill.
             ctx.pill_anchor = Some(sc_layout::Rect {
@@ -1241,7 +1245,7 @@ fn pass_switcher_cards(
             dpi: ctx.app_scale as f32,
         };
         ctx.skia
-            .draw_card_shadow(size.w, size.h, &decor, ctx.skia_flip_y);
+            .draw_card_shadow(view.w, view.h, &decor, ctx.skia_flip_y);
         draw_scaled_card(
             renderer,
             framebuffer,
@@ -1249,15 +1253,15 @@ fn pass_switcher_cards(
             ctx,
             elements,
             placement,
-            rotation,
+            card_t,
         )?;
         ctx.skia
-            .draw_card_dim(size.w, size.h, &decor, ctx.skia_flip_y);
+            .draw_card_dim(view.w, view.h, &decor, ctx.skia_flip_y);
         // Badge and title ride `decor.chrome` on top of the card alpha, so they
         // ramp in with an opening deck instead of popping.
         ctx.skia.draw_card_icon(
-            size.w,
-            size.h,
+            view.w,
+            view.h,
             &decor,
             &app_id,
             ctx.icon_cache,
@@ -1268,8 +1272,8 @@ fn pass_switcher_cards(
         if let Some((tid, title)) = &ctx.card_chrome.title {
             if *tid == card.toplevel {
                 ctx.skia.draw_card_title(
-                    size.w,
-                    size.h,
+                    view.w,
+                    view.h,
                     &decor,
                     title,
                     card.alpha * ctx.card_chrome.title_alpha,
@@ -1286,12 +1290,13 @@ fn pass_switcher_cards(
 /// physical origin, scaled by dpi, with its backdrop blurred first.
 ///
 /// 1. App-parented popups (menus, dropdowns), root→leaf so submenus draw over
-///    their parents. Drawn whatever the rotation — they belong to the app.
+///    their parents. Drawn in the view, like the app they belong to.
 /// 2. Top/overlay layer surfaces (a status panel, the on-screen keyboard).
 /// 3. Popups parented to one of those layer surfaces.
 ///
-/// (2) and (3) are hidden while the app is rotated: portrait chrome across a
-/// landscape app is worse than no chrome. `touch::surface_under` skips them in
+/// (2) and (3) are hidden while the view is turned: they are laid out against
+/// the upright panel, and portrait chrome across a landscape view is worse
+/// than no chrome. `touch::surface_under` skips them in
 /// the same condition, so a hidden panel never eats taps meant for the app.
 fn pass_overlays(
     renderer: &mut GlesRenderer,
@@ -1302,26 +1307,16 @@ fn pass_overlays(
 ) -> Result<(), SwapBuffersError> {
     // Borrowed, not collected: this runs every frame, and `ctx.skia` below is a
     // disjoint field from the three slices being chained.
-    let app_rotation = ctx.rotation;
     let (app_popups, layers_above, layer_popups) =
         (ctx.app_popups, ctx.layers_above, ctx.layer_popups);
     for (surface, origin) in app_popups {
-        draw_overlay(
-            renderer,
-            framebuffer,
-            size,
-            ctx,
-            surface,
-            *origin,
-            app_rotation,
-        )?;
+        draw_overlay(renderer, framebuffer, size, ctx, surface, *origin, true)?;
     }
     if rotated {
         return Ok(());
     }
-    let upright = crate::rotation::Rotation::None;
     for (surface, origin) in layers_above {
-        draw_overlay(renderer, framebuffer, size, ctx, surface, *origin, upright)?;
+        draw_overlay(renderer, framebuffer, size, ctx, surface, *origin, false)?;
     }
     // A keyboard sliding out after its client hid it: drawn from the held last
     // buffer, in the slot its live entry held — which is gone from the render
@@ -1331,7 +1326,7 @@ fn pass_overlays(
         draw_closing(renderer, framebuffer, size, ctx, buffer, rect)?;
     }
     for (surface, origin) in layer_popups {
-        draw_overlay(renderer, framebuffer, size, ctx, surface, *origin, upright)?;
+        draw_overlay(renderer, framebuffer, size, ctx, surface, *origin, false)?;
     }
     Ok(())
 }
@@ -1344,22 +1339,19 @@ fn draw_overlay(
     ctx: &mut DrawCtx<'_>,
     surface: &WlSurface,
     origin: (i32, i32),
-    rotation: crate::rotation::Rotation,
+    in_view: bool,
 ) -> Result<(), SwapBuffersError> {
-    // Skia draws portrait, in output space; a turned popup's backdrop rects are
-    // in the app's space, so blurring them would smear the wrong strip of
-    // screen. Skip it while rotated — the popup itself still draws.
-    if !rotation.swaps_axes() {
-        blur_behind(
-            ctx.skia,
-            size,
-            surface,
-            origin,
-            ctx.app_scale,
-            ctx.skia_flip_y,
-        );
-    }
-    draw_layer(renderer, framebuffer, size, ctx, surface, origin, rotation)
+    // Layers are only drawn while the view is upright, so the view size is
+    // right for both kinds.
+    blur_behind(
+        ctx.skia,
+        ctx.view(size),
+        surface,
+        origin,
+        ctx.app_scale,
+        ctx.skia_flip_y,
+    );
+    draw_layer(renderer, framebuffer, size, ctx, surface, origin, in_view)
 }
 
 /// Draw one frame of an OSK slide-out: the client's last buffer as a texture
@@ -1425,9 +1417,10 @@ fn draw_closing(
 
 /// springchick's own chrome, drawn last: the home bar, the volume OSD, and the
 /// touch indicators.
-fn pass_chrome(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, rotated: bool) {
+fn pass_chrome(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>) {
+    let size = ctx.view(size);
     // Always draw the bar on top: it is the only way back out of a fullscreen
-    // app, so it stays even while rotated (where it reads as a side handle).
+    // app.
     ctx.skia.draw_bar_overlay(
         size.w,
         size.h,
@@ -1436,10 +1429,9 @@ fn pass_chrome(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, rotated: bool) 
         ctx.pill_anchor,
     );
 
-    // The OSD sits above everything, including a fullscreen app — but it is
-    // drawn portrait, so it is suppressed while the app is rotated rather than
-    // laid sideways across landscape video.
-    if let Some((level, muted, alpha)) = ctx.osd.filter(|_| !rotated) {
+    // The OSD sits above everything, including a fullscreen app. It lays itself
+    // out against the view, so it follows a turn like the rest of the chrome.
+    if let Some((level, muted, alpha)) = ctx.osd {
         ctx.skia
             .draw_osd_overlay(size.w, size.h, level, muted, alpha, ctx.skia_flip_y);
     }
@@ -1522,6 +1514,7 @@ pub fn draw_scene(
     }
 
     ctx.skia.sync_catalog_gen(ctx.catalog_gen);
+    ctx.skia.set_view(ctx.rotation);
 
     let mut plan = plan_scene(renderer, ctx);
     // Computed before drawing: it reads the app element's pre-draw commit
@@ -1540,11 +1533,11 @@ pub fn draw_scene(
     pass_app_card(renderer, &mut *framebuffer, size, ctx, &mut plan)?;
     pass_switcher_cards(renderer, &mut *framebuffer, size, ctx)?;
     pass_overlays(renderer, &mut *framebuffer, size, ctx, plan.rotated)?;
-    pass_chrome(size, ctx, plan.rotated);
+    pass_chrome(size, ctx);
     // Over everything, chrome included: while the screen is dipped for a turn
     // there is nothing worth showing through it.
-    ctx.skia
-        .draw_screen_dim(size.w, size.h, ctx.dim, ctx.skia_flip_y);
+    let v = ctx.view(size);
+    ctx.skia.draw_screen_dim(v.w, v.h, ctx.dim, ctx.skia_flip_y);
 
     send_frame_callbacks(ctx);
     Ok(damage_hint)
@@ -1567,6 +1560,7 @@ fn draw_locked(
     ctx: &mut DrawCtx<'_>,
 ) -> Result<Vec<Rectangle<i32, Physical>>, SwapBuffersError> {
     let damage = Rectangle::from_size(size);
+    ctx.skia.set_view(crate::rotation::Rotation::None);
 
     // The lock surface renders at `dpi` like any other client, and covers the
     // whole output (it was configured at the output's logical size), so it draws
@@ -1676,8 +1670,9 @@ mod tests {
             let slot = Card::centered(output(), cx, cy, scale, 40.0);
             let want = on_framebuffer(&slot, out);
             for rotation in [Rotation::LeftUp, Rotation::RightUp] {
-                let turned = Card::centered_rotated(output(), cx, cy, scale, 40.0, rotation, out);
-                let got = on_framebuffer(&turned, out + rotation.transform());
+                let card_t = out + rotation.transform();
+                let turned = Card::placed(output(), cx, cy, scale, 40.0, out, card_t);
+                let got = on_framebuffer(&turned, card_t);
                 assert!(
                     (got.loc.x - want.loc.x).abs() <= 1 && (got.loc.y - want.loc.y).abs() <= 1,
                     "{out:?} + {rotation:?}: landed {:?}, slot {:?}",
@@ -1700,7 +1695,15 @@ mod tests {
         let slot = Card::centered(output(), cx, cy, scale, 40.0);
         for out in OUT_TRANSFORMS {
             for rotation in [Rotation::LeftUp, Rotation::RightUp] {
-                let turned = Card::centered_rotated(output(), cx, cy, scale, 40.0, rotation, out);
+                let turned = Card::placed(
+                    output(),
+                    cx,
+                    cy,
+                    scale,
+                    40.0,
+                    out,
+                    out + rotation.transform(),
+                );
                 // Axes swapped, so a landscape buffer fills the portrait slot.
                 assert!(
                     (turned.size.0 - slot.size.1).abs() <= 1.0
@@ -1769,16 +1772,38 @@ mod tests {
     #[test]
     fn an_upright_card_is_untouched_by_the_rotated_constructor() {
         let plain = Card::centered(output(), 700.0, 900.0, 0.5, 24.0);
-        let same = Card::centered_rotated(
+        let same = Card::placed(
             output(),
             700.0,
             900.0,
             0.5,
             24.0,
-            Rotation::None,
+            Transform::Normal,
             Transform::Normal,
         );
         assert_eq!((plain.x, plain.y), (same.x, same.y));
         assert_eq!(plain.size, same.size);
+    }
+
+    #[test]
+    fn an_upright_card_in_a_turned_view_lands_on_its_view_slot() {
+        let (cx, cy, scale) = (900.0_f32, 500.0_f32, 0.62_f32);
+        for out in OUT_TRANSFORMS {
+            for rotation in [Rotation::LeftUp, Rotation::RightUp] {
+                let base = out + rotation.transform();
+                let view = rotation.app_size((output().w, output().h)).into();
+                let slot = Card::centered(view, cx, cy, scale, 40.0);
+                let want = on_framebuffer(&slot, base);
+                let card = Card::placed(view, cx, cy, scale, 40.0, base, out);
+                let got = on_framebuffer(&card, out);
+                assert!(
+                    (got.loc.x - want.loc.x).abs() <= 1
+                        && (got.loc.y - want.loc.y).abs() <= 1
+                        && (got.size.w - want.size.w).abs() <= 1
+                        && (got.size.h - want.size.h).abs() <= 1,
+                    "{out:?} + {rotation:?}: landed {got:?}, slot {want:?}",
+                );
+            }
+        }
     }
 }
