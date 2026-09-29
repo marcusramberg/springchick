@@ -85,7 +85,7 @@ pub(crate) fn run_winit() {
 
     // Control/IPC socket (`springchick ipc …`). Always listening; the client
     // connects to the same path. Shared setup with the DRM backend.
-    let debug_chan = debug_input::spawn_listener(state.output_size);
+    let debug_chan = debug_input::spawn_listener(state.panel_size);
     let catalog_dirty = crate::catalog_watch::spawn();
 
     info!("entering frame loop");
@@ -310,8 +310,8 @@ fn handle_winit_input(state: &mut State, event: InputEvent<winit::WinitInput>) {
             touch::pointer_button(state, pressed, event.button_code(), event.time_msec());
         }
         InputEvent::PointerMotionAbsolute { event } => {
-            let x = event.x_transformed(state.output_size.0) as f32;
-            let y = event.y_transformed(state.output_size.1) as f32;
+            let x = event.x_transformed(state.panel_size.0) as f32;
+            let y = event.y_transformed(state.panel_size.1) as f32;
             touch::pointer_motion(state, x, y, event.time_msec());
         }
         // Scroll, so a wheel behaves the same nested as on device — otherwise

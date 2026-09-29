@@ -332,7 +332,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Control/IPC socket (`springchick ipc …`), same as the winit backend.
     // Always listening; carries the debug-input gestures the VM tests drive too.
-    let debug_chan = crate::debug_input::spawn_listener(state.output_size);
+    let debug_chan = crate::debug_input::spawn_listener(state.panel_size);
     let catalog_dirty = crate::catalog_watch::spawn();
 
     // Screencopy dmabuf constraints: the render node + format/modifier set a
@@ -1145,7 +1145,7 @@ impl App {
             return;
         }
         let size = self.drm.output_size;
-        let rotation = self.state.rotation;
+        let rotation = self.state.view_rotation();
         let mut drawn = false;
         for i in 0..self.drm.mirrors.len() {
             if self.drm.mirrors[i].pending_flip {

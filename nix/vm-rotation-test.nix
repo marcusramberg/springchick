@@ -76,6 +76,7 @@ mkTest {
 
   packages = [
     pkgs.imv
+    pkgs.foot
     # A real top/overlay layer surface, to prove layer chrome is hidden while
     # the app is rotated.
     pkgs.wvkbd
@@ -286,6 +287,50 @@ mkTest {
     turn("normal")
     machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation None'", timeout=30)
     machine.screenshot("05-upright-again")
+
+    # --- cmd-tab between two fullscreen apps stays landscape --------------
+    # The view holds its turn through the switcher, so the deck itself comes up
+    # landscape and picking the other fullscreen app never drops to portrait.
+    def ipc(verb):
+        return machine.succeed(f"SPRINGCHICK_IPC_SOCK={IPC_SOCK} springchick ipc {verb}").strip()
+
+    def count(pattern):
+        return int(machine.succeed(f"{JOURNAL} | grep -cF '{pattern}' || true").strip())
+
+    turn("left-up")
+    machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation LeftUp'", timeout=30)
+    machine.succeed(
+        "systemd-run --user -M tester@.host --collect --unit=imv2 "
+        f"--setenv=WAYLAND_DISPLAY={sock} $(command -v imv) "
+        "-f -i rotation-test-2 ${quadrants}"
+    )
+    machine.sleep(4)
+    machine.screenshot("06-second-app")
+    before = count("rotation None")
+    ipc("keydown Super_L")
+    ipc("action switcher-next")
+    ipc("settle 2000")
+    machine.screenshot("07-deck-landscape")
+    assert count("rotation None") == before, "the deck dropped to portrait"
+    ipc("keyup Super_L")
+    ipc("settle 2000")
+    machine.sleep(2)
+    machine.screenshot("08-switched-landscape")
+    assert count("rotation None") == before, "switching fullscreen apps dropped to portrait"
+    got = quadrant_colours("08-switched-landscape")
+    assert got["bottom-left"][0] == "red", f"not landscape after switch: {got}"
+
+    # Landing on a portrait (non-fullscreen) app turns the view back.
+    machine.succeed("systemctl --user -M tester@.host stop imv2")
+    machine.succeed(
+        "systemd-run --user -M tester@.host --collect --unit=foot "
+        f"--setenv=WAYLAND_DISPLAY={sock} $(command -v foot)"
+    )
+    machine.wait_until_succeeds(f"[ $({JOURNAL} | grep -cF 'rotation None') -gt {before} ]", timeout=30)
+    machine.sleep(2)
+    machine.screenshot("09-portrait-app")
+    machine.succeed("systemctl --user -M tester@.host stop foot")
+    ipc("action home")
 
     # --- Leaving fullscreen while turned -> portrait ----------------------
     # Quitting the client is the same path as an app exiting fullscreen from the

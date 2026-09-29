@@ -155,7 +155,7 @@ impl State {
                         .map(|(_, o)| *o)
                 })
                 .unwrap_or((0, 0));
-            ((0, 0, self.output_size.0, self.output_size.1), origin)
+            ((0, 0, self.panel_size.0, self.panel_size.1), origin)
         };
         let tc = get_popup_toplevel_coords(kind);
         let (x, y, w, h) = popups::unconstrain_target(area, root_origin, (tc.x, tc.y), self.dpi);
@@ -206,14 +206,14 @@ impl State {
         }
     }
 
-    /// The space app-rooted popups are laid out in, as `(origin, size)` in
-    /// physical px: normally the usable area, but a rotated app fills the output
-    /// and lives in its own turned space, starting at that space's own origin.
-    /// Everything downstream (clamp, unconstrain target, hit-test, draw) has to
-    /// agree on this or the popup lands somewhere the app never asked for.
+    /// The space app-rooted popups are laid out in, as `(origin, size)` in view
+    /// px: normally the usable area, but a turned view has no layers and the
+    /// app fills it. Everything downstream (clamp, unconstrain target, hit-test,
+    /// draw) has to agree on this or the popup lands somewhere the app never
+    /// asked for.
     pub(crate) fn app_popup_space(&self) -> ((i32, i32), (i32, i32)) {
-        if self.rotation.swaps_axes() {
-            return ((0, 0), self.rotation.app_size(self.output_size));
+        if self.view_rotation().swaps_axes() {
+            return ((0, 0), self.output_size());
         }
         let u = self.layers.usable(self.dpi);
         (
@@ -224,15 +224,10 @@ impl State {
 
     /// Popups parented to the fullscreen app (menus, dropdowns), root→leaf.
     fn app_popups(&self) -> Vec<PopupRect> {
-        let (origin, bound) = self.app_popup_space();
-        // A rotated app's popups are clamped into the app's own space, which
-        // starts at its origin; an unrotated one keeps clamping to the output so
-        // a menu may still overhang the usable area's edges (bar strip).
-        let bound = if self.rotation.swaps_axes() {
-            bound
-        } else {
-            self.output_size
-        };
+        // Clamped to the whole view, not the usable area, so a menu may still
+        // overhang its edges (bar strip).
+        let (origin, _) = self.app_popup_space();
+        let bound = self.output_size();
         self.app_focus_surface()
             .map(|s| self.popup_chain(&s, origin, bound))
             .unwrap_or_default()
@@ -243,7 +238,7 @@ impl State {
         let mut out = Vec::new();
         let (below, above) = self.layers.render_lists(self.dpi);
         for (surface, origin) in below.iter().chain(above.iter()) {
-            out.extend(self.popup_chain(surface, *origin, self.output_size));
+            out.extend(self.popup_chain(surface, *origin, self.panel_size));
         }
         out
     }
@@ -322,18 +317,18 @@ impl State {
     pub(crate) fn layers_dump(&self) -> String {
         let infos = self.layers.dump(self.dpi);
         let popups = self.active_popups();
-        // Layer surfaces and their popups are not drawn while the app is turned
-        // (portrait chrome over a landscape app), so say so rather than let the
-        // reader wonder why the dump lists surfaces they cannot see.
-        let rotated = if self.rotation.swaps_axes() {
+        // Layer surfaces and their popups are not drawn while the view is
+        // turned, so say so rather than let the reader wonder why the dump lists
+        // surfaces they cannot see.
+        let rotated = if self.view_rotation().swaps_axes() {
             " rotated=yes(layers-not-drawn)"
         } else {
             ""
         };
         let mut parts = vec![format!(
             "out={}x{} dpi={} {}{} layers={} popups={}",
-            self.output_size.0,
-            self.output_size.1,
+            self.panel_size.0,
+            self.panel_size.1,
             self.dpi,
             self.layers.dump_header(self.dpi),
             rotated,
@@ -369,13 +364,12 @@ impl State {
     /// a *grabbing* popup swallows an outside tap and dismisses — see
     /// `touch::popup_press`, which consults `popup_grabs` per popup.
     ///
-    /// While the app is rotated the layer surfaces are not drawn (portrait
-    /// chrome over a landscape app), so their popups are not on screen either
-    /// and are left out — input routing uses this list, and an invisible popup
-    /// must not take taps.
+    /// While the view is turned the layer surfaces are not drawn, so their
+    /// popups are not on screen either and are left out — input routing uses
+    /// this list, and an invisible popup must not take taps.
     pub(crate) fn active_popups(&self) -> Vec<PopupRect> {
         let mut v = self.app_popups();
-        if !self.rotation.swaps_axes() {
+        if !self.view_rotation().swaps_axes() {
             v.extend(self.layer_popups());
         }
         v
@@ -391,6 +385,9 @@ impl State {
     /// so it no longer fades the bar; only a surface actually over the pill
     /// (e.g. a fullscreen overlay) does.
     fn bar_alpha_target(&self) -> f32 {
+        if self.view_rotation().swaps_axes() {
+            return 1.0;
+        }
         let (w, h) = self.output_size_f();
         let pill = sc_layout::pill_rect(w, h);
         if self.layers.top_overlaps(pill, self.dpi) {
@@ -589,11 +586,10 @@ impl State {
             *page_count = pages;
         }
 
-        let usable = self.layers.usable(self.dpi);
         let scene = compute_scene(
             &self.ui,
-            self.output_size,
-            (usable.x, usable.y),
+            self.output_size(),
+            self.app_origin(),
             self.card_radius,
         );
         self.switcher_cards = scene.cards.clone();
@@ -793,8 +789,9 @@ impl State {
     ) -> render::DrawCtx<'a> {
         // Resolved before the struct literal so nothing here borrows `self`
         // while `skia` and `last_present` hold mutable borrows of it.
-        let usable = self.layers.usable(self.dpi);
-        let app_origin = (usable.x.round() as i32, usable.y.round() as i32);
+        let (ox, oy) = self.app_origin();
+        let app_origin = (ox.round() as i32, oy.round() as i32);
+        let rotation = self.view_rotation();
         // Resolved to an owned rect first, so the `arrange` closure below borrows
         // nothing but `self.arrange` itself.
         let dock_zone = self.arrange.as_ref().map(|_| {
@@ -836,7 +833,7 @@ impl State {
             app_scale: self.dpi,
             app_origin,
             transform,
-            rotation: self.rotation,
+            rotation,
             skia_flip_y,
             frame_time: prep.frame_time,
             osd: prep.osd_view,

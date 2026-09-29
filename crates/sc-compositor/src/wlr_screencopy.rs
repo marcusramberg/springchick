@@ -274,6 +274,6 @@ fn check_buffer(buffer: &WlBuffer, size: Size<i32, BufferCoord>) -> Result<(), &
 impl State {
     /// The whole output, in the physical pixels a capture reads back.
     fn output_rect(&self) -> Rectangle<i32, BufferCoord> {
-        Rectangle::from_size((self.output_size.0, self.output_size.1).into())
+        Rectangle::from_size((self.panel_size.0, self.panel_size.1).into())
     }
 }
