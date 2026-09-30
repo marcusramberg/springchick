@@ -1,12 +1,11 @@
-/// Normalized point: x in [0,1] of screen width, y in [0,1] of screen height
-/// with y=0 at the top. Keeps the logic resolution-independent.
+/// Normalized point, 0..1 of screen size, y=0 at the top.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pt {
     pub x: f32,
     pub y: f32,
 }
 
-/// Tracks a single touch and produces a low-passed velocity (units: fraction/sec).
+/// Tracks one touch; velocity is low-passed, in fractions/sec.
 #[derive(Clone, Copy, Debug)]
 pub struct Tracker {
     pub start: Pt,
@@ -36,21 +35,17 @@ impl Tracker {
         self.current = p;
     }
 
-    /// Decay velocity toward zero. Motion events stop arriving while a finger is
-    /// held still, so the frame loop calls this each tick during a grab; without
-    /// it a "drag up and hold" keeps its stale upward velocity and every release
-    /// reads as a fast flick. Frame-rate independent (~halves every ~35ms).
+    /// Decay velocity toward zero. Held fingers send no motion, so the frame loop
+    /// calls this during a grab; otherwise drag-and-hold releases as a flick.
     pub fn decay(&mut self, dt: f32) {
         let factor = (-dt / 0.05).exp();
         self.velocity.x *= factor;
         self.velocity.y *= factor;
     }
 
-    /// Upward progress: how far up from the start (0 at start, 1 = full screen up).
     pub fn up_progress(&self) -> f32 {
         (self.start.y - self.current.y).max(0.0)
     }
-    /// Signed horizontal travel from start.
     pub fn dx(&self) -> f32 {
         self.current.x - self.start.x
     }
@@ -70,7 +65,7 @@ mod tests {
     #[test]
     fn decay_kills_velocity_on_hold() {
         let mut t = Tracker::begin(Pt { x: 0.5, y: 0.9 });
-        t.update(Pt { x: 0.5, y: 0.5 }, 1.0 / 90.0); // fast upward drag
+        t.update(Pt { x: 0.5, y: 0.5 }, 1.0 / 90.0);
         let flick = t.velocity.y;
         assert!(flick < 0.0);
         // Hold still for ~150ms worth of frames.

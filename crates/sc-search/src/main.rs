@@ -1,10 +1,6 @@
-//! springchick pull-down search: a standalone screen-filling Wayland app.
-//!
-//! Launched by the compositor on the Home pull-down gesture. As a normal xdg
-//! toplevel it gets keyboard focus, touch, an on-screen keyboard (wvkbd/IME),
-//! and a cursor for free — the compositor only spawns it and animates it in.
-//! It ranks the app catalog by frecency (read-only from the shared state file),
-//! filters by name as you type, and launches the pick (then exits).
+//! Pull-down search: a standalone Wayland app the compositor spawns on the
+//! Home pull-down. Ranks the catalog by frecency, filters as you type,
+//! launches the pick.
 
 mod blur;
 
@@ -15,15 +11,12 @@ use eframe::egui;
 use sc_catalog::AppEntry;
 use sc_shell_model::{unix_now, FrecencyStore};
 
-/// xdg app_id — the compositor keys on this to slide it in and hide it from the
-/// task switcher. Must match `SEARCH_APP_ID` in the compositor.
+/// Must match `SEARCH_APP_ID` in the compositor.
 const APP_ID: &str = "chick.springchick.Search";
 const DEFAULT_LIMIT: usize = 5;
-/// How long a result has to be held before it becomes a drag. Matches the
-/// compositor's `arrange::HOLD_MS` so a hold feels the same here as on Home.
+/// Matches the compositor's `arrange::HOLD_MS`.
 const HOLD_MS: u128 = 500;
-/// How far a held finger may travel (egui points) before the press is read as a
-/// list scroll instead of a hold.
+/// Travel (egui points) beyond which a hold becomes a list scroll.
 const HOLD_SLOP: f32 = 12.0;
 const FILTER_LIMIT: usize = 8;
 
@@ -31,16 +24,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id(APP_ID)
-            // Deliberately NOT `.with_fullscreen(true)`. springchick maximizes
-            // every toplevel anyway, so fullscreen buys nothing — and it is
-            // actively harmful here: the compositor treats a fullscreen app as
-            // media wanting landscape, so it configures the *swapped* size and
-            // draws the window a quarter-turn round. That left search sized
-            // 2088x1902 on a 1901x2088 panel: its blur region (clipped to the
-            // surface) stopped short of the bottom of the screen, and a rotated
-            // ghost of the search field was drawn over Home.
-            // Translucent so the compositor's blurred Home backdrop shows
-            // through (see `blur`).
+            // Not `.with_fullscreen(true)`: the compositor treats fullscreen as media
+            // wanting landscape and would rotate us.
             .with_transparent(true),
         ..Default::default()
     };
@@ -57,16 +42,12 @@ struct SearchApp {
     query: String,
     results: Vec<String>,
     textures: HashMap<String, egui::TextureHandle>,
-    /// Icon search path, built once at startup rather than per icon lookup.
     icon_dirs: Vec<std::path::PathBuf>,
     focus_requested: bool,
-    /// Last known viewport focus, to spot the edge where we are raised again.
+    /// To spot the edge where we are raised again.
     focused: bool,
-    /// The result row currently held down: its id, when the press started, and
-    /// where — the press that may become a drag. Dropped if the finger travels,
-    /// because that press is a list scroll.
+    /// Held row: id, start time, position. Dropped if the finger travels.
     held: Option<(String, Instant, egui::Pos2)>,
-    /// Kept alive for the process lifetime: dropping it drops the blur.
     _blur: Option<blur::ExtBackgroundEffectSurfaceV1>,
 }
 
@@ -88,15 +69,13 @@ impl SearchApp {
         app
     }
 
-    /// Re-read the catalog and frecency from disk. The compositor raises this
-    /// process rather than respawning it, so a scan done only at startup goes
-    /// stale the moment anything is installed or launched.
+    /// The compositor raises this process instead of respawning it.
     fn rescan(&mut self) {
         self.catalog = sc_catalog::scan_apps()
             .into_iter()
             .map(|e| (e.id.clone(), e))
             .collect();
-        // Frecency is read-only here; the compositor stays the sole writer.
+        // Read-only; the compositor is the sole writer.
         self.frecency = sc_shell_model::persist::load(&sc_shell_model::persist::state_path())
             .map(|m| m.frecency)
             .unwrap_or_default();
@@ -118,7 +97,6 @@ impl SearchApp {
         );
     }
 
-    /// Lazily upload an app's icon into an egui texture.
     fn icon(&mut self, ctx: &egui::Context, id: &str) -> Option<egui::TextureHandle> {
         if let Some(t) = self.textures.get(id) {
             return Some(t.clone());
@@ -137,14 +115,8 @@ impl SearchApp {
         Some(tex)
     }
 
-    /// Open `id` and quit.
-    ///
-    /// Preferably by asking the compositor over its control socket, so the
-    /// launch goes through the same path as an icon tap: an already-running app
-    /// is raised rather than started twice, and the window that appears is
-    /// attributed to this app id instead of to whatever the client calls
-    /// itself. Spawning it here directly is the fallback for running outside a
-    /// springchick session.
+    /// Launches via the compositor so a running app is raised and the window is
+    /// attributed to `id`. Spawns directly outside springchick.
     fn launch(&self, id: &str) {
         if ipc_launch(id) {
             std::process::exit(0);
@@ -152,7 +124,6 @@ impl SearchApp {
         if let Some(entry) = self.catalog.get(id) {
             if let Some(command) = sc_catalog::launch_command(entry) {
                 if let Some((prog, args)) = command.argv.split_first() {
-                    // WAYLAND_DISPLAY etc. are inherited from the compositor.
                     let mut builder = std::process::Command::new(prog);
                     if let Some(cwd) = &command.cwd {
                         builder.current_dir(cwd);
@@ -165,28 +136,17 @@ impl SearchApp {
     }
 }
 
-/// Ask the running compositor to open `app_id`. True when it accepted.
 fn ipc_launch(app_id: &str) -> bool {
     ipc_cmd(&format!("launch {app_id}"))
 }
 
-/// Ask the compositor to take over a drag of `app_id`, with the finger still
-/// down on us. True when it accepted, and then this process is done: the
-/// compositor has cancelled our touch and owns the gesture from here.
-///
-/// No coordinates: the compositor was routing that finger to us until a moment
-/// ago and knows where it is in output space, which we would have to convert
-/// our surface-local position into.
+/// On success the compositor has cancelled our touch and owns the drag, so
+/// this process is done.
 fn ipc_drag(app_id: &str) -> bool {
     ipc_cmd(&format!("drag {app_id}"))
 }
 
-/// Send one line to the compositor's control socket and report whether it
-/// replied `ok`.
-///
-/// Mirrors `springchick ipc <line>`: same socket resolution, same one-line
-/// protocol. Any failure (no compositor, no socket, an error reply) returns
-/// false so the caller can fall back.
+/// Same protocol as `springchick ipc`. False on any failure.
 fn ipc_cmd(line: &str) -> bool {
     use std::io::{BufRead, BufReader, Write};
 
@@ -210,8 +170,6 @@ fn ipc_cmd(line: &str) -> bool {
 }
 
 impl eframe::App for SearchApp {
-    /// Transparent clear so the compositor composites us over the blurred Home
-    /// screen instead of over black.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
     }
@@ -228,8 +186,6 @@ impl eframe::App for SearchApp {
         }
         self.focused = focused;
 
-        // Translucent panel over the blurred backdrop. Without the compositor's
-        // blur this is still legible, just a plain dark scrim.
         let frame = egui::Frame::central_panel(&ctx.style())
             .fill(egui::Color32::from_rgba_unmultiplied(12, 14, 18, 170));
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
@@ -270,13 +226,11 @@ impl eframe::App for SearchApp {
                     if !resp.is_pointer_button_down_on() {
                         continue;
                     }
-                    // Held: keep the press this row started, or start one.
                     let Some(now_at) = pointer else { continue };
                     let (since, from) = match &self.held {
                         Some((held_id, at, from)) if held_id == id => (*at, *from),
                         _ => (Instant::now(), now_at),
                     };
-                    // Travelled: this is the list being scrolled, not a hold.
                     if (now_at - from).length() > HOLD_SLOP {
                         continue;
                     }
@@ -288,19 +242,13 @@ impl eframe::App for SearchApp {
                 }
             });
             self.held = still_held;
-            // A perfectly still finger produces no further events, so egui would
-            // not repaint and the hold would never mature. Ask for the one
-            // wake-up that lands on the threshold.
+            // A still finger produces no events; schedule the wake-up at the threshold.
             if let Some((_, since, _)) = &self.held {
                 let remain = HOLD_MS.saturating_sub(since.elapsed().as_millis());
                 ctx.request_repaint_after(Duration::from_millis(remain as u64));
             }
 
             if let Some(id) = drag {
-                // The compositor cancels our touch and owns the gesture now, so
-                // there is nothing left for this process to do. If it refuses,
-                // fall through and leave the press alone — a long hold that goes
-                // nowhere beats a launch the user did not ask for.
                 if ipc_drag(&id) {
                     std::process::exit(0);
                 }
@@ -316,8 +264,6 @@ impl eframe::App for SearchApp {
     }
 }
 
-/// One result row: icon on the left, name filling the rest. Returns a clickable
-/// response covering the whole row.
 fn row_widget<'a>(tex: Option<&'a egui::TextureHandle>, name: &'a str) -> impl egui::Widget + 'a {
     move |ui: &mut egui::Ui| {
         let row_h = 64.0;

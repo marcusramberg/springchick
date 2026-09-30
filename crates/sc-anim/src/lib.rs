@@ -1,13 +1,12 @@
 #![forbid(unsafe_code)]
 
-/// A critically-damped-by-default spring driving one scalar.
 #[derive(Clone, Copy, Debug)]
 pub struct Spring {
     pub value: f32,
     pub velocity: f32,
     pub target: f32,
-    pub stiffness: f32, // higher = snappier
-    pub damping: f32,   // critical damping ~= 2*sqrt(stiffness)
+    pub stiffness: f32,
+    pub damping: f32,
 }
 
 impl Spring {
@@ -21,9 +20,7 @@ impl Spring {
         }
     }
 
-    /// A snappy zoom spring (stiffness 300, damping 35) starting at `from` and
-    /// retargeted to `to`. Used for the icon-zoom / card-open/close transitions,
-    /// which all share this tuning.
+    /// Shared tuning for icon-zoom and card open/close.
     pub fn zoom(from: f32, to: f32) -> Self {
         let mut s = Spring::new(from);
         s.stiffness = 300.0;
@@ -32,12 +29,11 @@ impl Spring {
         s
     }
 
-    /// Retarget without losing current value/velocity (interruptible).
     pub fn retarget(&mut self, target: f32) {
         self.target = target;
     }
 
-    /// Advance by dt seconds (semi-implicit Euler). Returns true while still moving.
+    /// Semi-implicit Euler. Returns true while still moving.
     pub fn step(&mut self, dt: f32) -> bool {
         let force = -self.stiffness * (self.value - self.target) - self.damping * self.velocity;
         self.velocity += force * dt;
@@ -50,32 +46,22 @@ impl Spring {
     }
 }
 
-/// Linear interpolation of a 2D point at normalized `t`, clamped to `[0,1]`.
-/// The straight-line tween used for synthetic swipe playback.
 pub fn lerp_point(from: (f32, f32), to: (f32, f32), t: f32) -> (f32, f32) {
     let t = t.clamp(0.0, 1.0);
     (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
 }
 
-/// Ease-out cubic: `1 - (1-p)^3`, clamped to `[0,1]`. Fast start, gentle
-/// settle — the standard curve for slide-in/zoom transitions.
 pub fn ease_out_cubic(p: f32) -> f32 {
     let p = p.clamp(0.0, 1.0);
     1.0 - (1.0 - p).powi(3)
 }
 
-/// How far a surface sliding in from an edge still is from its resting place,
-/// at normalized progress `p`: `(1 - ease_out_cubic(p)) * distance`.
-///
-/// `p = 0` → the full `distance` (fully off-edge), `p = 1` → `0` (in place).
-/// Used for the on-screen keyboard rising from the bottom of the screen.
+/// Remaining offset of a surface sliding in from an edge at progress `p`.
 pub fn slide_in_offset(p: f32, distance: f32) -> f32 {
     (1.0 - ease_out_cubic(p)) * distance
 }
 
-/// A breathing/pulse value in `[0,1]` from a monotonic `elapsed` (seconds) and
-/// angular `rate` (radians/sec): `sin(elapsed*rate)*0.5 + 0.5`. Drives the
-/// launching-icon halo.
+/// `sin(elapsed*rate)*0.5 + 0.5`, for the launching-icon halo.
 pub fn pulse(elapsed: f32, rate: f32) -> f32 {
     (elapsed * rate).sin() * 0.5 + 0.5
 }
@@ -128,7 +114,7 @@ mod tests {
             s.step(dt);
         }
         let v = s.velocity;
-        s.retarget(50.0); // interrupt
+        s.retarget(50.0);
         assert_eq!(s.velocity, v, "retarget must not zero velocity");
     }
 
@@ -147,16 +133,14 @@ mod tests {
         assert_eq!(ease_out_cubic(1.0), 1.0);
         assert_eq!(ease_out_cubic(-1.0), 0.0);
         assert_eq!(ease_out_cubic(2.0), 1.0);
-        assert!(ease_out_cubic(0.5) > 0.5); // fast start: past halfway by midpoint
+        assert!(ease_out_cubic(0.5) > 0.5);
     }
 
     #[test]
     fn slide_in_offset_runs_full_distance_to_zero() {
         assert_eq!(slide_in_offset(0.0, 800.0), 800.0);
         assert_eq!(slide_in_offset(1.0, 800.0), 0.0);
-        // Ease-out: most of the travel is done by the midpoint.
         assert!(slide_in_offset(0.5, 800.0) < 400.0);
-        // Monotonically decreasing.
         let mut prev = f32::INFINITY;
         for i in 0..=20 {
             let v = slide_in_offset(i as f32 / 20.0, 800.0);

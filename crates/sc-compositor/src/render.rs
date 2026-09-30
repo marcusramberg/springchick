@@ -1,9 +1,5 @@
-//! Shared render path for the winit and DRM backends.
-//!
-//! Both backends own a `GlesRenderer` and differ only in how they acquire the
-//! framebuffer (`bind`) and present (`submit`/page-flip). Everything between —
-//! clearing, the transformed two-pass app composite, and the Skia home/bar
-//! overlay — is identical and lives here.
+//! Shared render path. Backends differ only in how they bind the framebuffer
+//! and present.
 
 use std::collections::{HashMap, HashSet};
 
@@ -39,36 +35,21 @@ use smithay::wayland::compositor::{
 
 use tracing::warn;
 
-/// Blur radius for ext-background-effect blur regions, in logical px (scaled by
-/// output dpi at use). Roughly matches the frosted-glass look phone panels draw
-/// against; the protocol leaves the algorithm entirely to the compositor.
+/// ext-background-effect blur, logical px (scaled by dpi).
 const BLUR_SIGMA_LOGICAL: f32 = 8.0;
 
-/// Blur radius for the shell's own switcher backdrop, in logical px. Stronger
-/// than a client blur region: this is a whole-screen frost meant to push Home
-/// well behind the deck, not a panel's frosted glass.
+/// The switcher backdrop, logical px. Stronger: it pushes all of Home back.
 const BACKDROP_BLUR_SIGMA_LOGICAL: f32 = 18.0;
 
-/// Background clear color.
 pub const CLEAR_COLOR: Color32F = Color32F::new(0.06, 0.10, 0.14, 1.0);
 
-/// Rounded-rect texture fragment shader. Derived verbatim from smithay's default
-/// `texture.frag` (pin 7ddcd17) — same `//_DEFINES_` placeholder and
-/// `NO_ALPHA`/`EXTERNAL`/`DEBUG_FLAGS` variants — with two extra uniforms
-/// (`corner_radius`, `card_rect`) and a rounded-rect signed-distance-field mask
-/// applied to the premultiplied output.
+/// smithay's `texture.frag` (pin 7ddcd17) plus a rounded-rect SDF mask.
 ///
-/// The mask works in **framebuffer pixels** off `gl_FragCoord`, with the card's
-/// rect handed in as a uniform. Deriving it from `v_coords` instead does not
-/// work: that varying is the quad coordinate already mapped through
-/// `tex_matrix`, which folds in the client's viewport crop and buffer size, so
-/// it spans 0..1 only for a client whose buffer is exactly the dest rect. A
-/// waydroid window (Android renders into a fixed gralloc buffer and
-/// viewport-maps it) makes the span arbitrary, which collapses the mask to a
-/// constant: 0 paints the card solid black — smithay disables blending over the
-/// opaque region, so zero is written, not skipped — and 1 drops the rounding.
-/// Recovering the quad coordinate by inverting `tex_matrix` in the shader is
-/// worse: it is fine on a desktop fp32 renderer and falls apart on the phone.
+/// The mask works in framebuffer px off `gl_FragCoord`, with the card rect as
+/// a uniform. `v_coords` can't be used: it folds in the client's viewport
+/// crop, so for waydroid (a viewport-mapped gralloc buffer) the mask
+/// collapses to a constant, painting the card black or unrounded. Inverting
+/// `tex_matrix` in the shader breaks on the phone's precision.
 const ROUNDED_TEX_SHADER: &str = r#"#version 100
 
 //_DEFINES_
@@ -123,9 +104,7 @@ void main() {
 }
 "#;
 
-/// Compile the rounded-corner texture shader. Each backend calls this once,
-/// right after it creates its `GlesRenderer`, and stores the resulting program
-/// to hand to `draw_scene` via `DrawCtx::rounded_tex_shader`.
+/// Call once per backend after creating the `GlesRenderer`.
 pub fn compile_rounded_tex_shader(
     renderer: &mut GlesRenderer,
 ) -> Result<GlesTexProgram, GlesError> {
@@ -138,118 +117,82 @@ pub fn compile_rounded_tex_shader(
     )
 }
 
-/// Render-only view of arrange-mode drag state, threaded through `DrawCtx`
-/// the same way `pressed_app` is: `main.rs`/`drm_backend.rs` derive it from
-/// live compositor state (`State::arrange`), and `draw_home` only reads it.
 pub struct ArrangeView<'a> {
-    /// App id currently being dragged, if any.
     pub drag_app: Option<&'a str>,
-    /// Live finger/pointer position for the dragged icon (output pixels).
+    /// Output pixels.
     pub drag_pos: Option<(f32, f32)>,
-    /// Whether the drag position is currently over the dock drop zone.
     pub over_dock: bool,
 }
 
-/// Everything the Skia home pass draws from, bundled into one argument: the
-/// model and catalogs, the animated icon positions, the per-icon cues, arrange
-/// mode, and the whole-screen offsets.
-///
-/// Assembled by [`pass_home`] from [`DrawCtx`], which holds these as separate
-/// fields because the rest of the render path uses them separately.
+/// Everything the Skia home pass draws from, assembled by [`pass_home`].
 pub struct HomeView<'a> {
-    /// Page whose dock/dots layout is drawn. Grid icons come from
-    /// `grid_positions` instead, so paging is icon motion, not a page offset.
+    /// Dock/dots page. Grid icons come from `grid_positions`.
     pub page: usize,
     pub model: &'a ShellModel,
     pub icon_cache: &'a HashMap<String, IconPixels>,
     pub app_catalog: &'a HashMap<String, AppEntry>,
-    /// Icon currently pressed, drawn with a press highlight.
     pub pressed_app: Option<&'a str>,
-    /// `(app_id, seconds since spawn)` per in-flight launch: the icon breathes.
+    /// `(app_id, seconds since spawn)` per pending launch.
     pub launch_pulses: &'a [(String, f32)],
-    /// Apps with at least one open window — their icons get a running dot.
     pub running_apps: &'a HashSet<String>,
-    /// Arrange-mode extras (badges, Done, drag ghost). `None` when inactive.
     pub arrange: Option<&'a ArrangeView<'a>>,
-    /// Animated screen-space centers for grid and dock icons.
     pub grid_positions: &'a HashMap<String, (f32, f32)>,
     pub dock_positions: &'a HashMap<String, (f32, f32)>,
-    /// The library page's folder tiles, drawn in the same pass as the grid so
-    /// they page with it.
+    /// Drawn with the grid so it pages with it.
     pub library: Option<&'a LibraryView>,
-    /// Top of the usable area, which the arrange-mode Done button stays below.
+    /// The arrange Done button stays below this.
     pub top_inset: f32,
-    /// Whole-screen offsets: the Home bounce (up) and the drag-out (sideways).
+    /// Home bounce (up) and drag-out (sideways).
     pub lift: f32,
     pub shift: f32,
 }
 
-/// Render-only view of the app library page: the folder tiles and the page
-/// offset they are drawn at. Tiles are laid out in page-local coordinates, so
-/// `x_offset` is what slides them on and off as the pages scroll.
+/// Tiles are page-local; `x_offset` slides them with the pages.
 pub struct LibraryView {
     pub tiles: Vec<sc_layout::library::FolderSlot>,
-    /// Up to four member app ids per tile, for the mini-icon preview. Same
-    /// order and length as `tiles`.
+    /// Up to four ids per tile, parallel to `tiles`.
     pub previews: Vec<Vec<String>>,
     pub x_offset: f32,
 }
 
-/// Render-only view of an open library folder.
 pub struct FolderView {
     pub layout: sc_layout::library::PanelLayout,
     pub title: String,
-    /// Member index under the finger, drawn with a press highlight.
     pub pressed: Option<usize>,
-    /// The tile center the card grows out of.
     pub anchor: (f32, f32),
-    /// Open animation, 0→1 (and back to 0 while closing).
+    /// 0→1, and back while closing.
     pub progress: f32,
 }
 
-/// Render-only view of the open icon menu, derived from `State::icon_menu` the
-/// same way [`ArrangeView`] is derived from `State::arrange`.
 pub struct MenuView {
-    /// Panel and row rects (output pixels).
+    /// Output pixels.
     pub layout: sc_layout::menu::MenuLayout,
-    /// `(label, destructive)` per row, in the same order as `layout.items`.
+    /// `(label, destructive)`, parallel to `layout.items`.
     pub items: Vec<(String, bool)>,
-    /// Row under the finger, drawn highlighted.
     pub pressed: Option<usize>,
-    /// The icon center the panel grows out of.
     pub anchor: (f32, f32),
-    /// Open animation, 0→1.
     pub progress: f32,
 }
 
-/// Render-only view of the switcher deck's chrome fades, snapshotted from
-/// [`crate::switcher::CardChrome`] the way [`MenuView`] is from the icon menu.
 #[derive(Default)]
 pub struct CardChromeView {
-    /// Opacity of every card's app-icon badge, 0 when the deck is not up.
+    /// 0 when the deck is down.
     pub icon_alpha: f32,
-    /// The card the title belongs to, and the title itself. `None` while no
-    /// title is on screen (deck down, focused window untitled, or faded out).
+    /// `None` when no title is on screen.
     pub title: Option<(crate::ui_state::ToplevelId, String)>,
-    /// Opacity of that title — its own cross-fade, already multiplied by
-    /// `icon_alpha` so the whole chrome leaves together.
+    /// Already multiplied by `icon_alpha`.
     pub title_alpha: f32,
 }
 
-/// What a draw collects for the backend to act on once the frame is presented.
-///
-/// Both halves are obligations, not information: unanswered feedback leaves a
-/// client waiting forever, and an unreleased blocker leaves its commit
-/// unapplied. See [`crate::presentation`] and [`crate::pacing`].
+/// Obligations for the backend after presenting: unanswered feedback hangs a
+/// client, and an unreleased blocker leaves its commit unapplied. See
+/// [`crate::presentation`] and [`crate::pacing`].
 #[derive(Default)]
 pub struct FrameSinks {
-    /// Presentation feedback from the surfaces drawn this frame.
     pub presented: Vec<PresentationFeedbackCallback>,
-    /// Clients whose fifo/commit-timing blockers were signalled this frame.
     pub unblocked: Vec<smithay::reexports::wayland_server::Client>,
 }
 
-/// Everything the shared draw needs beyond the renderer + framebuffer.
 pub struct DrawCtx<'a> {
     pub scene: &'a Scene,
     pub app_surface: Option<&'a WlSurface>,
@@ -257,139 +200,88 @@ pub struct DrawCtx<'a> {
     pub model: &'a ShellModel,
     pub icon_cache: &'a HashMap<String, IconPixels>,
     pub app_catalog: &'a HashMap<String, AppEntry>,
-    /// Catalog rescan counter — a change drops the renderer's uploaded icons.
+    /// A change drops the renderer's uploaded icons.
     pub catalog_gen: u64,
-    /// Toplevels for switcher card rendering.
     pub toplevels: &'a Vec<Option<crate::AppToplevel>>,
-    /// Output scale (`[main].dpi`). App surfaces are configured at physical/dpi
-    /// logical size and render an oversized buffer, so their render elements are
-    /// generated at this scale to land back at physical size.
+    /// `dpi`. Apps render oversized buffers, so elements are generated at this
+    /// scale to land at physical size.
     pub app_scale: f64,
-    /// Physical top-left where the fullscreen app surface is drawn: the origin
-    /// of the usable area (output minus top/left exclusive-zone reservations,
-    /// e.g. a top bar). Zero for bottom/right-only reservations.
+    /// Usable-area origin: below/right of top/left exclusive zones.
     pub app_origin: (i32, i32),
-    /// Output transform (winit = Flipped180; DRM = connector transform).
+    /// winit = Flipped180; DRM = connector transform.
     pub transform: Transform,
-    /// How the view is turned (see [`crate::rotation`]). Composed on top of
-    /// `transform` for everything but the upright layer surfaces; Skia gets the
-    /// same turn through [`SkiaGl::set_view`].
+    /// Composed on `transform` for everything but the upright layers; Skia gets
+    /// it via [`SkiaGl::set_view`].
     pub rotation: crate::rotation::Rotation,
-    /// Mirror the Skia home/bar vertically — the DRM/GBM scanout buffer has the
-    /// opposite Y-origin from Skia's BottomLeft surface. winit presents
-    /// already-correct, so false.
+    /// DRM scanout is Y-flipped vs Skia's BottomLeft surface; winit is not.
     pub skia_flip_y: bool,
-    /// Time in ms for frame callbacks.
     pub frame_time: u32,
-    /// Volume OSD to overlay: `(level, muted, alpha)`. `None` when inactive.
+    /// `(level, muted, alpha)`.
     pub osd: Option<(f32, bool, f32)>,
-    /// Touch indicator marks (physical coords) drawn on top of everything for
-    /// demo recordings. Empty unless `[main].show_touches` is set.
+    /// Physical coords.
     pub touches: &'a [crate::touch_viz::TouchMark],
-    /// Mouse cursor position in physical pixels, drawn above everything else.
-    /// `None` (the usual case on a phone) draws no cursor at all.
+    /// Physical px.
     pub cursor: Option<(f32, f32)>,
-    /// Session-lock view. Anything but `Unlocked` replaces the entire scene —
-    /// see [`draw_locked`].
+    /// Anything but `Unlocked` replaces the scene; see [`draw_locked`].
     pub lock_view: crate::session_lock::LockView,
-    /// The lock client's surface, drawn when `lock_view` is `Surface`.
     pub lock_surface: Option<&'a WlSurface>,
-    /// Layer-shell surfaces below the app (background/bottom): `(surface, origin)`.
     pub layers_below: &'a [(WlSurface, (i32, i32))],
-    /// Layer-shell surfaces above the app (top/overlay): `(surface, origin)`.
     pub layers_above: &'a [(WlSurface, (i32, i32))],
-    /// A keyboard sliding out after its client hid it: the held buffer and the
-    /// physical rect it is drawn at this frame. `None` when no slide-out is
-    /// running.
+    /// The held buffer and its physical rect this frame.
     pub closing: Option<(
         &'a smithay::backend::renderer::utils::Buffer,
         sc_layout::Rect,
     )>,
-    /// xdg_popups whose root is the fullscreen app, ordered root→leaf. Each is a
-    /// popup surface + its clamped physical origin. Drawn above the app, below
-    /// the top/overlay layers.
+    /// Root→leaf, clamped physical origins. Above the app, below top layers.
     pub app_popups: &'a [(WlSurface, (i32, i32))],
-    /// xdg_popups whose root is a top/overlay layer surface (e.g. an OSK menu),
-    /// ordered root→leaf. Drawn above the layers, below springchick chrome.
+    /// Root→leaf. Above the layers, below springchick chrome.
     pub layer_popups: &'a [(WlSurface, (i32, i32))],
-    /// Home-bar opacity (faded out when the OSK covers it).
     pub bar_alpha: f32,
-    /// Drawn rect of the card the home pill rides, filled in by the card passes
-    /// as they draw (the deck leaves the front card's, since it walks ascending
-    /// z). `None` means no card this frame and the pill sits in the screen's own
-    /// bar band. Tracks *drawn* bounds, not the nominal slot: a card is the
-    /// client's buffer anchored at the slot's top-left, so with anything
-    /// reserved above (a top bar) the pixels end well short of the slot bottom.
+    /// Drawn rect of the card the pill rides, set by the card passes. Drawn
+    /// bounds, not the slot: with a top bar the client's pixels end short of the
+    /// slot bottom.
     pub pill_anchor: Option<sc_layout::Rect>,
-    /// Screen-wide black scrim, `0.0`..=`1.0`: the dip that covers an
-    /// orientation change. `0.0` on any ordinary frame.
+    /// The rotation dip.
     pub dim: f32,
-    /// App id of the icon currently pressed on Home (draws a press highlight).
     pub pressed_app: Option<&'a str>,
-    /// Apps launching but not yet showing a window, as `(app_id, seconds since
-    /// spawn)`. Each draws a breathing pulse on its icon, the elapsed time
-    /// driving the phase. Empty when nothing is launching.
+    /// `(app_id, seconds since spawn)`.
     pub launch_pulses: &'a [(String, f32)],
-    /// Apps with at least one open window — their icons get a running dot.
     pub running_apps: &'a HashSet<String>,
-    /// Arrange-mode view (badges/Done/drag ghost). `None` when arrange mode
-    /// is inactive.
     pub arrange: Option<ArrangeView<'a>>,
-    /// Open icon context menu, drawn over Home. `None` when closed.
     pub icon_menu: Option<&'a MenuView>,
-    /// Folder tiles for the library page. `None` when Home isn't drawn.
     pub library: Option<&'a LibraryView>,
-    /// The open library folder's panel. `None` when no folder is open.
     pub folder: Option<&'a FolderView>,
-    /// Fades for the switcher deck's icon badges and focused-card title.
     pub card_chrome: &'a CardChromeView,
-    /// Screen-space animated center `(x, y)` for each grid app, driven by
-    /// `State.grid_anim` springs. Used to render the grid so icons slide to
-    /// their reflow targets instead of snapping.
+    /// Screen-space centers from `State.grid_anim`.
     pub grid_positions: &'a HashMap<String, (f32, f32)>,
-    /// Screen-space animated center `(x, y)` for each dock app, driven by
-    /// `State.dock_anim` springs. Used to render the dock so icons slide to
-    /// their reflow targets instead of snapping.
+    /// Screen-space centers from `State.dock_anim`.
     pub dock_positions: &'a HashMap<String, (f32, f32)>,
-    /// When true, the frame is a "quiet fullscreen app" (nothing but the app
-    /// surface can have changed) and `draw_scene` may return a narrowed KMS
-    /// page-flip damage hint instead of the full rect. The backend computes
-    /// this; when false the hint is always the full output.
+    /// Only the app surface can have changed, so `draw_scene` may return a
+    /// narrowed damage hint. Computed by the backend.
     pub report_partial_damage: bool,
-    /// Per-app commit cursor for `report_partial_damage`. Holds the app surface
-    /// and the `CommitCounter` last presented for it, so `damage_since` returns
-    /// only what changed since. Reset (→ full damage) when the surface differs.
+    /// The app surface and its last presented `CommitCounter`. A different
+    /// surface resets to full damage.
     pub last_present: &'a mut Option<(WlSurface, CommitCounter)>,
-    /// Rounded-corner texture program, compiled once per backend. Applied to a
-    /// card's root surface when its `corner_radius > 0` so shrunken app cards
-    /// (drag-up / switcher deck) render with rounded corners.
+    /// Applied when `corner_radius > 0`.
     pub rounded_tex_shader: &'a GlesTexProgram,
-    /// When the frame being drawn is expected to reach the panel, used to
-    /// release commit-timing commits aimed at it (see [`crate::pacing`]).
+    /// Expected presentation time, for releasing commit-timing commits.
     pub frame_target: smithay::utils::Time<smithay::utils::Monotonic>,
-    /// What the draw hands back to the backend for the client-facing half of
-    /// the frame: presentation feedback and released blockers.
     pub sinks: &'a mut FrameSinks,
 }
 
 impl DrawCtx<'_> {
-    /// The transform every view-space pass renders with.
     fn base(&self) -> Transform {
         self.transform + self.rotation.transform()
     }
 
-    /// The view's size — element space for [`Self::base`], and what Skia and
-    /// the scene lay out in.
+    /// Element space for [`Self::base`], and what Skia and the scene lay out in.
     fn view(&self, size: Size<i32, Physical>) -> Size<i32, Physical> {
         self.rotation.app_size((size.w, size.h)).into()
     }
 }
 
-/// Render a layer surface's tree at `origin` in its own pass. Used for both the
-/// below-app and above-app layers.
-/// Blur the backdrop of `surface` (ext-background-effect-v1), if it asked for
-/// one. Must run after everything behind the surface is drawn and before the
-/// surface itself, since it blurs whatever is currently in the framebuffer.
+/// Blur whatever is already drawn behind `surface`, if it asked. Run after
+/// everything behind it and before the surface.
 fn blur_behind(
     skia: &mut SkiaGl,
     size: Size<i32, Physical>,
@@ -420,17 +312,14 @@ fn draw_layer(
     origin: (i32, i32),
     in_view: bool,
 ) -> Result<(), SwapBuffersError> {
-    // `origin` is physical; `app_scale` (= output `dpi`) scales the surface's
-    // logical geometry to physical. Layer clients render at fractional scale
-    // `dpi`, so their buffer is physical-sized and lands 1:1 — same model as app
-    // surfaces.
+    // Layer clients render at `dpi`, so their buffers land 1:1 like apps.
     let scale = ctx.app_scale;
     let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
         render_elements_from_surface_tree(renderer, surface, origin, scale, 1.0, Kind::Unspecified);
     if elements.is_empty() {
         return Ok(());
     }
-    // App popups live in the view; layer surfaces are always panel-upright.
+    // App popups live in the view; layers are always panel-upright.
     let (transform, damage) = if in_view {
         (ctx.base(), Rectangle::from_size(ctx.view(size)))
     } else {
@@ -446,24 +335,20 @@ fn draw_layer(
     Ok(())
 }
 
-/// Where a shrunken app card lands, in physical output pixels. Both card
-/// producers (the drag-up/zoom window and the switcher deck) derive the same
-/// four numbers from a centre + scale, so the arithmetic lives here once.
+/// A shrunken app card in physical px.
 #[derive(Clone, Copy, Debug)]
 struct Card {
-    /// Top-left corner.
     x: i32,
     y: i32,
-    /// Uniform scale applied to the surface tree (1.0 = fullscreen).
+    /// 1.0 = fullscreen.
     scale: f32,
-    /// Corner radius in physical px. `0` draws through the default program.
+    /// Physical px. `0` uses the default program.
     corner_radius: f32,
-    /// Drawn size, needed by the rounded-rect SDF in the shader.
+    /// For the shader's SDF.
     size: (f32, f32),
 }
 
 impl Card {
-    /// A card of `scale` × the output, centred on `(center_x, center_y)`.
     fn centered(
         output: Size<i32, Physical>,
         center_x: f32,
@@ -482,39 +367,22 @@ impl Card {
         }
     }
 
-    /// The transform that undoes `t` under [`Transform::transform_rect_in`].
-    ///
-    /// Not `Transform::invert()`: that pairs `Flipped90` with `Flipped270`, but
-    /// as rect mappings both are involutions (`Flipped90` mirrors both axes and
-    /// transposes; `Flipped270` is a plain transpose), so inverting through it
-    /// silently mis-maps every composed-with-a-flip case — which is what winit's
-    /// `Flipped180` output transform composes into. Verified by the round-trip
-    /// test below, which is the only thing keeping this table honest.
+    /// Not `Transform::invert()`: as rect mappings the flipped quarter-turns are
+    /// involutions, and `invert()` pairs them, mis-mapping everything composed
+    /// with winit's `Flipped180`. The round-trip test keeps this honest.
     fn inverse_transform(t: Transform) -> Transform {
         match t {
             Transform::_90 => Transform::_270,
             Transform::_270 => Transform::_90,
-            // Everything else is its own inverse.
             other => other,
         }
     }
 
-    /// A card whose window is drawn with `card_t` in a view rendered with
-    /// `base` — the two differ when the window's buffer is turned relative to
-    /// the view (a landscape app in an upright deck, or the other way round).
-    ///
-    /// The slot stays exactly where [`Card::centered`] put it in the view — the
-    /// deck's geometry, hit-testing and animations all live there. What changes
-    /// is the space the numbers are expressed in: the card's pass renders with
-    /// `card_t`, so the card has to be given in *that* pass's element space.
-    ///
-    /// Which is why the output transform is part of both rather than assumed.
-    /// The two backends do not agree on it — winit renders `Flipped180`, DRM
-    /// renders `Normal` — and a mapping hardcoded for one comes out mirrored on
-    /// the other: cards tracked the finger backwards on the phone while looking
-    /// correct in the nested dev window. So the rect is carried through the
-    /// output transform to the framebuffer and back through the *composed*
-    /// transform, which is right for any output transform by construction.
+    /// A card drawn with `card_t` in a view drawn with `base` (a landscape app in
+    /// an upright deck, or vice versa). The slot stays where [`Card::centered`]
+    /// put it; only the space changes. The rect goes through the output
+    /// transform and back through the composed one, since winit (`Flipped180`)
+    /// and DRM (`Normal`) disagree and a hardcoded mapping mirrors on one.
     #[allow(clippy::too_many_arguments)]
     fn placed(
         view: Size<i32, Physical>,
@@ -533,10 +401,8 @@ impl Card {
             slot.origin(),
             (slot.size.0 as i32, slot.size.1 as i32).into(),
         );
-        // Where the view pass would have put it on the framebuffer...
         let framebuffer = base.transform_size(view);
         let on_screen = base.transform_rect_in(rect, &view);
-        // ...and what the card's pass has to be handed to land there.
         let turned = Card::inverse_transform(card_t).transform_rect_in(on_screen, &framebuffer);
         Card {
             x: turned.loc.x,
@@ -547,29 +413,14 @@ impl Card {
         }
     }
 
-    /// Top-left as a render-element point.
     fn origin(&self) -> Point<i32, Physical> {
         Point::<i32, Physical>::from((self.x, self.y))
     }
 
-    /// Where the card's root surface actually lands, in physical px.
-    ///
-    /// The card rect above is `output × scale`, which is what a *fullscreen*
-    /// client draws — but a backgrounded toplevel keeps whatever size it was
-    /// configured at, so its surface can be smaller or offset. The Skia cues
-    /// drawn around a card (shadow, depth scrim) use these bounds so they hug
-    /// the pixels the client actually put on screen.
-    ///
-    /// The rounded-corner shader masks against these same bounds (carried into
-    /// framebuffer space by [`Card::fb_rect`]), so the corner it rounds is the
-    /// one the shadow and scrim are drawn around.
-    ///
-    /// The root is `elements.last()`, not `.first()`: a render-element slice is
-    /// ordered front-to-back (`draw_render_elements` reverses it before
-    /// drawing), so the surface-tree root — the window itself — is at the end.
-    ///
-    /// Mirrors what `draw_scaled_card` does to the element: relocate to the
-    /// card origin, then scale about that origin.
+    /// Where the root surface actually lands: a backgrounded toplevel keeps its
+    /// configured size, so it may be smaller or offset from the card. Shadow,
+    /// scrim and the shader mask all use this. The root is `elements.last()`:
+    /// the slice is front-to-back.
     fn drawn_bounds(
         &self,
         elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
@@ -587,17 +438,9 @@ impl Card {
         )
     }
 
-    /// The card's drawn rect in framebuffer px, in `gl_FragCoord` terms (origin
-    /// bottom-left) — what the rounded-corner shader masks against.
-    ///
-    /// This runs the rect through the *same* projection `GlesFrame::render`
-    /// builds — element space → NDC (y down), the pass transform, then GL's own
-    /// y flip — because nothing simpler survives both backends. The two do not
-    /// agree on the output transform (winit renders `Flipped180`, DRM renders
-    /// `Normal`, hence `skia_flip_y`), and the ortho's y flip cancels the GL
-    /// one for exactly one of them: a hand-rolled "transform the rect, then
-    /// flip" is right on winit and upside-down on the phone, which is a mask
-    /// sitting off the card and cards that draw as empty outlines.
+    /// The drawn rect in `gl_FragCoord` terms (origin bottom-left), via the same
+    /// projection `GlesFrame::render` builds. Hand-rolling "transform then flip"
+    /// is right on winit and upside-down on DRM.
     fn fb_rect(
         &self,
         elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
@@ -606,21 +449,17 @@ impl Card {
         fb_size: Size<i32, Physical>,
     ) -> [f32; 4] {
         let (x, y, w, h) = self.drawn_bounds(elements, app_scale);
-        // Element space: what the pass was handed, axis-swapped for a
-        // quarter-turn transform the way `GlesFrame::render` swaps it.
+        // Axis-swapped for a quarter turn, as `GlesFrame::render` does.
         let elem = pass_transform.transform_size(fb_size);
         let (ew, eh) = (elem.w as f32, elem.h as f32);
         let (fw, fh) = (fb_size.w as f32, fb_size.h as f32);
-        // Column-major [x_axis, y_axis, translation]; read as components so the
-        // glam types stay smithay's business.
         let m = pass_transform.matrix().to_cols_array();
 
         let project = |px: f32, py: f32| -> (f32, f32) {
             let (nx, ny) = (2.0 * px / ew - 1.0, 1.0 - 2.0 * py / eh);
             let tx = m[0] * nx + m[2] * ny + m[4];
             let ty = m[1] * nx + m[3] * ny + m[5];
-            // GL's y flip, applied after the transform just as the renderer's
-            // `flip180` is.
+            // GL's y flip, after the transform like the renderer's `flip180`.
             ((tx + 1.0) * 0.5 * fw, (-ty + 1.0) * 0.5 * fh)
         };
 
@@ -630,22 +469,11 @@ impl Card {
     }
 }
 
-/// Draw a shrunken app "card" (drag-up window or switcher-deck card): relocate +
-/// rescale the surface tree to the card rect, then draw it in its own pass.
-///
-/// When `corner_radius > 0` the whole tree goes through the rounded-corner
-/// texture program in **one** `draw_render_elements` call. Both halves of that
-/// matter:
-///
-/// - One call, because the slice is ordered front-to-back and
-///   `draw_render_elements` reverses it internally. Splitting it into
-///   `[..1]` then `[1..]` drew the topmost element *underneath* the rest — for a
-///   client whose card is an opaque root plus a full-size content subsurface
-///   (waydroid) that painted the root over the content, i.e. a black card at
-///   every radius except 0, where the single call had ordered it correctly.
-/// - Every element, not just the root, because the mask is in framebuffer
-///   coordinates: the same `card_rect` clips the whole tree to one rounded
-///   shape, instead of rounding one surface that another then covers.
+/// Relocate and rescale the tree to the card, then draw it. Rounded cards go
+/// through the shader in one `draw_render_elements` call: the slice is
+/// front-to-back and reversed internally, so splitting it drew waydroid's
+/// opaque root over its content (a black card). Every element gets the mask,
+/// since it's in framebuffer coords.
 fn draw_scaled_card(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -659,8 +487,7 @@ fn draw_scaled_card(
         return Ok(());
     }
     let app_scale = ctx.app_scale;
-    // Taken before the elements are consumed below; the mask needs the rect the
-    // root element actually lands on.
+    // Before the elements are consumed.
     let card_rect = card.fb_rect(&elements, app_scale, pass_transform, size);
     let damage = Rectangle::from_size(pass_transform.transform_size(size));
     let scaled: Vec<
@@ -698,34 +525,21 @@ fn draw_scaled_card(
     Ok(())
 }
 
-/// Render elements and derived facts about one frame, collected once before any
-/// pass runs — element collection borrows the renderer, so it cannot be
-/// interleaved with the render passes that also borrow it.
+/// Element collection borrows the renderer, so it happens before any pass.
 struct ScenePlan {
-    /// The app surface's tree. Empty when there is no app surface.
     app_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
-    /// Background/bottom layer-shell trees, one entry per non-empty surface.
     below_elements: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>>,
-    /// The app's card placement while it is scaled (drag-up / zoom). `None` when
-    /// the app is fullscreen or absent.
+    /// `None` when fullscreen or absent.
     window_transform: Option<crate::scene::WindowTransform>,
-    /// The scene says the window covers the screen.
     is_fullscreen: bool,
-    /// The view is turned a quarter-turn relative to the panel.
     rotated: bool,
-    /// Fullscreen *and* the client actually has something to draw. The extra
-    /// condition matters: a fullscreen-scaled window with no content yet must
-    /// still show Home behind it.
+    /// A fullscreen-scaled window with no content yet must still show Home.
     app_fills_screen: bool,
-    /// Blur regions a fullscreen app asked for via ext-background-effect.
     app_blur: Vec<crate::background_effect::BlurRect>,
-    /// Fullscreen app with a blurred backdrop — translucent, so it needs Home
-    /// drawn and blurred behind it instead of the usual single opaque pass.
+    /// Translucent, so Home is drawn and blurred behind it.
     app_blurred: bool,
 }
 
-/// Collect every surface tree this frame needs and derive the flags the passes
-/// branch on.
 fn plan_scene(renderer: &mut GlesRenderer, ctx: &DrawCtx<'_>) -> ScenePlan {
     let scene = ctx.scene;
     let is_fullscreen = scene.window_covers_screen();
@@ -783,16 +597,8 @@ fn plan_scene(renderer: &mut GlesRenderer, ctx: &DrawCtx<'_>) -> ScenePlan {
     }
 }
 
-/// The KMS page-flip damage hint.
-///
-/// Default: the whole output (always correct — drivers without FB_DAMAGE_CLIPS
-/// ignore it anyway). Narrow it only when the backend says this is a quiet
-/// fullscreen app AND the app is a single render element at the origin, so
-/// element-space damage equals output-space damage. Anything else (subsurfaces,
-/// animation, chrome) stays full to avoid leaving stale pixels the driver would
-/// skip. A blurred surface samples the pixels behind it, so damage below it must
-/// be repainted through the blur: any blur region on screen disqualifies the
-/// fast path entirely.
+/// Full output by default. Narrowed only for a quiet fullscreen app that is a
+/// single element at the origin. Any blur region on screen disqualifies it.
 fn flip_damage(
     size: Size<i32, Physical>,
     ctx: &mut DrawCtx<'_>,
@@ -826,7 +632,7 @@ fn flip_damage(
         .flatten();
     let damage = elem.damage_since(Scale::from(ctx.app_scale), since);
     *ctx.last_present = Some((app_wl.clone(), elem.current_commit()));
-    // First frame on a freshly-focused surface has no baseline: repaint all.
+    // No baseline on a newly focused surface: repaint all.
     if same_surface {
         let turn = ctx.rotation.transform();
         let view = ctx.view(size);
@@ -839,9 +645,8 @@ fn flip_damage(
     }
 }
 
-/// Pass 1: clear the background, draw the below-app layer surfaces, and draw the
-/// app itself when it is opaquely fullscreen (nothing goes behind it). A rotated
-/// or blurred app is skipped here — each gets its own pass further down.
+/// Pass 1: clear, below-app layers, and the app if opaquely fullscreen.
+/// Rotated or blurred apps get their own passes.
 fn pass_background(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -875,16 +680,9 @@ fn pass_background(
     Ok(())
 }
 
-/// Skia: the home screen, drawn behind a shrinking window during transitions.
-///
-/// Skipped once the app has actually been drawn covering the screen — painting
-/// home on top of that would flash home over the finished window for the last
-/// few frames before the state machine formally settles into `UiState::App`.
-/// Gating on scale alone (without requiring content) blanks home instead of the
-/// app during the window where the animation has reached fullscreen scale but
-/// the client hasn't painted its first frame yet. A blurred app is translucent,
-/// so it needs a backdrop even in `UiState::App` (where `show_home` is false
-/// because an opaque app hides Home entirely).
+/// Skipped once the app has actually covered the screen, or Home flashes
+/// over it before the state settles. Gating on scale alone blanks the app
+/// before its first frame. A blurred app needs Home even in `App`.
 fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan) {
     let scene = ctx.scene;
     if !(plan.app_blurred || (scene.show_home && !plan.app_fills_screen)) {
@@ -910,8 +708,7 @@ fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan)
     ctx.skia.draw_home(v.w, v.h, ctx.skia_flip_y, &view);
 }
 
-/// The icon context menu, over Home. Drawn only when Home itself is (an app
-/// zoom that covers the screen has already taken the menu's place).
+/// Only when Home itself is drawn.
 fn pass_icon_menu(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan) {
     let Some(menu) = ctx.icon_menu else {
         return;
@@ -923,7 +720,6 @@ fn pass_icon_menu(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &Scene
     ctx.skia.draw_icon_menu(v.w, v.h, menu, ctx.skia_flip_y);
 }
 
-/// An open library folder's panel, over Home. Same gating as the icon menu.
 fn pass_folder(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan) {
     let Some(folder) = ctx.folder else {
         return;
@@ -937,10 +733,8 @@ fn pass_folder(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePla
         .draw_folder_panel(v.w, v.h, folder, icon_cache, app_catalog, ctx.skia_flip_y);
 }
 
-/// Fullscreen app in a turned view: its own pass with the view transform, since
-/// `pass_background` draws panel-upright (for the layers under it). The
-/// renderer swaps the projection's axes for a quarter-turn transform, so element
-/// space is the one the client was configured at.
+/// `pass_background` draws panel-upright for the layers, so a turned app
+/// needs its own pass.
 fn pass_rotated_app(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -948,11 +742,8 @@ fn pass_rotated_app(
     ctx: &DrawCtx<'_>,
     plan: &ScenePlan,
 ) -> Result<(), SwapBuffersError> {
-    // A blurred app is drawn by `pass_blurred_app` instead — it has to wait for
-    // Home and the blur to land underneath it first. Skipping it here is what
-    // keeps the three fullscreen-app passes mutually exclusive: an app that was
-    // both rotated *and* blurred used to be drawn by both, leaving a rotated
-    // ghost of it on screen next to the upright copy.
+    // Blurred apps are drawn by `pass_blurred_app`; the three fullscreen-app
+    // passes must stay exclusive or a rotated ghost appears.
     if !(plan.app_fills_screen && plan.rotated) || plan.app_blurred {
         return Ok(());
     }
@@ -969,7 +760,6 @@ fn pass_rotated_app(
     Ok(())
 }
 
-/// The transform and damage a fullscreen app pass draws with: the view's.
 fn app_pass_geometry(
     size: Size<i32, Physical>,
     ctx: &DrawCtx<'_>,
@@ -977,8 +767,6 @@ fn app_pass_geometry(
     (ctx.base(), Rectangle::from_size(ctx.view(size)))
 }
 
-/// Blurred fullscreen app: home is behind it by now, so blur that backdrop and
-/// draw the app over it in its own pass.
 fn pass_blurred_app(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -1008,8 +796,7 @@ fn pass_blurred_app(
     Ok(())
 }
 
-/// The orientation `surface`'s window was last configured at, portrait if it is
-/// not a tracked toplevel (a layer surface, or one already gone).
+/// Portrait if not a tracked toplevel.
 fn surface_rotation(ctx: &DrawCtx<'_>, surface: &WlSurface) -> crate::rotation::Rotation {
     ctx.toplevels
         .iter()
@@ -1019,7 +806,7 @@ fn surface_rotation(ctx: &DrawCtx<'_>, surface: &WlSurface) -> crate::rotation::
         .unwrap_or_default()
 }
 
-/// The size the root of this surface tree actually draws at, in physical px.
+/// Physical px.
 fn drawn_size(
     elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
     app_scale: f64,
@@ -1028,17 +815,9 @@ fn drawn_size(
     Some(root.geometry(Scale::from(app_scale)).size)
 }
 
-/// The rotation to draw a card with: the orientation the window was configured
-/// at, but only while its committed buffer really is turned relative to the
-/// output.
-///
-/// [`crate::state::AppToplevel::rotation`] records only what we last
-/// *configured*. A backgrounded window can be resized out from under that — any
-/// layer change runs `reconfigure_toplevels` over every toplevel — and turning a
-/// buffer that has since gone back to portrait is exactly as broken as failing
-/// to turn one that is still landscape: it is what made a fullscreen app's card
-/// come back wrong the second time the deck was opened. What the client
-/// committed decides *whether* to turn; the stored value only says which way.
+/// The stored rotation only says which way; the committed buffer decides
+/// whether. A background window can be reconfigured back to portrait by any
+/// layer change, and turning it then breaks the card.
 fn card_rotation(
     stored: crate::rotation::Rotation,
     buffer: Option<Size<i32, Physical>>,
@@ -1057,8 +836,7 @@ fn card_rotation(
     }
 }
 
-/// The transform a window's card renders with: the output transform plus the
-/// window's own turn (see [`card_rotation`]), independent of the view's.
+/// Independent of the view's rotation.
 fn card_transform(
     ctx: &DrawCtx<'_>,
     stored: crate::rotation::Rotation,
@@ -1068,9 +846,7 @@ fn card_transform(
     ctx.transform + card_rotation(stored, drawn_size(elements, ctx.app_scale), size).transform()
 }
 
-/// Pass 2: draw the scaled app card ON TOP of home (no clear), with rounded
-/// corners when the transform carries a non-zero radius (drag-up / zoom).
-/// Consumes `plan.app_elements` — no later pass uses them.
+/// Pass 2: the scaled app card over Home. Consumes `plan.app_elements`.
 fn pass_app_card(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -1084,8 +860,7 @@ fn pass_app_card(
     let Some(t) = plan.window_transform else {
         return Ok(());
     };
-    // The card follows the *window's* orientation, which need not be the
-    // view's: the window keeps whatever buffer it was configured for.
+    // The card follows the window's orientation, not necessarily the view's.
     let card_t = card_transform(
         ctx,
         ctx.app_surface
@@ -1104,10 +879,8 @@ fn pass_app_card(
         ctx.base(),
         card_t,
     );
-    // Same blur as a layer surface, but the card is scaled: the surface-local
-    // region scales with it and lands at the card's origin. Skipped for a card
-    // turned against the view: its rect is in its own turned space, not the
-    // view space Skia draws in, so the blur would land somewhere else.
+    // Skipped for a card turned against the view: its rect isn't in Skia's
+    // view space.
     if let (Some(surface), true) = (ctx.app_surface, upright) {
         blur_behind(
             ctx.skia,
@@ -1126,12 +899,8 @@ fn pass_app_card(
     draw_scaled_card(renderer, framebuffer, size, ctx, elements, card, card_t)
 }
 
-/// Frost the shell backdrop (Home, plus anything drawn under it) before the
-/// switcher deck goes on top, so the cards read as floating glass over a soft
-/// background instead of over the icon grid.
-///
-/// Sigma ramps with `scene.backdrop_blur` rather than switching on: a blur that
-/// pops to full strength on the first switcher frame reads as a cut.
+/// Frost Home before the deck. Ramps with `scene.backdrop_blur`; popping to
+/// full reads as a cut.
 fn pass_backdrop_blur(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>) {
     let strength = ctx.scene.backdrop_blur.clamp(0.0, 1.0);
     if strength <= 0.0 {
@@ -1154,21 +923,14 @@ fn pass_backdrop_blur(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>) {
     );
 }
 
-/// Switcher deck: each card back-to-front (the scene sorts them ascending z).
-/// `close_progress` lifts a card upward via the layout as it slides off-screen
-/// to close, so the deck itself needs no extra scaling here.
-///
-/// Each card is sandwiched between two Skia draws — a drop shadow before it and
-/// its depth scrim after — so cards read as separated slabs instead of one flat
-/// collage. The interleaving is required, not incidental: the deck overlaps, so
-/// a card's shadow must land over the card behind it and under the card itself.
+/// Back-to-front. Each card sits between its Skia shadow and scrim, so the
+/// shadow lands over the card behind and under this one.
 fn pass_switcher_cards(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
     size: Size<i32, Physical>,
     ctx: &mut DrawCtx<'_>,
 ) -> Result<(), SwapBuffersError> {
-    // Copied out: the loop needs `ctx.skia` mutably while walking the cards.
     let cards: Vec<crate::switcher::CardRect> = ctx.scene.cards.clone();
     for card in cards {
         let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) else {
@@ -1177,8 +939,7 @@ fn pass_switcher_cards(
         let surface = tl.surface.wl_surface().clone();
         let stored = tl.rotation;
         let app_id = tl.app_id.clone();
-        // Elements first: whether this card is turned depends on the buffer they
-        // are about to draw, not on the configure that asked for it.
+        // Whether a card is turned depends on its buffer, so collect first.
         let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             render_elements_from_surface_tree(
                 renderer,
@@ -1203,14 +964,9 @@ fn pass_switcher_cards(
             ctx.base(),
             card_t,
         );
-        // Both cues track the surface's real drawn bounds: a backgrounded app
-        // keeps its old size, so the nominal card rect would put the shadow and
-        // the scrim off the card's actual edges.
-        //
-        // A card turned against the view is the exception: `placement` is in
-        // its own turned space, while the shadow and scrim are Skia draws in
-        // view space. Its buffer fills the slot exactly once turned, so the
-        // view-space slot is the right rect for both.
+        // Use the real drawn bounds: a backgrounded app keeps its old size. A card
+        // turned against the view fills its slot, and its placement is in its own
+        // space, so use the view-space slot.
         let (dx, dy, dw, dh) = if upright {
             placement.drawn_bounds(&elements, ctx.app_scale)
         } else {
@@ -1224,8 +980,7 @@ fn pass_switcher_cards(
             (slot.x as f32, slot.y as f32, slot.size.0, slot.size.1)
         };
         if upright {
-            // Ascending z: the last card to draw is the front one, and its rect
-            // is what stays here for the pill.
+            // Ascending z: the front card's rect is what's left for the pill.
             ctx.pill_anchor = Some(sc_layout::Rect {
                 x: dx,
                 y: dy,
@@ -1257,8 +1012,6 @@ fn pass_switcher_cards(
         )?;
         ctx.skia
             .draw_card_dim(view.w, view.h, &decor, ctx.skia_flip_y);
-        // Badge and title ride `decor.chrome` on top of the card alpha, so they
-        // ramp in with an opening deck instead of popping.
         ctx.skia.draw_card_icon(
             view.w,
             view.h,
@@ -1267,8 +1020,6 @@ fn pass_switcher_cards(
             ctx.icon_cache,
             ctx.skia_flip_y,
         );
-        // Only the focused card is titled — the fanned ones show a sliver of
-        // themselves and nowhere to put the text.
         if let Some((tid, title)) = &ctx.card_chrome.title {
             if *tid == card.toplevel {
                 ctx.skia.draw_card_title(
@@ -1285,19 +1036,9 @@ fn pass_switcher_cards(
     Ok(())
 }
 
-/// Everything that draws above the app and below springchick's own chrome, in
-/// back-to-front order. Each renders like a layer surface: its tree at a
-/// physical origin, scaled by dpi, with its backdrop blurred first.
-///
-/// 1. App-parented popups (menus, dropdowns), root→leaf so submenus draw over
-///    their parents. Drawn in the view, like the app they belong to.
-/// 2. Top/overlay layer surfaces (a status panel, the on-screen keyboard).
-/// 3. Popups parented to one of those layer surfaces.
-///
-/// (2) and (3) are hidden while the view is turned: they are laid out against
-/// the upright panel, and portrait chrome across a landscape view is worse
-/// than no chrome. `touch::surface_under` skips them in
-/// the same condition, so a hidden panel never eats taps meant for the app.
+/// Back-to-front: app popups (in the view), top/overlay layers, then their
+/// popups. Layers and their popups are hidden while turned;
+/// `touch::surface_under` skips them too.
 fn pass_overlays(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -1305,8 +1046,6 @@ fn pass_overlays(
     ctx: &mut DrawCtx<'_>,
     rotated: bool,
 ) -> Result<(), SwapBuffersError> {
-    // Borrowed, not collected: this runs every frame, and `ctx.skia` below is a
-    // disjoint field from the three slices being chained.
     let (app_popups, layers_above, layer_popups) =
         (ctx.app_popups, ctx.layers_above, ctx.layer_popups);
     for (surface, origin) in app_popups {
@@ -1318,10 +1057,7 @@ fn pass_overlays(
     for (surface, origin) in layers_above {
         draw_overlay(renderer, framebuffer, size, ctx, surface, *origin, false)?;
     }
-    // A keyboard sliding out after its client hid it: drawn from the held last
-    // buffer, in the slot its live entry held — which is gone from the render
-    // lists now (the surface has no buffer), the instant disappearance this
-    // replaces.
+    // The hidden OSK is gone from the render lists; draw its held buffer.
     if let Some((buffer, rect)) = ctx.closing {
         draw_closing(renderer, framebuffer, size, ctx, buffer, rect)?;
     }
@@ -1331,7 +1067,6 @@ fn pass_overlays(
     Ok(())
 }
 
-/// One overlay surface tree: its backdrop blur, then the tree itself.
 fn draw_overlay(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -1341,8 +1076,6 @@ fn draw_overlay(
     origin: (i32, i32),
     in_view: bool,
 ) -> Result<(), SwapBuffersError> {
-    // Layers are only drawn while the view is upright, so the view size is
-    // right for both kinds.
     blur_behind(
         ctx.skia,
         ctx.view(size),
@@ -1354,19 +1087,9 @@ fn draw_overlay(
     draw_layer(renderer, framebuffer, size, ctx, surface, origin, in_view)
 }
 
-/// Draw one frame of an OSK slide-out: the client's last buffer as a texture
-/// at the animated rect.
-///
-/// The import passes no surface state and an empty damage list, so it is a
-/// full upload every frame — the buffer may already belong to a destroyed
-/// surface (wvkbd's hide path), which rules out smithay's per-surface cache.
-/// That is one ~0.5ms 1224x750 upload per frame for the ~0.18s the dismissal
-/// lasts; caching the upload would mean plumbing the renderer's texture back
-/// into `LayerShell`, which is not worth it for a one-shot animation.
-///
-/// A dmabuf keyboard imports through the dmabuf path; anything else fails
-/// the import and vanishes without animation, exactly like before this
-/// existed.
+/// A full upload every frame (the buffer may belong to a destroyed surface,
+/// ruling out smithay's cache); ~0.5ms for the ~0.18s slide. Non-dmabuf
+/// buffers fail the import and just vanish.
 fn draw_closing(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -1383,9 +1106,7 @@ fn draw_closing(
     let Some(texture) = texture else {
         return Ok(());
     };
-    // 1:1 physical: the layer client renders at `dpi`, so its buffer is already
-    // physical-sized and lands at `rect` unscaled — the same model `draw_layer`
-    // applies to the live surface.
+    // 1:1: the layer client renders at `dpi`.
     let elements = vec![TextureRenderElement::from_static_texture(
         ElementId::new(),
         renderer.context_id(),
@@ -1415,12 +1136,9 @@ fn draw_closing(
     Ok(())
 }
 
-/// springchick's own chrome, drawn last: the home bar, the volume OSD, and the
-/// touch indicators.
 fn pass_chrome(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>) {
     let size = ctx.view(size);
-    // Always draw the bar on top: it is the only way back out of a fullscreen
-    // app.
+    // Always on top: it's the only way out of a fullscreen app.
     ctx.skia.draw_bar_overlay(
         size.w,
         size.h,
@@ -1429,41 +1147,26 @@ fn pass_chrome(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>) {
         ctx.pill_anchor,
     );
 
-    // The OSD sits above everything, including a fullscreen app. It lays itself
-    // out against the view, so it follows a turn like the rest of the chrome.
     if let Some((level, muted, alpha)) = ctx.osd {
         ctx.skia
             .draw_osd_overlay(size.w, size.h, level, muted, alpha, ctx.skia_flip_y);
     }
 
-    // Touch indicators sit on the very top so recordings show them over any
-    // chrome or app.
     if !ctx.touches.is_empty() {
         ctx.skia
             .draw_touches_overlay(size.w, size.h, ctx.touches, ctx.skia_flip_y);
     }
 
-    // The cursor is the last thing drawn: it must never be occluded by the very
-    // chrome it is being aimed at.
     if let Some((x, y)) = ctx.cursor {
         ctx.skia
             .draw_cursor(size.w, size.h, x, y, ctx.app_scale as f32, ctx.skia_flip_y);
     }
 }
 
-/// Drive every client that drew this frame. The foreground app always gets a
-/// callback; in the switcher every card surface must also be driven, otherwise
-/// backgrounded clients (which throttle drawing to frame callbacks) stop
-/// presenting and their card renders blank after the entry animation settles.
-/// Layer surfaces and popups throttle the same way.
-///
-/// The same surfaces have their presentation feedback taken, since these are
-/// exactly the ones whose content is in the frame the backend is about to
-/// present. A surface we didn't draw keeps its callbacks until we do draw it —
-/// it has nothing in this frame to report a presentation time for.
+/// Every drawn surface gets a callback, including switcher cards, or
+/// backgrounded clients stop presenting and their cards go blank. The same
+/// surfaces have their presentation feedback taken.
 fn send_frame_callbacks(ctx: &mut DrawCtx<'_>) {
-    // Collected first: the walk below borrows `ctx.sinks` mutably, and the
-    // surface lists hang off `ctx` too.
     let mut drawn: Vec<&WlSurface> = Vec::new();
     if let Some(wl_surface) = ctx.app_surface {
         drawn.push(wl_surface);
@@ -1485,30 +1188,21 @@ fn send_frame_callbacks(ctx: &mut DrawCtx<'_>) {
     for surface in drawn {
         send_frames_surface_tree(surface, ctx.frame_time);
         crate::presentation::take_feedback(surface, &mut ctx.sinks.presented);
-        // The surface's current content is in this frame, so its fifo barrier
-        // has been honoured and its next update may go ahead.
+        // Its content is in this frame, so the fifo barrier is honoured.
         crate::pacing::signal_fifo(surface, &mut ctx.sinks.unblocked);
         crate::pacing::signal_commit_timers(surface, ctx.frame_target, &mut ctx.sinks.unblocked);
     }
 }
 
-/// Execute the full scene draw against an already-bound framebuffer, returning
-/// the KMS page-flip damage hint. Presentation (`submit`/page-flip) is the
-/// caller's job.
-///
-/// The passes below run in strict back-to-front order and each one assumes the
-/// ones before it have already landed in the framebuffer — the blur passes in
-/// particular sample whatever is currently there, so moving one earlier would
-/// blur the wrong thing.
+/// Returns the KMS damage hint; presenting is the caller's job. Passes run
+/// strictly back-to-front; the blur passes sample what's already drawn.
 pub fn draw_scene(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
     size: Size<i32, Physical>,
     ctx: &mut DrawCtx<'_>,
 ) -> Result<Vec<Rectangle<i32, Physical>>, SwapBuffersError> {
-    // The session lock replaces the scene entirely — no app, no shell, no
-    // layers. Checked before anything else is even planned so no client content
-    // can reach the framebuffer while locked.
+    // Before planning, so no client content can reach the framebuffer.
     if ctx.lock_view != crate::session_lock::LockView::Unlocked {
         return draw_locked(renderer, framebuffer, size, ctx);
     }
@@ -1517,16 +1211,14 @@ pub fn draw_scene(
     ctx.skia.set_view(ctx.rotation);
 
     let mut plan = plan_scene(renderer, ctx);
-    // Computed before drawing: it reads the app element's pre-draw commit
-    // counter and advances `last_present`.
+    // Before drawing: reads the pre-draw commit counter.
     let damage_hint = flip_damage(size, ctx, &plan);
 
     pass_background(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_home(size, ctx, &plan);
     pass_folder(size, ctx, &plan);
     pass_icon_menu(size, ctx, &plan);
-    // Before any app/card pass: the backdrop is the shell behind the cards, and
-    // a dragged card drawn first would be blurred along with it.
+    // Before any card pass, or a dragged card gets blurred too.
     pass_backdrop_blur(size, ctx);
     pass_rotated_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_blurred_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
@@ -1534,8 +1226,6 @@ pub fn draw_scene(
     pass_switcher_cards(renderer, &mut *framebuffer, size, ctx)?;
     pass_overlays(renderer, &mut *framebuffer, size, ctx, plan.rotated)?;
     pass_chrome(size, ctx);
-    // Over everything, chrome included: while the screen is dipped for a turn
-    // there is nothing worth showing through it.
     let v = ctx.view(size);
     ctx.skia.draw_screen_dim(v.w, v.h, ctx.dim, ctx.skia_flip_y);
 
@@ -1543,16 +1233,8 @@ pub fn draw_scene(
     Ok(damage_hint)
 }
 
-/// Draw the session lock: black, plus the lock client's surface if it has one.
-///
-/// Deliberately minimal — this is the whole frame. Nothing from the session is
-/// drawn, not even the home bar (the gesture it advertises does nothing while
-/// locked). The volume OSD and the touch indicators are the only overlays kept:
-/// neither shows session content, and volume keys still work while locked.
-///
-/// Damage is always the full output: the lock's own frames are rare, and the
-/// partial-damage fast path assumes a fullscreen *app* element it must not be
-/// handed here.
+/// Black plus the lock surface. Only the OSD, touch marks and cursor are
+/// kept; none shows session content. Always full damage.
 fn draw_locked(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -1562,9 +1244,7 @@ fn draw_locked(
     let damage = Rectangle::from_size(size);
     ctx.skia.set_view(crate::rotation::Rotation::None);
 
-    // The lock surface renders at `dpi` like any other client, and covers the
-    // whole output (it was configured at the output's logical size), so it draws
-    // from the origin rather than the usable area.
+    // Configured at the output's logical size, so drawn from the origin.
     let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = ctx
         .lock_surface
         .map(|surface| {
@@ -1582,9 +1262,8 @@ fn draw_locked(
     let mut frame = renderer
         .render(framebuffer, size, ctx.transform)
         .map_err(SwapBuffersError::from)?;
-    // Black, not `CLEAR_COLOR`: a lock surface that hasn't painted yet (or a
-    // dead lock client) must not leave the shell's tinted backdrop showing as if
-    // the session were merely idle.
+    // Black, not `CLEAR_COLOR`: an idle-looking backdrop would hide a dead
+    // lock client.
     frame
         .clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage])
         .map_err(SwapBuffersError::from)?;
@@ -1601,8 +1280,6 @@ fn draw_locked(
         ctx.skia
             .draw_touches_overlay(size.w, size.h, ctx.touches, ctx.skia_flip_y);
     }
-    // A mouse must stay usable on the lock screen — that is where a password
-    // gets typed and a button gets clicked.
     if let Some((x, y)) = ctx.cursor {
         ctx.skia
             .draw_cursor(size.w, size.h, x, y, ctx.app_scale as f32, ctx.skia_flip_y);
@@ -1614,7 +1291,6 @@ fn draw_locked(
     Ok(vec![damage])
 }
 
-/// Send frame callbacks to all surfaces in the tree.
 pub fn send_frames_surface_tree(surface: &WlSurface, time: u32) {
     with_surface_tree_downward(
         surface,
@@ -1640,13 +1316,10 @@ mod tests {
     use super::*;
     use crate::rotation::Rotation;
 
-    /// FP5 panel size, so the numbers are the real ones.
     fn output() -> Size<i32, Physical> {
         Size::from((1224, 2700))
     }
 
-    /// Where the renderer will actually put a card: the pass hands element-space
-    /// rects to `render(fb, size, transform)`, which maps them by `transform`.
     fn on_framebuffer(card: &Card, transform: Transform) -> Rectangle<i32, Physical> {
         let rect: Rectangle<i32, Physical> = Rectangle::new(
             card.origin(),
@@ -1656,15 +1329,13 @@ mod tests {
         transform.transform_rect_in(rect, &element_space)
     }
 
-    /// Both backends, because they disagree: winit renders `Flipped180`, DRM
-    /// `Normal`. A mapping that is only right for one draws the card mirrored on
-    /// the other — which is exactly the bug this pairing exists to catch.
+    /// winit renders `Flipped180`, DRM `Normal`; a mapping right for one draws
+    /// mirrored on the other.
     const OUT_TRANSFORMS: [Transform; 2] = [Transform::Normal, Transform::Flipped180];
 
     #[test]
     fn a_turned_card_lands_on_the_same_pixels_as_its_upright_slot() {
-        // Deliberately off-centre: a centred card is symmetric under these
-        // transforms and would pass even with the handedness inverted.
+        // Off-centre: a centred card passes even with inverted handedness.
         let (cx, cy, scale) = (500.0_f32, 900.0_f32, 0.62_f32);
         for out in OUT_TRANSFORMS {
             let slot = Card::centered(output(), cx, cy, scale, 40.0);
@@ -1704,7 +1375,6 @@ mod tests {
                     out,
                     out + rotation.transform(),
                 );
-                // Axes swapped, so a landscape buffer fills the portrait slot.
                 assert!(
                     (turned.size.0 - slot.size.1).abs() <= 1.0
                         && (turned.size.1 - slot.size.0).abs() <= 1.0,
@@ -1718,9 +1388,7 @@ mod tests {
 
     #[test]
     fn the_inverse_table_really_inverts_every_transform() {
-        // `Card::inverse_transform` exists because `Transform::invert()` does
-        // not satisfy this for the flipped quarter-turns. If a smithay upgrade
-        // ever makes `invert()` correct, this is the test that says so.
+        // Guards `Card::inverse_transform` against `Transform::invert()`.
         let area = output();
         let rect: Rectangle<i32, Physical> = Rectangle::new((37, 91).into(), (240, 410).into());
         for t in [
@@ -1744,25 +1412,19 @@ mod tests {
     fn a_card_turns_only_while_its_buffer_is_actually_landscape() {
         let portrait = output();
         let landscape: Size<i32, Physical> = Size::from((2700, 1224));
-        // The window is still drawing the landscape buffer it was configured
-        // for: turn it.
         assert_eq!(
             card_rotation(Rotation::LeftUp, Some(landscape), portrait),
             Rotation::LeftUp
         );
-        // It has since been reconfigured back to portrait (a layer change
-        // resizes every toplevel) while the stored value still says LeftUp.
-        // Turning it now is the second-open break.
+        // Reconfigured back to portrait while the stored value says LeftUp.
         assert_eq!(
             card_rotation(Rotation::LeftUp, Some(portrait), portrait),
             Rotation::None
         );
-        // Never-fullscreen windows are left alone whatever they are drawing.
         assert_eq!(
             card_rotation(Rotation::None, Some(landscape), portrait),
             Rotation::None
         );
-        // Nothing drawn yet: nothing to turn.
         assert_eq!(
             card_rotation(Rotation::LeftUp, None, portrait),
             Rotation::None

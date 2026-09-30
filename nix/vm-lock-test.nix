@@ -1,29 +1,17 @@
-# ext-session-lock-v1 test with a real lock client (swaylock).
+# ext-session-lock-v1 with swaylock. A lock hides the session and is
+# confirmed only after a locked frame; swaylock's colour is what's on screen;
+# gestures are dead while locked; typing the password unlocks; a lock client
+# that dies leaves a black, still-locked screen.
 #
-# The protocol's guarantee is a security one, so the oracles are about what is
-# *not* on screen and what input can *not* do:
-#   - a lock request hides the session and is confirmed to the client
-#     (`session locked` is only logged after a locked frame was presented);
-#   - the lock surface is what is actually composited — the screen shows
-#     swaylock's colour, not the home screen behind it;
-#   - the home gesture is dead while locked: the shell never changes state
-#     behind the lock;
-#   - typing the password unlocks, and the shell comes back;
-#   - killing the lock client while locked leaves the session locked (a black
-#     screen), never unlocked — the failure mode has to fail closed.
+# Keys go through `springchick ipc key`, the real xkb/forwarding path.
 #
-# swaylock is driven through the compositor's own IPC (`springchick ipc key`),
-# which injects keys along the real xkb/filter/forward path, so the password
-# reaches it exactly as a physical keyboard's would.
-#
-# Build for the host arch:  nix build .#checks.aarch64-linux.vm-lock
+# Run:  nix build .#checks.aarch64-linux.vm-lock
 { self, pkgs }:
 
 let
   inherit (import ./test-support.nix { inherit self pkgs; }) mkTest;
 
-  # A solid, unmistakable colour: the checks below are "is the screen this
-  # colour", which only works because swaylock paints the whole surface.
+  # Solid colour, so "is the screen this colour" is the oracle.
   lockColor = "00cc00";
 
 in
@@ -32,15 +20,11 @@ mkTest {
 
   packages = [ pkgs.swaylock ];
 
-  # The oracle reads pixels off the VM's framebuffer — the lock screen has
-  # nothing legible on it by design, so OCR would have nothing to say.
   extraPythonPackages = p: [ p.pillow ];
 
   extraMachineConfig = {
-    # swaylock authenticates through PAM; without this service it exits with
-    # "failed to initialize pam" and never locks.
+    # Without a PAM service swaylock never locks.
     security.pam.services.swaylock = { };
-    # The password the test types back in to unlock.
     users.users.tester.password = "swordfish";
   };
 
@@ -78,8 +62,7 @@ mkTest {
         machine.screenshot(name)
         img = Image.open(f"{machine.out_dir}/{name}.png").convert("RGB")
         w, h = img.size
-        # Flat RGB bytes rather than PIL's pixel tuples: plain ints keep the
-        # test driver's type checker happy and the arithmetic obvious.
+        # Bytes, not PIL tuples, to keep the driver's type checker happy.
         patch = img.crop((int(w * 0.1), int(h * 0.1), int(w * 0.3), int(h * 0.3))).tobytes()
         n = len(patch) // 3
         mean = (
@@ -99,24 +82,18 @@ mkTest {
     def unlocked_count():
         return int(machine.succeed(f"{JOURNAL} | grep -c 'session unlocked' || true").strip())
 
-    # --- Lock ---
     lock_client("swaylock")
 
-    # The request arrived...
     machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'session lock requested'", timeout=60)
-    # ...and was confirmed, which the compositor only does once a frame drawn
-    # under the lock has actually been presented.
+    # Only confirmed once a locked frame was presented.
     machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'session locked'", timeout=60)
 
-    # --- The lock surface is what is on screen ---
     rgb, _ = screen("01-locked")
     assert is_lock_green(rgb), (
         f"expected swaylock's green lock surface to cover the screen, sampled rgb={rgb}"
     )
 
-    # --- Input can't reach the shell behind it ---
-    # A swipe up from the home bar is the gesture that would otherwise take the
-    # shell home / into the switcher; locked, it must move nothing.
+    # A bar swipe up must move nothing behind the lock.
     before = machine.succeed(f"{JOURNAL} | grep -c 'state changed to' || true").strip()
     dbg(f"swipe {W // 2} {H - 5} {W // 2} {H // 3} 300")
     dbg("settle 500")
@@ -126,11 +103,9 @@ mkTest {
     assert before == after, (
         f"the shell changed state behind the lock ({before} -> {after} transitions)"
     )
-    # And the screen is still the lock surface, not the home screen.
     rgb, _ = screen("02-still-locked")
     assert is_lock_green(rgb), f"gestures leaked past the lock, sampled rgb={rgb}"
 
-    # --- Unlock by typing the password ---
     for ch in "swordfish":
         dbg(f"key {ch}")
     dbg("key Return")
@@ -140,11 +115,10 @@ mkTest {
     assert not is_lock_green(rgb), (
         f"the lock surface is still on screen after unlocking, sampled rgb={rgb}"
     )
-    # The shell really is back, not just a blank screen: the home screen has
-    # bright chrome on it (the home pill, page dots, icon labels).
+    # Home has bright chrome (pill, dots, labels), so this isn't just black.
     assert brightest > 60, f"nothing was drawn after unlocking (brightest channel {brightest})"
 
-    # --- Fail closed: a lock client that dies stays locked ---
+    # Fail closed: a dying lock client stays locked.
     locks = locked_count()
     lock_client("swaylock2")
     machine.wait_until_succeeds(
@@ -152,8 +126,7 @@ mkTest {
     )
     machine.succeed("systemctl --user -M tester@.host kill -s KILL swaylock2")
     dbg("settle 1000")
-    # No lock surface left, so the compositor draws black — and above all NOT
-    # the session it was hiding.
+    # Black, never the session.
     rgb, brightest = screen("04-lock-client-died")
     assert brightest < 30, (
         f"the session reappeared after the lock client died (brightest channel {brightest})"

@@ -1,31 +1,22 @@
-//! Pure UI state machine for springchick.
-//!
-//! `UiState` + `UiEvent` → `UiState` transitions, unit-tested without Wayland/GPU.
+//! Pure UI state machine: `transition(state, event) -> Effect`.
 
 use sc_anim::Spring;
 use sc_input::{NavTarget, Tracker};
 use tracing::debug;
 
-/// Opaque toplevel identifier (index into the compositor's toplevel vec).
+/// Index into the compositor's toplevel vec.
 pub type ToplevelId = usize;
 
-/// A switcher card being dragged along the close axis.
-///
-/// `progress` is signed: `>0` = lifted upward toward the close commit,
-/// `<0` = pushed down below the resting stack (rubber-banded by the input
-/// layer). While the finger is down the spring is pinned to the finger; on
-/// release below the commit threshold it is retargeted to 0 and `Tick` runs it
-/// until it settles.
+/// `progress > 0` lifts toward closing, `< 0` pushes below the stack. Pinned
+/// to the finger while dragging; on a short release it springs back to 0.
 #[derive(Clone, Copy, Debug)]
 pub struct CardClose {
     pub toplevel: ToplevelId,
     pub progress: Spring,
-    /// Finger let go below the commit threshold — springing back to rest.
     pub releasing: bool,
 }
 
 impl CardClose {
-    /// Pinned to the finger: no physics while dragging.
     pub fn dragging(toplevel: ToplevelId, progress: f32) -> Self {
         let mut s = close_spring();
         s.value = progress;
@@ -38,29 +29,21 @@ impl CardClose {
         }
     }
 
-    /// Hand the card back to physics: spring to rest, carrying the finger's
-    /// speed over so the bounce continues the gesture instead of restarting it.
-    /// `vy` is in screen heights/s, negative upward — the opposite sign to
-    /// close progress.
+    /// Carries the finger's speed into the springback. `vy` is in heights/s,
+    /// negative upward (opposite sign to progress).
     pub fn release(&mut self, vy: f32) {
-        // Unclamped, a fast release throws the spring far past the rubber-band
-        // limit and back — the card dives off-screen and returns. Anything
-        // above the flick speed upward would have committed instead, and
-        // downward there is nothing to travel to.
+        // Unclamped, a fast release dives off-screen and back. Faster upward would
+        // have committed anyway.
         self.progress.velocity = (-vy).clamp(-CLOSE_RELEASE_MAX_SPEED, CLOSE_RELEASE_MAX_SPEED);
         self.progress.retarget(0.0);
         self.releasing = true;
     }
 }
 
-/// Cap on the release velocity carried into the springback, in close-progress
-/// units per second. Matches the close flick threshold.
+/// Matches the close flick threshold.
 const CLOSE_RELEASE_MAX_SPEED: f32 = 0.9;
 
-/// Springback for a cancelled close drag: under-damped (critical ≈ 2·√320 ≈ 36)
-/// so overshooting past rest reads as a bounce — most visible when the card was
-/// pushed *down* below the stack. Not *too* soft: a single small bounce, not a
-/// wobble.
+/// Under-damped (critical ≈ 36) for one small bounce past rest.
 fn close_spring() -> Spring {
     let mut s = Spring::new(0.0);
     s.stiffness = 320.0;
@@ -68,10 +51,8 @@ fn close_spring() -> Spring {
     s
 }
 
-/// Window → icon shrink. Much stiffer than the shared `Spring::zoom` (critical
-/// ≈ 2·√760 ≈ 55): the open zoom has an icon to grow out of, the shrink has
-/// nothing to look at while it runs. Paired with `MINIMIZE_HANDOVER`, which cuts
-/// the tail.
+/// Window → icon shrink, much stiffer than `Spring::zoom`: there's nothing
+/// to watch while it runs. `MINIMIZE_HANDOVER` cuts the tail.
 fn minimize_spring(from: f32, to: f32) -> Spring {
     let mut s = Spring::new(from);
     s.stiffness = 760.0;
@@ -80,28 +61,21 @@ fn minimize_spring(from: f32, to: f32) -> Spring {
     s
 }
 
-/// Velocity kick (fractions of screen height per second) given to the Home
-/// bounce spring when a bar gesture has nowhere to go. Tuned against the
-/// bounce spring below for a ~3% lift that settles in under a third of a second.
+/// Heights/s, for a ~3% lift settling in under a third of a second.
 const HOME_BOUNCE_KICK: f32 = 1.1;
 
-/// Settle progress at which a settle toward the switcher hands the deck over,
-/// instead of waiting for the spring to reach its `is_settled` tolerance. The
-/// remainder is sub-pixel on a phone panel, and the deck can't be stepped or
-/// touched until it exists.
+/// Hand over to the deck here instead of waiting for `is_settled`; the rest
+/// is sub-pixel and the deck can't be stepped until it exists.
 const SWITCHER_HANDOVER: f32 = 0.985;
 
-/// Same idea for the minimize: the last few percent of the shrink is a window a
-/// few pixels wider than the icon, and the spring's tail there is long enough to
-/// read as a hitch before Home appears.
+/// The shrink's tail reads as a hitch before Home appears.
 const MINIMIZE_HANDOVER: f32 = 0.95;
 
-/// Origin of a zoom animation: where the window grows from / shrinks to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ZoomOrigin {
-    /// Center in logical pixels.
+    /// Logical px.
     pub center: (f32, f32),
-    /// Start scale (icon ≈ 0.1, switcher card ≈ 0.62).
+    /// Icon ≈ 0.1, switcher card ≈ 0.62.
     pub scale: f32,
 }
 
@@ -114,131 +88,99 @@ impl ZoomOrigin {
     }
 }
 
-/// How an app's open (and close) animation plays.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OpenMode {
-    /// Zoom from the launch origin (icon / switcher card) to fullscreen.
     Zoom,
-    /// Slide up full-size from below the bottom edge. Used by the pull-down
-    /// search app, which has no icon origin.
+    /// The search app; it has no icon origin.
     SlideUp,
-    /// Slide in full-size from the left edge as Home is dragged off to the
-    /// right. Used by the rightward Home-bar swipe: the stack sits to the left
-    /// of Home, so pushing Home away uncovers its top card.
+    /// Home-bar rightward swipe: Home slides right, uncovering the top card.
     SlideFromLeft,
 }
 
-/// The shell's UI states, including transition animations.
 #[derive(Clone, Debug)]
 pub enum UiState {
     Home {
         page: usize,
         page_spring: Spring,
         page_count: usize,
-        /// Rubber-band lift of the whole Home screen, in fractions of screen
-        /// height (positive = shifted up). Rests at 0; a bar gesture with
-        /// nothing to go to kicks it (see [`UiEvent::HomeBounce`]).
+        /// Fractions of screen height, positive = up. Kicked by
+        /// [`UiEvent::HomeBounce`].
         bounce: Spring,
     },
     App {
         toplevel: ToplevelId,
         app_id: String,
     },
-    /// Icon → fullscreen zoom animation.
     AppOpening {
         toplevel: ToplevelId,
         app_id: String,
-        /// Spring 0→1 (0 = icon size, 1 = fullscreen).
+        /// 0 = icon size, 1 = fullscreen.
         progress: Spring,
-        /// Zoom origin (center + start scale).
         origin: ZoomOrigin,
-        /// Which entrance animation to play.
         open_mode: OpenMode,
     },
-    /// Fullscreen → icon shrink animation.
     AppClosing {
         toplevel: ToplevelId,
         app_id: String,
-        /// Spring 1→0.
         progress: Spring,
         origin: ZoomOrigin,
     },
-    /// Finger is on the bar, dragging the window.
+    /// Finger on the bar, dragging the window.
     Grabbing {
         toplevel: ToplevelId,
         app_id: String,
         tracker: Tracker,
-        /// MRU deck for the live switcher-preview fan (front = current app).
-        /// Populated by the caller after the grab starts (the pure state machine
-        /// has no history); empty until then, which just shows the single card.
+        /// MRU deck for the live fan, filled in by the caller after the grab starts.
         cards: Vec<ToplevelId>,
     },
-    /// Released — spring-animating toward a target.
     Settling {
         toplevel: ToplevelId,
         app_id: String,
         target: NavTarget,
-        /// Spring animating toward rest (0 = app fullscreen, 1 = target reached).
+        /// 0 = app fullscreen, 1 = target reached.
         progress: Spring,
         origin: ZoomOrigin,
-        /// MRU deck carried from the grab (front = current app). For the
-        /// `Switcher` target it keeps the neighbour fan on screen through the
-        /// settle so the deck doesn't vanish and re-fan; empty otherwise.
+        /// Kept only for a `Switcher` target, so the fan stays up through the
+        /// settle.
         cards: Vec<ToplevelId>,
     },
-    /// Live horizontal quick-switch: current app slides sideways following the
-    /// finger, revealing the adjacent MRU app. Rubber-bands when there is no
-    /// app in the swiped direction (end of the stack).
+    /// The current app follows the finger sideways, revealing the MRU
+    /// neighbour. Rubber-bands at the ends.
     QuickSwitch {
         current: ToplevelId,
         current_app: String,
-        /// App revealed by a rightward swipe (`offset > 0`) — the older/next app
-        /// (carousel handedness: most-recent on the right, so sliding right
-        /// walks toward older apps).
+        /// Revealed by a rightward swipe: the older app.
         prev: Option<(ToplevelId, String)>,
-        /// App revealed by a leftward swipe (`offset < 0`) — the more-recent
-        /// (previous) app.
+        /// Revealed by a leftward swipe: the more recent app.
         next: Option<(ToplevelId, String)>,
-        /// Horizontal offset as a fraction of screen width. `+` = current slides
-        /// right (revealing `prev` from the left edge); `-` = slides left.
+        /// Fraction of screen width; `+` slides right, revealing `prev`.
         offset: Spring,
-        /// After release: `Some` = settling onto this app; `None` = rejected,
-        /// springing back to `current`. Ignored until `releasing`.
+        /// `Some` = settling onto this app, `None` = springing back. Read once
+        /// `releasing`.
         commit: Option<(ToplevelId, String)>,
-        /// Finger let go — `Tick` drives `offset` to rest, then resolves.
         releasing: bool,
-        /// Screen-x (px) where the slide began — the point at which `offset` is 0.
+        /// Where `offset` is 0.
         start_x: f32,
-        /// Normalized grab origin (the point the finger first went down on the
-        /// bar). Kept so an upward drag can hand back to `Grabbing` with a
-        /// continuous `up_progress` — see `input_common::revert_quick_switch`.
+        /// Normalized grab origin, so an upward drag can return to `Grabbing` with a
+        /// continuous `up_progress`.
         origin: sc_input::Pt,
     },
-    /// Switcher deck: fanned stack of running apps.
     Switcher {
-        /// MRU card order; cards[0] = front (most recent).
+        /// cards[0] = most recent.
         cards: Vec<ToplevelId>,
-        /// Carousel focus spring (continuous card index).
+        /// Continuous card index.
         scroll: Spring,
-        /// Card being dragged along the close axis. `None` at rest.
         close: Option<CardClose>,
-        /// Entrance animation, 0 = deck still below the bottom edge, 1 = at
-        /// rest. Entered from a grab release the deck is *already* in place
-        /// (the settle animated it there), so that path starts settled at 1;
-        /// only the Home-bar swipe-up plays the rise.
-        ///
-        /// Retargeted back to 0 to play the rise in reverse — that is how a
-        /// Home shortcut leaves the deck (see [`UiEvent::ReturnHome`]), and a
-        /// settled spring aimed at 0 is what tells `Tick` the exit is done.
+        /// 0 = below the bottom edge, 1 = at rest. Starts at 1 from a grab (the
+        /// settle already placed it); only the Home-bar swipe-up plays the rise.
+        /// Retargeted to 0 to leave; settled at 0 tells `Tick` the exit is done.
         enter: Spring,
-        /// While `enter` runs backwards: slide the deck off the left edge
-        /// instead of sinking it down. Set by the tap-outside dismiss.
+        /// Exit off the left edge instead of sinking. Set by tap-outside dismiss.
         exit_left: bool,
     },
 }
 
-/// The Home bounce spring at rest: stiff and deliberately under-damped, so a
-/// velocity kick reads as a springy rebound rather than a slow drift back.
+/// Stiff and under-damped, so a kick reads as a rebound.
 fn bounce_spring() -> Spring {
     let mut s = Spring::new(0.0);
     s.stiffness = 500.0;
@@ -258,11 +200,7 @@ impl UiState {
         }
     }
 
-    /// Replace the stored `app_id` for `toplevel` wherever the current state
-    /// references it. A client usually sets its xdg `app_id` *after* the
-    /// toplevel maps (winit does), so the id captured at map time is a
-    /// placeholder; this retags the live UI so switcher/zoom visuals resolve
-    /// the real catalog icon.
+    /// Clients set their xdg `app_id` after map, so retag the live UI.
     pub fn retag_app(&mut self, toplevel: ToplevelId, app_id: &str) {
         let set = |a: &mut String| *a = app_id.to_string();
         match self {
@@ -314,7 +252,6 @@ impl UiState {
         }
     }
 
-    /// Get the foreground toplevel id if any app is visible/animating.
     pub fn foreground_toplevel(&self) -> Option<ToplevelId> {
         match self {
             UiState::App { toplevel, .. }
@@ -328,7 +265,6 @@ impl UiState {
         }
     }
 
-    /// Whether the state needs animation ticks (springs not settled).
     pub fn needs_animation(&self) -> bool {
         match self {
             UiState::AppOpening { progress, .. } => !progress.is_settled(),
@@ -340,8 +276,7 @@ impl UiState {
                 ..
             } => !page_spring.is_settled() || !bounce.is_settled(),
             UiState::Grabbing { .. } => true,
-            // Dragging (not releasing) is finger-driven and repaints on move;
-            // once releasing, the spring must tick until it settles.
+            // Dragging repaints on move; releasing must tick until settled.
             UiState::QuickSwitch {
                 releasing, offset, ..
             } => *releasing && !offset.is_settled(),
@@ -360,95 +295,89 @@ impl UiState {
     }
 }
 
-/// Events the UI state machine accepts.
 #[derive(Clone, Debug)]
 pub enum UiEvent {
-    /// App launched and matched to a toplevel (with entrance animation).
     AppMapped {
         toplevel: ToplevelId,
         app_id: String,
         origin: ZoomOrigin,
         open_mode: OpenMode,
     },
-    /// Raise an already-running app directly (no zoom animation).
+    /// No zoom animation.
     RaiseApp {
         toplevel: ToplevelId,
         app_id: String,
     },
-    /// Return-home (Esc shortcut in dev).
-    ReturnHome { origin: ZoomOrigin },
-    /// Foreground app's toplevel was destroyed.
-    /// A toplevel went away. `next` is the app to fall back to when the closed
-    /// one was in the foreground — the caller resolves it from the MRU history
-    /// (which it has already removed the closed id from), since this module has
-    /// no view of what else is alive.
-    ///
-    /// It is `Some` only when a *dialog* was dismissed; an app closing passes
-    /// `None` and goes Home, which is the Springboard model. See
-    /// `State::close_toplevel`.
+    ReturnHome {
+        origin: ZoomOrigin,
+    },
+    /// `next` is the fallback when the closed one was in front, resolved by the
+    /// caller from MRU. `Some` only for a dismissed dialog; an app close goes
+    /// Home.
     ToplevelClosed {
         toplevel: ToplevelId,
         next: Option<(ToplevelId, String)>,
     },
-    /// Finger down on bar zone — start grab.
-    GrabStart { point: sc_input::Pt },
-    /// Finger moved during grab.
-    GrabMove { point: sc_input::Pt, dt: f32 },
-    /// Finger released during grab.
+    GrabStart {
+        point: sc_input::Pt,
+    },
+    GrabMove {
+        point: sc_input::Pt,
+        dt: f32,
+    },
     GrabRelease,
-    /// Touch-down while animating (interrupt).
-    Interrupt { point: sc_input::Pt },
-    /// Animation tick — advance springs by dt.
-    Tick { dt: f32 },
-    /// Enter switcher deck from grab release — already fanned open by the
-    /// settle, so it is presented at rest with no entrance animation.
-    EnterSwitcher { cards: Vec<ToplevelId> },
-    /// Enter the switcher deck from Home (bar swipe-up): the deck rises into
-    /// place from below the bottom edge.
-    OpenSwitcherFromHome { cards: Vec<ToplevelId> },
-    /// Enter the switcher deck from a running app without a gesture (the
-    /// Super+Tab shortcut). The app shrinks into the front card slot exactly as
-    /// a bar-grab release does — same `Settling` path, so the deck it lands in
-    /// is the one `Effect::EnterSwitcher` builds.
+    /// Touch-down while animating.
+    Interrupt {
+        point: sc_input::Pt,
+    },
+    Tick {
+        dt: f32,
+    },
+    /// From a grab release: the settle already fanned it open, so no entrance.
+    EnterSwitcher {
+        cards: Vec<ToplevelId>,
+    },
+    /// From Home (bar swipe-up): the deck rises from below.
+    OpenSwitcherFromHome {
+        cards: Vec<ToplevelId>,
+    },
+    /// From an app without a gesture (Super+Tab): the app shrinks into the
+    /// front slot via the same `Settling` path as a grab release.
     OpenSwitcherFromApp {
         cards: Vec<ToplevelId>,
         origin: ZoomOrigin,
     },
-    /// Move the switcher's focused card by `delta` steps (negative = toward the
-    /// more-recent end), wrapping at both ends. Springs the carousel there, so
-    /// held-modifier stepping reads as one continuous pan.
-    SwitcherStep { delta: i32 },
-    /// A Home-bar gesture that had nowhere to go — rubber-band Home and stay.
+    /// Negative = toward the more recent end. Wraps both ways.
+    SwitcherStep {
+        delta: i32,
+    },
+    /// Rubber-band Home and stay.
     HomeBounce,
-    /// Tap a card to open that app. `app_id` is the real id resolved from the
-    /// toplevel by the caller — the switcher deck tracks only toplevel ids.
+    /// `app_id` is resolved by the caller; the deck tracks only ids.
     SwitcherTapCard {
         toplevel: ToplevelId,
         app_id: String,
         origin: ZoomOrigin,
     },
-    /// Swipe a card up to close.
-    SwitcherCloseCard { toplevel: ToplevelId },
-    /// Dismiss the switcher (tap empty area).
+    SwitcherCloseCard {
+        toplevel: ToplevelId,
+    },
+    /// Tap on empty area.
     SwitcherDismiss,
 }
 
-/// Side effect from a transition.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     CloseToplevel {
         toplevel: ToplevelId,
     },
-    /// Settling animation resolved to Switcher — caller should populate cards.
+    /// The caller populates the cards.
     EnterSwitcher,
     None,
 }
 
-/// Which toplevel should hold keyboard focus in this state.
-///
-/// Only the settled `App` state focuses a client: during zoom, grab, settle and
-/// switcher the compositor owns the screen, and a mapped-but-hidden app must not
-/// eat keys.
+/// Only the settled `App` state focuses a client; a hidden app must not eat
+/// keys.
 pub fn desired_focus(state: &UiState) -> Option<ToplevelId> {
     match state {
         UiState::App { toplevel, .. } => Some(*toplevel),
@@ -456,7 +385,6 @@ pub fn desired_focus(state: &UiState) -> Option<ToplevelId> {
     }
 }
 
-/// Advance the state machine.
 pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
     match event {
         UiEvent::AppMapped {
@@ -498,9 +426,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                         origin,
                     };
                 }
-                // From the deck there is no window to shrink: play the deck's
-                // own entrance backwards (cards sink, backdrop unblurs) and land
-                // on Home when it settles.
+                // From the deck, play its entrance backwards and land Home.
                 UiState::Switcher { enter, .. } => enter.retarget(0.0),
                 _ => {}
             }
@@ -517,11 +443,8 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 _ => false,
             };
             if is_foreground {
-                // A dismissed dialog hands the screen back to the app
-                // underneath; an app close passes None and lands Home. A portal
-                // file chooser is the case that makes this matter: it is a
-                // toplevel of its own, in another process, so dismissing it
-                // used to drop the app that asked for it.
+                // A dismissed dialog (e.g. a portal file chooser, its own process) hands
+                // back to the app underneath; an app close lands Home.
                 *state = match next {
                     Some((t, app_id)) => UiState::App {
                         toplevel: t,
@@ -530,7 +453,6 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     None => UiState::home(0, 1),
                 };
             }
-            // Remove from switcher deck if present.
             if let UiState::Switcher { cards, .. } = state {
                 cards.retain(|&t| t != toplevel);
                 if cards.is_empty() {
@@ -573,14 +495,11 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 debug!(target: "springchick::debug", "GrabRelease target={:?} progress={} vel={}", target, tracker.up_progress(), tracker.velocity.y);
                 let toplevel = *toplevel;
                 let app_id = app_id.clone();
-                // Keep the deck through the settle only when landing in the
-                // switcher; other targets have no fan.
                 let cards = if matches!(target, NavTarget::Switcher) {
                     std::mem::take(cards)
                 } else {
                     Vec::new()
                 };
-                // Start from current drag progress.
                 let current_progress = tracker.up_progress().clamp(0.0, 1.0);
                 let settle_target = match target {
                     NavTarget::BackToApp => 0.0,
@@ -594,14 +513,14 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     s.damping = 32.0;
                     s
                 };
-                progress.velocity = -tracker.velocity.y; // upward velocity → positive progress velocity
+                progress.velocity = -tracker.velocity.y; // upward velocity → positive progress
                 progress.retarget(settle_target);
                 *state = UiState::Settling {
                     toplevel,
                     app_id,
                     target,
                     progress,
-                    origin: ZoomOrigin::icon((0.5, 0.5)), // will be overridden by caller with actual origin
+                    origin: ZoomOrigin::icon((0.5, 0.5)), // overridden by the caller
                     cards,
                 };
             }
@@ -664,10 +583,8 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     ..
                 } => {
                     progress.step(dt);
-                    // The deck takes over a hair before the spring's asymptotic
-                    // tail runs out: the last fraction of a percent is invisible
-                    // motion, and holding it back only delays the first card
-                    // step (Super+Tab) or the deck's first touch.
+                    // Hand over just before the asymptotic tail, which only delays the first
+                    // card step or touch.
                     let handover = progress.value
                         >= match target {
                             NavTarget::Switcher => SWITCHER_HANDOVER,
@@ -690,7 +607,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                                 return Effect::EnterSwitcher;
                             }
                             NavTarget::QuickSwitch(_) => {
-                                // Handled by caller raising the adjacent app.
+                                // The caller raises the adjacent app.
                                 *state = UiState::home(0, 1);
                             }
                         }
@@ -712,13 +629,11 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 } => {
                     scroll.step(dt);
                     enter.step(dt);
-                    // A settled entrance spring aimed at 0 means the deck has
-                    // finished sinking off the bottom — the Home shortcut's exit.
+                    // Settled at 0: the deck has finished sinking.
                     if enter.target == 0.0 && enter.is_settled() {
                         *state = UiState::home(0, 1);
                         return Effect::None;
                     }
-                    // Spring a cancelled close-drag back to rest (with bounce).
                     if let Some(c) = close {
                         if c.releasing {
                             c.progress.step(dt);
@@ -729,7 +644,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     }
                 }
                 UiState::Grabbing { tracker, .. } => {
-                    // Decay velocity so a stationary hold doesn't read as a flick.
+                    // A still hold must not read as a flick.
                     tracker.decay(dt);
                 }
                 UiState::QuickSwitch {
@@ -742,8 +657,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 } if *releasing => {
                     offset.step(dt);
                     if offset.is_settled() {
-                        // Land on the committed neighbour, or fall back to the
-                        // app we started on (rejected swipe).
+                        // The committed neighbour, or back to where we started.
                         let (toplevel, app_id) = commit
                             .take()
                             .unwrap_or_else(|| (*current, current_app.clone()));
@@ -756,13 +670,8 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
         }
         UiEvent::EnterSwitcher { cards } => {
             debug!(target: "springchick::debug", "EnterSwitcher cards={:?}", cards);
-            // The settle already held the fan fully open (neighbours fanned
-            // around the front card into their rest slots), so the deck is simply
-            // presented at rest — there is no fan-in animation.
-            //
-            // Focus starts on cards[1]: you came *from* cards[0], so the useful
-            // target is the one behind it. Scrolled there rather than started
-            // there, so the card you left slides out to the right edge.
+            // Already fanned by the settle, so no entrance. Focus scrolls to cards[1]
+            // (you came from cards[0]), so the card you left slides out right.
             let mut scroll = Spring::new(0.0);
             if cards.len() > 1 {
                 scroll.retarget(1.0);
@@ -778,7 +687,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
         }
         UiEvent::OpenSwitcherFromHome { cards } => {
             debug!(target: "springchick::debug", "OpenSwitcherFromHome cards={:?}", cards);
-            // Only from Home — the grab path has its own (already-open) entry.
+            // Only from Home; the grab path has its own entry.
             if matches!(state, UiState::Home { .. }) && !cards.is_empty() {
                 *state = UiState::Switcher {
                     cards,
@@ -795,10 +704,8 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 if !cards.is_empty() {
                     let toplevel = *toplevel;
                     let app_id = app_id.clone();
-                    // Keyboard-only entry (Super+Tab): the first card step can't
-                    // start until this settle hands over, so it runs much
-                    // stiffer than a finger's settle — the shrink still reads,
-                    // but the deck is there to step almost at once.
+                    // Much stiffer than a finger's settle: the first Tab step waits for the
+                    // handover.
                     let mut progress = Spring::zoom(0.0, 1.0);
                     progress.stiffness = 2000.0;
                     progress.damping = 90.0;
@@ -818,8 +725,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             if let UiState::Switcher { cards, scroll, .. } = state {
                 let n = cards.len() as i32;
                 if n > 0 {
-                    // Step from where the spring is *headed*, not where it is,
-                    // so repeats while it is still flying each add one card.
+                    // Step from the target, so repeats mid-flight each add a card.
                     let from = scroll.target.round() as i32;
                     scroll.retarget((from + delta).rem_euclid(n) as f32);
                 }
@@ -864,9 +770,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
             Effect::None
         }
         UiEvent::SwitcherDismiss => {
-            // Play the entrance backwards, sideways: the deck slides off the
-            // left edge and the backdrop unblurs. `Tick` lands Home when the
-            // spring settles at 0.
+            // Slide off the left edge; `Tick` lands Home when it settles at 0.
             if let UiState::Switcher {
                 enter, exit_left, ..
             } = state
@@ -913,7 +817,6 @@ mod tests {
                 open_mode: OpenMode::Zoom,
             },
         );
-        // Tick until settled.
         for _ in 0..500 {
             transition(&mut state, UiEvent::Tick { dt: 1.0 / 90.0 });
             if matches!(state, UiState::App { .. }) {
@@ -944,14 +847,12 @@ mod tests {
             toplevel: 1,
             app_id: "x".into(),
         };
-        // Start grab.
         transition(
             &mut state,
             UiEvent::GrabStart {
                 point: Pt { x: 0.5, y: 0.95 },
             },
         );
-        // Tiny move up (below threshold).
         transition(
             &mut state,
             UiEvent::GrabMove {
@@ -959,13 +860,11 @@ mod tests {
                 dt: 1.0 / 90.0,
             },
         );
-        // Release.
         transition(&mut state, UiEvent::GrabRelease);
         assert!(matches!(state, UiState::Settling { .. }));
         if let UiState::Settling { target, .. } = &state {
             assert_eq!(*target, NavTarget::BackToApp);
         }
-        // Tick until settled.
         for _ in 0..500 {
             transition(&mut state, UiEvent::Tick { dt: 1.0 / 90.0 });
             if matches!(state, UiState::App { .. }) {
@@ -987,7 +886,6 @@ mod tests {
                 point: Pt { x: 0.5, y: 0.95 },
             },
         );
-        // Fast upward flick.
         if let UiState::Grabbing { tracker, .. } = &mut state {
             tracker.current = Pt { x: 0.5, y: 0.70 };
             tracker.velocity = Pt { x: 0.0, y: -3.0 };
@@ -996,7 +894,6 @@ mod tests {
         if let UiState::Settling { target, .. } = &state {
             assert_eq!(*target, NavTarget::Home);
         }
-        // Tick until home.
         for _ in 0..500 {
             transition(&mut state, UiEvent::Tick { dt: 1.0 / 90.0 });
             if matches!(state, UiState::Home { .. }) {
@@ -1024,7 +921,6 @@ mod tests {
         }
         transition(&mut state, UiEvent::GrabRelease);
         assert!(matches!(state, UiState::Settling { .. }));
-        // Interrupt mid-settle.
         transition(
             &mut state,
             UiEvent::Interrupt {
@@ -1074,10 +970,7 @@ mod tests {
         assert!(matches!(state, UiState::Home { .. }));
     }
 
-    /// Dismissing a foreground toplevel returns to whatever the caller named as
-    /// next, not Home. This is the portal file chooser case: the picker is its
-    /// own toplevel in its own process, so closing it must hand the screen back
-    /// to the app that asked for it.
+    /// The portal file chooser case: closing it returns to the app that asked.
     #[test]
     fn toplevel_closed_returns_to_previous_app() {
         let mut state = UiState::App {
@@ -1100,7 +993,6 @@ mod tests {
         }
     }
 
-    /// ...but with nothing left alive, Home is still the right answer.
     #[test]
     fn toplevel_closed_without_next_goes_home() {
         let mut state = UiState::App {
@@ -1153,8 +1045,6 @@ mod tests {
         assert!(matches!(state, UiState::Home { .. }));
     }
 
-    // --- Switcher tests ---
-
     #[test]
     fn switcher_preview_release_enters_switcher() {
         let mut state = UiState::App {
@@ -1189,7 +1079,6 @@ mod tests {
             "…by scrolling there, so card 1 slides off"
         );
 
-        // Sole card: nowhere to go, stay on it.
         let mut state = UiState::App {
             toplevel: 1,
             app_id: "a".into(),
@@ -1242,7 +1131,6 @@ mod tests {
                 origin: ZoomOrigin::card((900.0, 1350.0), 0.62),
             },
         );
-        // The app shrinks into the front slot rather than cutting to the deck.
         let UiState::Settling { target, cards, .. } = &state else {
             panic!("expected a settle, got {state:?}");
         };
@@ -1260,8 +1148,6 @@ mod tests {
         panic!("settle never reached the switcher");
     }
 
-    /// The deck must be up fast enough that the first Tab step reads as
-    /// immediate — the step can't be applied until the settle hands over.
     #[test]
     fn super_tab_reaches_the_deck_within_a_few_frames() {
         let mut state = UiState::App {
@@ -1320,21 +1206,18 @@ mod tests {
         assert_eq!(scroll.target, 1.0);
         assert!(scroll.value < 1.0, "it springs there rather than jumping");
 
-        // Repeats accumulate off the target, even mid-flight...
         transition(&mut state, UiEvent::SwitcherStep { delta: 1 });
         let UiState::Switcher { scroll, .. } = &state else {
             panic!("left the switcher");
         };
         assert_eq!(scroll.target, 2.0);
 
-        // ...and the deck is a ring: past the last card, back to the front.
         transition(&mut state, UiEvent::SwitcherStep { delta: 1 });
         let UiState::Switcher { scroll, .. } = &state else {
             panic!("left the switcher");
         };
         assert_eq!(scroll.target, 0.0);
 
-        // Backwards from the front wraps to the last card.
         transition(&mut state, UiEvent::SwitcherStep { delta: -1 });
         let UiState::Switcher { scroll, .. } = &state else {
             panic!("left the switcher");
@@ -1386,7 +1269,6 @@ mod tests {
         assert_eq!(enter.value, 0.0, "deck starts below the bottom edge");
         assert!(state.needs_animation(), "the rise must be ticked");
 
-        // And it settles in place.
         for _ in 0..500 {
             transition(&mut state, UiEvent::Tick { dt: 1.0 / 90.0 });
             if !state.needs_animation() {
@@ -1401,7 +1283,6 @@ mod tests {
 
     #[test]
     fn home_bar_swipe_up_with_one_app_still_opens_the_switcher() {
-        // Regression: a single running app used to leave the bar gesture inert.
         let mut state = UiState::home(0, 1);
         transition(&mut state, UiEvent::OpenSwitcherFromHome { cards: vec![7] });
         assert!(matches!(state, UiState::Switcher { .. }));
@@ -1433,7 +1314,6 @@ mod tests {
             }
         }
         assert!(!state.needs_animation(), "bounce never settled");
-        // A visible but modest lift: a few percent of screen height.
         assert!((0.01..0.08).contains(&peak), "peak lift was {peak}");
         let UiState::Home { bounce, .. } = &state else {
             unreachable!()
@@ -1479,9 +1359,8 @@ mod tests {
             enter: Spring::new(1.0),
             exit_left: false,
         };
-        // Events carry the toplevel id, not a positional index — so the render
-        // z-order and the MRU order can never desync (regression: tapping the
-        // front card used to open the mirrored back card).
+        // Events carry the toplevel id, not a positional index, so z-order and MRU
+        // order can't desync.
         let _eff = transition(
             &mut state,
             UiEvent::SwitcherTapCard {
@@ -1490,8 +1369,6 @@ mod tests {
                 origin: ZoomOrigin::card((600.0, 1350.0), 0.62),
             },
         );
-        // The real app_id from the event must carry through — not a fabricated
-        // `app_{toplevel}` placeholder.
         assert!(matches!(
             &state,
             UiState::AppOpening { toplevel: 3, app_id, .. } if app_id == "org.foo.Bar"
@@ -1537,13 +1414,10 @@ mod tests {
             };
             match close {
                 Some(c) => peak = peak.max(c.progress.value),
-                // Settled and cleared.
                 None => break,
             }
         }
-        // Under-damped: it overshoots rest (upward) before settling...
         assert!(peak > 0.001, "no bounce past rest: peak={peak}");
-        // ...but the bounce stays small — nowhere near the close commit.
         assert!(peak < 0.02, "bounce too big: peak={peak}");
         assert!(
             matches!(&state, UiState::Switcher { close: None, .. }),
@@ -1554,7 +1428,7 @@ mod tests {
     #[test]
     fn fast_downward_release_does_not_dive() {
         let mut c = CardClose::dragging(2, -0.08);
-        c.release(6.0); // flung downward hard
+        c.release(6.0);
         let mut state = UiState::Switcher {
             cards: vec![1, 2, 3],
             scroll: Spring::new(0.0),

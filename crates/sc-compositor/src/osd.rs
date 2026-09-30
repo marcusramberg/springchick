@@ -1,20 +1,13 @@
-//! Volume on-screen display state.
-//!
-//! Holds the last-known volume plus a show timestamp; the render code turns that
-//! into an alpha. Parsing `wpctl` output and the fade curve are pure and tested
-//! here; the actual `wpctl` calls live in `keybinds`.
+//! Volume OSD state. The `wpctl` calls live in `keybinds`.
 
 use std::time::{Duration, Instant};
 
-/// How long the OSD stays fully opaque after a volume change, then how long it
-/// fades out over.
 const HOLD: Duration = Duration::from_millis(1500);
 const FADE: Duration = Duration::from_millis(300);
 
-/// Current volume reading plus when it was last shown.
 #[derive(Clone, Copy, Debug)]
 pub struct Osd {
-    /// 0.0..=~1.5 as reported by wpctl (1.0 = 100%).
+    /// As reported by wpctl, 1.0 = 100%; can exceed 1.
     pub level: f32,
     pub muted: bool,
     shown_at: Option<Instant>,
@@ -35,14 +28,12 @@ impl Osd {
         Osd::default()
     }
 
-    /// Record a fresh reading and (re)start the display timer.
     pub fn show(&mut self, level: f32, muted: bool, now: Instant) {
         self.level = level;
         self.muted = muted;
         self.shown_at = Some(now);
     }
 
-    /// Opacity in `0.0..=1.0`; 0.0 means nothing to draw.
     pub fn alpha(&self, now: Instant) -> f32 {
         let Some(shown_at) = self.shown_at else {
             return 0.0;
@@ -60,16 +51,12 @@ impl Osd {
         }
     }
 
-    /// Whether the OSD still needs to be drawn (and the loop kept awake).
     pub fn is_active(&self, now: Instant) -> bool {
         self.alpha(now) > 0.0
     }
 }
 
-/// Parse `wpctl get-volume @DEFAULT_SINK@` output.
-///
-/// Lines look like `Volume: 0.45` or `Volume: 0.45 [MUTED]`. Returns
-/// `(level, muted)`, or `None` if the line does not match.
+/// Parses `Volume: 0.45` or `Volume: 0.45 [MUTED]`.
 pub fn parse_wpctl_volume(output: &str) -> Option<(f32, bool)> {
     let line = output
         .lines()
@@ -124,7 +111,6 @@ mod tests {
         osd.show(0.5, false, t0);
         assert_eq!(osd.alpha(t0), 1.0);
         assert_eq!(osd.alpha(t0 + Duration::from_millis(1500)), 1.0);
-        // Halfway through the fade.
         let mid = osd.alpha(t0 + Duration::from_millis(1650));
         assert!((0.4..=0.6).contains(&mid), "mid alpha was {mid}");
         assert_eq!(osd.alpha(t0 + Duration::from_millis(1800)), 0.0);

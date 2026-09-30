@@ -1,10 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Pure geometry and hit-testing for the springchick home screen.
-//!
-//! Given output dimensions, a page index, and a `ShellModel`, produces screen-space
-//! rectangles for every icon, dock slot, page-indicator dots, and the bottom bar zone.
-//! Also provides the inverse: `point → Hit`.
+//! Home screen geometry and hit-testing: (output size, page, model) → rects.
 
 pub mod layer;
 pub mod library;
@@ -12,7 +8,7 @@ pub mod menu;
 
 use sc_shell_model::{ShellModel, COLS, DOCK_CAP, ROWS};
 
-/// A rectangle in logical pixels (origin top-left).
+/// Origin top-left.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
     pub x: f32,
@@ -35,104 +31,73 @@ impl Rect {
     }
 }
 
-/// A positioned icon (grid or dock).
 #[derive(Clone, Debug, PartialEq)]
 pub struct IconSlot {
-    /// The app id occupying this slot.
     pub app_id: String,
-    /// Bounding rect for the icon image.
     pub icon_rect: Rect,
-    /// Bounding rect for the label below the icon.
     pub label_rect: Rect,
-    /// Remove-badge rect (arrange mode), centered on the icon's top-left corner.
+    /// Arrange-mode remove badge, centered on the icon's top-left corner.
     pub badge_rect: Rect,
-    /// Running-indicator dot, centered below the label. Drawn only for apps
-    /// that currently have a window; nothing hit-tests against it.
+    /// Running indicator; drawn only, never hit-tested.
     pub dot_rect: Rect,
 }
 
-/// Full layout for one frame of the home screen.
 #[derive(Clone, Debug)]
 pub struct Layout {
-    /// Grid icons on the current page.
     pub grid: Vec<IconSlot>,
-    /// Dock icons (always visible).
     pub dock: Vec<IconSlot>,
-    /// Page indicator dots area.
     pub dots_rect: Rect,
-    /// Bottom bar zone (return-home tap target).
     pub bar_rect: Rect,
-    /// Total page count.
     pub page_count: usize,
-    /// Dock band zone (full-width strip behind the dock icons).
+    /// Full-width strip behind the dock icons.
     pub dock_zone: Rect,
-    /// Arrange-mode "Done" button tap target.
     pub done_button: Rect,
 }
 
 impl Layout {
-    /// Shift the arrange-mode "Done" button down by a top exclusive-zone
-    /// reservation (e.g. an external status bar's exclusive zone) so it isn't
-    /// drawn underneath it. `top_inset` is in the layout's coordinate space
-    /// (physical px). Must be applied identically to the render and hit-test
-    /// paths so the tap target tracks the drawn button.
+    /// Move "Done" below a top exclusive zone (physical px). Apply identically to
+    /// render and hit-test.
     pub fn shift_done_below(&mut self, top_inset: f32) {
         self.done_button.y += top_inset.max(0.0);
     }
 }
 
-/// Result of hit-testing a point against the layout.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Hit {
-    /// Tapped a grid icon.
     GridIcon { app_id: String, index: usize },
-    /// Tapped a dock icon.
     DockIcon { app_id: String, index: usize },
-    /// Tapped the bottom bar zone.
     Bar,
-    /// Tapped a remove-badge on an icon (arrange mode).
     RemoveBadge { app_id: String },
-    /// Tapped the arrange-mode "Done" button.
     DoneButton,
-    /// Missed everything.
     Miss,
 }
 
-// --- Layout constants as fractions of output dimensions ---
+// Fractions of output dimensions.
 
-/// Top padding fraction (status bar area).
+/// Status bar area.
 const TOP_PAD: f32 = 0.04;
-/// Bottom bar height fraction.
 const BAR_HEIGHT: f32 = 0.03;
-/// Home-pill height (logical px), centered in the bottom bar band.
+/// Logical px.
 pub const PILL_HEIGHT: f32 = 8.0;
-/// Dock height fraction (including internal padding).
 const DOCK_HEIGHT: f32 = 0.10;
-/// Dots area height fraction.
 const DOTS_HEIGHT: f32 = 0.02;
-/// Horizontal margin fraction (each side).
+/// Each side.
 const H_MARGIN: f32 = 0.04;
-/// Icon size as fraction of cell width.
+/// Of cell width.
 const ICON_SIZE_FRAC: f32 = 0.62;
-/// Label height as fraction of cell height.
+/// Of cell height.
 const LABEL_HEIGHT_FRAC: f32 = 0.18;
-/// Breathing room between a label and the next row, as a fraction of the
-/// vertical band an icon and its label share.
+/// Gap below a label, as a fraction of the icon+label band.
 const CELL_V_PAD_FRAC: f32 = 0.06;
 
-/// Icon edge that fits both the cell width and the vertical band it shares with
-/// its label.
-///
-/// The width-derived size alone overflows whenever a cell is wider than it is
-/// tall - a 4x6 grid on a portrait phone - and the overflow is silent: the
-/// label lands in the next row's cell and is painted over by that row's icon,
-/// while the centering pushes the icon up into the row above.
+/// Fits both the cell width and the band shared with the label. Width alone
+/// overflows on cells wider than tall (4x6 on a portrait phone), and the
+/// label gets painted over by the next row.
 fn fit_icon_size(cell_w: f32, band_h: f32, label_h: f32) -> f32 {
     let available = band_h - label_h - band_h * CELL_V_PAD_FRAC;
     (cell_w * ICON_SIZE_FRAC).min(available).max(0.0)
 }
 
-/// The bottom home-bar zone rectangle, standalone (no full layout needed).
 pub fn bar_rect(width: f32, height: f32) -> Rect {
     Rect {
         x: 0.0,
@@ -142,15 +107,12 @@ pub fn bar_rect(width: f32, height: f32) -> Rect {
     }
 }
 
-/// Bottom exclusive zone the home gesture bar reserves from apps: twice the
-/// pill's offset from the screen bottom, i.e. the empty gap below + above the
-/// centered pill (`bar_height - pill_height`). Same unit as `height`.
+/// Space the gesture bar reserves from apps: the gap above plus below the
+/// centered pill.
 pub fn gesture_exclusive_zone(height: f32) -> f32 {
     (height * BAR_HEIGHT - PILL_HEIGHT).max(0.0)
 }
 
-/// The home-pill rectangle centered within the bottom bar band. Single source
-/// for the drawn pill and the bar-fade overlap test.
 pub fn pill_in_bar(bar: Rect) -> Rect {
     let pill_w = bar.w * 0.35;
     Rect {
@@ -161,22 +123,13 @@ pub fn pill_in_bar(bar: Rect) -> Rect {
     }
 }
 
-/// The home-pill rectangle for an output of the given size.
 pub fn pill_rect(width: f32, height: f32) -> Rect {
     pill_in_bar(bar_rect(width, height))
 }
 
-/// The home-pill rectangle for a card the pill is riding, given the card's
-/// *drawn* rect (the app's actual pixels, not the nominal card slot) and the
-/// output size.
-///
-/// Same relationship the screen-edge pill has to a fullscreen app — centered on
-/// the app, its own height below the app's bottom edge — scaled down with the
-/// card, so nothing jumps as a card grows back to fullscreen. Anchoring to the
-/// drawn rect is the load-bearing part: the card slot is the whole output
-/// scaled, but the buffer inside it is only the *usable* area, so measuring from
-/// the slot leaves a gap as wide as everything reserved above (a top bar) plus
-/// the gesture zone.
+/// The pill under a card, measured from the card's drawn rect (the app's
+/// pixels, which are only the usable area), scaled with the card so it
+/// doesn't jump as the card returns to fullscreen.
 pub fn pill_under(card: Rect, width: f32, height: f32) -> Rect {
     let scale = if width > 0.0 { card.w / width } else { 1.0 };
     let pill_w = card.w * 0.35;
@@ -188,11 +141,8 @@ pub fn pill_under(card: Rect, width: f32, height: f32) -> Rect {
     }
 }
 
-/// Shared grid-cell geometry, derived once from output dimensions.
 struct GridMetrics {
-    /// Top of the dock band, i.e. the bottom edge of the page-dots band.
     dock_top: f32,
-    /// Top of the page-dots band, i.e. the bottom edge of the icon grid.
     dots_top: f32,
     grid_left: f32,
     grid_top: f32,
@@ -202,9 +152,6 @@ struct GridMetrics {
     label_h: f32,
 }
 
-/// Compute the shared grid-cell metrics for the given output size. Single
-/// source for the numbers used both by `compute` and the standalone
-/// positioning helpers (`global_slot_pos`, `slot_at_center`).
 fn grid_metrics(width: f32, height: f32) -> GridMetrics {
     let dock_top = bar_rect(width, height).y - height * DOCK_HEIGHT;
     let dots_top = dock_top - height * DOTS_HEIGHT;
@@ -233,9 +180,7 @@ fn grid_metrics(width: f32, height: f32) -> GridMetrics {
     }
 }
 
-/// The `IconSlot` for grid cell `index` (0..PAGE_CAP) on the page whose origin
-/// is `x_offset` to the right. Single source for the cell arithmetic shared by
-/// `compute` and the library page.
+/// Cell `index` on the page offset by `x_offset`.
 fn grid_slot(gm: &GridMetrics, index: usize, x_offset: f32, app_id: String) -> IconSlot {
     let col = index % COLS;
     let row = index / COLS;
@@ -262,8 +207,6 @@ fn grid_slot(gm: &GridMetrics, index: usize, x_offset: f32, app_id: String) -> I
     }
 }
 
-/// Remove-badge rect for a given icon rect, centered on its top-left corner.
-/// Single source shared by `compute` and `slot_at_center`.
 fn badge_of(ir: Rect) -> Rect {
     let s = ir.w * 0.34;
     Rect {
@@ -274,14 +217,10 @@ fn badge_of(ir: Rect) -> Rect {
     }
 }
 
-/// Running-dot diameter as a fraction of the icon edge.
 const DOT_SIZE_FRAC: f32 = 0.07;
 
-/// Running-dot rect for an icon and its label: centered on the icon's column
-/// and in the leftover space between the label and `bottom` (the bottom of the
-/// cell, or of the dock band). Shrinks to fit rather than spilling out — the
-/// dock band leaves very little room below its labels on squarish outputs.
-/// Single source shared by `compute` and `slot_at_center`.
+/// Centered between the label and `bottom`; shrinks to fit (the dock band
+/// leaves little room on squarish outputs).
 fn dot_of(icon: Rect, label: Rect, bottom: f32) -> Rect {
     let top = label.y + label.h;
     let space = (bottom - top).max(0.0);
@@ -294,20 +233,15 @@ fn dot_of(icon: Rect, label: Rect, bottom: f32) -> Rect {
     }
 }
 
-/// The global-space center `(x, y)` of the grid slot at `index` on `page`,
-/// for an output of the given size. `page` offsets the position by a full
-/// `width` per page (so it is NOT screen-space — subtract `page_scroll * width`
-/// to get the on-screen position), matching how pages are laid out edge-to-edge
-/// for the reflow/paging animation.
+/// Global space: pages sit edge to edge, one `width` apart. Subtract
+/// `page_scroll * width` for screen space.
 pub fn global_slot_pos(page: usize, index: usize, width: f32, height: f32) -> (f32, f32) {
     let gm = grid_metrics(width, height);
     let icon = grid_slot(&gm, index, page as f32 * width, String::new()).icon_rect;
     (icon.center_x(), icon.center_y())
 }
 
-/// Slot index (0..PAGE_CAP) whose cell is nearest the on-screen point (x, y)
-/// for the currently visible page. Clamps to the grid; callers further clamp
-/// to the page's fill length. `x` is screen-space (0..width), not page-global.
+/// `x` is screen-space. Callers still clamp to the page's fill length.
 pub fn nearest_grid_index(width: f32, height: f32, x: f32, y: f32) -> usize {
     let gm = grid_metrics(width, height);
     let col =
@@ -317,10 +251,7 @@ pub fn nearest_grid_index(width: f32, height: f32, x: f32, y: f32) -> usize {
     row * COLS + col
 }
 
-/// Build a standalone `IconSlot` for `app_id` whose icon is centered at
-/// `(cx, cy)`, using the same icon/label sizing as the grid for an output of
-/// the given size. Used by the reflow animation to place icons in-flight
-/// between grid slots.
+/// Same sizing as the grid, for icons in flight between slots.
 pub fn slot_at_center(app_id: String, cx: f32, cy: f32, width: f32, height: f32) -> IconSlot {
     let gm = grid_metrics(width, height);
     let icon_rect = Rect {
@@ -340,8 +271,6 @@ pub fn slot_at_center(app_id: String, cx: f32, cy: f32, width: f32, height: f32)
         icon_rect,
         label_rect,
         badge_rect: badge_of(icon_rect),
-        // The cell is centered on the icon+label band, so the space left below
-        // the label matches the padding above the icon.
         dot_rect: dot_of(
             icon_rect,
             label_rect,
@@ -350,13 +279,10 @@ pub fn slot_at_center(app_id: String, cx: f32, cy: f32, width: f32, height: f32)
     }
 }
 
-/// Full layout for `page`. `page == model.pages.len()` is the library page: it
-/// has no grid icons of its own (see [`library`]) but keeps the dock, dots and
-/// bar, so the shared chrome comes from here for every page alike.
+/// `page == model.pages.len()` is the library page: no grid, but the same
+/// dock, dots and bar.
 pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layout {
-    // +1 for the library, which is always the last page and is never stored in
-    // the model. Every caller reads its page count from here, so the dots and
-    // the paging clamp pick the extra page up for free.
+    // +1 for the library page, which the model never stores.
     let page_count = model.pages.len().max(1) + 1;
 
     let bar_rect = bar_rect(width, height);
@@ -374,8 +300,6 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
     let usable_width = width * (1.0 - 2.0 * H_MARGIN);
     let grid_left = gm.grid_left;
 
-    // Grid icons. `get` rather than a clamp: the library page (and anything
-    // past it) has no grid of its own.
     let grid = model
         .pages
         .get(page)
@@ -387,7 +311,6 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
         })
         .unwrap_or_default();
 
-    // Dock icons
     let dock_cell_w = usable_width / DOCK_CAP as f32;
     let dock_band_h = height * DOCK_HEIGHT;
     let dock_label_h = dock_band_h * LABEL_HEIGHT_FRAC;
@@ -428,8 +351,7 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
         w: width,
         h: height * DOCK_HEIGHT,
     };
-    // Sits entirely within the top-padding band (above `grid_top`) so it never
-    // overlaps grid icon hit-targets in normal (non-arrange) hit-testing.
+    // Inside the top padding, so it never overlaps grid icons.
     let done_side = width * 0.12;
     let done_button = Rect {
         x: width * (1.0 - H_MARGIN) - done_side,
@@ -449,14 +371,11 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
     }
 }
 
-/// Hit-test a point (logical pixels, origin top-left) against a layout.
 pub fn hit_test(layout: &Layout, x: f32, y: f32) -> Hit {
-    // Bar has highest priority (always-on-top affordance).
     if layout.bar_rect.contains(x, y) {
         return Hit::Bar;
     }
 
-    // Check dock icons.
     for (i, slot) in layout.dock.iter().enumerate() {
         if slot.icon_rect.contains(x, y) || slot.label_rect.contains(x, y) {
             return Hit::DockIcon {
@@ -466,7 +385,6 @@ pub fn hit_test(layout: &Layout, x: f32, y: f32) -> Hit {
         }
     }
 
-    // Check grid icons.
     for (i, slot) in layout.grid.iter().enumerate() {
         if slot.icon_rect.contains(x, y) || slot.label_rect.contains(x, y) {
             return Hit::GridIcon {
@@ -479,8 +397,7 @@ pub fn hit_test(layout: &Layout, x: f32, y: f32) -> Hit {
     Hit::Miss
 }
 
-/// Hit-test in arrange mode. Checks Done + remove-badges (which overlap icons)
-/// BEFORE falling through to normal icon/bar/miss testing.
+/// Done and badges overlap icons, so they're checked first.
 pub fn hit_test_arrange(layout: &Layout, x: f32, y: f32) -> Hit {
     if layout.done_button.contains(x, y) {
         return Hit::DoneButton;
@@ -500,8 +417,6 @@ mod tests {
     #[test]
     fn the_pill_meets_a_fullscreen_card_exactly_where_the_screen_pill_sits() {
         let (w, h) = (1224.0, 2700.0);
-        // A fullscreen app fills the usable area: the whole output minus the
-        // gesture zone it reserves at the bottom.
         let app = Rect {
             x: 0.0,
             y: 0.0,
@@ -510,15 +425,12 @@ mod tests {
         };
         let under = pill_under(app, w, h);
         let screen = pill_rect(w, h);
-        // Continuity: a card settling back to fullscreen must not make the pill
-        // hop, so the two placements have to agree at scale 1.
+        // Must agree with the screen-edge pill at scale 1.
         assert!((under.x - screen.x).abs() < 0.01, "{under:?} vs {screen:?}");
         assert!((under.y - screen.y).abs() < 0.01, "{under:?} vs {screen:?}");
         assert!((under.w - screen.w).abs() < 0.01);
         assert!((under.h - screen.h).abs() < 0.01);
 
-        // Half-size card: everything about the pill halves with it, including
-        // the gap below the card's own pixels.
         let half = Rect {
             x: 100.0,
             y: 200.0,
@@ -545,14 +457,13 @@ mod tests {
         m
     }
 
-    /// Every output size a phone might hand us, portrait and landscape.
     const SIZES: &[(f32, f32)] = &[
         (1224.0, 2700.0), // Fairphone 5, portrait
-        (1901.0, 2088.0), // nested winit window
-        (2700.0, 1224.0), // rotated
+        (1901.0, 2088.0),
+        (2700.0, 1224.0),
         (720.0, 1440.0),
         (1080.0, 1080.0),
-        (400.0, 800.0), // small
+        (400.0, 800.0),
     ];
 
     #[test]
@@ -565,8 +476,7 @@ mod tests {
         for &(w, h) in SIZES {
             let l = compute(w, h, 0, &m);
             for (i, slot) in l.grid.iter().enumerate() {
-                // The icon and its label share one cell: the label must end
-                // before the next row's icon begins, or it is painted over.
+                // The label must end before the next row's icon.
                 if let Some(below) = l.grid.get(i + COLS) {
                     let label_bottom = slot.label_rect.y + slot.label_rect.h;
                     assert!(
@@ -601,8 +511,6 @@ mod tests {
                     "{w}x{h}: slot {i} dot overlaps its label"
                 );
             }
-            // The dock band is the tightest fit: its dot must not spill past the
-            // bottom of the band into the home bar.
             for slot in &l.dock {
                 let dot_bottom = slot.dot_rect.y + slot.dot_rect.h;
                 assert!(
@@ -610,7 +518,6 @@ mod tests {
                     "{w}x{h}: dock dot ends at {dot_bottom}, past the dock band"
                 );
             }
-            // On the grid, the dot lives in the same cell as its icon.
             for (i, slot) in l.grid.iter().enumerate() {
                 if let Some(below) = l.grid.get(i + COLS) {
                     let dot_bottom = slot.dot_rect.y + slot.dot_rect.h;
@@ -643,7 +550,6 @@ mod tests {
             );
             assert!(gm.icon_size > 0.0, "{w}x{h}: icon collapsed to nothing");
 
-            // Centering must not push the first row above the grid either
             let l = compute(w, h, 0, &m);
             for slot in &l.grid {
                 assert!(
@@ -683,7 +589,7 @@ mod tests {
         let l = compute(1224.0, 2700.0, 0, &m);
         assert_eq!(l.grid.len(), 6);
         assert_eq!(l.dock.len(), 2);
-        assert_eq!(l.page_count, 2); // one user page + the library
+        assert_eq!(l.page_count, 2);
     }
 
     #[test]
@@ -702,7 +608,6 @@ mod tests {
     fn hit_test_bar() {
         let m = sample_model();
         let l = compute(1224.0, 2700.0, 0, &m);
-        // Bottom center should hit bar
         let hit = hit_test(&l, 612.0, 2690.0);
         assert_eq!(hit, Hit::Bar);
     }
@@ -711,7 +616,6 @@ mod tests {
     fn hit_test_grid_icon() {
         let m = sample_model();
         let l = compute(1224.0, 2700.0, 0, &m);
-        // Center of first icon
         let slot = &l.grid[0];
         let cx = slot.icon_rect.center_x();
         let cy = slot.icon_rect.center_y();
@@ -746,7 +650,6 @@ mod tests {
     fn hit_test_miss() {
         let m = sample_model();
         let l = compute(1224.0, 2700.0, 0, &m);
-        // Top-left corner should be a miss (top padding area)
         let hit = hit_test(&l, 5.0, 5.0);
         assert_eq!(hit, Hit::Miss);
     }
@@ -758,7 +661,7 @@ mod tests {
             m.place(format!("app{i}"));
         }
         let l = compute(1224.0, 2700.0, 0, &m);
-        assert_eq!(l.page_count, 3); // two user pages + the library
+        assert_eq!(l.page_count, 3);
     }
 
     #[test]
@@ -768,7 +671,7 @@ mod tests {
             m.place(format!("app{i}"));
         }
         let l = compute(1224.0, 2700.0, 1, &m);
-        assert_eq!(l.grid.len(), 6); // 30 - 24 = 6 on page 2
+        assert_eq!(l.grid.len(), 6);
         assert_eq!(l.grid[0].app_id, "app24");
     }
 
@@ -778,7 +681,7 @@ mod tests {
         let l = compute(1224.0, 2700.0, 0, &m);
         assert!(l.grid.is_empty());
         assert!(l.dock.is_empty());
-        assert_eq!(l.page_count, 2); // the empty home page + the library
+        assert_eq!(l.page_count, 2);
     }
 
     #[test]
@@ -788,9 +691,8 @@ mod tests {
         m.dock.push("d".into());
         let l = compute(1224.0, 2700.0, 1, &m); // page 1 == the library
         assert!(l.grid.is_empty());
-        assert_eq!(l.dock.len(), 1); // dock chrome stays
+        assert_eq!(l.dock.len(), 1);
         assert_eq!(l.page_count, 2);
-        // Past the library there is nothing at all, and no panic.
         assert!(compute(1224.0, 2700.0, 99, &m).grid.is_empty());
     }
 

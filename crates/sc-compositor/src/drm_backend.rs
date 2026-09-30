@@ -1,10 +1,5 @@
-//! DRM/KMS device backend (M4).
-//!
-//! Runs the compositor on real hardware via libseat/logind + udev/DRM/GBM +
-//! libinput, on its own calloop event loop, frame-paced by page-flip. The
-//! render itself is the shared [`crate::render::draw_scene`] — this module only
-//! provides the bind/submit primitives (Approach A). See
-//! `docs/superpowers/specs/2026-06-27-springchick-m4-device-backend-perf.md`.
+//! DRM/KMS backend: libseat + udev/DRM/GBM + libinput on calloop, paced by
+//! page-flip. Rendering is the shared [`crate::render::draw_scene`].
 
 use std::os::fd::AsFd;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,11 +44,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::{accept_client, create_display, State};
 
-/// Per-frame user data threaded through the GBM swapchain page-flip.
 type FlipData = ();
 
-/// What one composited frame hands the presenting code: the KMS damage hint,
-/// and the presentation feedback owed to the clients drawn into it.
+/// The KMS damage hint and the presentation feedback owed for the frame.
 type DrawnFrame = (
     Vec<Rectangle<i32, Physical>>,
     Vec<PresentationFeedbackCallback>,
@@ -63,52 +56,37 @@ struct Drm {
     device: DrmDevice,
     gbm_surface: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, FlipData>,
     renderer: GlesRenderer,
-    /// GBM device, kept so a hotplugged external display can get its own
-    /// swapchain without re-opening the node.
+    /// Kept for hotplugged displays' swapchains.
     gbm: GbmDevice<DrmDeviceFd>,
-    /// Every *other* connected connector, mirroring the primary. See
-    /// [`crate::mirror`]. Empty on a phone with nothing plugged in, which is
-    /// the path that must stay free of extra work.
+    /// See [`crate::mirror`]. Empty on a bare phone, which must stay free of
+    /// extra work.
     mirrors: Vec<crate::mirror::MirrorOutput>,
-    /// Rounded-corner texture program, compiled once, passed to `draw_scene`.
     rounded_tex_shader: GlesTexProgram,
     output_size: Size<i32, Physical>,
     transform: Transform,
-    /// Set false while a VT-switch has us deactivated.
+    /// False while VT-switched away.
     active: bool,
-    /// True while a page-flip is in flight (waiting on vblank).
     pending_flip: bool,
-    /// Presentation feedback for the frame currently in flight, answered from
-    /// the vblank that scans it out (see [`crate::presentation`]). Empty
-    /// whenever no flip is pending.
+    /// Answered from the vblank that scans it out. Empty when no flip is pending.
     pending_presentation: Vec<PresentationFeedbackCallback>,
-    /// Refresh rate of the scanout mode in mHz, reported to clients alongside
-    /// each presentation timestamp so they can pace to the panel.
     refresh_mhz: i32,
-    /// DRM node fd, kept for DPMS toggling (blanking).
     device_fd: DrmDeviceFd,
-    /// The connector we scan out to, and its `DPMS` property handle if the
-    /// driver exposes one. `None` means blanking falls back to freezing.
+    /// `None` means blanking falls back to freezing the last frame.
     connector: connector::Handle,
     dpms_prop: Option<property::Handle>,
-    /// The CRTC driving the connector, for gamma-LUT programming.
     crtc: crtc::Handle,
-    /// The CRTC gamma table captured at startup, restored when a gamma-control
-    /// client releases the output. `None` if the CRTC has no gamma LUT.
+    /// Restored when a gamma client releases. `None` if the CRTC has no LUT.
     orig_gamma: Option<[Vec<u16>; 3]>,
-    /// libseat session. Declared last so it drops *after* the DrmDevice releases
-    /// the master and the renderer/surface tear down — closing the seat before
-    /// the device is released can leave the handoff in a bad state.
+    /// Declared last so it drops after the DrmDevice releases master; closing
+    /// the seat first can wedge the handoff.
     _session: LibSeatSession,
 }
 
-/// DPMS levels, per `drm_mode.h`. Off (3) disables the pipe and powers the
-/// panel down; On (0) restores it.
+/// Per `drm_mode.h`.
 const DPMS_ON: property::RawValue = 0;
 const DPMS_OFF: property::RawValue = 3;
 
 impl Drm {
-    /// Drive one connector's DPMS property. No-op if the driver exposes none.
     fn set_connector_dpms(
         &self,
         conn: connector::Handle,
@@ -122,26 +100,22 @@ impl Drm {
         }
     }
 
-    /// Power the phone panel on or off.
     fn set_primary_dpms(&self, on: bool) {
         self.set_connector_dpms(self.connector, self.dpms_prop, on);
     }
 
-    /// Power every external panel on or off.
     fn set_mirror_dpms(&self, on: bool) {
         for m in &self.mirrors {
             self.set_connector_dpms(m.connector, m.dpms, on);
         }
     }
 
-    /// Whether an external display is attached, i.e. whether blanking the phone
-    /// leaves something on screen that still needs frames.
+    /// Blanking the phone still leaves something needing frames.
     fn mirroring(&self) -> bool {
         !self.mirrors.is_empty()
     }
 }
 
-/// Find the `DPMS` property handle on a connector, if the driver exposes it.
 pub fn find_dpms_prop(
     device: &DrmDeviceFd,
     connector: connector::Handle,
@@ -155,26 +129,13 @@ pub fn find_dpms_prop(
     })
 }
 
-/// Entry point for the DRM backend. Selected by `SPRINGCHICK_BACKEND=drm`.
 pub fn run_drm() {
     if let Err(e) = run() {
         error!("DRM backend error: {e}");
     }
 }
 
-/// Open the DRM node through the session, retrying on transient failure.
-///
-/// At login the previous session's compositor (the greeter) may still hold the
-/// DRM master when we start. logind then refuses to hand us the device fd —
-/// `session.open` fails with EPERM (`Operation not permitted`) — until it
-/// finishes deactivating that session and activating ours on the seat. Without a
-/// retry this aborts the compositor at login and drops the user back to the
-/// greeter, which on the phone reads as a reboot. Retry a bounded number of
-/// times with a short backoff so the handover can complete; after that, give up
-/// and surface the last error.
-/// Open a render node directly. Render nodes carry no modeset state and need no
-/// DRM master, so -- unlike the scanout device -- they can be opened without
-/// going through libseat.
+/// Render nodes need no DRM master, so they can be opened without libseat.
 fn open_render_node(
     path: &std::path::Path,
 ) -> Result<std::os::fd::OwnedFd, Box<dyn std::error::Error>> {
@@ -183,10 +144,9 @@ fn open_render_node(
     Ok(open(path, flags, Mode::empty())?)
 }
 
-/// Pick the render node to run GL on: the render node of a GPU that is *not* the
-/// scanout device. On this SoC that is panthor -- the DECON (scanout) has no 3D
-/// engine, so an EGL context on it is llvmpipe. Returns `None` when the only GPU
-/// is the scanout device (the winit host case), where the caller renders on it.
+/// A GPU that isn't the scanout device (on the FP5 the DECON has no 3D
+/// engine, so EGL there is llvmpipe). `None` when the scanout device is the
+/// only GPU.
 fn pick_render_node(seat: &str, scanout: &DrmDeviceFd) -> Option<std::path::PathBuf> {
     let scanout_node = DrmNode::from_file(scanout).ok()?;
     for card in udev::all_gpus(seat).ok()? {
@@ -195,7 +155,7 @@ fn pick_render_node(seat: &str, scanout: &DrmDeviceFd) -> Option<std::path::Path
             Err(_) => continue,
         };
         if node.dev_id() == scanout_node.dev_id() {
-            continue; // the display controller, no 3D engine
+            continue;
         }
         if let Some(render) = node.dev_path_with_type(NodeType::Render) {
             return Some(render);
@@ -204,6 +164,9 @@ fn pick_render_node(seat: &str, scanout: &DrmDeviceFd) -> Option<std::path::Path
     None
 }
 
+/// Retries: at login the greeter may still hold DRM master and logind
+/// answers EPERM until the handover finishes. Aborting there drops the user
+/// back to the greeter.
 fn open_drm_node(
     session: &mut LibSeatSession,
     path: &std::path::Path,
@@ -233,24 +196,19 @@ fn open_drm_node(
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut event_loop: EventLoop<'static, App> = EventLoop::try_new()?;
 
-    // --- Session (DRM master + input perms from logind on the active VT) ---
     let (mut session, session_notifier) = LibSeatSession::new()?;
     let seat_name = session.seat();
     info!(seat = %seat_name, "libseat session acquired");
 
-    // --- Pick the scanout GPU (the display controller) ---
     let gpu_path = udev::primary_gpu(&seat_name)?.ok_or("no primary GPU found")?;
     info!(path = ?gpu_path, "scanout GPU");
 
-    // --- Open the DRM node through the session ---
     let fd = open_drm_node(&mut session, &gpu_path)?;
     let device_fd = DrmDeviceFd::new(DeviceFd::from(fd));
 
-    // --- DRM device + scanout GBM ---
     let (mut drm_device, drm_notifier) = DrmDevice::new(device_fd.clone(), true)?;
     let gbm = GbmDevice::new(device_fd.clone())?;
 
-    // --- Render GPU + EGL + GLES renderer ---
     let render_gbm = match pick_render_node(&seat_name, &device_fd) {
         Some(path) => {
             info!(?path, "render GPU");
@@ -268,13 +226,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
     let rounded_tex_shader = crate::render::compile_rounded_tex_shader(&mut renderer)?;
 
-    // --- Find a connected connector + crtc + preferred mode ---
     let (connector_handle, crtc_handle, mode) = find_output(&drm_device)?;
     let (mw, mh) = mode.size();
     let output_size: Size<i32, Physical> = (mw as i32, mh as i32).into();
     info!(w = mw, h = mh, "selected mode");
 
-    // --- Scanout surface (GBM double-buffered, page-flip on vblank) ---
     let drm_surface = drm_device.create_surface(crtc_handle, mode, &[connector_handle])?;
     let allocator = GbmAllocator::new(
         gbm.clone(),
@@ -288,30 +244,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         render_formats,
     )?;
 
-    // --- Wayland display + shell State ---
     let (display, listener, socket_name) = create_display()?;
-    // Session backend: publish to systemd/dbus so user services (e.g. wvkbd)
-    // can reach our socket.
+    // Publish to systemd/dbus so user services (wvkbd) find our socket.
     crate::publish_wayland_display(&socket_name, true);
     let mut state = State::new(&display, socket_name, (output_size.w, output_size.h));
-    state.perf_log = true; // perf logging is the point of this backend
-                           // Nothing else draws a cursor on bare KMS. (Nested under winit the host
-                           // compositor draws its own over the window, so that backend leaves this off
-                           // rather than showing two.)
+    state.perf_log = true;
+    // Nothing else draws a cursor on bare KMS.
     state.cursor_overlay = true;
 
-    // Variable refresh: with render-on-demand the panel otherwise keeps scanning
-    // out at the mode's rate over a frozen frame. Enabling VRR lets it stretch
-    // its own vblank interval when we stop flipping, and present a flip as soon
-    // as it lands instead of at the next fixed vblank.
+    // With render-on-demand the panel would keep scanning out a frozen frame at
+    // the mode's rate; VRR lets it stretch the vblank.
     match gbm_surface.vrr_supported(connector_handle) {
         Ok(VrrSupport::NotSupported) => info!("connector does not support VRR"),
         Ok(support) => {
             info!(?support, want = state.vrr, "connector supports VRR");
             if state.vrr {
                 // `RequiresModeset` only stages it; the modeset rides the first
-                // `queue_buffer`, which commits instead of page-flipping while
-                // pending state differs.
+                // `queue_buffer`.
                 match gbm_surface.use_vrr(true) {
                     Ok(()) => info!("VRR enabled"),
                     Err(e) => warn!("enabling VRR failed: {e}"),
@@ -320,24 +269,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => warn!("VRR probe failed: {e}"),
     }
-    // Advertise zwp_linux_dmabuf so GL clients (GTK4, etc.) share buffers
-    // zero-copy instead of falling back to slow shm software upload. Passing the
-    // main device binds version 4 with default feedback, which wl-screenrec
-    // requires to allocate capture buffers.
-    // Advertise the render node (panthor) as the main device: GL clients should
-    // allocate buffers there so our renderer imports them zero-copy, not on the
-    // display controller.
+    // The render node (panthor) is the main device, so clients allocate where
+    // we import zero-copy. v4 feedback is required by wl-screenrec.
     let main_device = render_node.map(|n| n.dev_id());
     state.init_dmabuf_global(&display.handle(), renderer.dmabuf_formats(), main_device);
 
-    // Control/IPC socket (`springchick ipc …`), same as the winit backend.
-    // Always listening; carries the debug-input gestures the VM tests drive too.
     let debug_chan = crate::debug_input::spawn_listener(state.panel_size);
     let catalog_dirty = crate::catalog_watch::spawn();
 
-    // Screencopy dmabuf constraints: the render node + format/modifier set a
-    // recorder must allocate its capture buffers with, so we can blit into them
-    // zero-copy. Falls back to shm-only if the node can't be resolved.
+    // Recorders allocate capture buffers against this; shm-only without a node.
     if let Some(node) = render_node {
         let cap_node = node
             .node_with_type(NodeType::Render)
@@ -346,15 +286,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         state.capture_formats = Some((cap_node, group_formats(renderer.dmabuf_formats())));
     }
 
-    // Look up the connector's DPMS property so power-short can truly blank the
-    // panel (disabling scanout) rather than freezing the last frame.
+    // DPMS really blanks; without it we can only freeze the last frame.
     let dpms_prop = find_dpms_prop(&device_fd, connector_handle);
     if dpms_prop.is_none() {
         warn!("connector exposes no DPMS property; blanking will freeze, not power off");
     }
 
-    // wlr-gamma-control: advertise the real CRTC LUT size and snapshot the
-    // current ramp so we can restore it when a client releases control.
+    // Snapshot the ramp to restore when a client releases control.
     let gamma_size = device_fd
         .get_crtc(crtc_handle)
         .map(|info| info.gamma_length())
@@ -366,8 +304,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         warn!("CRTC exposes no gamma LUT; gamma-control uploads will be ignored");
     }
 
-    // Any additional connected connector mirrors the panel from the first
-    // frame; hotplug after this is handled by the udev source below.
+    // Later hotplug is handled by the udev source.
     let mut mirrors = Vec::new();
     crate::mirror::refresh(
         &mut mirrors,
@@ -387,10 +324,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         renderer,
         rounded_tex_shader,
         output_size,
-        // App-window output transform. The DRM/GBM scanout buffer is itself
-        // vertically flipped vs winit's framebuffer (hence Skia needs flip_y),
-        // so the wayland surface composites correct with Normal here while the
-        // Skia home/bar gets flip_y. Confirmed on-device 2026-06-27.
+        // The GBM scanout buffer is Y-flipped vs winit's framebuffer, so apps
+        // composite with Normal while Skia gets flip_y.
         transform: Transform::Normal,
         active: true,
         pending_flip: false,
@@ -402,13 +337,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         crtc: crtc_handle,
         orig_gamma,
     };
-    // The key path reads this to decide whether a blanked phone panel means the
-    // session is asleep or merely that the user is watching the other screen.
+    // A blanked phone panel with a mirror isn't asleep; the key path needs this.
     state.external_display = drm.mirroring();
 
-    // Duplicate the wayland fds before `display`/`listener` move into `app`, so
-    // both can be registered as calloop sources below. Without these the loop
-    // has no way to learn about client traffic and has to poll for it.
+    // Dup before `display`/`listener` move into `app`, so client traffic can
+    // wake the loop instead of being polled.
     let display_fd = display
         .as_fd()
         .try_clone_to_owned()
@@ -427,16 +360,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         clock: Clock::new(),
     };
 
-    // --- calloop sources ---
+    // calloop sources
 
     // 1. DRM page-flip events.
     event_loop
         .handle()
         .insert_source(drm_notifier, |event, meta, app| match event {
             DrmEvent::VBlank(crtc) => {
-                // A mirror's vblank normally only releases its own buffer —
-                // mirrors are driven by the primary's render, never the other
-                // way round.
+                // A mirror's vblank only releases its own buffer; mirrors follow the
+                // primary.
                 if crtc != app.drm.crtc {
                     if let Some(m) = app.drm.mirrors.iter_mut().find(|m| m.crtc == crtc) {
                         if let Err(e) = m.surface.frame_submitted() {
@@ -444,10 +376,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         m.pending_flip = false;
                     }
-                    // ...except while the phone panel is blanked. Then the
-                    // primary CRTC is powered down and issues no vblank at all,
-                    // so the external display's own vblank is the only clock
-                    // left to carry the next frame.
+                    // Except while the phone is blanked: its CRTC issues no vblank, so the
+                    // mirror's is the only clock.
                     if app.state.blank.is_blanked() && app.state.is_animating(Instant::now()) {
                         app.render();
                     }
@@ -458,11 +388,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 app.drm.pending_flip = false;
                 app.present_feedback(meta.take());
-                // Only re-prime a flip if something is still changing. On a
-                // static screen (idle home, quiescent app) this lets the vblank
-                // loop stop instead of rendering every frame forever — the idle
-                // CPU cost was ~60% of one core on-device. A commit/input/
-                // animation start re-arms via `needs_render` in the 2ms timeout.
+                // Only re-prime while something changes, so a static screen lets the loop
+                // stop (idle cost was ~60% of a core). `needs_render` re-arms it.
                 if app.state.is_animating(Instant::now()) {
                     app.render();
                 }
@@ -471,7 +398,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(|e| format!("insert drm source: {e}"))?;
 
-    // 2. libinput touch + keyboard.
+    // 2. libinput.
     let mut libinput =
         Libinput::new_with_udev(LibinputSessionInterface::from(app.drm._session.clone()));
     libinput
@@ -485,9 +412,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(|e| format!("insert libinput source: {e}"))?;
 
-    // 3. udev: display hotplug. A connector coming or going on our GPU raises a
-    // `Changed` event for the node; anything else on the seat is ignored. The
-    // rescan is cheap and idempotent, so a spurious event costs nothing.
+    // 3. udev display hotplug on our GPU. The rescan is idempotent.
     let gpu_dev_id = device_fd.dev_id().ok();
     let udev_backend = udev::UdevBackend::new(&seat_name).map_err(|e| format!("udev: {e}"))?;
     event_loop
@@ -502,7 +427,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(|e| format!("insert udev source: {e}"))?;
 
-    // 4. Session activate/deactivate (VT-switch).
+    // 4. Session activate/deactivate (VT switch).
     event_loop
         .handle()
         .insert_source(session_notifier, |event, _, app| match event {
@@ -524,8 +449,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(|e| format!("insert session source: {e}"))?;
 
-    // 5. Wayland client traffic. Registering these means an idle compositor
-    //    sleeps until a client actually says something, instead of waking to ask.
+    // 5. Client traffic, so an idle compositor sleeps.
     event_loop
         .handle()
         .insert_source(
@@ -537,7 +461,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
         .map_err(|e| format!("insert wayland display source: {e}"))?;
 
-    // 6. New client connections on the listening socket.
+    // 6. New client connections.
     event_loop
         .handle()
         .insert_source(
@@ -549,12 +473,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
         .map_err(|e| format!("insert wayland listener source: {e}"))?;
 
-    // 7. Pre-suspend blanking. logind holds the suspend off until we ack, so the
-    //    DPMS-off lands before the machine goes down and `Blank` still describes
-    //    the panel on the other side — which is what makes the press that wakes
-    //    the machine read as a wake instead of firing `toggle-display` and
-    //    blanking the screen the user just woke. Absent (no bus, no logind) is a
-    //    normal state: the panel simply does not blank before sleep.
+    // 7. Pre-suspend blanking; see `sleep`. Absent without logind.
     if let Some(sleep) = crate::sleep::spawn() {
         let acks = sleep.acks;
         event_loop
@@ -566,14 +485,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ) {
                     return;
                 }
-                // Blank here rather than leaving it to the loop body below: the
-                // ack releases the inhibitor, so the commit has to have happened
-                // by the time we send it.
+                // Blank here: the ack releases the inhibitor, so the commit must be done.
                 app.state.blank.set(true);
                 app.apply_blanking();
-                // Everything goes dark for a suspend, external displays
-                // included: an attached panel keeps its frames while the *phone*
-                // blanks, but the whole machine is about to stop rendering.
+                // Everything goes dark for suspend, external displays included.
                 app.drm.set_mirror_dpms(false);
                 for m in &mut app.drm.mirrors {
                     m.pending_flip = false;
@@ -584,30 +499,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     info!("entering DRM frame loop");
-    // Kick off the first frame.
     app.render();
 
-    // Tell systemd we're up: DRM output live, first frame on screen, wayland
-    // socket accepting. springchick.service is Type=notify and
-    // BindsTo+Before graphical-session.target, so this READY is what pulls
-    // that target active (it has RefuseManualStart=yes and cannot be started
-    // by hand). Downstream user services that gate on an active graphical
-    // session — xdg-desktop-portal-*, the OSK — only come up after this.
-    // No-ops when NOTIFY_SOCKET is unset (bare VT launch), so it is harmless
-    // outside the service.
+    // READY pulls graphical-session.target active (Type=notify, BindsTo); the
+    // portals and OSK wait on it. No-op without NOTIFY_SOCKET.
     if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
         warn!(%e, "sd_notify READY failed");
     }
 
-    // Graceful shutdown: catch SIGTERM (systemd stop, e.g. nixos-rebuild) and
-    // SIGINT (Ctrl-C on a bare VT launch), stop the loop, and tear down the DRM
-    // output cleanly below. Without this the process is SIGKILL'd mid-modeset,
-    // which can leave the msm DPU / Adreno GMU wedged so the *next* compositor's
-    // DrmDevice::new hard-resets the device at login.
+    // Tear down cleanly on SIGTERM/SIGINT. A SIGKILL mid-modeset can wedge the
+    // msm DPU / Adreno GMU so the next compositor hard-resets the device.
     let signals =
         Signals::new(&[Signal::SIGTERM, Signal::SIGINT]).map_err(|e| format!("signals: {e}"))?;
-    // Dispatched manually below rather than via `EventLoop::run`, so the stop
-    // request needs its own flag instead of `LoopSignal::stop`.
+    // Dispatched manually, so the stop needs its own flag.
     let running = Arc::new(AtomicBool::new(true));
     let stop = running.clone();
     event_loop
@@ -618,26 +522,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(|e| format!("insert signals source: {e}"))?;
 
-    // Wayland traffic, input, udev and page-flips are all event sources now, so
-    // the timeout only paces the housekeeping polls below. While animating it
-    // stays tight, because the `is_animating` render at the bottom is what
-    // primes a frame when no page-flip is in flight and a 50ms gap there would
-    // be a visible stutter. Idle, nothing needs that: the long-press threshold
-    // and the idle-blank countdown are decided on timescales where 50ms is
-    // invisible, and polling faster than that only burns battery. See
-    // `active_tick` for why a dark panel is idle regardless of `is_animating`.
+    // Everything is an event source; the timeout only paces housekeeping. Tight
+    // while animating (the render at the bottom primes frames when no flip is
+    // in flight), 50ms idle to save battery. See `active_tick`.
     const ACTIVE_TIMEOUT: Duration = Duration::from_millis(2);
     const IDLE_TIMEOUT: Duration = Duration::from_millis(50);
 
-    // Scheduler utilization floor for this thread, which is the render thread.
+    // This is the render thread.
     let mut uclamp = crate::uclamp::Uclamp::new(app.state.uclamp_min);
 
     while running.load(Ordering::Relaxed) && app.state.running {
-        // Dark with no mirror means no target to present to, so nothing
-        // `is_animating` reports can be made visible — and since `render`
-        // returns before `advance_frame` in that state, anything unsettled when
-        // the panel went off never advances again and would pin the 2ms timeout
-        // for as long as the screen is dark.
         let timeout = if active_tick(
             app.state.blank.is_blanked(),
             app.drm.mirroring(),
@@ -652,15 +546,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
-        // Drain the debug-input socket (dev harness) before housekeeping so a
-        // synthetic gesture takes effect this tick. `is_animating` reports true
-        // while one is in flight, so the render below keeps advancing it.
+        // Before housekeeping so a synthetic gesture lands this tick.
         if let Some(chan) = &debug_chan {
             crate::debug_input::drain(&mut app.state, chan);
         }
-        // Long presses are polled here, not in `render`: page-flips stop when
-        // nothing animates, so a frame-driven poll would never fire on an idle
-        // screen.
+        // Long presses are polled here: page-flips stop on an idle screen.
         if crate::catalog_watch::take(&catalog_dirty) {
             app.state.reload_catalog();
         }
@@ -668,39 +558,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         app.state.poll_launching();
         app.state.drain_sensor();
         app.state.sync_keyboard_focus();
-        // Idle-blank once the timeout elapses. Reuses the power-button DPMS-off
-        // path; a power-button press wakes it and resets the countdown (input
-        // routes through handle_input → idle.activity).
-        // A visible surface holding a zwp_idle_inhibitor (video playback) keeps
-        // the screen on and holds off client idle notifications alike.
+        // An idle inhibitor (video) keeps the screen on and holds off client idle.
         let inhibited = app.state.is_idle_inhibited();
         if inhibited {
-            // Keep the countdown fresh rather than merely skipping the check, so
-            // the screen doesn't blank the instant the inhibitor is released.
+            // Keep the countdown fresh so it doesn't blank the moment the inhibitor goes.
             app.state.idle.activity(Instant::now());
         } else if app.state.idle.should_blank(Instant::now()) && !app.state.blank.is_blanked() {
             app.state.blank.toggle();
         }
-        // ext-idle-notify timeouts: same poll, client-driven timeouts.
         app.state.idle_notify.refresh(Instant::now(), inhibited);
-        // Tell a wlr-output-power client about a blank it did not ask for (the
-        // power key, the idle timeout) before the panel acts on it.
+        // Tell a wlr-output-power client about blanks it didn't cause.
         let blanked = app.state.blank.is_blanked();
         app.state.output_power.sync(blanked);
         app.apply_blanking();
-        // After the panel is actually off: a lock engaged while dark gets no
-        // frame to confirm from.
+        // A lock engaged while dark gets no frame to confirm from.
         if blanked && !app.drm.mirroring() {
             app.state.session_lock.confirm_dark();
         }
         app.apply_gamma();
-        // Drive frames that no vblank is priming: a fresh commit/input
-        // (`needs_render`) or an animation that started on an otherwise idle
-        // screen. `render` early-returns on pending_flip, so once a flip is in
-        // flight the vblank handler carries the animation and this is a no-op.
-        // Raise the floor before rendering, not after: applying it a frame late
-        // would miss the first frame of a touch, which is the slowest one and
-        // the whole reason this exists.
+        // Frames no vblank is priming. Raise the uclamp floor before rendering so
+        // the first frame of a touch benefits.
         let now = Instant::now();
         let drawing = app.state.is_animating(now);
         uclamp.update(drawing, now);
@@ -708,53 +585,39 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             app.render();
         }
 
-        // Flush last, and unconditionally: the render above is what emits frame
-        // callbacks, and the housekeeping emits configures, so flushing before
-        // them would leave a client waiting on a callback stalled until the next
-        // wake — up to a full idle timeout away.
+        // Flush last: the render emits frame callbacks and housekeeping emits
+        // configures; flushing earlier stalls clients until the next wake.
         app.display.flush_clients().ok();
     }
 
-    // Loop stopped by SIGTERM/SIGINT: restore DRM state, then let `app` drop —
-    // which tears down the renderer, surface, DrmDevice (releases the master)
-    // and finally the libseat session, in that order.
+    // Drop order: renderer, surface, DrmDevice (master), then the seat.
     app.shutdown();
 
     Ok(())
 }
 
-/// Whether the event loop should run at its tight timeout.
-///
-/// Dark with no mirror means no target to present to, so nothing `is_animating`
-/// reports can be made visible — and `render` returns before `advance_frame` in
-/// that state, so anything unsettled when the panel went off never advances
-/// again and would otherwise pin the tight timeout until the screen came back.
+/// Dark with no mirror: nothing can be shown, and `render` returns before
+/// `advance_frame`, so unsettled animations would pin the tight timeout.
 fn active_tick(blanked: bool, mirroring: bool, animating: bool) -> bool {
     animating && (!blanked || mirroring)
 }
 
-/// Aggregate owned by the calloop loop.
 struct App {
     state: State,
     drm: Drm,
     display: Display<State>,
     listener: ListeningSocket,
     last_frame: Instant,
-    /// Monotonic clock for screencopy frame presentation timestamps.
     clock: Clock<Monotonic>,
 }
 
 impl App {
-    /// Restore DRM state before the compositor exits, so the greeter / next
-    /// compositor inherits a sane device: panel powered on, original gamma ramp.
-    /// The heavy lifting (releasing the DRM master, closing the seat) happens as
-    /// `App` drops right after this returns.
+    /// Hand over a sane device: panel on, original gamma. Master and seat are
+    /// released as `App` drops.
     fn shutdown(&mut self) {
         info!("restoring DRM state for clean handoff");
-        // Never hand over a blanked panel — nor a dark external one.
         self.drm.set_primary_dpms(true);
         self.drm.set_mirror_dpms(true);
-        // Undo any gamma-control client's ramp.
         if let Some([r, g, b]) = &self.drm.orig_gamma {
             if let Err(e) = self.drm.device_fd.set_gamma(self.drm.crtc, r, g, b) {
                 warn!("restore gamma on shutdown: {e}");
@@ -763,11 +626,8 @@ impl App {
     }
 
     fn handle_input(&mut self, event: InputEvent<LibinputInputBackend>) {
-        // Any input may change on-screen state (or the app it's forwarded to
-        // will commit in response). Prime a render for the next loop wake.
+        // Prime a render for the next wake.
         self.state.needs_render = true;
-        // Any input is activity: restart the idle-blank countdown and resume any
-        // client that we told had gone idle.
         let now = Instant::now();
         self.state.idle.activity(now);
         self.state.idle_notify.activity(now);
@@ -792,14 +652,11 @@ impl App {
                 let slot = event.slot();
                 crate::touch::up(&mut self.state, slot, event.time_msec());
             }
-            // libinput reports a frame after every batch of simultaneous touch
-            // changes; that — not the individual events — is when the client
-            // gets its `wl_touch.frame`.
+            // The client's `wl_touch.frame` follows libinput's frame event.
             InputEvent::TouchFrame { .. } => {
                 crate::touch::frame(&mut self.state);
             }
-            // Palm rejection (and friends) can abandon a sequence with no `up`.
-            // Dropping it strands the slot: see `touch::cancel`.
+            // Palm rejection can drop a sequence with no `up`; see `touch::cancel`.
             InputEvent::TouchCancel { .. } => {
                 crate::touch::cancel(&mut self.state);
             }
@@ -855,45 +712,31 @@ impl App {
         }
     }
 
-    /// Act on a blank/unblank request. Blanking drives the connector's DPMS
-    /// property to Off, which disables scanout and powers the panel down;
-    /// unblanking sets it back On and forces a redraw. If the driver has no DPMS
-    /// property we can only stop flipping (the last frame freezes).
+    /// DPMS off/on; without DPMS we can only stop flipping.
     fn apply_blanking(&mut self) {
         let Some(blanked) = self.state.blank.take_change() else {
             return;
         };
-        // A dark panel can't act on an orientation, so drop the accelerometer
-        // claim for as long as it stays dark.
+        // A dark panel can't act on orientation; drop the claim.
         self.state.sync_sensor_claim();
         if blanked {
-            // The phone panel powers down either way. An external display is a
-            // second screen the user is still looking at (video out, a
-            // presentation), so it keeps its power *and* its frames: the scene
-            // is still composited, just never flipped to the dark panel. See
-            // `render` and `present_mirrors`.
+            // External displays keep power and frames while the phone panel sleeps.
             let mirroring = self.drm.mirroring();
             info!(mirroring, "blanking panel");
             self.drm.pending_flip = false;
             self.drm.set_primary_dpms(false);
             if mirroring {
-                // Mirrors keep flipping, so their vblanks become the frame
-                // clock; prime the first one.
+                // Mirrors' vblanks become the clock; prime the first.
                 self.render();
             } else {
                 for m in &mut self.drm.mirrors {
                     m.pending_flip = false;
                 }
-                // `render` returns before `advance_frame` while dark, so a slide
-                // in flight would never tick again — and a slide-out holds the
-                // client's buffer until it does.
+                // No frames while dark, so a slide-out would hold the client's buffer.
                 self.state.layers.end_slides();
                 self.drm.set_mirror_dpms(false);
-                // Nothing will be composited until the panel comes back, so the
-                // renderer's texture and dmabuf import caches are dead weight
-                // held on the GPU for as long as the phone sits in a pocket.
-                // Imports are rebuilt from the clients' buffers on the first
-                // frame after unblanking.
+                // Drop GPU texture and dmabuf import caches while dark; they're rebuilt on
+                // the first frame after unblanking.
                 if let Err(err) = self.drm.renderer.invalidate_caches() {
                     warn!("invalidate_caches on blank failed: {err}");
                 }
@@ -912,9 +755,7 @@ impl App {
         }
     }
 
-    /// Program any pending gamma-control update into the CRTC LUT. A `Set`
-    /// applies the client's ramps; a `Reset` (control released) restores the
-    /// ramp captured at startup.
+    /// `Reset` restores the startup ramp.
     fn apply_gamma(&mut self) {
         let Some(update) = self.state.gamma.take_pending() else {
             return;
@@ -934,9 +775,8 @@ impl App {
         }
     }
 
-    /// Insert a GPU fence after the frame's draw calls so the KMS commit can
-    /// wait on it instead of the CPU. `None` when the driver can't export one,
-    /// which leaves the caller on the glFinish path.
+    /// A fence the KMS commit can wait on instead of the CPU. `None` falls back
+    /// to glFinish.
     fn frame_fence(&mut self) -> Option<SyncPoint> {
         if !self
             .drm
@@ -947,51 +787,37 @@ impl App {
             return None;
         }
         let fence = EGLFence::create(self.drm.renderer.egl_context().display()).ok()?;
-        // The fence can only signal once the commands ahead of it have reached
-        // the hardware.
+        // The fence only signals once the commands ahead of it reach the hardware.
         self.state.skia.flush_gpu();
         Some(SyncPoint::from(fence))
     }
 
-    /// Render one frame to the scanout buffer and queue a page-flip.
     fn render(&mut self) {
         if !self.drm.active || self.drm.pending_flip {
             return;
         }
-        // Blanked with nothing else attached: no target at all, so no frame. With
-        // a mirror attached the scene is still composited for it — the phone's
-        // own flip is what gets skipped, further down.
+        // Blanked with no mirror: no target, no frame.
         if self.state.blank.is_blanked() {
-            // `pending_flip` on the primary is what normally rate-limits this;
-            // with the panel dark there is none, so the mirrors' own in-flight
-            // state is the backstop. Every mirror still waiting means the frame
-            // would be composited and then dropped by `present_mirrors`.
+            // No primary flip to rate-limit while dark; if every mirror is still
+            // waiting, the frame would be dropped anyway.
             if !self.drm.mirroring() || self.drm.mirrors.iter().all(|m| m.pending_flip) {
-                // Drop the request instead of deferring it: nothing will present
-                // this frame, and a `needs_render` left set keeps `is_animating`
-                // true, which pins the loop at ACTIVE_TIMEOUT (2ms) for as long
-                // as the panel is dark. Unblanking renders unconditionally.
+                // Clear the request, or `is_animating` pins the loop at 2ms while dark.
                 self.state.needs_render = false;
                 return;
             }
         }
-        // Consuming the request now: this frame reflects current state. A commit
-        // arriving after this point re-sets the flag and gets its own render.
+        // A commit after this point re-sets the flag and gets its own render.
         self.state.needs_render = false;
         let frame_start = Instant::now();
 
-        // Variable step, clamped so a long stall can't fling the springs.
+        // Clamped so a stall can't fling the springs.
         let dt = self.last_frame.elapsed().as_secs_f32().min(1.0 / 30.0);
         self.last_frame = Instant::now();
         let prep = self.state.advance_frame(dt);
 
-        // Partial page-flip damage is only safe when nothing but the app surface
-        // could have changed: fullscreen app, no switcher/home/OSD/OSK, no touch
-        // markers, and the bar not mid-fade. Any of these repaint via Skia
-        // (untracked) and would leave stale pixels if excluded from the damage
-        // hint — for the touch overlay that means the marks never reach scanout.
-        // A locked session draws its own (full-damage) frame and never the app,
-        // so the app-shaped fast path does not apply to it.
+        // Partial damage is only safe when nothing but the app surface can change.
+        // Every Skia overlay is untracked and would never reach scanout. A locked
+        // session draws its own full frame.
         let report_partial = prep.lock_view == crate::session_lock::LockView::Unlocked
             && prep.scene.window_covers_screen()
             && prep.app_surface.is_some()
@@ -999,25 +825,17 @@ impl App {
             && !prep.scene.show_home
             && prep.osd_view.is_none()
             && !self.state.bar_fading()
-            // The rotation dip is a Skia overlay like the rest: excluded from
-            // the damage hint it would never reach scanout.
             && prep.dim <= 0.0
             && prep.touch_marks.is_empty()
-            // The cursor is a Skia overlay like the rest: excluded from the
-            // damage hint it never reaches scanout.
             && prep.cursor.is_none()
             && prep.layers_below.is_empty()
             && prep.layers_above.is_empty()
-            // The OSK sliding out: a texture the app-shaped damage hint doesn't
-            // know about, like the Skia overlays above.
+            // The OSK slide-out texture isn't in the app damage either.
             && prep.closing.is_none()
-            // A popup draws over the app in its own pass; the app-shaped damage
-            // hint doesn't cover it, so it would never reach scanout (and its
-            // pixels would go stale on dismiss).
+            // Popups draw in their own pass, outside the app damage.
             && prep.app_popups.is_empty()
             && prep.layer_popups.is_empty();
 
-        // Acquire the next scanout buffer and bind it as the framebuffer.
         let (mut dmabuf, _age) = match self.drm.gbm_surface.next_buffer() {
             Ok(b) => b,
             Err(e) => {
@@ -1040,27 +858,19 @@ impl App {
             };
         drop(framebuffer);
 
-        // Fence the frame so the page-flip never scans out a half-rendered
-        // buffer (tearing). An exportable fence is handed to the atomic commit
-        // as IN_FENCE_FD and the *display controller* does the waiting; only
-        // when the driver can't export one do we fall back to glFinish, which
-        // stalls the CPU for the whole GPU composite and costs us the rest of
-        // the frame budget we'd otherwise spend dispatching client commits.
+        // An exportable fence goes to the atomic commit as IN_FENCE_FD so the
+        // display controller waits; glFinish is the fallback and stalls the CPU.
         let sync = self.frame_fence();
         if sync.is_none() {
             self.state.skia.finish_gpu();
         }
 
-        // Queue the page-flip; vblank fires the next render.
-        //
-        // Skipped while the panel is blanked and only a mirror is watching: the
-        // primary CRTC is powered down, so a flip on it would error and its
-        // vblank would never arrive. `next_buffer` keeps handing back this same
-        // un-queued slot, which is exactly the buffer the mirrors read below.
+        // Skipped while blanked with a mirror: the primary CRTC is off, a flip
+        // would error. `next_buffer` keeps returning this un-queued slot, which the
+        // mirrors read.
         if self.state.blank.is_blanked() {
             debug!(target: "springchick::debug", "mirror-only frame (panel blanked)");
-            // The panel is off: this frame reaches a mirror at best, never the
-            // vblank that would time it.
+            // Panel off: no vblank to time this frame.
             crate::presentation::discard(presented);
         } else {
             match self
@@ -1070,9 +880,8 @@ impl App {
             {
                 Ok(()) => {
                     self.drm.pending_flip = true;
-                    // Answered by the vblank this flip produces. Anything still
-                    // held from an earlier frame never got one (a refused flip,
-                    // a VT switch): tell those clients so they stop waiting.
+                    // Anything still held from an earlier frame never got a vblank (refused
+                    // flip, VT switch); discard it so clients stop waiting.
                     let stale = std::mem::replace(&mut self.drm.pending_presentation, presented);
                     crate::presentation::discard(stale);
                 }
@@ -1083,22 +892,16 @@ impl App {
             }
         }
 
-        // Mirror the frame we just composited onto every external display. Done
-        // after the primary's flip is queued so an external panel can never
-        // delay the phone's, and after `finish_gpu` so the texture we sample is
-        // complete. `dmabuf` is still the buffer we rendered into — queueing the
-        // flip does not invalidate it for reading.
+        // After the primary flip is queued, so a mirror can't delay the phone.
         self.present_mirrors(&dmabuf);
 
         self.state.record_and_log_frame(frame_start);
 
-        // Screencopy: satisfy any pending capture requests from the same scene.
         self.capture_pending_frames(&prep);
         self.wlr_capture_pending_frames(&prep);
         self.take_screenshot(&prep);
     }
 
-    /// Serve a pending `screenshot` binding from the scene just composited.
     fn take_screenshot(&mut self, prep: &crate::FramePrep) {
         if !std::mem::take(&mut self.state.screenshot_pending) {
             return;
@@ -1130,16 +933,8 @@ impl App {
         }
     }
 
-    /// Copy the primary's just-composited scanout buffer onto every external
-    /// display. No-op when nothing is plugged in, which is the common case.
-    ///
-    /// All mirrors are drawn first, then fenced once, then flipped — a single
-    /// `finish_gpu` covers the batch. A mirror still waiting on its own vblank
-    /// skips this frame rather than holding the phone back.
-    ///
-    /// The current app rotation goes with it: a fullscreen app turned landscape
-    /// is drawn sideways in the phone's portrait buffer, and an external panel
-    /// that is not being held sideways has to have that undone.
+    /// All mirrors draw, fence once, then flip; one still waiting skips the
+    /// frame. The app rotation is undone for the external panel.
     fn present_mirrors(&mut self, src: &smithay::backend::allocator::dmabuf::Dmabuf) {
         if self.drm.mirrors.is_empty() {
             return;
@@ -1170,18 +965,9 @@ impl App {
         }
     }
 
-    /// Re-derive the mirror set after a display hotplug, then repaint so a
-    /// freshly attached panel shows the current frame instead of staying black
-    /// until something else animates.
-    /// Answer the in-flight frame's presentation feedback from the vblank that
-    /// scanned it out.
-    ///
-    /// The kernel's own timestamp and sequence are used when the driver reports
-    /// them on a monotonic clock — that is what makes the feedback worth having,
-    /// and it is flagged `HW_CLOCK`/`HW_COMPLETION` so clients know to trust it.
-    /// A realtime (or missing) stamp is not on the clock we advertised at bind,
-    /// so those frames fall back to reading the monotonic clock here and drop
-    /// the hardware flags.
+    /// Uses the kernel's timestamp and sequence when they're on a monotonic
+    /// clock (flagged `HW_CLOCK`/`HW_COMPLETION`); otherwise reads our clock and
+    /// drops the hardware flags.
     fn present_feedback(&mut self, meta: Option<DrmEventMetadata>) {
         let callbacks = std::mem::take(&mut self.drm.pending_presentation);
         if callbacks.is_empty() {
@@ -1215,6 +1001,8 @@ impl App {
         );
     }
 
+    /// Re-derive the mirrors after hotplug and repaint, so a new panel doesn't
+    /// stay black until something animates.
     fn refresh_outputs(&mut self) {
         let before = self.drm.mirrors.len();
         crate::mirror::refresh(
@@ -1232,9 +1020,8 @@ impl App {
         }
     }
 
-    /// Compose the current scene (`prep`) into `framebuffer`. Shared by the
-    /// scanout path and screencopy so a captured frame is pixel-identical to what
-    /// is presented. Returns the damage, or `None` if the draw failed (logged).
+    /// Shared by scanout and screencopy so captures are pixel-identical.
+    /// `None` if the draw failed.
     fn draw_scene_into(
         &mut self,
         framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -1243,8 +1030,7 @@ impl App {
     ) -> Option<DrawnFrame> {
         let size = self.drm.output_size;
 
-        // The GBM scanout buffer has the opposite Y-origin from Skia's
-        // BottomLeft surface, hence `skia_flip_y`.
+        // Scanout is Y-flipped vs Skia's BottomLeft surface.
         let mut sinks = crate::render::FrameSinks::default();
         let mut ctx = self.state.draw_ctx(
             prep,
@@ -1267,11 +1053,7 @@ impl App {
         drawn
     }
 
-    /// Blit the just-composited scene into each pending screencopy frame's
-    /// dmabuf and signal completion. Runs only while a recorder is attached, so
-    /// it costs nothing on the idle path. dmabuf capture keeps the GPU→CPU
-    /// download in the recorder process, off our render thread; shm buffers are
-    /// rejected (a dmabuf-first recorder falls back on its own).
+    /// dmabuf capture keeps the GPU→CPU download in the recorder process.
     fn capture_pending_frames(&mut self, prep: &crate::FramePrep) {
         if self.state.pending_captures.is_empty() {
             return;
@@ -1283,8 +1065,7 @@ impl App {
             let mut dmabuf = match get_dmabuf(&buffer) {
                 Ok(d) => d.clone(),
                 Err(_) => {
-                    // Not a dmabuf: grim and friends allocate shm, so take the
-                    // readback path rather than failing the frame.
+                    // grim and friends allocate shm.
                     match self.capture_frame_shm(&buffer, prep) {
                         Some(true) => frame.success(transform, None, present),
                         Some(false) => frame.fail(CaptureFailureReason::Unknown),
@@ -1304,7 +1085,6 @@ impl App {
             let drawn = self.draw_scene_into(&mut fb, prep, false).is_some();
             drop(fb);
             if drawn {
-                // Fence so the recorder never maps a half-written buffer.
                 self.state.skia.finish_gpu();
                 frame.success(transform, None, present);
             } else {
@@ -1313,9 +1093,7 @@ impl App {
         }
     }
 
-    /// shm capture: draw the scene into an offscreen texture and read it back
-    /// into the client's pool. `None` means the buffer isn't usable shm at all
-    /// (report as a constraints failure), `Some(false)` a real failure.
+    /// `None`: not usable shm (constraints failure). `Some(false)`: real failure.
     fn capture_frame_shm(
         &mut self,
         buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
@@ -1326,9 +1104,6 @@ impl App {
         self.capture_region_shm(buffer, prep, &target, src)
     }
 
-    /// The shared half of both capture protocols: compose the scene into an
-    /// offscreen texture the size of the output, then read `src` out of it into
-    /// the client's shm buffer.
     fn capture_region_shm(
         &mut self,
         buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
@@ -1353,7 +1128,6 @@ impl App {
         Some(ok)
     }
 
-    /// Serve pending wlr-screencopy copies from the same composited scene.
     fn wlr_capture_pending_frames(&mut self, prep: &crate::FramePrep) {
         if self.state.wlr_captures.is_empty() {
             return;
@@ -1365,7 +1139,6 @@ impl App {
                 .capture_region_shm(&frame.buffer, prep, &target, frame.region)
                 .unwrap_or(false);
             if ok {
-                // Fence so the client never maps a half-written buffer.
                 self.state.skia.finish_gpu();
                 frame.success(present);
             } else {
@@ -1375,8 +1148,6 @@ impl App {
     }
 }
 
-/// Group a renderer's flat dmabuf format set into the `(fourcc, [modifiers])`
-/// shape the screencopy dmabuf constraints expect.
 fn group_formats(
     formats: smithay::backend::allocator::format::FormatSet,
 ) -> Vec<(Fourcc, Vec<Modifier>)> {
@@ -1388,9 +1159,6 @@ fn group_formats(
     by_code.into_iter().collect()
 }
 
-/// Snapshot the CRTC's current gamma ramp so it can be restored when a
-/// gamma-control client releases the output. Returns `None` if the CRTC has no
-/// LUT or the read fails.
 fn capture_gamma(device: &DrmDeviceFd, crtc: crtc::Handle, size: u32) -> Option<[Vec<u16>; 3]> {
     if size == 0 {
         return None;
@@ -1406,12 +1174,8 @@ fn capture_gamma(device: &DrmDeviceFd, crtc: crtc::Handle, size: u32) -> Option<
     }
 }
 
-/// Refresh rate of a DRM mode in mHz.
-///
-/// `drm::control::Mode::vrefresh()` rounds to whole Hz (90Hz and 89.6Hz both
-/// report 90), which is too coarse to pace against, so this recomputes the rate
-/// from the mode's own timings: pixel clock over the total blanked line/frame
-/// size. Returns 0 for a degenerate mode, which reads as "unknown refresh".
+/// Computed from the mode timings: `vrefresh()` rounds 89.6Hz to 90. 0 for
+/// a degenerate mode.
 fn mode_refresh_mhz(mode: &smithay::reexports::drm::control::Mode) -> i32 {
     let clock = u64::from(mode.clock());
     let htotal = u64::from(mode.hsync().2);
@@ -1419,11 +1183,10 @@ fn mode_refresh_mhz(mode: &smithay::reexports::drm::control::Mode) -> i32 {
     if htotal == 0 || vtotal == 0 {
         return 0;
     }
-    // clock is in kHz; the extra 1_000_000 converts Hz to mHz.
+    // kHz clock; the extra 1_000_000 converts Hz to mHz.
     ((clock * 1_000_000_000) / (htotal * vtotal)) as i32
 }
 
-/// Find the first connected connector, a usable crtc, and its preferred mode.
 fn find_output(
     drm: &DrmDevice,
 ) -> Result<
@@ -1438,9 +1201,8 @@ fn find_output(
         .into_iter()
         .next()
         .ok_or("no connected connector with a usable crtc")?;
-    // Dump the panel's whole mode list: several modes at one resolution and
-    // different refresh rates is the mode-switch path to an adaptive cadence,
-    // and the fallback for a panel with no VRR_ENABLED property.
+    // Log all modes: same-resolution modes at other rates are the fallback for
+    // adaptive cadence on a panel without VRR.
     if let Ok(conn) = drm.get_connector(first.connector, false) {
         for m in conn.modes() {
             let (w, h) = m.size();

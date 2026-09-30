@@ -1,18 +1,9 @@
-# Screencopy (`ext-image-copy-capture-v1`) test on the real DRM backend.
+# Screencopy on the DRM backend, with grim as the oracle: its PNG must match
+# what QEMU sees. grim only allocates shm, and the capture `Session` must be
+# held for the client's lifetime; either failure makes grim print "failed to
+# copy output".
 #
-# The oracle is a real screenshot tool, `grim`, run inside the session: it must
-# produce a PNG of the output's size whose pixels match what is on screen. Two
-# regressions this pins down, both of which made `grim` print "failed to copy
-# output" with nothing in the compositor's log:
-#   - the owned capture `Session` being dropped in `new_session` (smithay then
-#     sends `stopped` and fails every frame the client asks for);
-#   - shm capture buffers being rejected — grim only ever allocates shm, never
-#     dmabuf, so a dmabuf-only capture path serves no screenshot tool at all.
-#
-# The "not blank" check is what proves pixels were actually blitted rather than
-# an empty buffer handed back as a success.
-#
-# Build for the host arch:  nix build .#checks.aarch64-linux.vm-capture
+# Run:  nix build .#checks.aarch64-linux.vm-capture
 { self, pkgs }:
 
 let
@@ -24,13 +15,11 @@ mkTest {
   packages = [
     pkgs.grim
     pkgs.foot
-    # wlr-screencopy side: wf-recorder is the reason that protocol exists here,
-    # and ffprobe is how the resulting file is checked.
+    # wlr-screencopy: wf-recorder, checked with ffprobe.
     pkgs.wf-recorder
     pkgs.ffmpeg
   ];
 
-  # The captured PNG is inspected pixel-wise on the driver side.
   extraPythonPackages = p: [ p.pillow ];
 
   testScript = ''
@@ -66,10 +55,8 @@ mkTest {
     def mean_abs_diff(a, b):
         return sum(abs(a[i] - b[i]) for i in range(len(a))) / len(a)
 
-    # The oracle: grim's capture must match what QEMU sees in the framebuffer.
-    # That is stronger than any "is it blank" heuristic — it also catches a
-    # y-flipped, channel-swapped, or stale-frame capture, and it does not care
-    # how much of the home screen happens to be lit.
+    # Comparing against QEMU's framebuffer also catches y-flipped,
+    # channel-swapped and stale captures.
     def assert_matches_framebuffer(png, name):
         machine.screenshot(name)
         shot = Image.open(f"{machine.out_dir}/{name}.png")
@@ -79,20 +66,16 @@ mkTest {
         assert diff < 12, f"{name}: capture differs from the screen (mean |d| = {diff:.1f})"
         return capture
 
-    # 1. Home screen. The shell is drawn by Skia into the same framebuffer, so a
-    #    correct capture is also the only automated check that the Skia overlay
-    #    survives the offscreen render path (a separate FBO from scanout).
+    # 1. Home: also checks the Skia overlay survives the offscreen FBO path.
     home_png = grim("/tmp/home.png")
     assert home_png[:8] == b"\x89PNG\r\n\x1a\n", "grim did not write a PNG"
 
-    # PNG IHDR: the capture must be the full output, not a stub.
     width, height = struct.unpack(">II", home_png[16:24])
     assert (width, height) == (720, 1440), f"captured {width}x{height}, want 720x1440"
 
     home = assert_matches_framebuffer(home_png, "capture-home")
 
-    # 2. With a client on screen — exercises the app composite passes, not just
-    #    the Skia shell overlay.
+    # 2. With a client, exercising the app composite passes.
     machine.succeed(
         "systemd-run --user -M tester@.host --collect "
         f"--setenv=WAYLAND_DISPLAY={socket} "
@@ -107,12 +90,9 @@ mkTest {
     app = assert_matches_framebuffer(grim("/tmp/app.png"), "capture-app")
     assert thumb(app) != thumb(home), "capture unchanged after launching an app"
 
-    # 3. wlr-screencopy, via the tool it was added for. wf-recorder negotiates
-    #    on its own (it asks for dmabuf first and falls back to the shm buffer
-    #    we advertise), records with copy_with_damage, and muxes on SIGINT.
-    # systemd-run gives the unit no PATH, so every binary is absolute; and
-    # `timeout` always exits 124 after signalling, so the recording is judged by
-    # the file it produced, not by the exit code.
+    # 3. wlr-screencopy via wf-recorder (dmabuf first, falls back to shm).
+    # systemd-run gives no PATH, so binaries are absolute; `timeout` always exits
+    # 124, so judge the file, not the exit code.
     machine.succeed(
         "systemd-run --user -M tester@.host --collect --wait "
         f"--setenv=WAYLAND_DISPLAY={socket} "
@@ -127,13 +107,11 @@ mkTest {
         "-of csv=p=0 /tmp/rec.mkv"
     ).strip()
     rec_width, rec_height, frames = (int(v) for v in probe.split(","))
-    # h264 rounds odd dimensions down to even; the output is 720x1440 here, so
-    # this is an exact check either way.
+    # h264 rounds odd sizes down; 720x1440 is exact.
     assert (rec_width, rec_height) == (720, 1440), f"recorded {rec_width}x{rec_height}"
     assert frames > 0, "recording has no frames"
 
-    # A repeat capture must still work: sessions are held for their client's
-    # lifetime, and a stale one left behind would stop the next capture.
+    # A stale session left behind would break the next capture.
     grim("/tmp/again.png")
 
     machine.fail(

@@ -1,8 +1,5 @@
-//! Keybinding glue: resolves keysym names, owns the press tracker, runs actions.
-//!
-//! This is the only module that knows both `sc-keys` types and smithay types.
-//! The timing rules live in `sc-keys`, the config.toml parse + load in
-//! `sc-config`; the remaining I/O (xkb, spawning) lives here.
+//! Keybinding glue between `sc-keys` and smithay: keysym resolution, the press
+//! tracker, and running actions.
 
 use crate::State;
 use sc_config::{Action, Config, ModMask};
@@ -15,20 +12,16 @@ use std::time::Duration;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
-/// Keybinding runtime state owned by `State`.
 pub struct Keys {
     pub tracker: PressTracker,
-    /// Spawned binding commands, reaped as they exit.
     pub children: Vec<Child>,
-    /// Keysyms whose press the blanking policy ate, so their release is eaten
-    /// too instead of reaching a client that never saw the press.
+    /// Keysyms whose press the blanking policy ate, so their release is eaten too.
     pub swallowed: std::collections::HashSet<u32>,
 }
 
 impl Keys {
-    /// Resolve an already-loaded config into keysym-keyed bindings. `State::new`
-    /// reads `config.toml` once and hands the same `Config` here and to the
-    /// `[main]` settings, so one startup never sees two versions of the file.
+    /// Takes the same `Config` `State::new` read, so startup never sees two
+    /// versions of the file.
     pub fn from_config(config: Config) -> Keys {
         let long_press = Duration::from_millis(config.long_press_ms);
         let bindings = resolve(config);
@@ -45,14 +38,12 @@ impl Keys {
     }
 }
 
-/// xkb keysym name → raw keysym value. Case-sensitive, as xkb defines them.
+/// Case-sensitive.
 pub fn resolve_keysym(name: &str) -> Option<u32> {
     let sym = xkb::keysym_from_name(name, xkb::KEYSYM_NO_FLAGS);
     (sym != xkb::Keysym::NoSymbol).then(|| sym.raw())
 }
 
-/// Resolve a parsed config into keysym-keyed bindings, dropping names xkb does
-/// not know.
 pub fn resolve(config: Config) -> KeyBindings {
     let long_press = Duration::from_millis(config.long_press_ms);
     let entries = config
@@ -68,15 +59,12 @@ pub fn resolve(config: Config) -> KeyBindings {
     KeyBindings::new(entries, long_press)
 }
 
-/// Whether `keysym` is the modifier that holds a keyboard switching session
-/// open. Either Super key: which one started the session does not matter, and a
-/// user who chords across both should still land on a card when both are up.
+/// Either Super key.
 fn is_switch_modifier(keysym: u32) -> bool {
     keysym == xkb::keysyms::KEY_Super_L || keysym == xkb::keysyms::KEY_Super_R
 }
 
-/// smithay modifiers → binding modifiers. Lock modifiers are dropped on
-/// purpose: a stuck Caps Lock must not disable every binding.
+/// Lock modifiers are dropped so a stuck Caps Lock can't disable bindings.
 pub fn mod_mask(mods: &ModifiersState) -> ModMask {
     ModMask {
         ctrl: mods.ctrl,
@@ -86,8 +74,6 @@ pub fn mod_mask(mods: &ModifiersState) -> ModMask {
     }
 }
 
-/// Run a binding's command through `sh -c`, detached. Mirrors `launcher.rs`:
-/// log the failure, never block the compositor on a user command.
 pub fn spawn_command(command: &str, children: &mut Vec<Child>) {
     info!(command, "running keybinding command");
     match Command::new("sh").arg("-c").arg(command).spawn() {
@@ -96,16 +82,12 @@ pub fn spawn_command(command: &str, children: &mut Vec<Child>) {
     }
 }
 
-/// Drop finished children so they do not linger as zombies.
 pub fn reap(children: &mut Vec<Child>) {
     children.retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_)) | Err(_)));
 }
 
-/// Feed one key event through the bindings, forwarding it to the focused client
-/// only when nothing is bound to it.
-///
-/// Runs inside the seat keyboard's filter closure so `Intercept` genuinely keeps
-/// the key from the client.
+/// Runs inside the keyboard filter closure so `Intercept` really withholds
+/// the key.
 pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, time: u32) {
     let keyboard = state.keyboard.clone();
     let now = Instant::now();
@@ -119,12 +101,8 @@ pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, t
         |state, mods, handle| {
             let keysym = handle.modified_sym().raw();
             let mask = mod_mask(mods);
-            // Named only when the key is part of some binding (or a bare
-            // modifier); anything else is the user's actual typing — including
-            // whatever they type into a lock screen — and must not land in the
-            // journal. The mask is always safe and is the thing worth tracing:
-            // a chord that "does nothing" is usually a modifier that never
-            // cleared.
+            // Only name bound keys and modifiers: anything else is the user's typing,
+            // lock-screen passwords included.
             debug!(
                 target: "springchick::debug",
                 "key {} {} mods={mask:?}",
@@ -136,10 +114,6 @@ pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, t
                 if pressed { "down" } else { "up" },
             );
             let outcome = if pressed {
-                // Blanking policy first: only the key bound to `toggle-display`
-                // (the power button) wakes the panel, and while it stays dark
-                // the key either travels to the app on the external display or
-                // goes nowhere at all.
                 let wake_key = state.keys.tracker.bindings().binds_action(
                     keysym,
                     mask,
@@ -148,9 +122,7 @@ pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, t
                 match state.blank.on_key_press(wake_key, state.external_display) {
                     crate::blank::KeyWhileBlanked::Woke
                     | crate::blank::KeyWhileBlanked::Swallow => {
-                        // The tracker never saw this press, so its release must
-                        // be held back too — a client that got a release with no
-                        // press repeats the key forever.
+                        // A client that gets a release without a press repeats the key forever.
                         state.keys.swallowed.insert(keysym);
                         PressOutcome::Swallow
                     }
@@ -159,9 +131,7 @@ pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, t
                     }
                 }
             } else {
-                // Letting the switching modifier go is what picks the focused
-                // switcher card (Super+Tab). The modifier itself is never bound,
-                // so its release still travels on to the client below.
+                // The modifier is never bound, so its release still reaches the client.
                 if is_switch_modifier(keysym) && !state.session_lock.is_locked() {
                     state.switcher_release();
                 }
@@ -183,17 +153,13 @@ pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, t
     );
 }
 
-/// Find the keycode that produces `keysym` in the active layout.
-///
-/// Used by the debug socket so injected keys travel the same path as real ones
-/// (xkb mapping, filter closure, client forwarding) rather than poking the
-/// tracker directly.
+/// Lets the debug socket inject keys through the real path.
 pub fn keycode_for_keysym(state: &mut State, keysym: u32) -> Option<Keycode> {
     let keyboard = state.keyboard.clone();
     keyboard.with_xkb_state(state, |ctx| {
         let xkb = ctx.xkb().lock().unwrap();
         let layout = xkb.active_layout();
-        // evdev keycodes are xkb keycodes minus 8; 8..=255 covers the keyboard.
+        // evdev keycodes are xkb keycodes minus 8.
         (8u32..=255).map(Keycode::from).find(|code| {
             xkb.raw_syms_for_key_in_layout(*code, layout)
                 .iter()
@@ -202,8 +168,7 @@ pub fn keycode_for_keysym(state: &mut State, keysym: u32) -> Option<Keycode> {
     })
 }
 
-/// Fire any long presses whose threshold has passed, and reap finished
-/// commands. Called once per frame (winit) or per event-loop wake (DRM).
+/// Called once per frame (winit) or per loop wake (DRM).
 pub fn poll(state: &mut State) {
     let now = Instant::now();
     while let Some(action) = state.keys.tracker.poll(now) {
@@ -214,13 +179,8 @@ pub fn poll(state: &mut State) {
     state.keys.children = children;
 }
 
-/// Whether an action may still fire while the session is locked
-/// (`ext-session-lock`).
-///
-/// A lock screen is only a lock if the keyboard can't drive the session behind
-/// it, so anything that touches the shell (Home, close app) or spawns a process
-/// is dropped. Volume and the display toggle stay: neither reveals nor reaches
-/// session content, and a phone whose volume keys die while locked is broken.
+/// Only volume and the display toggle survive the lock; nothing that reaches
+/// the shell or spawns a process.
 pub fn allowed_while_locked(action: &Action) -> bool {
     match action {
         Action::VolumeUp | Action::VolumeDown | Action::VolumeMute | Action::ToggleDisplay => true,
@@ -235,7 +195,6 @@ pub fn allowed_while_locked(action: &Action) -> bool {
     }
 }
 
-/// Perform a fired action.
 pub fn run_action(state: &mut State, action: Action) {
     if state.session_lock.is_locked() && !allowed_while_locked(&action) {
         info!(
@@ -259,8 +218,7 @@ pub fn run_action(state: &mut State, action: Action) {
         Action::VolumeMute => adjust_volume(state, VolumeChange::Mute),
         Action::ToggleFullscreen => state.toggle_fullscreen(),
         Action::Search => state.open_search(),
-        // Positive walks the deck toward older apps, so Super+Tab lands on the
-        // previously-used app first.
+        // Positive walks toward older apps, so Super+Tab lands on the previous app.
         Action::SwitcherNext => state.switcher_step(1),
         Action::SwitcherPrev => state.switcher_step(-1),
         Action::Screenshot => {
@@ -270,19 +228,15 @@ pub fn run_action(state: &mut State, action: Action) {
     }
 }
 
-/// One volume step.
 enum VolumeChange {
     Up,
     Down,
     Mute,
 }
 
-/// The audio sink the volume actions target.
 const SINK: &str = "@DEFAULT_SINK@";
 
-/// Change the volume via `wpctl`, read it back, and refresh the OSD. Runs
-/// `wpctl` synchronously (it returns in a few ms) so the read reflects the
-/// change we just made.
+/// Synchronous (a few ms) so the read-back reflects the change.
 fn adjust_volume(state: &mut State, change: VolumeChange) {
     let set_args: [&str; 3] = match change {
         VolumeChange::Up => ["set-volume", SINK, "5%+"],
@@ -306,7 +260,6 @@ fn adjust_volume(state: &mut State, change: VolumeChange) {
     }
 }
 
-/// Names an action for logs.
 pub fn action_name(action: &Action) -> &'static str {
     match action {
         Action::Command(_) => "command",
@@ -341,9 +294,6 @@ mod tests {
 
     #[test]
     fn every_default_binding_resolves() {
-        // Distinct (keysym, mods) pairs: vol up, vol down, power, Print, and
-        // the five Super shortcuts (home, fullscreen, search, switcher
-        // next/prev).
         assert_eq!(resolve(Config::defaults()).len(), 9);
     }
 
@@ -381,8 +331,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "hi");
     }
 
-    /// While the session is locked, only the actions that can't reach the shell
-    /// survive.
     #[test]
     fn session_lock_suppresses_shell_actions() {
         assert!(!allowed_while_locked(&Action::Home));

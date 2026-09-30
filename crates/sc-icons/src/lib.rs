@@ -1,14 +1,9 @@
 #![forbid(unsafe_code)]
 
-//! Icon resolution for springchick.
-//!
-//! Given an icon name (from a .desktop file), resolves to decoded RGBA pixels.
-//! Pragmatic theme lookup + resvg for SVG + first-letter placeholder fallback.
-//! Returns raw pixels — no Skia dependency; the compositor uploads to GPU.
+//! Icon theme lookup to raw RGBA (resvg for SVG), with a letter placeholder.
 
 use std::path::{Path, PathBuf};
 
-/// Decoded icon: RGBA8 pixel data at a known size.
 #[derive(Clone, Debug)]
 pub struct IconPixels {
     pub data: Vec<u8>,
@@ -16,18 +11,11 @@ pub struct IconPixels {
     pub height: u32,
 }
 
-/// Target icon render size in logical pixels.
 const TARGET_SIZE: u32 = 128;
 
-/// Icon theme subdirectories to search under each XDG data dir's `icons/`.
 const ICON_THEMES: &[&str] = &["hicolor", "Adwaita"];
 
-/// Expand XDG base data directories into the icon search path: for each base
-/// `<d>`, `<d>/icons/<theme>` per theme and `<d>/pixmaps`.
-///
-/// Bases come from the caller (`sc_catalog::xdg_data_dirs`) rather than being
-/// read here, so the env walk happens once per process instead of once per
-/// icon — and there is only one implementation of the XDG lookup.
+/// `<d>/icons/<theme>` per theme, plus `<d>/pixmaps`, for each base.
 pub fn theme_dirs(bases: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for base in bases {
@@ -39,12 +27,8 @@ pub fn theme_dirs(bases: &[PathBuf]) -> Vec<PathBuf> {
     dirs
 }
 
-/// Size subdirectories to search, largest first.
-///
-/// Covers every size hicolor's index.theme defines at or above TARGET_SIZE:
-/// apps that ship only a 512x512 or 192x192 PNG (common for icons generated
-/// from a web app manifest) were previously missed entirely and fell through to
-/// the letter placeholder.
+/// Largest first; includes 512/384/192 because web-manifest icons often ship
+/// only at those sizes.
 const SIZE_SUBDIRS: &[&str] = &[
     "512x512/apps",
     "384x384/apps",
@@ -58,35 +42,30 @@ const SIZE_SUBDIRS: &[&str] = &[
     "48x48/apps",
 ];
 
-/// Resolve an icon name to RGBA pixels against `theme_dirs` (build them once
-/// with [`theme_dirs`]). Falls back to a placeholder on failure.
+/// Falls back to a placeholder.
 pub fn resolve_with_dirs<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> IconPixels {
-    // If icon_name is an absolute path, try it directly.
     if icon_name.starts_with('/') {
         if let Some(pixels) = load_icon_file(Path::new(icon_name)) {
             return pixels;
         }
     }
 
-    // Search theme directories. Keep going if an earlier candidate is corrupt:
-    // a broken PNG must not shadow a usable SVG in a lower-priority directory.
+    // Keep going past a corrupt candidate: a broken PNG must not shadow a usable
+    // SVG further down.
     for path in icon_candidates(icon_name, theme_dirs) {
         if let Some(pixels) = load_icon_file(&path) {
             return pixels;
         }
     }
 
-    // Placeholder fallback: first letter on a colored background.
     placeholder(icon_name)
 }
 
-/// Existing icon-file candidates matching the name, in lookup order.
 fn icon_candidates<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in theme_dirs {
         let base = dir.as_ref();
 
-        // Check size subdirs.
         for subdir in SIZE_SUBDIRS {
             let dir_path = base.join(subdir);
             for ext in &["png", "svg"] {
@@ -97,7 +76,6 @@ fn icon_candidates<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> Vec<Pat
             }
         }
 
-        // Check directly in the dir (e.g. /usr/share/pixmaps/foo.png).
         for ext in &["png", "svg"] {
             let path = base.join(format!("{icon_name}.{ext}"));
             if path.exists() {
@@ -108,13 +86,11 @@ fn icon_candidates<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> Vec<Pat
     out
 }
 
-/// Search theme dirs for an icon file matching the name.
 #[cfg(test)]
 fn find_icon<P: AsRef<Path>>(icon_name: &str, theme_dirs: &[P]) -> Option<PathBuf> {
     icon_candidates(icon_name, theme_dirs).into_iter().next()
 }
 
-/// Load and decode an icon file (PNG or SVG) to RGBA pixels.
 fn load_icon_file(path: &Path) -> Option<IconPixels> {
     let ext = path.extension()?.to_str()?.to_lowercase();
     match ext.as_str() {
@@ -124,7 +100,6 @@ fn load_icon_file(path: &Path) -> Option<IconPixels> {
     }
 }
 
-/// Rasterize an SVG to TARGET_SIZE pixels using resvg.
 fn load_svg(path: &Path) -> Option<IconPixels> {
     let data = std::fs::read(path).ok()?;
     let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default()).ok()?;
@@ -141,7 +116,7 @@ fn load_svg(path: &Path) -> Option<IconPixels> {
 
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 
-    // Convert from premultiplied RGBA to straight RGBA.
+    // resvg is premultiplied; we return straight alpha.
     let mut pixels = pixmap.take();
     for chunk in pixels.chunks_exact_mut(4) {
         let a = chunk[3] as f32 / 255.0;
@@ -159,7 +134,6 @@ fn load_svg(path: &Path) -> Option<IconPixels> {
     })
 }
 
-/// Load a PNG file and decode to RGBA.
 fn load_png(path: &Path) -> Option<IconPixels> {
     let file = std::fs::File::open(path).ok()?;
     let decoder = png::Decoder::new(file);
@@ -170,7 +144,6 @@ fn load_png(path: &Path) -> Option<IconPixels> {
 
     let (width, height) = (info.width, info.height);
 
-    // Convert to RGBA8 if needed.
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf,
         png::ColorType::Rgb => {
@@ -205,19 +178,16 @@ fn load_png(path: &Path) -> Option<IconPixels> {
     })
 }
 
-/// Generate a placeholder icon: first letter of the name on a colored background.
 pub fn placeholder(name: &str) -> IconPixels {
     let size = TARGET_SIZE;
     let mut data = vec![0u8; (size * size * 4) as usize];
 
-    // Deterministic color from name hash.
     let hash = name
         .bytes()
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
     let hue = (hash % 360) as f32;
     let (r, g, b) = hsl_to_rgb(hue, 0.5, 0.45);
 
-    // Fill background with rounded-rect-ish solid (just fill the whole square for simplicity).
     for pixel in data.chunks_exact_mut(4) {
         pixel[0] = r;
         pixel[1] = g;
@@ -225,7 +195,6 @@ pub fn placeholder(name: &str) -> IconPixels {
         pixel[3] = 255;
     }
 
-    // Draw first letter as a simple block in the center (crude but functional).
     let letter = name
         .chars()
         .next()
@@ -242,10 +211,10 @@ pub fn placeholder(name: &str) -> IconPixels {
     }
 }
 
-/// Crude letter drawing: renders a character using a built-in 5x7 bitmap font scaled up.
+/// 5x7 bitmap font, scaled up.
 fn draw_letter(data: &mut [u8], size: u32, ch: char) {
     let glyph = get_glyph(ch);
-    let scale = size / 10; // each font pixel = scale×scale output pixels
+    let scale = size / 10;
     let glyph_w = 5 * scale;
     let glyph_h = 7 * scale;
     let ox = (size - glyph_w) / 2;
@@ -254,7 +223,6 @@ fn draw_letter(data: &mut [u8], size: u32, ch: char) {
     for row in 0..7u32 {
         for col in 0..5u32 {
             if glyph[row as usize] & (1 << (4 - col)) != 0 {
-                // Fill a scale×scale block.
                 for dy in 0..scale {
                     for dx in 0..scale {
                         let px = ox + col * scale + dx;
@@ -273,7 +241,6 @@ fn draw_letter(data: &mut [u8], size: u32, ch: char) {
     }
 }
 
-/// Minimal 5x7 bitmap font for A-Z and digits (enough for placeholder icons).
 fn get_glyph(ch: char) -> [u8; 7] {
     match ch {
         'A' => [
@@ -386,7 +353,7 @@ fn get_glyph(ch: char) -> [u8; 7] {
         ],
         _ => [
             0b01110, 0b10001, 0b00010, 0b00100, 0b00100, 0b00000, 0b00100,
-        ], // '?'
+        ],
     }
 }
 
@@ -426,7 +393,6 @@ mod tests {
     fn placeholder_different_names_different_colors() {
         let p1 = placeholder("Firefox");
         let p2 = placeholder("Chrome");
-        // First pixel (background color) should differ
         assert_ne!(&p1.data[..3], &p2.data[..3]);
     }
 
@@ -452,9 +418,6 @@ mod tests {
 
     #[test]
     fn find_icon_in_large_size_dirs() {
-        // A manifest-derived icon is often installed only at 512x512, which
-        // hicolor's index.theme defines but this search list used to omit -
-        // the icon was invisible and apps fell back to the letter placeholder.
         for size_dir in ["512x512/apps", "384x384/apps", "192x192/apps"] {
             let dir = tempfile::tempdir().unwrap();
             let apps_dir = dir.path().join(size_dir);
@@ -481,7 +444,6 @@ mod tests {
         let p = resolve_with_dirs("red-icon", &dirs);
         assert_eq!(p.width, TARGET_SIZE);
         assert_eq!(p.height, TARGET_SIZE);
-        // Should have non-zero red pixels
         let has_red = p.data.chunks_exact(4).any(|px| px[0] > 200 && px[1] < 50);
         assert!(has_red, "SVG rasterization should produce red pixels");
     }
@@ -506,7 +468,6 @@ mod tests {
         );
     }
 
-    /// Minimal valid 1x1 red PNG.
     fn minimal_png() -> Vec<u8> {
         let mut buf = Vec::new();
         {

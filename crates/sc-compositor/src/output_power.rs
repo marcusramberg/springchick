@@ -1,14 +1,6 @@
-//! wlr-output-power-management-unstable-v1: client-driven DPMS.
-//!
-//! Lets a shell (dms `power off monitors`, swayidle, …) blank and unblank the
-//! panel. smithay ships no handler for this protocol, so both interfaces are
-//! wired by hand here, the way [`crate::gamma_control`] is.
-//!
-//! The mode maps straight onto [`crate::blank::Blank`], so a client turning the
-//! output off is the same state the power key and the idle timeout produce —
-//! and any of those wake paths reports back to the client through
-//! [`OutputPower::sync`]. Control is exclusive per output: a second client
-//! asking for the output it already holds gets `failed` and an inert object.
+//! wlr-output-power-management-unstable-v1, wired by hand (smithay has no
+//! handler). Modes map onto [`crate::blank::Blank`]. Exclusive per output: a
+//! second client gets `failed` and an inert object.
 
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols_wlr::output_power_management::v1::server::{
@@ -22,17 +14,14 @@ use smithay::reexports::wayland_server::{
 
 use crate::State;
 
-/// Compositor-side state for the output-power protocol.
 pub struct OutputPower {
-    /// The control resource owning the output, if any.
     active: Option<ZwlrOutputPowerV1>,
-    /// Last mode announced to `active`, so a blank change that the client asked
-    /// for itself is not echoed twice and one it did not ask for still is.
+    /// Last mode sent to `active`, so client-requested changes aren't echoed
+    /// twice.
     announced: Option<bool>,
 }
 
 impl OutputPower {
-    /// Create the manager global.
     pub fn new(dh: &DisplayHandle) -> Self {
         dh.create_global::<State, ZwlrOutputPowerManagerV1, ()>(1, ());
         OutputPower {
@@ -41,10 +30,7 @@ impl OutputPower {
         }
     }
 
-    /// Announce `blanked` to the controlling client when it differs from what it
-    /// was last told. Call after anything that may have flipped
-    /// [`crate::blank::Blank`] behind the client's back — the power key, the
-    /// idle timeout.
+    /// Tell the client about blank changes it didn't cause (power key, idle).
     pub fn sync(&mut self, blanked: bool) {
         if self.announced == Some(blanked) {
             return;
@@ -52,10 +38,8 @@ impl OutputPower {
         self.announce(blanked);
     }
 
-    /// Announce `blanked` whether or not it changed. A `set_mode` is always
-    /// answered with a mode event, even a no-op one: clients block on that reply
-    /// (dms waits 10s), so staying quiet because the panel was already in the
-    /// requested state hangs them.
+    /// Always answer `set_mode`, even a no-op: clients block on the reply (dms
+    /// waits 10s).
     fn announce(&mut self, blanked: bool) {
         let Some(control) = self.active.as_ref() else {
             self.announced = None;
@@ -92,8 +76,6 @@ impl Dispatch<ZwlrOutputPowerManagerV1, ()> for State {
         match request {
             zwlr_output_power_manager_v1::Request::GetOutputPower { id, output } => {
                 let control = data_init.init(id, ());
-                // Unknown output (or one already under control): the object is
-                // created but inert, which is what `failed` means here.
                 let ours = Output::from_resource(&output).is_some_and(|o| o == state.output);
                 if !ours || state.output_power.active.is_some() {
                     control.failed();
@@ -122,7 +104,6 @@ impl Dispatch<ZwlrOutputPowerV1, ()> for State {
     ) {
         match request {
             zwlr_output_power_v1::Request::SetMode { mode } => {
-                // An evicted/inert control drives nothing.
                 if state.output_power.active.as_ref() != Some(resource) {
                     return;
                 }
@@ -138,8 +119,7 @@ impl Dispatch<ZwlrOutputPowerV1, ()> for State {
                     }
                 };
                 state.blank.set(blanked);
-                // Unblanking has to draw something: the DRM loop only renders
-                // when it has a reason to.
+                // The DRM loop only renders when it has a reason to.
                 if !blanked {
                     state.needs_render = true;
                 }
@@ -151,8 +131,7 @@ impl Dispatch<ZwlrOutputPowerV1, ()> for State {
     }
 
     fn destroyed(state: &mut Self, _client: ClientId, resource: &ZwlrOutputPowerV1, _data: &()) {
-        // Releasing control leaves the panel as it is — the protocol has no
-        // restore semantics — but frees the output for the next client.
+        // No restore semantics: the panel stays as it is.
         if state.output_power.active.as_ref() == Some(resource) {
             state.output_power.active = None;
             state.output_power.announced = None;

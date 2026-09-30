@@ -5,15 +5,14 @@ pub mod persist;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-/// Stable identifier for an app (its .desktop file id, e.g. "org.gnome.Maps").
+/// The .desktop file id, e.g. "org.gnome.Maps".
 pub type AppId = String;
 
 pub const COLS: usize = 4;
 pub const ROWS: usize = 6;
-pub const PAGE_CAP: usize = COLS * ROWS; // 24 icons per page
+pub const PAGE_CAP: usize = COLS * ROWS;
 pub const DOCK_CAP: usize = 4;
 
-/// Frecency half-life: a launch's contribution halves every 30 days.
 pub const HALF_LIFE_SECS: f64 = 30.0 * 24.0 * 60.0 * 60.0;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -28,7 +27,6 @@ pub struct FrecencyStore {
     pub apps: HashMap<AppId, AppStat>,
 }
 
-/// Current unix time in whole seconds (monotonic-enough for frecency).
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -36,23 +34,22 @@ pub fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Decayed score of `stat` evaluated at `now` (unix secs). Compare all apps at
-/// the same `now` to get a consistent ordering.
+/// Compare apps at the same `now` for a consistent ordering.
 pub fn eff(stat: &AppStat, now: u64) -> f64 {
     let elapsed = now.saturating_sub(stat.last_launch) as f64;
     stat.score * 0.5_f64.powf(elapsed / HALF_LIFE_SECS)
 }
 
 impl FrecencyStore {
-    /// Record an app launch: decay the stored score to `now`, then add 1.
+    /// Decay the stored score to `now`, then add 1.
     pub fn record_launch(&mut self, app: &str, now: u64) {
         let s = self.apps.entry(app.to_owned()).or_default();
         s.score = eff(s, now) + 1.0;
         s.last_launch = now;
     }
 
-    /// Insert an app not yet in the store. `first_run` true (store was empty at
-    /// bootstrap) -> score 0. Later install -> seed 1.0 at `now` so it surfaces.
+    /// `first_run` (empty store at bootstrap) seeds 0; a later install seeds 1.0
+    /// so it surfaces.
     pub fn seed(&mut self, app: &str, now: u64, first_run: bool) {
         if self.apps.contains_key(app) {
             return;
@@ -71,7 +68,6 @@ impl FrecencyStore {
         self.apps.insert(app.to_owned(), stat);
     }
 
-    /// Drop stats for apps no longer in the catalog.
     pub fn prune(&mut self, catalog_ids: &[AppId]) {
         self.apps.retain(|id, _| catalog_ids.contains(id));
     }
@@ -79,27 +75,19 @@ impl FrecencyStore {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ShellModel {
-    /// Home pages, in manual (persisted) order — only what the user placed
-    /// there. An app absent from `pages` and `dock` is not gone: it lives in
-    /// the library, which is derived from the catalog and never stored.
+    /// Only what the user placed. Everything else lives in the library, which
+    /// is derived and never stored.
     #[serde(default)]
     pub pages: Vec<Vec<AppId>>,
-    pub dock: Vec<AppId>, // len <= DOCK_CAP
+    pub dock: Vec<AppId>,
     #[serde(default)]
     pub frecency: FrecencyStore,
 }
 
 impl ShellModel {
-    /// Reconcile against the installed catalog: drop ids that are gone from
-    /// pages/dock/frecency and seed frecency for ids that are new.
-    ///
-    /// Deliberately does *not* place new apps on a home page — a fresh install
-    /// gets one empty page, and apps reach home only when the user drags them
-    /// out of the library. `now`/`first_run` mirror the old startup seed loop
-    /// (score 0 on a first-run empty store, 1.0 for a later install).
+    /// Drop ids that are gone, seed frecency for new ones. New apps are not
+    /// placed on a page; they reach Home only by drag from the library.
     pub fn reconcile(&mut self, catalog_ids: &[AppId], now: u64, first_run: bool) {
-        // A set lookup rather than a linear scan: with a few hundred installed
-        // apps the naive form is O(placed × catalog).
         let installed: HashSet<&AppId> = catalog_ids.iter().collect();
         self.pages
             .iter_mut()
@@ -109,13 +97,10 @@ impl ShellModel {
         for id in catalog_ids {
             self.frecency.seed(id, now, first_run);
         }
-        // A persisted state.toml is not trusted to respect PAGE_CAP: an
-        // over-full page hides every icon past the 24th, with no further page
-        // to swipe to.
+        // A persisted state.toml may break PAGE_CAP, hiding icons past the 24th.
         self.repack();
     }
 
-    /// Append an app to the first page with room, creating a page if needed.
     pub fn place(&mut self, app: AppId) {
         if let Some(page) = self.pages.iter_mut().find(|p| p.len() < PAGE_CAP) {
             page.push(app);
@@ -124,17 +109,15 @@ impl ShellModel {
         }
     }
 
-    /// Take an app off home (it remains in the library).
+    /// It stays in the library.
     pub fn delete(&mut self, app: &str) {
         self.remove_from_pages(app);
         self.dock.retain(|a| a != app);
         self.repack();
     }
 
-    /// Move `app` to the grid slot addressed by (page, index), treated as a
-    /// global position `page*PAGE_CAP + index` in the flattened order. Removes
-    /// `app` from pages/dock first, inserts, then repacks. Used by drag
-    /// reorder (grid- and dock-sourced).
+    /// `(page, index)` is a global position `page*PAGE_CAP + index` in the
+    /// flattened order. Repacks afterwards.
     pub fn move_to(&mut self, app: &str, page: usize, index: usize) {
         let mut flat: Vec<AppId> = self.flat().into_iter().filter(|a| a != app).collect();
         self.dock.retain(|a| a != app);
@@ -146,7 +129,7 @@ impl ShellModel {
         self.pages = flat.chunks(PAGE_CAP).map(|c| c.to_vec()).collect();
     }
 
-    /// Pin `app` to the dock. Returns false if already docked or dock is full.
+    /// False if already docked or the dock is full.
     pub fn pin(&mut self, app: &str) -> bool {
         if self.dock.iter().any(|a| a == app) || self.dock.len() >= DOCK_CAP {
             return false;
@@ -157,7 +140,6 @@ impl ShellModel {
         true
     }
 
-    /// Remove `app` from the dock, if present, restoring it to the home grid.
     pub fn unpin(&mut self, app: &str) {
         if self.dock.iter().any(|a| a == app) {
             self.dock.retain(|a| a != app);
@@ -165,7 +147,6 @@ impl ShellModel {
         }
     }
 
-    /// Remove `app` from all pages, dropping any pages left empty.
     fn remove_from_pages(&mut self, app: &str) {
         for page in &mut self.pages {
             page.retain(|a| a != app);
@@ -173,18 +154,12 @@ impl ShellModel {
         self.pages.retain(|p| !p.is_empty());
     }
 
-    /// Flattened grid order (all pages concatenated).
     fn flat(&self) -> Vec<AppId> {
         self.pages.iter().flatten().cloned().collect()
     }
 
-    /// Re-chunk the flattened order into PAGE_CAP-sized pages, dropping empty
-    /// tail pages. The single packing invariant: every page but the last is
-    /// full. A dense re-chunk can leave neither an interior hole nor an
-    /// overflow, so this handles both backfill and overflow cascade.
-    ///
-    /// Home always keeps at least one page, even with nothing on it — that is
-    /// the fresh-install state, and page 0 has to exist to swipe away from.
+    /// Every page but the last is full. Always keeps at least one page, even
+    /// empty.
     pub fn repack(&mut self) {
         let flat = self.flat();
         self.pages = flat.chunks(PAGE_CAP).map(|c| c.to_vec()).collect();
@@ -227,7 +202,7 @@ mod tests {
             ..Default::default()
         };
         m.delete("a05");
-        assert_eq!(m.pages.len(), 1); // tail pulled back, page 1 dropped
+        assert_eq!(m.pages.len(), 1);
         assert_eq!(m.pages[0].len(), PAGE_CAP);
         assert_eq!(m.pages[0][PAGE_CAP - 1], "tail");
     }
@@ -244,7 +219,6 @@ mod tests {
 
     #[test]
     fn move_to_cross_page_lands_at_global_index() {
-        // PAGE_CAP-1 on page0 + "x" on page1 = PAGE_CAP total -> repacks to one full page.
         let mut m = ShellModel {
             pages: vec![
                 (0..PAGE_CAP - 1).map(|i| format!("a{i:02}")).collect(),
@@ -252,7 +226,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        m.move_to("x", 0, 2); // global index 2
+        m.move_to("x", 0, 2);
         assert_eq!(m.pages[0][2], "x");
         assert_eq!(m.pages[0].len(), PAGE_CAP);
         assert_eq!(m.pages.len(), 1);
@@ -263,7 +237,7 @@ mod tests {
         let mut m = ShellModel::default();
         m.place("a".into());
         m.dock.push("d".into());
-        m.move_to("d", 0, 0); // dock -> grid
+        m.move_to("d", 0, 0);
         assert!(m.dock.is_empty());
         assert_eq!(m.pages[0], vec!["d", "a"]);
     }
@@ -349,7 +323,6 @@ mod tests {
 
     #[test]
     fn old_file_without_pages_loads_empty() {
-        // A config written before pages were persisted: only dock + frecency.
         let s = "dock = []\n[frecency]\n";
         let m: ShellModel = toml::from_str(s).unwrap();
         assert!(m.pages.is_empty());
@@ -408,8 +381,7 @@ mod tests {
 
     #[test]
     fn legacy_hidden_key_is_ignored() {
-        // state.toml written before the library existed: `hidden` apps are now
-        // simply apps that are not on a page.
+        // `hidden` predates the library; those apps are simply not on a page.
         let m: ShellModel = toml::from_str("dock = []\nhidden = [\"a\"]\n").unwrap();
         assert!(m.pages.is_empty());
     }
@@ -419,7 +391,7 @@ mod tests {
         let mut m = ShellModel::default();
         m.place("b".into());
         m.reconcile(&["a".into(), "b".into(), "c".into()], 0, false);
-        assert_eq!(m.pages, vec![vec!["b"]]); // a and c stay in the library only
+        assert_eq!(m.pages, vec![vec!["b"]]);
     }
 
     #[test]
@@ -435,7 +407,7 @@ mod tests {
     fn reconcile_splits_an_overfull_persisted_page() {
         let mut m = ShellModel::default();
         let ids: Vec<AppId> = (0..PAGE_CAP + 5).map(|i| format!("app{i}")).collect();
-        m.pages = vec![ids.clone()]; // as loaded from a bad state.toml
+        m.pages = vec![ids.clone()];
         m.reconcile(&ids, 0, false);
         assert_eq!(m.pages.len(), 2);
         assert_eq!(m.pages[0].len(), PAGE_CAP);
@@ -474,7 +446,7 @@ mod tests {
         for n in ["a", "b", "c"] {
             m.place(n.into());
         }
-        m.move_to("c", 0, 0); // user order: c, a, b
+        m.move_to("c", 0, 0);
         m.reconcile(&["a".into(), "b".into(), "c".into()], 0, false);
         assert_eq!(m.pages[0], vec!["c", "a", "b"]);
     }
@@ -488,16 +460,15 @@ mod tests {
             ],
             ..Default::default()
         };
-        m.pages[0].remove(5); // interior hole -> page0 now 23
+        m.pages[0].remove(5);
         m.repack();
-        assert_eq!(m.pages[0].len(), PAGE_CAP); // backfilled from page1
+        assert_eq!(m.pages[0].len(), PAGE_CAP);
         assert_eq!(m.pages[0][23], "tail");
-        assert_eq!(m.pages.len(), 1); // page1 emptied + dropped
+        assert_eq!(m.pages.len(), 1);
     }
 
     #[test]
     fn pin_backfills_grid_across_pages() {
-        // 25 grid apps -> page0 full (24), page1 has 1. Pin one from page0.
         let mut m = ShellModel {
             pages: vec![
                 (0..PAGE_CAP).map(|i| format!("a{i:02}")).collect(),
@@ -507,7 +478,7 @@ mod tests {
         };
         assert!(m.pin("a05"));
         assert!(m.dock.contains(&"a05".to_string()));
-        assert_eq!(m.pages[0].len(), PAGE_CAP); // tail pulled back, no interior hole
+        assert_eq!(m.pages[0].len(), PAGE_CAP);
         assert_eq!(m.pages.len(), 1);
     }
 

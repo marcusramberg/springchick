@@ -1,10 +1,6 @@
-//! The app library: the last home page, holding one tile per category folder,
-//! and the panel a tile opens.
-//!
-//! The library is derived, never stored — `State::folders` is rebuilt from each
-//! catalog scan, and the page itself is synthesised past the end of
-//! `model.pages` (see `sc_layout::compute`, which counts it). Home pages hold
-//! only what the user put there; everything installed is always reachable here.
+//! The app library: the last home page, one tile per category folder, plus
+//! the panel a tile opens. Derived, never stored; the page sits past the end
+//! of `model.pages`.
 
 use sc_layout::library::{PanelHit, PanelLayout};
 
@@ -13,22 +9,19 @@ use crate::input_dispatch::IconSource;
 use crate::state::State;
 use crate::ui_state::{UiState, ZoomOrigin};
 
-/// A folder the user has opened on the library page.
 pub(crate) struct OpenFolder {
-    /// Index into `State::folders`.
     pub index: usize,
-    /// Scroll offset in physical pixels; clamped by the layout.
+    /// Physical pixels; clamped by the layout.
     pub scroll: f32,
-    /// Member index under the finger, drawn pressed and launched on release.
+    /// Member under the finger, launched on release.
     pub pressed: Option<usize>,
-    /// Finger position and scroll offset when the current drag began:
-    /// `(x, y, scroll)`.
+    /// `(x, y, scroll)` when the drag began.
     pub drag: Option<(f32, f32, f32)>,
-    /// Tile center the panel zooms out of, in screen coordinates.
+    /// Tile center the panel zooms out of.
     pub anchor: (f32, f32),
-    /// 0→1 open animation, retargeted to 0 on close.
+    /// Retargeted to 0 on close.
     pub open: sc_anim::Spring,
-    /// Closing: the folder is inert and is dropped once `open` settles.
+    /// Inert; dropped once `open` settles.
     pub closing: bool,
 }
 
@@ -47,33 +40,26 @@ impl OpenFolder {
 }
 
 impl State {
-    /// Total home pages including the library, which is always the last one.
-    /// Single source for every page-count assignment — the model alone is one
-    /// short.
+    /// Includes the library page. Use this, not the model: it's one short.
     pub(crate) fn home_page_count(&self) -> usize {
         self.model.pages.len().max(1) + 1
     }
 
-    /// Index of the library page.
     pub(crate) fn library_page(&self) -> usize {
         self.home_page_count() - 1
     }
 
-    /// Whether the shell is on (or animating onto) the library page.
     pub(crate) fn on_library_page(&self) -> bool {
         matches!(&self.ui, UiState::Home { page, .. } if *page == self.library_page())
     }
 
-    /// Horizontal offset the library page is drawn at: zero when it fills the
-    /// screen, a full width away when the last user page does. Tiles are laid
-    /// out in page-local coordinates and shifted by this, the same way grid
-    /// icons ride their page-scrolled springs.
+    /// Zero when the library fills the screen, one width away from the last
+    /// user page. Tiles are page-local and shifted by this.
     pub(crate) fn library_x_offset(&self) -> f32 {
         let (w, _) = self.output_size_f();
         (self.library_page() as f32 - self.home_page_scroll()) * w
     }
 
-    /// Folder tiles for the library page, in page-local coordinates.
     pub(crate) fn library_tiles(&self) -> Vec<sc_layout::library::FolderSlot> {
         let (w, h) = self.output_size_f();
         let names: Vec<(String, usize)> = self
@@ -84,8 +70,7 @@ impl State {
         sc_layout::library::folders(w, h, &names)
     }
 
-    /// Start the folder's zoom-out. It stays in `State::folder`, inert, until
-    /// the spring settles and `advance_frame` drops it.
+    /// Stays in `State::folder`, inert, until the spring settles.
     pub(crate) fn close_folder(&mut self) {
         if let Some(f) = &mut self.folder {
             f.closing = true;
@@ -96,12 +81,10 @@ impl State {
         self.needs_render = true;
     }
 
-    /// Whether a folder is open and still taking input (a closing one is not).
     fn folder_live(&self) -> bool {
         self.folder.as_ref().is_some_and(|f| !f.closing)
     }
 
-    /// Screen-space center of a library tile, the point its panel zooms out of.
     fn folder_anchor(&self, index: usize) -> (f32, f32) {
         let (w, h) = self.output_size_f();
         let dx = self.library_x_offset();
@@ -111,13 +94,11 @@ impl State {
             .unwrap_or((w / 2.0, h / 2.0))
     }
 
-    /// Open the folder at `index`, zooming out of its tile.
     pub(crate) fn open_folder(&mut self, index: usize) {
         let anchor = self.folder_anchor(index);
         self.folder = Some(OpenFolder::new(index, anchor));
     }
 
-    /// Layout for the open folder's panel, if one is open.
     pub(crate) fn folder_panel(&self) -> Option<PanelLayout> {
         let open = self.folder.as_ref()?;
         let folder = self.folders.get(open.index)?;
@@ -125,9 +106,7 @@ impl State {
         Some(sc_layout::library::panel(w, h, &folder.apps, open.scroll))
     }
 
-    /// Press while a folder is open. The panel owns every press: a member arms
-    /// its launch, the card swallows and starts a scroll drag, and anywhere
-    /// outside closes the folder without falling through to the page beneath.
+    /// The panel owns every press; outside closes without falling through.
     pub(crate) fn folder_press(&mut self, x: f32, y: f32) -> bool {
         if !self.folder_live() {
             return false;
@@ -141,8 +120,7 @@ impl State {
                     f.pressed = Some(index);
                     f.drag = Some((x, y, f.scroll));
                 }
-                // Arm the hold that opens the member's context menu ("Add to
-                // Home" and friends), the same way a home icon does.
+                // Arm the hold that opens the member's context menu.
                 self.icon_press = Some(IconPress {
                     app_id,
                     source: IconSource::Library,
@@ -162,13 +140,8 @@ impl State {
         true
     }
 
-    /// Drag inside an open folder. The axis decides: vertical scrolls the
-    /// member list, horizontal lifts the pressed app out of the folder and
-    /// hands it to the ordinary arrange drag.
-    ///
-    /// Axis rather than a long press because the long press is spoken for by
-    /// the member's context menu — and sideways is the direction the home pages
-    /// are in anyway.
+    /// Vertical scrolls; horizontal lifts the pressed app into an arrange drag.
+    /// Axis, not long press: the long press opens the context menu.
     pub(crate) fn folder_motion(&mut self, x: f32, y: f32) -> bool {
         if !self.folder_live() {
             return false;
@@ -207,10 +180,7 @@ impl State {
         true
     }
 
-    /// Pick an app up out of the open folder: close the folder, engage arrange
-    /// mode, and start an ordinary drag carrying it. From here the existing
-    /// arrange machinery owns the gesture — edge-dwell flips to a home page and
-    /// the drop places or pins it.
+    /// Hands the gesture to the arrange machinery.
     fn lift_from_library(&mut self, app_id: String, at: (f32, f32)) {
         tracing::debug!(
             target: "springchick::debug",
@@ -233,7 +203,6 @@ impl State {
         self.needs_render = true;
     }
 
-    /// Release inside an open folder: launch the armed member and close.
     pub(crate) fn folder_release(&mut self) -> bool {
         if !self.folder_live() {
             return false;
@@ -265,9 +234,7 @@ impl State {
         true
     }
 
-    /// Press on the library page with no folder open: arm the tile under the
-    /// finger. Never consumes the press — the page drag still has to be armed
-    /// from the same point, so a swipe that starts on a tile pages instead.
+    /// Never consumes the press: a swipe starting on a tile must still page.
     pub(crate) fn library_press(&mut self, x: f32, y: f32) {
         if !self.on_library_page() || self.arrange.is_some() {
             return;
@@ -280,6 +247,4 @@ impl State {
     }
 }
 
-/// Finger travel (physical px) past which a press inside a folder is a scroll,
-/// not a tap.
 const SCROLL_SLOP: f32 = 12.0;

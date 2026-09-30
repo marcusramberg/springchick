@@ -26,17 +26,12 @@
 }:
 
 let
-  # skia-bindings' build script normally downloads a prebuilt Skia from GitHub,
-  # which the Nix sandbox forbids. Fetch the exact archive up front and point
-  # SKIA_BINARIES_URL at it with a file:// URL (the build script special-cases
-  # those and reads the file directly, no curl).
-  #
-  # The archive name is `skia-binaries-<rust-skia repo hash>-<target>-<features>`.
-  # Bumping skia-safe changes the repo hash and the version tag below; when that
-  # happens, list the assets of the matching release at
-  # https://github.com/rust-skia/skia-binaries/releases and update all three
-  # values. `<features>` must match the enabled skia-safe features exactly
-  # (we build with `gl`, which resolves to `gl-jpegd-jpege-pdf`).
+  # The sandbox forbids skia-bindings' download, so fetch the prebuilt archive
+  # and hand it over as a file:// SKIA_BINARIES_URL.
+  # Name: `skia-binaries-<repo hash>-<target>-<features>`. On a skia-safe bump,
+  # update all three values from
+  # https://github.com/rust-skia/skia-binaries/releases. `gl` resolves to
+  # features `gl-jpegd-jpege-pdf`.
   skiaVersion = "0.99.0";
   skiaRepoHash = "a25a0fdb7d90429aa2d1";
   skiaFeatures = "gl-jpegd-jpege-pdf";
@@ -55,17 +50,10 @@ let
         or (throw "no prebuilt Skia binaries pinned for target ${rustTarget}");
   };
 
-  # Only the Rust workspace feeds the build. The flake passes `src = self` (the
-  # whole tree), so without this filter an edit to anything — nix/, tests/,
-  # docs/, scripts/ — changes the src hash and busts the expensive release
-  # build. Restrict to the files cargo actually reads; postInstall pulls
-  # config.example.toml and the session scripts via their own nix paths, so they
-  # are unaffected.
+  # Only files cargo reads, so edits under nix/, tests/, docs/ don't rebuild.
   cargoSrc = lib.cleanSourceWith {
     inherit src;
-    # `src` arrives as a string-like store path (flake `self`), which
-    # lib.fileset rejects — cleanSourceWith's path filter accepts it. Keep the
-    # workspace manifests and every crate; drop everything else.
+    # lib.fileset rejects the string-like flake `self`; cleanSourceWith doesn't.
     filter =
       path: _type:
       let
@@ -74,14 +62,9 @@ let
       rel == "Cargo.toml" || rel == "Cargo.lock" || rel == "crates" || lib.hasPrefix "crates/" rel;
   };
 
-  # winit/EGL/GLES and libseat are dlopen'd at runtime, so they must be on the
-  # loader path of the installed binary — build-time rpath does not cover them.
-  #
-  # NOT mesa: on NixOS the GL/EGL driver comes from /run/opengl-driver (via the
-  # glvnd libGL/libEGL below and libgbm's gbm-backends-path). Putting mesa's own
-  # libEGL/DRI on LD_LIBRARY_PATH shadows glvnd with this flake's stock mesa,
-  # which has no arch-11 panfrost for the Mali-G715 and so falls back to
-  # llvmpipe. Let glvnd dispatch to whatever driver the host system installed.
+  # dlopen'd at runtime, so they go on LD_LIBRARY_PATH.
+  # Not mesa: its libEGL would shadow glvnd and the host's driver (the stock
+  # mesa has no panfrost for the Mali-G715, so llvmpipe).
   runtimeLibs = [
     wayland
     libxkbcommon
@@ -99,8 +82,7 @@ rustPlatform.buildRustPackage {
 
   cargoLock = {
     lockFile = ../Cargo.lock;
-    # smithay is pinned to upstream 7ddcd17 (xkbcommon 0.9 → wvkbd keymap fix).
-    # git deps must be vendored with an explicit hash.
+    # Upstream smithay git (xkbcommon 0.9 fixes wvkbd keymaps).
     outputHashes = {
       "smithay-0.7.0" = "sha256-FkybYhnZ6h5EQIROWzNTGD7zk9fH3WwNzomWr3ebbzA=";
     };
@@ -122,7 +104,7 @@ rustPlatform.buildRustPackage {
     mesa
     udev
     seatd
-    # libdbus: the iio-sensor-proxy client (accelerometer orientation).
+    # iio-sensor-proxy client.
     dbus
     fontconfig
     freetype
@@ -132,7 +114,6 @@ rustPlatform.buildRustPackage {
 
   env.SKIA_BINARIES_URL = "file://${skiaBinaries}";
 
-  # Only the compositor binary is wanted; the other workspace crates are libs.
   cargoBuildFlags = [
     "-p"
     "sc-compositor"
@@ -140,27 +121,19 @@ rustPlatform.buildRustPackage {
     "sc-search"
   ];
 
-  # Workspace tests need no display; keep them on so `nix flake check` is useful.
   cargoTestFlags = [ "--workspace" ];
 
   postInstall = ''
-    # `$out/bin` on PATH so the compositor can spawn the sibling `sc-search`
-    # binary (the pull-down search app) by name.
+    # `$out/bin` on PATH so the compositor can spawn `sc-search`.
     wrapProgram $out/bin/springchick \
       --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}" \
       --prefix PATH : "${lib.makeBinPath [ xwayland ]}:$out/bin"
 
-    # The search app is an eframe/glow Wayland client: it needs the GL + wayland
-    # libs at runtime the same way the compositor does.
     wrapProgram $out/bin/sc-search \
       --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}"
 
-    # Session entry point launched by the display manager. It does not exec the
-    # compositor directly: it starts springchick.service (Type=notify) so that
-    # graphical-session.target is pulled active via the service's BindsTo, which
-    # is the only legal way to raise that RefuseManualStart target. See
-    # nix/springchick-session and the systemd.user units in nix/module.nix. The
-    # DRM backend / XDG_SESSION_TYPE now live on the service, not here.
+    # Starts springchick.service (Type=notify) instead of exec'ing the
+    # compositor, so the service's BindsTo can raise graphical-session.target.
     install -Dm555 ${./springchick-session} $out/bin/springchick-session
     substituteInPlace $out/bin/springchick-session \
       --replace-fail '@springchick@' "$out/bin/springchick"
@@ -168,14 +141,11 @@ rustPlatform.buildRustPackage {
     install -Dm444 ${./springchick.desktop} \
       $out/share/wayland-sessions/springchick.desktop
 
-    # Sample config with every option at its built-in default. The module
-    # installs this to /etc/springchick/config.toml.example as a starting point.
     install -Dm444 ${../config.example.toml} \
       $out/share/springchick/config.example.toml
   '';
 
-  # Required by services.displayManager.sessionPackages; must match the
-  # desktop file's DesktopNames.
+  # Must match the desktop file's DesktopNames.
   passthru.providedSessions = [ "springchick" ];
 
   meta = {

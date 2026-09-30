@@ -1,8 +1,5 @@
-//! Skia-on-Smithay-GLES rendering for springchick.
-//!
-//! Reuses the M1 spike's Ganesh-GL shared-context approach with the M2 fix:
-//! caches the Skia `Surface` + `BackendRenderTarget` keyed on (fboid, width, height),
-//! recreating only on change.
+//! Skia (Ganesh GL) drawing into smithay's GLES context. The Skia `Surface`
+//! is cached on (fboid, width, height) and recreated only on change.
 
 use crate::render::HomeView;
 use crate::rotation::Rotation;
@@ -33,7 +30,6 @@ type GlGetIntegerv = unsafe extern "system" fn(pname: u32, params: *mut c_int);
 type GlFinish = unsafe extern "system" fn();
 type GlFlush = unsafe extern "system" fn();
 
-/// Skia Ganesh-GL renderer bound to Smithay's existing GLES/EGL context.
 pub struct SkiaGl {
     context: Option<DirectContext>,
     gl_get_integerv: Option<GlGetIntegerv>,
@@ -42,17 +38,14 @@ pub struct SkiaGl {
     setup_failed: bool,
     cached_surface: Option<CachedSurface>,
     icon_images: HashMap<String, Image>,
-    /// Catalog generation `icon_images` was uploaded from.
     icon_gen: u64,
     font: Option<Font>,
-    /// How the view is turned against the panel; every draw takes view-space
-    /// sizes and coordinates. Set once per frame by [`Self::set_view`].
+    /// Every draw takes view-space sizes; set per frame by [`Self::set_view`].
     view: Rotation,
 }
 
-/// One switcher card's rect in physical output px (top-left origin, y down),
-/// plus the two depth cues drawn around it: a drop shadow underneath and a
-/// darkening scrim on top.
+/// A switcher card's rect in physical px (top-left origin, y down), plus its
+/// drop shadow and depth scrim.
 #[derive(Clone, Copy, Debug)]
 pub struct CardDecor {
     pub x: f32,
@@ -60,46 +53,26 @@ pub struct CardDecor {
     pub w: f32,
     pub h: f32,
     pub radius: f32,
-    /// The card's own opacity; both cues fade with it so a fading-in fan does
-    /// not show a hard shadow under a barely-visible card.
+    /// Both cues fade with it.
     pub alpha: f32,
-    /// Depth scrim strength, 0..1.
     pub dim: f32,
-    /// How far the deck's chrome (the icon badge, and the title beside it) has
-    /// faded in, 0..1. Multiplied by `alpha`, not folded into it: the shadow and
-    /// the scrim belong to the card itself and must not ride the chrome fade.
+    /// Chrome (badge, title) fade, multiplied by `alpha`. The shadow and scrim
+    /// don't ride it.
     pub chrome: f32,
-    /// Output scale (`[main].dpi`), for the chrome that is sized in logical px.
     pub dpi: f32,
 }
 
-/// Drop-shadow tuning, as fractions of the card's width so the cue scales with
-/// dpi and card size.
-///
-/// The deck fans to the LEFT: every card overlaps the one behind it along that
-/// card's right edge, so the shadow is cast leftward only. A symmetric (or
-/// downward) drop shadow puts a wide smudge across the neighbour's exposed
-/// strip and over the shell below the deck, which reads as dirt rather than
-/// depth. Keeping the offset small and the blur tight keeps the whole cue
-/// inside the exposed strip, so it reads as a contact shadow rather than a
-/// gradient washing one card's color into the next.
+/// Fractions of card width. The deck fans left, so the shadow is cast left
+/// only and kept tight enough to stay inside the neighbour's exposed strip;
+/// wider reads as dirt.
 const SHADOW_SIGMA_FRAC: f32 = 0.005;
 const SHADOW_DX_FRAC: f32 = 0.006;
 const SHADOW_ALPHA: f32 = 0.30;
 
-/// App-icon badge on a switcher card. Side length is a fraction of the card's
-/// width so the badge scales with dpi and card size; the rest are fractions of
-/// that side.
-///
-/// The badge sits clear of the card, above its top edge and inset from the left
-/// (`INSET` is a fraction of the card width, `GAP` the clearance above the
-/// edge), with a soft shadow under it. Nothing of it overlaps the client's
-/// pixels, so it reads as a label floating over the card. The space to its
-/// right is where the focused card's window title will go.
+/// Badge side as a fraction of card width, sitting above the card's top edge
+/// with nothing over the client's pixels.
 const CARD_ICON_FRAC: f32 = 0.20;
-/// Ceiling on the badge side in logical px. A wide, low-dpi panel (tablet) has
-/// a card wide enough that the fraction alone draws a badge several times the
-/// apparent size it has on a phone.
+/// Cap in logical px, so a wide low-dpi panel doesn't get a huge badge.
 const CARD_ICON_MAX_LOGICAL: f32 = 45.0;
 const CARD_ICON_INSET_FRAC: f32 = 0.05;
 const CARD_ICON_GAP_FRAC: f32 = 0.3;
@@ -107,9 +80,7 @@ const CARD_ICON_SHADOW_OFFSET_FRAC: f32 = 0.06;
 const CARD_ICON_SHADOW_SIGMA_FRAC: f32 = 0.13;
 const CARD_ICON_SHADOW_ALPHA: f32 = 0.45;
 
-/// Focused card's title, drawn beside the badge: gap from the badge and text
-/// size as fractions of the badge side, and how much of the available width the
-/// right-edge fade covers when the title overruns.
+/// Fractions of the badge side.
 const CARD_TITLE_GAP_FRAC: f32 = 0.28;
 const CARD_TITLE_SIZE_FRAC: f32 = 0.34;
 const CARD_TITLE_FADE_FRAC: f32 = 0.25;
@@ -124,14 +95,8 @@ impl CardDecor {
     }
 }
 
-/// Blurred black rounded rect, offset to the left of the card: the shadow that
-/// separates a card from the card it overlaps.
-///
-/// Clipped to *outside* the card's own rect, which matters because app windows
-/// are often translucent (a terminal with an alpha background shows the shell
-/// through it). An unclipped shadow sits behind the card, and everything the
-/// client leaves see-through then reads as a dark wash across the card body
-/// instead of a shadow around its edge.
+/// Clipped to outside the card: apps are often translucent, and an unclipped
+/// shadow shows through them as a dark wash.
 fn draw_card_shadow_rrect(canvas: &skia_safe::Canvas, card: &CardDecor) {
     let sigma = (card.w * SHADOW_SIGMA_FRAC).max(1.0);
     let mut paint = Paint::default();
@@ -144,11 +109,8 @@ fn draw_card_shadow_rrect(canvas: &skia_safe::Canvas, card: &CardDecor) {
         0,
         0,
     ));
-    // `Normal`, not `Outer`: Outer drops the shadow inside the *offset* shape,
-    // which is exactly the strip next to the card, so the ramp fell back to
-    // full brightness in the last few px before the edge — a bright line of the
-    // covered card's color, worse than no shadow. The clip below is what keeps
-    // the shadow off the card itself.
+    // `Normal`, not `Outer`: Outer leaves a bright line of the covered card
+    // right at the edge. The clip keeps the shadow off the card.
     paint.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, sigma, false));
     canvas.save();
     canvas.clip_rrect(card.rrect(), Some(ClipOp::Difference), Some(true));
@@ -157,8 +119,6 @@ fn draw_card_shadow_rrect(canvas: &skia_safe::Canvas, card: &CardDecor) {
     canvas.restore();
 }
 
-/// The uploaded icons, font, and catalog every Home icon draws from: one
-/// borrow of the renderer's caches, shared by the grid and dock passes.
 #[derive(Clone, Copy)]
 struct IconAssets<'a> {
     icon_images: &'a HashMap<String, Image>,
@@ -166,8 +126,6 @@ struct IconAssets<'a> {
     app_catalog: &'a HashMap<String, AppEntry>,
 }
 
-/// The per-icon cues drawn on top of the icon itself, resolved per slot: press
-/// highlight, launch pulse (seconds since spawn), and the running dot.
 #[derive(Clone, Copy)]
 struct IconCues {
     pressed: bool,
@@ -175,9 +133,7 @@ struct IconCues {
     running: bool,
 }
 
-/// Where the app-icon badge for `card` is drawn: square, above the card's top
-/// edge and inset from its left. Shared by the badge and the title beside it so
-/// the two can't drift apart.
+/// Shared by the badge and title so they can't drift apart.
 fn card_icon_rect(card: &CardDecor) -> Rect {
     let side = (card.w * CARD_ICON_FRAC)
         .min(CARD_ICON_MAX_LOGICAL * card.dpi)
@@ -271,18 +227,15 @@ impl SkiaGl {
         true
     }
 
-    /// Block until all submitted GL commands (smithay + Skia) have completed.
-    /// Used by the DRM backend to fence the frame before a page-flip so scanout
-    /// never shows a partially-rendered buffer (tearing).
+    /// Blocks until all GL commands complete. The DRM fallback when no fence
+    /// can be exported.
     pub fn finish_gpu(&self) {
         if let Some(finish) = self.gl_finish {
             unsafe { finish() };
         }
     }
 
-    /// Push all submitted GL commands to the GPU without waiting for them.
-    /// Needed after inserting a fence: the fence only becomes signalable once
-    /// the commands before it have actually been flushed to the hardware.
+    /// A fence only becomes signalable once the commands before it are flushed.
     pub fn flush_gpu(&self) {
         if let Some(flush) = self.gl_flush {
             unsafe { flush() };
@@ -310,11 +263,8 @@ impl SkiaGl {
         }
     }
 
-    /// Draw the icon context menu over the home screen.
-    ///
-    /// Follows `draw_home`'s manual surface acquisition rather than
-    /// `with_overlay_canvas`, because the rows need `&self.font` while the
-    /// canvas holds `&mut self.cached_surface`.
+    /// Manual surface acquisition, not `with_overlay_canvas`: the rows need
+    /// `&self.font` while the canvas borrows `&mut self.cached_surface`.
     pub fn draw_icon_menu(
         &mut self,
         width: i32,
@@ -332,8 +282,6 @@ impl SkiaGl {
 
         canvas.save();
         orient(canvas, view, width, height, flip_y);
-        // Grow from the anchor as it opens, so the panel reads as coming out of
-        // the icon that was held rather than fading in over it.
         let p = menu.progress.clamp(0.0, 1.0);
         let scale = 0.85 + 0.15 * p;
         canvas.translate((menu.anchor.0, menu.anchor.1));
@@ -347,12 +295,7 @@ impl SkiaGl {
         }
     }
 
-    /// Draw an open library folder: a dim backdrop, a rounded card, the
-    /// category name, and the member icons clipped to the card.
-    ///
-    /// Same manual surface acquisition as `draw_icon_menu`, for the same
-    /// reason: the icons need `&self.icon_images` while the canvas borrows
-    /// `&mut self.cached_surface`.
+    /// Manual surface acquisition, as in `draw_icon_menu`.
     pub fn draw_folder_panel(
         &mut self,
         width: i32,
@@ -375,19 +318,15 @@ impl SkiaGl {
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
         let canvas = surface.canvas();
 
-        // One restore at the end unwinds the flip, the zoom, its alpha layer
-        // and the row clip together.
+        // One restore unwinds the flip, zoom, alpha layer and clip.
         let base = canvas.save();
         orient(canvas, view, width, height, flip_y);
 
-        // Backdrop: dim the page behind so the card reads as modal, and so a
-        // press outside it obviously means "close".
         let open = folder.progress.clamp(0.0, 1.0);
         let mut dim = Paint::default();
         dim.set_color(Color::from_argb((140.0 * open) as u8, 0, 0, 0));
         canvas.draw_rect(Rect::new(0.0, 0.0, width as f32, height as f32), &dim);
 
-        // Grow out of (and shrink back into) the tile that was tapped.
         let scale = 0.4 + 0.6 * open;
         canvas.translate((folder.anchor.0, folder.anchor.1));
         canvas.scale((scale, scale));
@@ -412,8 +351,7 @@ impl SkiaGl {
             }
         }
 
-        // Rows are clipped to the card below the title — the same rect the
-        // panel hit-test uses, so what is tappable is exactly what is drawn.
+        // Same rect the hit-test uses, so tappable == drawn.
         let title = folder.layout.title_rect;
         canvas.clip_rect(
             Rect::new(
@@ -449,9 +387,8 @@ impl SkiaGl {
         }
     }
 
-    /// Drop the uploaded icons when the catalog has been rescanned: they are
-    /// keyed by app id, so a re-themed or reinstalled app would otherwise keep
-    /// drawing its old pixels. Called once per frame, before any icon draw.
+    /// Icons are keyed by app id; a rescan must drop them or re-themed apps keep
+    /// old pixels. Call once per frame before drawing icons.
     pub fn sync_catalog_gen(&mut self, gen: u64) {
         if self.icon_gen != gen {
             self.icon_gen = gen;
@@ -477,9 +414,8 @@ impl SkiaGl {
         Some(image)
     }
 
-    /// Draw the home screen (grid + dock + dots + bar). Grid icons are drawn
-    /// from `grid_positions` (animated screen-space centers), so paging and
-    /// reflow both play out as icon motion rather than a page-offset scroll.
+    /// Grid icons are drawn from `grid_positions`, so paging and reflow are icon
+    /// motion.
     pub fn draw_home(&mut self, width: i32, height: i32, flip_y: bool, view: &HomeView<'_>) {
         let &HomeView {
             page,
@@ -499,16 +435,13 @@ impl SkiaGl {
         } = view;
         self.ensure_font();
 
-        // Upload any icons we haven't uploaded yet.
         for (app_id, pixels) in icon_cache {
             if !self.icon_images.contains_key(app_id) {
                 self.get_or_upload_icon(app_id, pixels);
             }
         }
 
-        // Same surface acquisition as the overlay draws; `with_overlay_canvas`
-        // isn't usable here because the body needs `&self.icon_images` and
-        // `&self.font` while the canvas holds `&mut self.cached_surface`.
+        // Manual acquisition: the body needs `&self.icon_images` and `&self.font`.
         if !self.ensure_surface(width, height) {
             return;
         }
@@ -517,22 +450,16 @@ impl SkiaGl {
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
         let canvas = surface.canvas();
 
-        // Panel-orientation flip: the DRM/GBM scanout buffer has the opposite
-        // Y-origin from Skia's BottomLeft surface, so the home/bar render
-        // upside-down on the panel. Mirror vertically for the DRM path.
         // Save/restore so the cached surface's matrix doesn't accumulate.
         canvas.save();
         orient(canvas, view, width, height, flip_y);
-        // Whole-screen offsets: the bounce lift and the sideways drag-out. The
-        // lift's sign follows the flip so it moves home the same way on the
-        // panel as it always has.
+        // The lift's sign follows the flip.
         if lift != 0.0 || shift != 0.0 {
             canvas.translate((shift, if flip_y { lift } else { -lift }));
         }
 
-        // Grid icons: build the animated slot set once, in deterministic model
-        // (page, slot) order — see `visible_grid_slots`. Reused below for arrange
-        // badges so they track the sliding icons instead of the static layout.
+        // Deterministic model order (see `visible_grid_slots`); reused for the
+        // arrange badges so they track the sliding icons.
         let anim_slots = visible_grid_slots(model, grid_positions, width as f32, height as f32);
         let assets = IconAssets {
             icon_images: &self.icon_images,
@@ -548,8 +475,6 @@ impl SkiaGl {
             draw_icon_slot(canvas, slot, assets, cues(slot));
         }
 
-        // Library folder tiles, drawn in page-local space and slid into place
-        // by the page offset — the same way the grid icons ride their springs.
         if let Some(lib) = library {
             canvas.save();
             canvas.translate((lib.x_offset, 0.0));
@@ -559,9 +484,7 @@ impl SkiaGl {
             canvas.restore();
         }
 
-        // Dock and dots don't scroll with pages.
         let mut current_layout = sc_layout::compute(width as f32, height as f32, page, model);
-        // Keep the arrange-mode Done button below a top exclusive-zone bar.
         current_layout.shift_done_below(top_inset);
 
         let dock_slots =
@@ -570,14 +493,10 @@ impl SkiaGl {
             draw_icon_slot(canvas, slot, assets, cues(slot));
         }
 
-        // Draw page indicator dots.
         draw_dots(canvas, &current_layout, page);
 
-        // No bar here: the pill is the chrome overlay's, drawn at whatever alpha
-        // `bar_hint` says (nothing, on Home).
+        // No bar here: the chrome overlay draws the pill.
 
-        // Arrange mode: remove-badges, Done button, dock drop highlight, and
-        // the lifted (dragged) icon on top of everything else.
         if let Some(view) = arrange {
             for slot in anim_slots.iter().chain(dock_slots.iter()) {
                 draw_remove_badge(canvas, slot);
@@ -600,10 +519,8 @@ impl SkiaGl {
         }
     }
 
-    /// Acquire (or reuse) the Skia surface wrapping the currently bound
-    /// framebuffer. Returns false if the GL context or the wrap failed, in which
-    /// case `cached_surface` must not be touched.
-    /// Takes the view size; the render target is the panel's.
+    /// Takes the view size; the render target is the panel's. On false,
+    /// `cached_surface` must not be touched.
     fn ensure_surface(&mut self, width: i32, height: i32) -> bool {
         let (width, height) = self.view.app_size((width, height));
         if width <= 0 || height <= 0 {
@@ -652,9 +569,6 @@ impl SkiaGl {
         true
     }
 
-    /// Acquire the cached GL-backed Skia surface and run `f` against its canvas,
-    /// applying the y-flip if needed and flushing afterward. Shared by the
-    /// overlay draws so they don't each repeat the surface-acquire dance.
     fn with_overlay_canvas<F: FnOnce(&skia_safe::Canvas)>(
         &mut self,
         width: i32,
@@ -680,12 +594,7 @@ impl SkiaGl {
         }
     }
 
-    /// Draw the home-affordance bar over the app. `alpha` (0..=1) fades it out
-    /// when an exclusive-zone layer surface (e.g. the OSK) covers the bottom.
-    ///
-    /// `card` is the drawn rect of the card the pill rides, which puts it just
-    /// under that card's own bottom edge instead of on the screen edge while the
-    /// card flies around above it. `None` draws it in the screen's bar band.
+    /// `card` is the drawn rect the pill rides; `None` puts it in the bar band.
     pub fn draw_bar_overlay(
         &mut self,
         width: i32,
@@ -706,9 +615,7 @@ impl SkiaGl {
         });
     }
 
-    /// Draw the volume OSD: a vertical bar on the right edge, in the top third,
-    /// next to the physical rockers. `level` is 0.0..=~1.5 (1.0 = 100%);
-    /// `alpha` fades it in/out.
+    /// Right edge, top third, next to the physical rockers. `level` 1.0 = 100%.
     pub fn draw_osd_overlay(
         &mut self,
         width: i32,
@@ -726,15 +633,10 @@ impl SkiaGl {
         });
     }
 
-    /// Blur what is already in the framebuffer, inside `rects`
-    /// (ext-background-effect-v1). Call it after everything *behind* the
-    /// blurring surface is drawn and before the surface itself.
-    ///
-    /// Works by snapshotting the framebuffer and drawing that snapshot straight
-    /// back through a blur filter, clipped to the region. The snapshot lives in
-    /// the surface's own coordinate space, so it is drawn with no y-flip and the
-    /// clip rectangles are flipped into that space instead — flipping both would
-    /// mirror the blurred content against the pixels it came from.
+    /// ext-background-effect-v1: blur what's already drawn inside `rects`. Call
+    /// after everything behind the surface and before the surface itself. The
+    /// snapshot is in surface space, so it is drawn unflipped and the clip is
+    /// flipped instead; flipping both mirrors the blur.
     pub fn blur_backdrop(
         &mut self,
         width: i32,
@@ -750,11 +652,10 @@ impl SkiaGl {
             return;
         }
 
-        // Region → clip path: Add rects union, Subtract rects punch holes.
         let view = self.view;
         let (pw, ph) = view.app_size((width, height));
         let to_canvas = |r: &crate::background_effect::BlurRect| {
-            // View → panel: the inverse of `Rotation::map_input`.
+            // Inverse of `Rotation::map_input`.
             let (x, y, w, h) = match view {
                 Rotation::None => (r.x, r.y, r.w, r.h),
                 Rotation::LeftUp => (r.y, ph as f32 - r.x - r.w, r.h, r.w),
@@ -808,10 +709,8 @@ impl SkiaGl {
         }
     }
 
-    /// Drop a soft shadow behind one switcher card. Call it immediately before
-    /// the card's own (GLES) draw so the shadow lands under that card but over
-    /// whatever was already composited — the deck overlaps, so a single
-    /// shadow pre-pass for the whole deck would be hidden by the cards in front.
+    /// Call right before the card's own draw: the deck overlaps, so one shadow
+    /// pre-pass would be hidden by the cards in front.
     pub fn draw_card_shadow(&mut self, width: i32, height: i32, card: &CardDecor, flip_y: bool) {
         if card.alpha <= 0.0 || card.w <= 0.0 || card.h <= 0.0 {
             return;
@@ -821,8 +720,7 @@ impl SkiaGl {
         });
     }
 
-    /// Darken one switcher card by its depth scrim, drawn straight after the
-    /// card so it tints the client's own pixels.
+    /// Drawn right after the card so it tints the client's pixels.
     pub fn draw_card_dim(&mut self, width: i32, height: i32, card: &CardDecor, flip_y: bool) {
         let a = card.dim * card.alpha;
         if a <= 0.0 || card.w <= 0.0 || card.h <= 0.0 {
@@ -841,17 +739,8 @@ impl SkiaGl {
         });
     }
 
-    /// Badge one switcher card with its app icon, floating clear above the
-    /// card's top-left.
-    ///
-    /// The icon sits outside the card entirely rather than over the client's
-    /// pixels, so it reads as a label belonging to the card; the soft shadow
-    /// under it sells the same separation.
-    ///
-    /// Drawn after the card and its depth scrim, so it stays legible on a card
-    /// that is dimmed by depth. Its opacity is the card's own times
-    /// `card.chrome`, so badges ramp in with the opening deck rather than
-    /// popping, and a fading fan doesn't leave icons floating over nothing.
+    /// Floats above the card's top-left. Drawn after the scrim so it stays
+    /// legible; opacity is the card's times `card.chrome`.
     pub fn draw_card_icon(
         &mut self,
         width: i32,
@@ -865,8 +754,7 @@ impl SkiaGl {
         if alpha <= 0.0 || card.w <= 0.0 || card.h <= 0.0 {
             return;
         }
-        // Uploaded here rather than relying on `draw_home`: the deck is drawn in
-        // states where Home may never have been painted this frame.
+        // The deck may be drawn in frames where Home wasn't.
         let image = match icon_cache.get(app_id) {
             Some(pixels) => self.get_or_upload_icon(app_id, pixels),
             None => self.icon_images.get(app_id).cloned(),
@@ -877,9 +765,6 @@ impl SkiaGl {
         let dst = card_icon_rect(card);
         let side = dst.width();
         self.with_overlay_canvas(width, height, flip_y, |canvas| {
-            // Lifted shadow: offset down-right and blurred wide, so the badge
-            // reads as hovering above the card rather than stuck to it. Also
-            // keeps a light icon readable over a light window.
             let mut shadow = Paint::default();
             shadow.set_anti_alias(true);
             shadow.set_color(Color::from_argb(
@@ -908,16 +793,8 @@ impl SkiaGl {
         });
     }
 
-    /// Draw the focused card's window title beside its icon badge, at `alpha`
-    /// (the chrome fade times the title's own cross-fade).
-    ///
-    /// A title too long for the card is *not* ellipsized: it runs to the card's
-    /// right edge and fades out there, so a long title reads as continuing
-    /// rather than as truncated, and the deck keeps a clean right margin.
-    ///
-    /// Follows `draw_home`'s manual surface acquisition rather than
-    /// `with_overlay_canvas`: the text needs `&self.font` while the canvas holds
-    /// `&mut self.cached_surface`.
+    /// Not ellipsized: an overrunning title fades out at the card's right edge.
+    /// Manual surface acquisition, as in `draw_icon_menu`.
     pub fn draw_card_title(
         &mut self,
         width: i32,
@@ -954,8 +831,7 @@ impl SkiaGl {
             return;
         };
         let text_w = font.measure_str(title, None).0;
-        // Baseline that centres the text on the badge: metrics are negative
-        // above the baseline, so this splits ascent and descent evenly.
+        // Metrics are negative above the baseline.
         let (_, metrics) = font.metrics();
         let baseline = icon.center_y() - (metrics.ascent + metrics.descent) / 2.0;
 
@@ -964,14 +840,11 @@ impl SkiaGl {
         let canvas = surface.canvas();
         canvas.save();
         orient(canvas, view, width, height, flip_y);
-        // The overflow fade is a DstIn gradient, which needs the text on its own
-        // layer — applied straight to the canvas it would eat the card too.
+        // A DstIn fade needs its own layer or it eats the card.
         let bounds = Rect::new(x0, icon.top(), right, icon.bottom());
         canvas.save_layer_alpha_f(bounds, 1.0);
         canvas.clip_rect(bounds, None, true);
 
-        // Same soft shadow the badge gets, for the same reason: the title sits
-        // over the shell backdrop and whatever card is fanned behind it.
         let mut shadow = Paint::default();
         shadow.set_anti_alias(true);
         shadow.set_color(Color::from_argb(
@@ -995,14 +868,10 @@ impl SkiaGl {
         paint.set_alpha_f(alpha);
         canvas.draw_text_blob(&blob, (x0, baseline), &paint);
 
-        // Only a title that actually overruns gets the edge fade; a short one
-        // would otherwise have its last few characters dimmed for no reason.
         if text_w > avail {
             let fade = (avail * CARD_TITLE_FADE_FRAC).min(icon.width());
             let mut mask = Paint::default();
             mask.set_blend_mode(skia_safe::BlendMode::DstIn);
-            // Opaque → transparent left to right; DstIn keeps the layer's alpha
-            // where this is opaque, so the text dissolves into the card edge.
             let stops = [
                 skia_safe::Color4f::new(1.0, 1.0, 1.0, 1.0),
                 skia_safe::Color4f::new(1.0, 1.0, 1.0, 0.0),
@@ -1022,17 +891,15 @@ impl SkiaGl {
                 &mask,
             );
         }
-        canvas.restore(); // layer
-        canvas.restore(); // flip
+        canvas.restore();
+        canvas.restore();
 
         if let Some(ctx) = self.context.as_mut() {
             ctx.flush_and_submit();
         }
     }
 
-    /// Black out the whole screen at `alpha`: the dip that covers an orientation
-    /// change (see [`crate::rotation::Fade`]). Drawn last, over app and chrome
-    /// alike — the whole point is that nothing of the turn itself is visible.
+    /// The rotation dip, drawn over everything.
     pub fn draw_screen_dim(&mut self, width: i32, height: i32, alpha: f32, flip_y: bool) {
         if alpha <= 0.0 {
             return;
@@ -1052,7 +919,6 @@ impl SkiaGl {
         });
     }
 
-    /// Draw the touch indicator marks on top of everything (demo recordings).
     pub fn draw_touches_overlay(
         &mut self,
         width: i32,
@@ -1068,9 +934,7 @@ impl SkiaGl {
         });
     }
 
-    /// Draw the mouse cursor at `(x, y)` (physical pixels). `scale` is the
-    /// output scale (`dpi`) so the arrow is the same apparent size as the rest
-    /// of the chrome on a HiDPI panel.
+    /// `scale` is `dpi`.
     pub fn draw_cursor(
         &mut self,
         width: i32,
@@ -1086,9 +950,8 @@ impl SkiaGl {
     }
 }
 
-/// Map view-space drawing (`width`×`height`, y down) onto the panel: turn by
-/// `view` — the inverse of [`Rotation::map_input`], so what is drawn lines up
-/// with where input lands — then the DRM y-flip.
+/// View space to panel: the inverse of [`Rotation::map_input`], then the DRM
+/// y-flip.
 fn orient(canvas: &skia_safe::Canvas, view: Rotation, width: i32, height: i32, flip_y: bool) {
     let (pw, ph) = view.app_size((width, height));
     if flip_y {
@@ -1103,14 +966,9 @@ fn orient(canvas: &skia_safe::Canvas, view: Rotation, width: i32, height: i32, f
     canvas.concat(&turn);
 }
 
-/// Draw a plain left-pointing arrow cursor with its tip exactly at `(x, y)`.
-///
-/// springchick draws its own cursor rather than the client's: `cursor_image` is
-/// a no-op, so a client's `set_cursor` surface is never composited. One fixed
-/// arrow is honest about that — it always points where the click will land,
-/// whatever the client would have preferred to show.
+/// We draw our own arrow: `cursor_image` is a no-op, so client cursor
+/// surfaces are never composited.
 fn draw_cursor_arrow(canvas: &skia_safe::Canvas, x: f32, y: f32, scale: f32) {
-    // Classic arrow outline in a 12x19 unit box, tip at the origin.
     const POINTS: [(f32, f32); 7] = [
         (0.0, 0.0),
         (0.0, 16.0),
@@ -1127,8 +985,7 @@ fn draw_cursor_arrow(canvas: &skia_safe::Canvas, x: f32, y: f32, scale: f32) {
         .collect();
     let path = skia_safe::Path::polygon(&pts, true, None, None);
 
-    // Black outline under a white fill, so the cursor stays visible over both a
-    // dark app and the light home grid.
+    // Black outline under white fill, visible on dark and light.
     let mut outline = Paint::default();
     outline.set_anti_alias(true);
     outline.set_stroke(true);
@@ -1142,18 +999,13 @@ fn draw_cursor_arrow(canvas: &skia_safe::Canvas, x: f32, y: f32, scale: f32) {
     canvas.draw_path(&path, &fill);
 }
 
-/// Draw touch indicator marks: a soft filled disc under each held finger, with
-/// a brighter rim, and an expanding stroked ring for each releasing contact.
-/// Colors are a warm accent so contacts stand out over both light and dark UI.
 fn draw_touch_marks(canvas: &skia_safe::Canvas, marks: &[crate::touch_viz::TouchMark]) {
-    // Accent (springchick warm yellow), tuned for legibility on recordings.
     const R: u8 = 255;
     const G: u8 = 205;
     const B: u8 = 70;
     for m in marks {
         let a = |x: f32| (x * m.alpha).round().clamp(0.0, 255.0) as u8;
         if m.filled {
-            // Solid fingertip fill plus a crisper rim for definition.
             let mut fill = Paint::default();
             fill.set_anti_alias(true);
             fill.set_color(Color::from_argb(a(255.0), R, G, B));
@@ -1166,7 +1018,6 @@ fn draw_touch_marks(canvas: &skia_safe::Canvas, marks: &[crate::touch_viz::Touch
             rim.set_color(Color::from_argb(a(255.0), 255, 235, 170));
             canvas.draw_circle((m.x, m.y), m.radius, &rim);
         } else {
-            // Expanding release ring.
             let mut ring = Paint::default();
             ring.set_anti_alias(true);
             ring.set_stroke(true);
@@ -1177,8 +1028,6 @@ fn draw_touch_marks(canvas: &skia_safe::Canvas, marks: &[crate::touch_viz::Touch
     }
 }
 
-/// Draw the volume OSD track + fill. Geometry is a slim vertical pill hugging
-/// the right edge, vertically centered in the top third of the screen.
 fn draw_volume_osd(
     canvas: &skia_safe::Canvas,
     width: f32,
@@ -1193,24 +1042,22 @@ fn draw_volume_osd(
     let track_h = height * 0.24;
     let margin = width * 0.03;
     let x = width - margin - track_w;
-    let y = height * 0.10; // top third, a little below the top edge
+    let y = height * 0.10;
     let radius = track_w / 2.0;
 
-    // Track (dim background).
     let mut track = Paint::default();
     track.set_anti_alias(true);
     track.set_color(Color::from_argb(a(90.0), 40, 40, 40));
     let track_rect = Rect::new(x, y, x + track_w, y + track_h);
     canvas.draw_rrect(RRect::new_rect_xy(track_rect, radius, radius), &track);
 
-    // Fill grows from the bottom. Over 100% is tinted; muted is greyed.
     let frac = level.clamp(0.0, 1.0);
     let fill_h = track_h * frac;
     let fill_top = y + track_h - fill_h;
     let (r, g, b) = if muted {
         (110, 110, 120)
     } else if level > 1.0 {
-        (255, 170, 60) // overdriven past 100%
+        (255, 170, 60)
     } else {
         (255, 255, 255)
     };
@@ -1222,7 +1069,6 @@ fn draw_volume_osd(
         canvas.draw_rrect(RRect::new_rect_xy(fill_rect, radius, radius), &fill);
     }
 
-    // A slash across the pill signals muted.
     if muted {
         let mut slash = Paint::default();
         slash.set_anti_alias(true);
@@ -1242,12 +1088,8 @@ impl Default for SkiaGl {
     }
 }
 
-// --- Free functions for drawing (avoids borrow issues with &mut self + canvas) ---
-
-/// Seconds since launch for `app_id` iff it has a launch still waiting for its
-/// window, else `None`. Feeds the breathing pulse phase in [`draw_icon_slot`].
-/// The oldest in-flight launch wins when an app is opening more than one
-/// window — they pulse the same icon either way.
+/// Seconds since launch while an app is waiting for its window. With several
+/// in flight, the oldest wins.
 fn launch_pulse(launch_pulses: &[(String, f32)], app_id: &str) -> Option<f32> {
     launch_pulses
         .iter()
@@ -1274,13 +1116,8 @@ fn draw_icon_slot(
         launching,
         running,
     } = cues;
-    // Launch pulse: while the app is spawning (before its window maps) the icon
-    // breathes — a halo that swells and fades  — so the tap
-    // has visible, ongoing feedback instead of a dead icon. Takes over from the
-    // static press highlight.
     let icon_scale = 1.0;
     if let Some(elapsed) = launching {
-        // ~0.7 Hz breath: halo alpha pulses in place
         let phase = sc_anim::pulse(elapsed, 4.4);
         let alpha = (40.0 + 70.0 * phase) as u8;
         let mut paint = Paint::default();
@@ -1296,8 +1133,6 @@ fn draw_icon_slot(
         let rrect = RRect::new_rect_xy(rect, 28.0, 28.0);
         canvas.draw_rrect(rrect, &paint);
     } else if pressed {
-        // Press highlight: a translucent rounded backing behind the icon so a
-        // tap reads as "launching" before the zoom animation begins.
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         paint.set_color(Color::from_argb(60, 255, 255, 255));
@@ -1312,27 +1147,21 @@ fn draw_icon_slot(
         canvas.draw_rrect(rrect, &paint);
     }
 
-    // Icon rect, grown about its center by the launch pulse scale.
     let cx = slot.icon_rect.x + slot.icon_rect.w / 2.0;
     let cy = slot.icon_rect.y + slot.icon_rect.h / 2.0;
     let hw = slot.icon_rect.w / 2.0 * icon_scale;
     let hh = slot.icon_rect.h / 2.0 * icon_scale;
     let icon_dst = Rect::new(cx - hw, cy - hh, cx + hw, cy + hh);
 
-    // Draw icon image.
     if let Some(image) = icon_images.get(&slot.app_id) {
         canvas.draw_image_rect(image, None, icon_dst, &Paint::default());
     } else {
-        // Placeholder rect.
         let mut paint = Paint::default();
         paint.set_color(Color::from_argb(255, 80, 80, 100));
         let rrect = RRect::new_rect_xy(icon_dst, 20.0, 20.0);
         canvas.draw_rrect(rrect, &paint);
     }
 
-    // Running dot: one small dot below the label for an app that has a window
-    // open, whatever its window count — the switcher is where individual
-    // windows are counted, this only answers "is it running".
     if running {
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
@@ -1341,13 +1170,11 @@ fn draw_icon_slot(
         canvas.draw_circle((d.center_x(), d.center_y()), d.w / 2.0, &paint);
     }
 
-    // Draw label.
     if let Some(entry) = app_catalog.get(&slot.app_id) {
         if let Some(f) = font {
             let mut paint = Paint::default();
             paint.set_color(Color::WHITE);
-            // Clipped to the cell: a long name ("Thincast Remote Desktop
-            // Client") otherwise runs under its neighbours' labels.
+            // Long names would run under their neighbours' labels.
             let name = ellipsize(f, &entry.name, slot.label_rect.w);
             if let Some(blob) = TextBlob::new(&name, f) {
                 let text_width = f.measure_str(&name, None).0;
@@ -1359,8 +1186,6 @@ fn draw_icon_slot(
     }
 }
 
-/// A library folder tile: a rounded backing plate with up to four member icons
-/// inside it, and the category name below.
 fn draw_folder_tile(
     canvas: &skia_safe::Canvas,
     slot: &sc_layout::library::FolderSlot,
@@ -1394,16 +1219,12 @@ fn draw_folder_tile(
     }
 }
 
-/// Menu row text size relative to the shared UI font.
 const MENU_FONT_SCALE: f32 = 1.15;
-/// Left/right text inset inside a menu row, as a fraction of the panel width.
+/// Fraction of the panel width.
 const MENU_TEXT_INSET_FRAC: f32 = 0.08;
 
-/// `label` shortened with a trailing ellipsis until it fits `max_w`, or
-/// unchanged when it already does.
-///
-/// Trims by character so a multi-byte title can't be split mid-codepoint, and
-/// gives up gracefully (empty string) if even the ellipsis doesn't fit.
+/// Trims by char, so multi-byte titles aren't split; empty if even the
+/// ellipsis doesn't fit.
 fn ellipsize(font: &Font, label: &str, max_w: f32) -> String {
     if font.measure_str(label, None).0 <= max_w {
         return label.to_string();
@@ -1419,8 +1240,6 @@ fn ellipsize(font: &Font, label: &str, max_w: f32) -> String {
     String::new()
 }
 
-/// The icon menu's panel, rows, and separators. `progress` (0→1) fades the
-/// whole thing in as it grows.
 fn draw_menu_panel(
     canvas: &skia_safe::Canvas,
     menu: &crate::render::MenuView,
@@ -1432,8 +1251,6 @@ fn draw_menu_panel(
     let panel_rect = Rect::new(panel.x, panel.y, panel.x + panel.w, panel.y + panel.h);
     let radius = (panel.w * 0.06).min(28.0);
 
-    // Drop shadow, then the panel itself: dark and near-opaque so labels stay
-    // readable over whatever wallpaper or icon grid is behind it.
     let mut shadow = Paint::default();
     shadow.set_anti_alias(true);
     shadow.set_color(Color::from_argb(a(90.0), 0, 0, 0));
@@ -1444,8 +1261,7 @@ fn draw_menu_panel(
     ));
     canvas.draw_rrect(RRect::new_rect_xy(panel_rect, radius, radius), &shadow);
 
-    // Fully opaque: even a few percent of bleed-through puts a ghost of the
-    // icon labels behind the panel across the rows.
+    // Fully opaque: any bleed-through ghosts the icon labels across the rows.
     let mut bg = Paint::default();
     bg.set_anti_alias(true);
     bg.set_color(Color::from_argb(a(255.0), 28, 30, 36));
@@ -1459,7 +1275,6 @@ fn draw_menu_panel(
             hl.set_color(Color::from_argb(a(50.0), 255, 255, 255));
             canvas.draw_rect(rect, &hl);
         }
-        // Hairline between rows (not above the first).
         if i > 0 {
             let mut sep = Paint::default();
             sep.set_color(Color::from_argb(a(40.0), 255, 255, 255));
@@ -1473,12 +1288,7 @@ fn draw_menu_panel(
             continue;
         };
         let Some(f) = font else { continue };
-        // A touch of extra size over the icon labels: menu rows are read, not
-        // glanced at, and they sit on a panel with room to spare.
         let f = f.with_size(f.size() * MENU_FONT_SCALE).unwrap_or(f.clone());
-        // Window titles are arbitrary client text and routinely wider than a
-        // phone-width panel; clip them to the row rather than letting them run
-        // out over the wallpaper.
         let x = row.x + row.w * MENU_TEXT_INSET_FRAC;
         let label = ellipsize(&f, label, row.w * (1.0 - 2.0 * MENU_TEXT_INSET_FRAC));
         let Some(blob) = TextBlob::new(&label, &f) else {
@@ -1491,8 +1301,6 @@ fn draw_menu_panel(
         } else {
             Color::from_argb(a(255.0), 255, 255, 255)
         });
-        // Left-aligned with the same inset as the separators; vertically
-        // centered on the row using the font's own metrics.
         let (_, metrics) = f.metrics();
         let y = row.y + row.h / 2.0 - (metrics.ascent + metrics.descent) / 2.0;
         canvas.draw_text_blob(&blob, (x, y), &paint);
@@ -1531,8 +1339,6 @@ fn draw_pill(canvas: &skia_safe::Canvas, pill: sc_layout::Rect, alpha: f32) {
     canvas.draw_rrect(rrect, &paint);
 }
 
-/// Arrange-mode "remove" badge: a filled red circle with a white '-' glyph,
-/// drawn at the slot's precomputed `badge_rect`.
 fn draw_remove_badge(canvas: &skia_safe::Canvas, slot: &IconSlot) {
     let r = &slot.badge_rect;
     let cx = r.center_x();
@@ -1552,7 +1358,6 @@ fn draw_remove_badge(canvas: &skia_safe::Canvas, slot: &IconSlot) {
     canvas.draw_line((cx - half, cy), (cx + half, cy), &stroke);
 }
 
-/// Arrange-mode "Done" button: a translucent rounded rect with centered text.
 fn draw_done_button(canvas: &skia_safe::Canvas, layout: &Layout, font: &Option<Font>) {
     let r = &layout.done_button;
     let rect = Rect::new(r.x, r.y, r.x + r.w, r.y + r.h);
@@ -1577,8 +1382,6 @@ fn draw_done_button(canvas: &skia_safe::Canvas, layout: &Layout, font: &Option<F
     }
 }
 
-/// Highlight the dock zone as a drop target while a dragged icon hovers over
-/// it (semi-transparent fill).
 fn draw_dock_highlight(canvas: &skia_safe::Canvas, layout: &Layout) {
     let z = &layout.dock_zone;
     let rect = Rect::new(z.x, z.y, z.x + z.w, z.y + z.h);
@@ -1589,10 +1392,7 @@ fn draw_dock_highlight(canvas: &skia_safe::Canvas, layout: &Layout) {
     canvas.draw_rect(rect, &paint);
 }
 
-/// The lifted (dragged) icon, drawn last so it floats above everything else.
-/// Looked up in `layout` (grid + dock) for its natural icon size, scaled up
-/// ~1.2x, centered on the live drag position. Silently skipped if the icon
-/// isn't in the upload cache yet — never worth a panic mid-drag.
+/// Skipped if the icon isn't uploaded yet.
 fn draw_drag_ghost(
     canvas: &skia_safe::Canvas,
     app_id: &str,
@@ -1621,14 +1421,8 @@ fn draw_drag_ghost(
     canvas.draw_image_rect(image, None, dst, &Paint::default());
 }
 
-/// Grid icon slots to draw, at their animated screen positions, in deterministic
-/// model (page, slot) order.
-///
-/// Iterating `grid_positions` (a `HashMap` rebuilt every frame with a fresh random
-/// seed) would draw in a different z-order each frame, making overlapping
-/// labels/icons z-fight and shimmer. Walking `model.pages` fixes the order to the
-/// stable page/slot layout the old per-page renderer used. Off-screen icons are
-/// culled.
+/// Walks `model.pages` for a stable z-order; iterating the `HashMap` would
+/// shimmer as overlapping icons z-fight. Off-screen icons are culled.
 pub(crate) fn visible_grid_slots(
     model: &ShellModel,
     grid_positions: &HashMap<String, (f32, f32)>,
@@ -1655,17 +1449,14 @@ pub(crate) fn visible_grid_slots(
     out
 }
 
-/// Dock icon slots positioned from animated `dock_positions` (falling back to
-/// the static layout center for a not-yet-seeded app), so the dock reflows.
 pub(crate) fn visible_dock_slots(
     layout: &Layout,
     dock_positions: &HashMap<String, (f32, f32)>,
     width: f32,
     height: f32,
 ) -> Vec<IconSlot> {
-    // Skip apps absent from `dock_positions` (mirrors `visible_grid_slots`): a
-    // dock icon being dragged is dropped from `dock_anim`, so it renders only as
-    // the ghost, not doubled in its dock cell.
+    // A dragged dock icon is absent from `dock_positions`; it renders only as
+    // the ghost.
     layout
         .dock
         .iter()
@@ -1684,8 +1475,6 @@ mod tests {
     use std::collections::HashMap;
 
     fn on_screen_positions(apps: &[&str]) -> HashMap<String, (f32, f32)> {
-        // Insert in a different order than `apps` so a HashMap-order bug would
-        // surface; values are all comfortably on-screen at 1224x2700.
         let mut gp = HashMap::new();
         for (i, a) in apps.iter().enumerate().rev() {
             gp.insert((*a).to_string(), (100.0 + i as f32 * 50.0, 400.0));
@@ -1699,8 +1488,6 @@ mod tests {
             pages: vec![vec!["a".into(), "b".into(), "c".into()]],
             ..Default::default()
         };
-        // Rebuild the map many times (fresh RandomState each) and confirm the
-        // draw order is always the model order, never the HashMap's.
         for _ in 0..25 {
             let gp = on_screen_positions(&["a", "b", "c"]);
             let order: Vec<String> = visible_grid_slots(&m, &gp, 1224.0, 2700.0)
@@ -1719,7 +1506,7 @@ mod tests {
         };
         let mut gp = HashMap::new();
         gp.insert("on".to_string(), (600.0, 400.0));
-        gp.insert("off".to_string(), (1224.0 * 2.0, 400.0)); // far right, culled
+        gp.insert("off".to_string(), (1224.0 * 2.0, 400.0));
         let slots = visible_grid_slots(&m, &gp, 1224.0, 2700.0);
         assert_eq!(slots.len(), 1);
         assert_eq!(slots[0].app_id, "on");

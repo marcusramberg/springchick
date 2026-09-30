@@ -1,52 +1,28 @@
-# Landscape-rotation test: turning the device turns a fullscreen app.
+# Rotation: a fullscreen app turns with the device and returns to portrait
+# when the device is upright again or it leaves fullscreen. A fullscreen app
+# on an upright phone stays portrait. Layer chrome is hidden while turned.
 #
-# Policy under test (see crates/sc-compositor/src/rotation.rs): a fullscreen
-# toplevel is configured at the size its orientation implies and drawn turned to
-# match how the device is held; it goes back to portrait when the device is
-# stood up again *or* when it stops being fullscreen. springchick's own chrome
-# always stays portrait.
+# No accelerometer in the VM; the `orientation` ipc verb feeds the same
+# `set_device_orientation` path.
 #
-# Both halves of that rule are asserted, because the interesting bug was the
-# first one: rotation used to key off fullscreen alone, so a fullscreen
-# *portrait* app (the pull-down search) was configured at the swapped size and
-# drawn with a rotated ghost of itself. Fullscreen-while-upright must therefore
-# stay portrait, and only turning the device may rotate it.
-#
-# The VM has no accelerometer, so orientation arrives through the `orientation`
-# control-socket verb — the same `set_device_orientation` entry point the
-# iio-sensor-proxy client will feed.
-#
-# The client is `imv` showing a four-quadrant image, one saturated colour per
-# corner, at exactly the landscape aspect so it fills the rotated area with no
-# letterboxing. That makes the screenshot self-describing: sampling the four
-# screen quadrants says not just "something rotated" but *which way*.
-#
-# Turning the phone CLOCKWISE puts its left edge up (`left-up`) and turns the
-# app ANTICLOCKWISE, so the image's top-left corner ends up at the screen's
-# bottom-left:
+# imv shows a four-colour image at exactly the landscape aspect, so sampling
+# the screen quadrants tells which way it turned. Turning the phone
+# clockwise (`left-up`) turns the app anticlockwise:
 #
 #     image          screen (left-up)      screen (right-up)
 #     R G      ->        G Y                    B R
 #     B Y                R B                    Y G
 #
-# The two are 180° apart, so asserting both catches the failure that a "did it
-# rotate?" check cannot see: turning the app the same way as the phone, which
-# renders video upside down. That is not hypothetical — it shipped, and was
-# caught on device rather than here.
+# The two are 180° apart, which catches turning the app the same way as the
+# phone (video upside down; this shipped once).
 #
-# It also covers the chrome rule: springchick's portrait chrome is suppressed
-# while the app is rotated. wvkbd stands in for it as a real layer surface — the
-# test proves it covers the bottom of the screen first, then that the same strip
-# is app content once the app is fullscreen and rotated.
-#
-# Build for the host arch:  nix build .#checks.aarch64-linux.vm-rotation -L
+# Run:  nix build .#checks.aarch64-linux.vm-rotation -L
 { self, pkgs }:
 
 let
   inherit (import ./test-support.nix { inherit self pkgs; }) mkTest phone;
 
-  # Colours, as (name, hex, rgb) — the driver classifies sampled pixels against
-  # these, so they are deliberately far apart in RGB space.
+  # Far apart in RGB so sampled pixels classify cleanly.
   colours = {
     red = "#cc0000";
     green = "#00aa00";
@@ -54,8 +30,7 @@ let
     yellow = "#cccc00";
   };
 
-  # The rotated app area is the output with its axes swapped, so an image of
-  # exactly that size fills it 1:1 under imv's default "full" scaling.
+  # The rotated area is the output with axes swapped; this fills it 1:1.
   imgW = phone.height;
   imgH = phone.width;
   halfW = imgW / 2;
@@ -77,11 +52,9 @@ mkTest {
   packages = [
     pkgs.imv
     pkgs.foot
-    # A real top/overlay layer surface, to prove layer chrome is hidden while
-    # the app is rotated.
+    # A real overlay layer surface, to show layers hide while turned.
     pkgs.wvkbd
   ];
-  # Pillow: the assertion is about pixels, not just that a screenshot exists.
   extraPythonPackages = p: [ p.pillow ];
 
   testScript = ''
@@ -152,14 +125,9 @@ mkTest {
             "bottom-right": at(3 * W // 4, 3 * H // 4),
         }
 
-    # --- Layer chrome is visible to begin with ----------------------------
-    # wvkbd maps an overlay layer surface across the bottom of the screen. The
-    # probe sits left of centre in that strip, clear of the home-bar pill (drawn
-    # centred, and never hidden — it is the way back out of a fullscreen app).
-    #
-    # Comparing Home-before against keyboard-after proves the layer surface is
-    # really on screen at the probe. Without that, the "hidden while rotated"
-    # assertion below would pass just as happily with no keyboard at all.
+    # Layer chrome is visible to begin with. The probe is left of the home pill,
+    # which is never hidden. Comparing against Home proves the keyboard is really
+    # there, or the "hidden while rotated" check would pass with none.
     KEYBOARD_PROBE = (W // 4, H - 80)
     machine.screenshot("00-home")
     machine.succeed(
@@ -176,11 +144,7 @@ mkTest {
         "below would prove nothing"
     )
 
-    # --- Fullscreen on an UPRIGHT phone stays portrait --------------------
-    # The regression this policy exists for. springchick used to treat any
-    # fullscreen toplevel as video wanting landscape, which configured portrait
-    # apps at the swapped size and drew a rotated ghost of them. imv -f asks for
-    # fullscreen at map time, so the fullscreen path runs immediately.
+    # Fullscreen on an upright phone stays portrait. imv -f is fullscreen at map.
     machine.succeed(
         "systemd-run --user -M tester@.host --collect --unit=imv "
         f"--setenv=WAYLAND_DISPLAY={sock} $(command -v imv) "
@@ -197,12 +161,8 @@ mkTest {
     machine.sleep(2)
     machine.screenshot("02-fullscreen-upright")
 
-    # Quadrant sampling is useless here: the test image is landscape-aspect on
-    # purpose (it fills the *rotated* area exactly), so shown unrotated in a
-    # portrait window it is letterboxed to a band across the middle and the
-    # screen quadrant centres land on background, not image. Probe inside the
-    # band instead — scaled to fit the width, it is W wide and W/2 tall,
-    # centred vertically.
+    # The landscape image is letterboxed into a band (W wide, W/2 tall) in
+    # portrait, so probe inside the band, not the screen quadrants.
     band_top = (H - W // 2) // 2
     upright_probes = {
         # (x, y) -> the image quadrant it must land in.
@@ -217,10 +177,9 @@ mkTest {
             "upright phone must not be rotated."
         )
 
-    # --- Turning the device rotates it ------------------------------------
+    # Turning the device rotates it.
     turn("left-up")
-    # The configure now carries the SWAPPED logical size: the output is W x H
-    # physical at dpi ${toString phone.dpi}, so landscape logical is H/dpi x W/dpi.
+    # Swapped logical size: H/dpi x W/dpi.
     want_w = int(H / ${toString phone.dpi})
     want_h = int(W / ${toString phone.dpi})
     machine.wait_until_succeeds(
@@ -229,15 +188,12 @@ mkTest {
     )
     machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation LeftUp'", timeout=30)
 
-    # Let the client paint the full-size buffer before sampling.
+    # Let the client paint the full-size buffer.
     machine.sleep(3)
     machine.screenshot("02-landscape")
 
     got = quadrant_colours("02-landscape")
-    # left-up = the phone turned CLOCKWISE, which turns the app ANTICLOCKWISE:
-    # the image's top-left corner lands at the screen's bottom-left. Turning it
-    # the same way as the phone would put the image 180° out — how this looked
-    # on device before the transforms were swapped.
+    # Top-left of the image lands at the screen's bottom-left.
     want = {
         "top-left": "green",
         "top-right": "yellow",
@@ -253,8 +209,7 @@ mkTest {
             "(Rotation::transform), not that rotation failed."
         )
 
-    # Portrait chrome is suppressed while rotated: the strip that was keyboard a
-    # moment ago is now the app's own bottom-left quadrant colour.
+    # The strip that was keyboard is now app content.
     rotated_px = pixel("02-landscape", *KEYBOARD_PROBE)
     assert rotated_px == COLOURS["red"], (
         f"expected app content (red) at {KEYBOARD_PROBE} while rotated, "
@@ -262,9 +217,7 @@ mkTest {
         "rotated app"
     )
 
-    # --- The other way up is the opposite turn ----------------------------
-    # Guards the second landscape direction: right-up must be a 180° turn of
-    # left-up, not the same transform (which would show it upside down).
+    # right-up must be 180° from left-up, not the same transform.
     turn("right-up")
     machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation RightUp'", timeout=30)
     machine.sleep(3)
@@ -283,14 +236,13 @@ mkTest {
             "right-up should be left-up turned 180°."
         )
 
-    # --- Standing the phone up again -> portrait --------------------------
+    # Upright again -> portrait.
     turn("normal")
     machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation None'", timeout=30)
     machine.screenshot("05-upright-again")
 
-    # --- cmd-tab between two fullscreen apps stays landscape --------------
-    # The view holds its turn through the switcher, so the deck itself comes up
-    # landscape and picking the other fullscreen app never drops to portrait.
+    # cmd-tab between two fullscreen apps stays landscape: the view holds its
+    # turn through the switcher.
     def ipc(verb):
         return machine.succeed(f"SPRINGCHICK_IPC_SOCK={IPC_SOCK} springchick ipc {verb}").strip()
 
@@ -320,7 +272,7 @@ mkTest {
     got = quadrant_colours("08-switched-landscape")
     assert got["bottom-left"][0] == "red", f"not landscape after switch: {got}"
 
-    # Landing on a portrait (non-fullscreen) app turns the view back.
+    # Landing on a non-fullscreen app turns back.
     machine.succeed("systemctl --user -M tester@.host stop imv2")
     machine.succeed(
         "systemd-run --user -M tester@.host --collect --unit=foot "
@@ -332,10 +284,8 @@ mkTest {
     machine.succeed("systemctl --user -M tester@.host stop foot")
     ipc("action home")
 
-    # --- Leaving fullscreen while turned -> portrait ----------------------
-    # Quitting the client is the same path as an app exiting fullscreen from the
-    # compositor's side: the foreground toplevel stops being fullscreen. Turn the
-    # device first, so this proves fullscreen (not orientation) ended it.
+    # Leaving fullscreen while turned -> portrait. Turn first, so fullscreen (not
+    # orientation) is what ends it.
     turn("left-up")
     machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation LeftUp'", timeout=30)
     machine.succeed("systemctl --user -M tester@.host stop imv")

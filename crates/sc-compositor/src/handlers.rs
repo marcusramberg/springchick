@@ -1,7 +1,4 @@
-//! smithay protocol handler impls for [`State`], plus the `delegate_*` glue.
-//!
-//! These are the callbacks Wayland clients drive; the policy they invoke lives
-//! in [`crate::toplevel`], [`crate::frame`], and the per-protocol modules.
+//! smithay protocol handlers and dispatch glue.
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
@@ -68,37 +65,24 @@ impl CompositorHandler for State {
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
 
-        // A client presented new content; ask the DRM loop to render. Without
-        // this, an app committing while the screen is otherwise idle never
-        // gets its frame callback (only sent during a render), so it stalls.
-        // Skipped for a toplevel that isn't in the frame at all — see
-        // `commit_affects_frame`.
+        // Frame callbacks are only sent during a render, so an idle screen must be
+        // woken or the client stalls.
         if self.commit_affects_frame(surface) {
             self.needs_render = true;
         }
 
-        // Advance popup configure/geometry state (initial configure, acks,
-        // reposition) for any tracked popup in this surface's tree.
         self.popups.commit(surface);
 
-        // A layer surface committing may change its geometry or reserved area.
-        // `handle_commit` arranges the map (map/unmap + configures); we then
-        // resize apps if the usable area changed.
         if self.layers.handle_commit(surface) {
             self.recompute_layers();
         }
 
-        // Report a toplevel's committed size against the space it was given.
-        // Cheap: it early-returns unless this is a tracked toplevel whose
-        // geometry actually changed.
         self.log_toplevel_size(surface);
 
-        // A commit can carry a new wp_content_type tag (playback started or
-        // stopped), which is what the auto-landscape hint keys off.
+        // A new wp_content_type tag drives the auto-landscape hint.
         if self.app_focus_surface().as_ref() == Some(surface) {
             self.refresh_landscape_hint();
-            // ...and it may be the first commit at the size a turn configured,
-            // which is what ends the rotation fade's dark stretch.
+            // The first commit at the turned size ends the rotation fade.
             self.note_rotation_commit(surface);
         }
     }
@@ -115,11 +99,7 @@ impl XdgShellHandler for State {
     }
 
     fn app_id_changed(&mut self, surface: ToplevelSurface) {
-        // Clients set the xdg `app_id` after `new_toplevel`/map, so the id
-        // captured in `register_toplevel` is a `unknown_N` placeholder. Now
-        // that the real id has arrived, match it against the catalog and, on a
-        // hit, retag the stored toplevel + live UI and record frecency (which
-        // register could not — see the note there).
+        // The real app_id arrives after map; retag and record frecency now.
         self.resolve_app_id(&surface);
     }
 
@@ -128,12 +108,8 @@ impl XdgShellHandler for State {
     }
 
     fn parent_changed(&mut self, surface: ToplevelSurface) {
-        // `new_toplevel` fires on the `get_toplevel` request, before the client
-        // has sent `set_parent`, so its first configure always saw `parent() ==
-        // None` and treated even a dialog as a top-level app (→ server-side, no
-        // header bar). Once the parent arrives we know it's a child toplevel, so
-        // reconfigure to flip the decoration policy and restore the toolkit's
-        // action buttons (e.g. a GTK file chooser's Open/Cancel).
+        // `set_parent` arrives after the first configure, so a dialog was
+        // configured as a top-level app. Reconfigure to restore its CSD buttons.
         self.configure_maximized(&surface);
     }
 
@@ -142,35 +118,21 @@ impl XdgShellHandler for State {
         surface: ToplevelSurface,
         _output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
     ) {
-        // A client (video player, game) asked to go truly immersive. Cover the
-        // whole output — not just the usable area — force server-side (= no)
-        // decorations, and set the Fullscreen state so the toolkit hides its own
-        // chrome. This is the only path that hides the OSK's exclusive zone.
-        //
-        // Fullscreen also means landscape, so the size we hand the client is the
-        // rotated (swapped) one. `self.rotation` is NOT set here: rendering only
-        // turns once the client has acked this configure and committed a
-        // landscape buffer, otherwise the app would be drawn sideways at its old
-        // portrait size for a frame or two. See [`crate::rotation`].
+        // Covers the whole output, which is the only way to hide the OSK's
+        // exclusive zone. The size is the rotated one, but `self.rotation` waits
+        // for a landscape buffer; see [`crate::rotation`].
         self.configure_fullscreen(&surface);
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
-        // Back to the normal maximized app state; `refresh_rotation` turns the
-        // display back to portrait once the client commits the portrait size.
+        // `refresh_rotation` turns back once the portrait size is committed.
         self.configure_maximized(&surface);
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
-        // Send the initial configure. wvkbd (and other layer-shell OSKs) create
-        // an xdg_popup child and ignore ALL input until that popup is
-        // configured, so without this the on-screen keyboard never registers a
-        // tap.
-        //
-        // Honour the client's constraint_adjustment against the on-screen area
-        // (flip/slide/resize) rather than `get_geometry()`'s raw anchor result —
-        // otherwise a menu anchored low is configured off the bottom edge and
-        // our render-time clamp drags it back over the app's own chrome.
+        // wvkbd ignores all input until its popup is configured. Unconstrain
+        // against the on-screen area so low menus flip instead of being clamped
+        // over the app's chrome.
         let target = self.popup_target(&PopupKind::Xdg(surface.clone()));
         surface.with_pending_state(|state| {
             state.geometry = positioner.get_unconstrained_geometry(target);
@@ -178,8 +140,6 @@ impl XdgShellHandler for State {
         if let Err(e) = surface.send_configure() {
             warn!(?e, "failed to configure popup");
         }
-        // Track the popup so it gets rendered, hit-tested, and dismissed. Its
-        // configure/commit lifecycle and geometry are then advanced in `commit`.
         if let Err(e) = self.popups.track_popup(PopupKind::Xdg(surface)) {
             warn!(?e, "failed to track popup");
         }
@@ -188,20 +148,11 @@ impl XdgShellHandler for State {
 
     fn grab(&mut self, surface: PopupSurface, _seat: WlSeat, _serial: Serial) {
         self.popup_grabs.insert(surface.wl_surface().clone());
-        // Marked modal above: only grabbing popups capture touch and dismiss on
-        // an outside press (see `active_popups`). Non-grab popups (wvkbd's hack
-        // popup, tooltips) never enter that set, so they can't swallow taps.
+        // Only grabbing popups capture touch and dismiss on an outside press.
         //
-        // A client opens a popup grab from within an in-flight press (menus —
-        // e.g. Firefox — grab on the button's press/release that opened them).
-        // Do NOT cancel or retarget that sequence: per wl_touch/xdg-shell grab
-        // semantics the originating press belongs to the surface that received
-        // its `down`, and its matching `up` must be delivered there as normal.
-        // The client owns the grab and won't treat that release as an
-        // outside-dismiss. Cancelling it (as we used to) made Firefox read the
-        // gesture as aborted and flicker the menu closed the instant it opened.
-        // We dismiss manually on the *next* outside press (see `popup_press`),
-        // never off the opening sequence's release.
+        // Don't cancel the press that opened the grab: its `up` belongs to the
+        // surface that got its `down`. Cancelling made Firefox menus flicker shut.
+        // Dismissal happens on the next outside press (`popup_press`).
     }
 
     fn reposition_request(
@@ -222,8 +173,6 @@ impl XdgShellHandler for State {
     }
 
     fn popup_destroyed(&mut self, surface: PopupSurface) {
-        // smithay has already removed it from `known_popups`; drop our render of
-        // it on the next frame and forget any grab it held.
         self.popup_grabs.remove(surface.wl_surface());
         self.needs_render = true;
     }
@@ -238,9 +187,7 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    /// Point the selection devices at the newly focused client. Without this a
-    /// client never receives a `wl_data_offer`, so copy/paste silently does
-    /// nothing even though the globals are advertised.
+    /// Without this no client gets a `wl_data_offer` and copy/paste does nothing.
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let dh = self.dh.clone();
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
@@ -276,16 +223,13 @@ impl DmabufHandler for State {
         _dmabuf: Dmabuf,
         notifier: ImportNotifier,
     ) {
-        // The advertised formats come straight from the backend renderer's
-        // importable set, so accept optimistically; the shared render path
-        // imports the buffer lazily when it first composites the surface.
+        // Formats come from the renderer's importable set; import happens lazily.
         let _ = notifier.successful::<State>();
     }
 }
 
 impl SelectionHandler for State {
-    /// The compositor only ever owns the selection for a screenshot, so the
-    /// user data *is* the PNG.
+    /// We only own the selection for a screenshot, so this is the PNG.
     type SelectionUserData = std::sync::Arc<Vec<u8>>;
 
     fn send_selection(
@@ -324,15 +268,13 @@ impl PrimarySelectionHandler for State {
     }
 }
 
-// Phone shell: no server-initiated DnD. The default `dnd_requested` cancels the
-// source, which is what we want.
+// No server-initiated DnD; the default cancels the source.
 impl WaylandDndGrabHandler for State {}
 
 impl OutputHandler for State {}
 
 impl FractionalScaleHandler for State {
-    /// A client bound `wp_fractional_scale` for a surface: tell it to render at
-    /// `dpi`. Constant here (single output), so one send at creation suffices.
+    /// Single output, so one send at creation suffices.
     fn new_fractional_scale(&mut self, surface: WlSurface) {
         let scale = self.dpi;
         with_states(&surface, |states| {
@@ -345,10 +287,7 @@ impl FractionalScaleHandler for State {
 
 impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
-        // A client created an xdg-decoration object — i.e. it speaks the protocol
-        // and will honor whatever mode we hand back (Qt does; GTK never gets
-        // here). Logged so the decoration nix test can tell "negotiated" from
-        // "self-decorated" apart.
+        // The decoration VM test greps this line.
         debug!(target: "springchick::debug", "xdg-decoration negotiated");
         self.apply_decoration(&toplevel, None);
     }
@@ -364,10 +303,7 @@ impl XdgDecorationHandler for State {
 
 impl XdgDialogHandler for State {
     fn dialog_hint_changed(&mut self, toplevel: ToplevelSurface, _hint: ToplevelDialogHint) {
-        // A client (often a portal file chooser with no in-process parent) just
-        // flagged this toplevel as a dialog/modal. Like `parent_changed`, the
-        // initial configure predates the hint, so reconfigure to flip the
-        // decoration policy to client-side and restore its action buttons.
+        // The dialog hint postdates the first configure, as in `parent_changed`.
         self.configure_maximized(&toplevel);
     }
 }
@@ -383,12 +319,9 @@ impl XdgActivationHandler for State {
         _token_data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
-        // Already-mapped window: raise it (a browser handed a URL by another
-        // app). Otherwise the token is identity, not focus — a client
-        // presenting a token we minted at spawn time names the launch it came
-        // from, which beats guessing from its xdg `app_id`. The surface may not
-        // be a registered toplevel yet (clients commonly activate before their
-        // first commit), so park it for `register_toplevel` to claim.
+        // A mapped window is raised. Otherwise the token is identity: it names
+        // the launch. The surface may not be registered yet, so park it for
+        // `register_toplevel`.
         if self.raise_activated_surface(&surface) {
             return;
         }
@@ -405,7 +338,6 @@ impl OutputCaptureSourceHandler for State {
     }
 
     fn output_source_created(&mut self, source: ImageCaptureSource, output: &Output) {
-        // Stash the output on the source so `capture_constraints` can recover it.
         source.user_data().insert_if_missing(|| output.downgrade());
     }
 }
@@ -416,7 +348,6 @@ impl ImageCopyCaptureHandler for State {
     }
 
     fn capture_constraints(&mut self, source: &ImageCaptureSource) -> Option<BufferConstraints> {
-        // Only our output is a valid source; recover it from the source's data.
         let output = source
             .user_data()
             .get::<smithay::output::WeakOutput>()?
@@ -426,8 +357,7 @@ impl ImageCopyCaptureHandler for State {
             .size
             .to_logical(1)
             .to_buffer(1, smithay::utils::Transform::Normal);
-        // Advertise dmabuf (zero-copy blit) when the DRM backend supplied formats,
-        // plus shm as a universal fallback so a client can always allocate.
+        // dmabuf when the DRM backend supplied formats, shm always.
         let dma = self.capture_formats.as_ref().map(|(node, formats)| {
             smithay::wayland::image_copy_capture::DmabufConstraints {
                 node: *node,
@@ -445,16 +375,13 @@ impl ImageCopyCaptureHandler for State {
     }
 
     fn new_session(&mut self, session: CaptureSession) {
-        // `Session` is owned: dropping it sends `stopped` and fails every frame
-        // the client asks for, so it must be kept alive for the capture's
-        // lifetime. Drop the ones whose client object died while we're here.
+        // Dropping a `Session` sends `stopped`; keep it for the capture's lifetime.
         self.capture_sessions.retain(|s| s.alive());
         self.capture_sessions.push(session);
     }
 
     fn frame(&mut self, _session: &CaptureSessionRef, frame: CaptureFrame) {
-        // Defer the actual capture to the render loop, which owns the renderer and
-        // the just-composited scene. `success`/`fail` happens there.
+        // The render loop owns the renderer and does `success`/`fail`.
         self.pending_captures.push(frame);
         self.needs_render = true;
     }
@@ -462,9 +389,7 @@ impl ImageCopyCaptureHandler for State {
 
 impl InputMethodHandler for State {
     fn new_popup(&mut self, surface: ImePopupSurface) {
-        // Track the IME popup like an xdg popup so it renders + hit-tests. It is
-        // parented to the focused app surface, so `app_popups()` picks it up
-        // automatically (PopupManager::popups_for_surface yields all kinds).
+        // Parented to the focused app surface, so `app_popups()` finds it.
         if let Err(e) = self.popups.track_popup(PopupKind::from(surface)) {
             warn!(?e, "failed to track input-method popup");
         }
@@ -481,8 +406,7 @@ impl InputMethodHandler for State {
     fn popup_repositioned(&mut self, _surface: ImePopupSurface) {}
 
     fn parent_geometry(&self, _parent: &WlSurface) -> Rectangle<i32, smithay::utils::Logical> {
-        // Apps are fullscreen within the usable area; report it in logical coords
-        // (client space) so the IME positions its popup over the focused field.
+        // Logical coords, so the IME can place its popup over the field.
         let u = self.layers.usable(self.dpi);
         Rectangle::from_size(
             (
@@ -507,16 +431,14 @@ impl smithay::wayland::shell::wlr_layer::WlrLayerShellHandler for State {
         namespace: String,
     ) {
         info!(%namespace, ?layer, "new layer surface");
-        // See the OSK slide-out: the hook holds the surface's last buffer
-        // before a null commit resets it, so the dismissal can be animated.
+        // Holds the last buffer before a null commit resets it, so the OSK
+        // dismissal can animate.
         smithay::wayland::compositor::add_pre_commit_hook::<State, _>(
             surface.wl_surface(),
             |state, _dh, surface| {
                 state.layers.note_hide(surface, state.dpi);
             },
         );
-        // smithay's LayerMap tracks geometry + reservations and sends the
-        // initial configure on the surface's first commit.
         self.layers.new_surface(surface, namespace);
     }
 
@@ -524,19 +446,14 @@ impl smithay::wayland::shell::wlr_layer::WlrLayerShellHandler for State {
         if self.layers.destroyed(&surface, self.dpi) {
             self.recompute_layers();
         }
-        // The OSK slide-out installed by `destroyed` needs a frame to start
-        // moving — a destroy is not a commit, so nothing else asks for one.
+        // A destroy is not a commit; the OSK slide-out needs a frame.
         self.needs_render = true;
     }
 }
 
-/// `PointerTarget for WlSurface` requires this bound; we advertise no
-/// pointer-constraints global, so every method keeps its default no-op.
+/// Required by `PointerTarget for WlSurface`; no global is advertised.
 impl PointerConstraintsHandler for State {}
 
-// One blanket impl in place of the old per-protocol `delegate_*!` invocations:
-// smithay now dispatches through `Dispatch2`/`GlobalDispatch2`, implemented on
-// each protocol's user-data type rather than on `State`. Modules that hand-roll
-// `Dispatch for State` (gamma_control, wlr_screencopy, idle_notify) are
-// unaffected — the interfaces are disjoint, so they don't overlap this.
+// Hand-rolled `Dispatch for State` modules (gamma_control, wlr_screencopy,
+// idle_notify) use disjoint interfaces and don't overlap this.
 smithay::delegate_dispatch2!(State);

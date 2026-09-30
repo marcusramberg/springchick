@@ -1,28 +1,16 @@
-# Icon context menu + multi-instance test.
+# Icon menu and multiple windows: a long press opens the menu without
+# launching; "New window" starts instances (twice, giving two toplevels); a tap
+# then raises instead of launching; and a wrapper-launched window keeps the
+# launch's identity, not the terminal's.
 #
-# Covers the path that used to be impossible: a second window of an app that is
-# already running. Tapping an icon raises the app, so "new window" needs its own
-# affordance — the menu a long press on an icon opens.
-#
-# It exercises:
-#   - long-press on a grid icon opens its menu (and does NOT launch the app);
-#   - a stopped app's menu offers "New window" but not "Open"/"Close";
-#   - the menu's "New window" row starts an instance;
-#   - doing it again while the app is running starts a *second* one, both of
-#     which are real, distinct toplevels;
-#   - tapping the icon afterwards raises rather than launching a third;
-#   - a window launched through a `Terminal=true`-style wrapper keeps its own
-#     identity instead of being tagged with the terminal's app id.
-#
-# Build for the host arch:  nix build .#checks.aarch64-linux.vm-icon-menu -L
+# Run:  nix build .#checks.aarch64-linux.vm-icon-menu -L
 { self, pkgs }:
 
 let
   inherit (import ./test-support.nix { inherit self pkgs; }) mkTest phone;
 
-  # A plain app. `--app-id` deliberately does *not* match the .desktop id: the
-  # shell must tag the window from the launch, not from what the client calls
-  # itself, which is exactly what breaks terminal wrappers and PWA runners.
+  # `--app-id` deliberately doesn't match the .desktop id: the window must be
+  # tagged from the launch.
   termApp = pkgs.makeDesktopItem {
     name = "aaa";
     desktopName = "aaa";
@@ -32,8 +20,6 @@ in
 mkTest {
   name = "springchick-icon-menu";
 
-  # A fresh install leaves home empty (everything lives in the library), so the
-  # icon this test long-presses has to be put on the grid first.
   homePages = [ [ "aaa" ] ];
 
   packages = [
@@ -75,8 +61,7 @@ mkTest {
         """How many foot processes are running (one per opened window)."""
         return int(machine.succeed("pgrep -c -x foot || true").strip() or 0)
 
-    # Grid geometry in physical output pixels, mirrored from the layout
-    # constants in crates/sc-layout/src/lib.rs — see vm-arrange for the details.
+    # Mirrored from crates/sc-layout/src/lib.rs; see vm-arrange.
     W = ${toString phone.width}
     H = ${toString phone.height}
     H_MARGIN, TOP_PAD = 0.04, 0.04
@@ -97,8 +82,8 @@ mkTest {
 
     ROW0 = row(0)
 
-    # Menu geometry, mirrored from crates/sc-layout/src/menu.rs. The panel hangs
-    # below a top-row icon, so its rows run downward from the anchor.
+    # Mirrored from crates/sc-layout/src/menu.rs. The panel hangs below a top-row
+    # icon.
     PANEL_W = W * 0.52
     ITEM_H = H * 0.045
     PAD = H * 0.008
@@ -109,7 +94,7 @@ mkTest {
         """Centre y of menu row i for a menu anchored on the first grid row."""
         return int(ROW0 + GAP + PAD + i * ITEM_H + ITEM_H / 2)
 
-    # --- Long-press on an icon opens its menu, and launches nothing ---
+    # Long-press opens the menu and launches nothing.
     dbg(f"down {col(0)} {ROW0}")
     machine.sleep(2)
     machine.wait_until_succeeds(
@@ -120,8 +105,7 @@ mkTest {
     machine.fail(f"{JOURNAL} | grep -qF 'state changed to App'")
     assert foot_count() == 0, "the long-press must not have launched the app"
 
-    # A stopped app has no window to open or close, so its menu leads with
-    # "New window" — row 0.
+    # A stopped app's menu leads with "New window".
     dbg(f"tap {MENU_X} {menu_row(0)}")
     machine.wait_until_succeeds(
         f"{JOURNAL} | grep -qF 'icon menu action app_id=aaa action=NewWindow'", timeout=15
@@ -130,14 +114,11 @@ mkTest {
     machine.wait_until_succeeds("pgrep -x foot", timeout=30)
     machine.screenshot("02-first-window")
 
-    # --- The window is tagged from the launch, not from its own app_id ---
-    # foot reports `foot`; the shell must have kept `aaa`, or tap-to-raise would
-    # land on the wrong app and a second tap would spawn a duplicate.
+    # foot reports `foot`; the shell must keep `aaa`.
     machine.wait_until_succeeds(
         f"{JOURNAL} | grep -qE 'toplevel attributed to launch.*app_id=aaa'", timeout=15
     )
 
-    # --- Home, then a second window from the same icon ---
     go_home()
     dbg(f"down {col(0)} {ROW0}")
     machine.sleep(2)
@@ -147,9 +128,7 @@ mkTest {
     dbg("up")
     machine.screenshot("03-menu-running")
 
-    # Running now, so the rows are Open / New window / Close / Remove — "New
-    # window" has moved to row 1. (With two or more windows the leading row
-    # becomes one row *per window*, listed by title.)
+    # Running: Open / New window / Close / Remove, so "New window" is row 1.
     dbg(f"tap {MENU_X} {menu_row(1)}")
     machine.wait_until_succeeds(
         f"{JOURNAL} | grep -qF 'icon menu action app_id=aaa action=NewWindow'", timeout=15
@@ -157,7 +136,7 @@ mkTest {
     machine.wait_until_succeeds("test $(pgrep -c -x foot || true) -eq 2", timeout=30)
     machine.screenshot("04-second-window")
 
-    # --- A plain tap raises instead of launching a third ---
+    # A plain tap raises instead of launching a third.
     go_home()
     dbg(f"tap {col(0)} {ROW0}")
     dbg("settle 3000")

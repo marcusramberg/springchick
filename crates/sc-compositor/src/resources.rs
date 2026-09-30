@@ -1,17 +1,9 @@
-//! Per-app resource tiers: what the focused app gets, and what the apps behind
-//! it are squeezed to.
+//! Per-app resource tiers: focused app vs. the ones behind it. Each app has
+//! its own systemd scope ([`crate::launcher`]), so tiering is a property change
+//! on that cgroup and never moves processes.
 //!
-//! Apps are launched into their own transient systemd scope (see
-//! [`crate::launcher`]), so each one already owns a cgroup holding it and
-//! everything it forked. Tiering is therefore only a property change on that
-//! cgroup — no process is ever moved between tiers, which is what makes it safe
-//! to do on a focus change: a forking app cannot leave half its children in the
-//! wrong tier.
-//!
-//! The unit is resolved from the client's pid rather than from the scope name we
-//! chose at launch, because an app may end up somewhere else entirely: a flatpak
-//! `Exec` hands off to `flatpak-session-helper`, which registers its *own* scope
-//! and moves the app there, leaving ours empty and collected.
+//! The unit comes from the client's pid, not our scope name: flatpak moves the
+//! app into its own scope and ours is collected empty.
 
 use sc_config::Resources;
 use std::process::{Child, Command};
@@ -24,17 +16,10 @@ pub enum Tier {
     Background,
 }
 
-/// The leaf unit of a `/proc/<pid>/cgroup` body, if the process is in a scope.
-///
-/// Only scopes are tiered. Every app — ours (`springchick-*.scope`) and
-/// anything that re-registered itself (`app-flatpak-*.scope`) — is in one, while
-/// the shell's own long-running helpers are services: `dms.service`,
-/// `wvkbd.service`, `xdg-desktop-portal-*.service`. Some of those do map
-/// toplevels (a portal file chooser), and throttling the shell's own panel or
-/// keyboard because a dialog lost focus is exactly the wrong outcome.
+/// Only scopes are tiered. The shell's helpers are services (dms, wvkbd,
+/// portals); some map toplevels, and they must never be throttled.
 pub fn unit_from_cgroup(body: &str) -> Option<AppCgroup> {
-    // The cgroup-v2 line is `0::/path`; v1 lines (`1:name=systemd:/path`) may
-    // also be present on a hybrid system and are not what we want.
+    // Take the v2 line; hybrid systems also list v1 lines.
     let path = body.lines().find_map(|l| l.strip_prefix("0::"))?;
     let leaf = path.rsplit('/').next()?;
     leaf.ends_with(".scope").then(|| AppCgroup {
@@ -43,27 +28,19 @@ pub fn unit_from_cgroup(body: &str) -> Option<AppCgroup> {
     })
 }
 
-/// A tierable app: the scope unit to address it by, and the cgroup path it sits
-/// at (which is what says whether a controller reached it — see
-/// [`cpuset_available`]).
+/// The path says whether a controller reached it ([`cpuset_available`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppCgroup {
     pub unit: String,
     pub path: String,
 }
 
-/// The scope `pid` runs in, or `None` when it is not in one (or is gone).
 pub fn unit_of_pid(pid: i32) -> Option<AppCgroup> {
     unit_from_cgroup(&std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?)
 }
 
-/// The CPUs making up the efficiency cluster: those at the lowest
-/// `cpu_capacity`. `None` when every CPU is the same size, where pinning would
-/// only take cores away for nothing.
-///
-/// Derived rather than configured because the layout differs per phone — the
-/// FP5 is not the 4+4 the name suggests but 4x382 + 3x889 + 1x1024, so any
-/// hardcoded mask would be wrong on the next device.
+/// CPUs at the lowest `cpu_capacity`; `None` when all are equal. Derived: the
+/// FP5 is 4x382 + 3x889 + 1x1024, so a hardcoded mask won't port.
 pub fn little_cluster(caps: &[(u32, u32)]) -> Option<Vec<u32>> {
     let min = caps.iter().map(|(_, c)| *c).filter(|c| *c > 0).min()?;
     let max = caps.iter().map(|(_, c)| *c).max()?;
@@ -79,7 +56,6 @@ pub fn little_cluster(caps: &[(u32, u32)]) -> Option<Vec<u32>> {
     Some(cpus)
 }
 
-/// Format a sorted CPU list the way `AllowedCPUs=` wants it: `0-3`, `0-1,4`.
 pub fn cpu_ranges(cpus: &[u32]) -> String {
     let mut out = String::new();
     let mut i = 0;
@@ -103,10 +79,7 @@ pub fn cpu_ranges(cpus: &[u32]) -> String {
     out
 }
 
-/// Resolve `[resources].bg_allowed_cpus` against this machine.
-///
-/// `"auto"` derives the efficiency cluster, `"off"` disables pinning, anything
-/// else is passed through as an explicit CPU list.
+/// `"auto"` derives the little cluster, `"off"` disables, else a CPU list.
 pub fn resolve_allowed_cpus(cfg: &str) -> Option<String> {
     match cfg {
         "off" => None,
@@ -125,12 +98,8 @@ pub fn resolve_allowed_cpus(cfg: &str) -> Option<String> {
     }
 }
 
-/// Whether the `cpuset` controller actually reached `path`.
-///
-/// systemd ships `Delegate=pids memory cpu` on `user@.service`, so on a system
-/// without the drop-in `nix/module.nix` adds, `cpuset` never gets enabled down
-/// the user tree and every `AllowedCPUs=` would be refused. Checked once: a
-/// controller does not come and go mid-session.
+/// `user@.service` delegates only `pids memory cpu` without the drop-in in
+/// `nix/module.nix`, and then every `AllowedCPUs=` is refused.
 fn cpuset_available(path: &str) -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| {
@@ -148,7 +117,7 @@ fn cpuset_available(path: &str) -> bool {
     })
 }
 
-/// `""` for "no limit", which is the only spelling `CPUQuota=` accepts.
+/// `CPUQuota=` rejects `infinity`; empty means no limit.
 fn clear_infinity(quota: &str) -> &str {
     if quota.eq_ignore_ascii_case("infinity") {
         ""
@@ -157,11 +126,8 @@ fn clear_infinity(quota: &str) -> &str {
     }
 }
 
-/// The `systemctl set-property` arguments putting `unit` in `tier`.
-///
-/// Both properties are set in both tiers: promoting an app has to *clear* the
-/// ceiling the demotion put on it, and a property left unmentioned keeps its
-/// old value.
+/// Every property is set in both tiers: promotion must clear the demotion's
+/// values.
 fn args(unit: &str, tier: Tier, res: &Resources) -> Vec<String> {
     let (weight, high, quota) = match tier {
         Tier::Foreground => (
@@ -178,45 +144,30 @@ fn args(unit: &str, tier: Tier, res: &Resources) -> Vec<String> {
     vec![
         "--user".into(),
         "--quiet".into(),
-        // Not persisted: a tier is a fact about this session's focus, and a
-        // drop-in surviving a reboot would outlive the app it describes.
+        // A tier describes this session's focus; don't outlive it.
         "--runtime".into(),
         "set-property".into(),
         unit.into(),
         format!("CPUWeight={weight}"),
         format!("MemoryHigh={high}"),
-        // The cap that actually saves power: CPUWeight is proportional, so it
-        // does nothing for a background app spinning alone on an idle phone.
-        //
-        // `CPUQuota=` is the only one of the three that rejects `infinity`
-        // ("Failed to parse CPUQuota= value") — an empty value is how it is
-        // cleared. Since `set-property` applies all-or-nothing, getting this
-        // wrong drops the CPUWeight in the same call.
+        // CPUWeight is proportional and does nothing for an app spinning alone on an
+        // idle phone; the quota is what saves power. It must be empty, not
+        // `infinity`: set-property is all-or-nothing and would drop the weight too.
         format!("CPUQuota={}", clear_infinity(&quota)),
     ]
 }
 
-/// Move `app` into `tier`, returning the `systemctl` children for the caller to
-/// reap.
-///
-/// Deliberately not waited on: each call is a D-Bus round-trip to the user
-/// manager and this runs on the render thread. Nothing depends on the result —
-/// if it fails (the app exited, taking its scope with it) the tier simply does
-/// not apply, and `systemctl` says so in the journal.
-///
-/// The CPU pinning is a *second* call rather than two more properties on the
-/// first. `set-property` is all-or-nothing, so one refused `AllowedCPUs=` — a
-/// kernel without cpuset, a user manager without the delegation — would
-/// otherwise silently drop the weight and quota that do work.
+/// Not waited on: it's a D-Bus round-trip and this is the render thread.
+/// Pinning is a separate call because set-property is all-or-nothing and a
+/// refused `AllowedCPUs=` would drop the weight and quota with it.
 pub fn apply(app: &AppCgroup, tier: Tier, res: &Resources, cpus: Option<&str>) -> Vec<Child> {
     let unit = app.unit.as_str();
     debug!(unit, ?tier, "applying resource tier");
     let mut children = Vec::new();
     children.extend(spawn(args(unit, tier, res), unit));
 
-    // Pinning is background-only, and clearing it on promotion has to happen
-    // whether or not this session is pinning at all: the app may have been
-    // demoted before a reload turned `bg_allowed_cpus` off.
+    // Clear pinning on promotion even when not pinning now: a reload may have
+    // turned `bg_allowed_cpus` off after the demotion.
     let pin = match tier {
         Tier::Foreground => Some(String::new()),
         Tier::Background => cpus.map(|c| c.to_string()),
@@ -263,7 +214,6 @@ mod tests {
         assert!(app.path.starts_with("/user.slice/"));
     }
 
-    /// A flatpak app is in the scope flatpak made for it, not the one we did.
     #[test]
     fn reads_a_scope_we_did_not_create() {
         let body = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-flatpak-org.gnome.Fractal.Devel-3308067827.scope\n";
@@ -273,8 +223,6 @@ mod tests {
         );
     }
 
-    /// The shell's own helpers are services and must never be tiered, even when
-    /// they map a toplevel (a portal dialog).
     #[test]
     fn services_are_not_tiered() {
         let body = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/wvkbd.service\n";
@@ -305,19 +253,14 @@ mod tests {
         let fg = args("a.scope", Tier::Foreground, &res);
         assert!(fg.contains(&"CPUWeight=100".to_string()));
         assert!(fg.contains(&"MemoryHigh=infinity".to_string()));
-        // Empty, not "infinity": CPUQuota= refuses that word, and set-property
-        // applies all-or-nothing, so the CPUWeight above would go with it.
         assert!(fg.contains(&"CPUQuota=".to_string()));
         let bg = args("a.scope", Tier::Background, &res);
         assert!(bg.contains(&"CPUWeight=20".to_string()));
         assert!(bg.contains(&"MemoryHigh=512M".to_string()));
         assert!(bg.contains(&"CPUQuota=30%".to_string()));
-        // Nothing is persisted across reboots.
         assert!(bg.contains(&"--runtime".to_string()));
     }
 
-    /// The FP5's real topology: three capacity tiers, not the 4+4 the label
-    /// suggests. Only the 382s are the efficiency cluster.
     #[test]
     fn little_cluster_on_a_three_tier_phone() {
         let caps = [
@@ -334,14 +277,12 @@ mod tests {
         assert_eq!(cpu_ranges(&little_cluster(&caps).unwrap()), "0-3");
     }
 
-    /// A symmetric machine (a dev box, the VM) has nothing to pin to.
     #[test]
     fn no_little_cluster_without_asymmetry() {
         assert_eq!(little_cluster(&[(0, 1024), (1, 1024)]), None);
         assert_eq!(little_cluster(&[]), None);
     }
 
-    /// The efficiency cores need not be numbered first or contiguously.
     #[test]
     fn little_cluster_handles_scattered_numbering() {
         let caps = [(0, 1024), (1, 400), (2, 1024), (3, 400), (4, 400)];
@@ -364,8 +305,6 @@ mod tests {
         assert_eq!(resolve_allowed_cpus("0-3"), Some("0-3".to_string()));
     }
 
-    /// `bg_cpu_quota = "infinity"` is how the config says "don't cap", and has
-    /// to reach systemd as the empty value it actually accepts.
     #[test]
     fn background_quota_of_infinity_is_sent_empty() {
         let res = Resources {

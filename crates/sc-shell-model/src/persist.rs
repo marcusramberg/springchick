@@ -1,13 +1,10 @@
-//! On-disk persistence for the [`ShellModel`]: atomic save + tolerant load of
-//! `state.toml`. Lives with the model it serializes; the compositor reads and
-//! writes it, the search app only reads frecency from it.
+//! `state.toml`: atomic save, tolerant load. The search app only reads
+//! frecency from it.
 
 use crate::ShellModel;
 use std::path::{Path, PathBuf};
 
-/// The springchick state file: `$XDG_CONFIG_HOME/springchick/state.toml`, else
-/// `~/.config/springchick/state.toml`. This is persisted *state* (dock, pages,
-/// frecency), not user config — see `sc-config` for `config.toml`.
+/// `$XDG_CONFIG_HOME/springchick/state.toml`, else `~/.config/...`.
 pub fn state_path() -> PathBuf {
     let config_home = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -53,7 +50,7 @@ mod tests {
         save(&m, &path).unwrap();
         let back = load(&path).unwrap();
         assert_eq!(m.dock, back.dock);
-        assert_eq!(m.pages, back.pages); // pages are the persisted manual order
+        assert_eq!(m.pages, back.pages);
     }
 
     #[test]
@@ -74,7 +71,7 @@ mod tests {
         let back = load(&path).unwrap();
         assert_eq!(m.dock, back.dock);
         assert_eq!(m.frecency, back.frecency);
-        assert!(back.pages.is_empty()); // pages are not persisted
+        assert!(back.pages.is_empty());
     }
 
     #[test]
@@ -85,7 +82,7 @@ mod tests {
         m.dock.push("org.gnome.Console".into());
         save(&m, &path).unwrap();
         assert!(path.exists());
-        assert!(!path.with_file_name("state.toml.tmp").exists()); // tmp cleaned by rename
+        assert!(!path.with_file_name("state.toml.tmp").exists());
         let back = load(&path).unwrap();
         assert_eq!(m.dock, back.dock);
     }
@@ -112,7 +109,7 @@ mod tests {
         .unwrap();
         let m = load(&path).unwrap();
         assert_eq!(m.dock, vec!["org.gnome.Console".to_string()]);
-        assert!(m.frecency.apps.is_empty()); // frecency absent -> defaults empty
-        assert_eq!(m.pages, vec![vec!["org.gnome.Maps".to_string()]]); // pages now persisted + loaded
+        assert!(m.frecency.apps.is_empty());
+        assert_eq!(m.pages, vec![vec!["org.gnome.Maps".to_string()]]);
     }
 }

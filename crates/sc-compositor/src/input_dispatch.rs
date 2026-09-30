@@ -1,13 +1,10 @@
-//! Structured input dispatch for springchick.
-//!
-//! Routes pointer/touch events into UiState transitions based on current state.
+//! Routes pointer/touch events into UiState transitions.
 
 use crate::ui_state::{UiEvent, UiState, ZoomOrigin};
 use sc_input::Pt;
 use sc_layout::{self, Hit};
 use sc_shell_model::ShellModel;
 
-/// Normalized point from pixel coordinates.
 fn normalize(x: f32, y: f32, width: f32, height: f32) -> Pt {
     Pt {
         x: x / width,
@@ -15,17 +12,14 @@ fn normalize(x: f32, y: f32, width: f32, height: f32) -> Pt {
     }
 }
 
-/// Where a dragged icon originated from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum IconSource {
     Grid,
     Dock,
-    /// Dragged out of an open library folder. Not on any page yet, so a drop
-    /// places it rather than reordering it.
+    /// Out of a library folder: a drop places it rather than reordering.
     Library,
 }
 
-/// What a drop at a given point means, given the icon's origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DropAction {
     Pin,
@@ -33,10 +27,8 @@ pub enum DropAction {
     SnapBack,
 }
 
-/// Decide what a drop at `pos` means given where the dragged icon came from.
-/// A `Pin` may still fail at the model layer (full dock); the caller maps that to snap-back.
-/// `page` is the visible Home page and `page_len` its filled icon count; `size` is
-/// the output size (Layout has no size fields), used for nearest-slot mapping.
+/// A `Pin` may still fail in the model (full dock); the caller snaps back.
+/// `page_len` is the visible page's icon count.
 pub fn resolve_drop(
     pos: (f32, f32),
     layout: &sc_layout::Layout,
@@ -49,24 +41,19 @@ pub fn resolve_drop(
     let (w, h) = size;
     let over_dock = layout.dock_zone.contains(x, y);
     match (source, over_dock) {
-        (IconSource::Grid | IconSource::Library, true) => DropAction::Pin, // -> dock: pin
-        (IconSource::Dock, true) => DropAction::SnapBack,                  // dock -> dock: no-op
+        (IconSource::Grid | IconSource::Library, true) => DropAction::Pin,
+        (IconSource::Dock, true) => DropAction::SnapBack, // dock -> dock: no-op
         (_, false) => {
-            // any -> grid: reorder
             let idx = sc_layout::nearest_grid_index(w, h, x, y).min(page_len);
             DropAction::Reorder { page, index: idx }
         }
     }
 }
 
-/// Result of processing a pointer/touch down event.
 #[derive(Clone, Debug)]
 pub enum DownAction {
-    /// Emit this UiEvent.
     Event(UiEvent),
-    /// Finger went down on an app icon. Track it as a pending launch: a release
-    /// with little movement launches; movement past the tap threshold cancels it
-    /// and the gesture becomes a page swipe instead.
+    /// Launches on a still release; movement past the tap slop makes it a swipe.
     PressIcon {
         app_id: String,
         origin: ZoomOrigin,
@@ -74,15 +61,16 @@ pub enum DownAction {
         start_y: f32,
         source: IconSource,
     },
-    /// Start tracking a page drag from this x position.
-    StartPageDrag { start_x: f32 },
-    /// Start tracking a bar drag (for app switching from Home).
-    StartBarDrag { start_x: f32, start_y: f32 },
-    /// No action.
+    StartPageDrag {
+        start_x: f32,
+    },
+    StartBarDrag {
+        start_x: f32,
+        start_y: f32,
+    },
     None,
 }
 
-/// Hit-test a press against the Home layout (grid, dock, bar, background).
 fn home_press(x: f32, y: f32, page: usize, model: &ShellModel, w: f32, h: f32) -> DownAction {
     let layout = sc_layout::compute(w, h, page, model);
     match sc_layout::hit_test(&layout, x, y) {
@@ -119,7 +107,6 @@ fn home_press(x: f32, y: f32, page: usize, model: &ShellModel, w: f32, h: f32) -
     }
 }
 
-/// Process a pointer/touch down event.
 pub fn on_press(
     state: &UiState,
     x: f32,
@@ -133,7 +120,6 @@ pub fn on_press(
     match state {
         UiState::Home { page, .. } => home_press(x, y, *page, model, w, h),
         UiState::App { .. } => {
-            // Check if finger is in bar zone → start grab.
             let layout = sc_layout::compute(w, h, 0, model);
             if layout.bar_rect.contains(x, y) {
                 DownAction::Event(UiEvent::GrabStart { point: pt })
@@ -141,18 +127,14 @@ pub fn on_press(
                 DownAction::None
             }
         }
-        // Home is already on screen behind the shrinking app, so its icons are
-        // live: tapping one during the minimise animation must launch *that*
-        // app, not resurrect the one on its way out (which is what a blanket
-        // Interrupt → Grabbing → BackToApp release did). Anything that is not
-        // an icon still interrupts and re-grabs the outgoing window.
+        // Home is live behind the shrinking app: an icon tap launches that icon.
+        // Anything else interrupts and re-grabs the outgoing window.
         UiState::AppClosing { .. } => match home_press(x, y, 0, model, w, h) {
             press @ DownAction::PressIcon { .. } => press,
             _ => DownAction::Event(UiEvent::Interrupt { point: pt }),
         },
         UiState::Settling { target, .. } => {
-            // Same for a settle that is on its way Home (the fast swipe-up);
-            // a settle back to the app or into the deck keeps interrupting.
+            // Same for a settle heading Home; others keep interrupting.
             if matches!(target, sc_input::NavTarget::Home) {
                 if let press @ DownAction::PressIcon { .. } = home_press(x, y, 0, model, w, h) {
                     return press;
@@ -161,22 +143,15 @@ pub fn on_press(
             DownAction::Event(UiEvent::Interrupt { point: pt })
         }
         UiState::AppOpening { .. } => DownAction::Event(UiEvent::Interrupt { point: pt }),
-        UiState::Grabbing { .. } => {
-            // Already grabbing — no action on additional press.
-            DownAction::None
-        }
+        UiState::Grabbing { .. } => DownAction::None,
         UiState::Switcher { .. } => {
-            // Switcher handles its own input in input_common.
+            // The switcher handles its own input in input_common.
             DownAction::None
         }
-        UiState::QuickSwitch { .. } => {
-            // Mid-slide (or its settle) — ignore extra presses.
-            DownAction::None
-        }
+        UiState::QuickSwitch { .. } => DownAction::None,
     }
 }
 
-/// Process pointer/touch move during a grab.
 pub fn on_move(
     state: &UiState,
     x: f32,
@@ -188,10 +163,7 @@ pub fn on_move(
     let pt = normalize(x, y, w, h);
     match state {
         UiState::Grabbing { .. } => Some(UiEvent::GrabMove { point: pt, dt }),
-        UiState::Switcher { .. } => {
-            // Switcher handles its own move in input_common.
-            None
-        }
+        UiState::Switcher { .. } => None,
         _ => None,
     }
 }
@@ -209,9 +181,7 @@ mod tests {
         m
     }
 
-    /// Pressing an icon must NOT launch immediately — it arms a pending tap so a
-    /// swipe that starts on the icon can still flip pages. Launch happens on
-    /// release (in input_common), not here.
+    /// Launch happens on release, so a swipe starting on an icon still pages.
     #[test]
     fn press_on_icon_arms_pending_not_launch() {
         let m = model();
@@ -229,12 +199,10 @@ mod tests {
         }
     }
 
-    /// Pressing empty grid space starts a page drag straight away.
     #[test]
     fn press_on_empty_starts_page_drag() {
         let m = model();
         let out = (1224, 2700);
-        // Top-left corner of the status-bar padding — no icon there.
         let action = on_press(&UiState::home(0, 1), 5.0, 5.0, &m, out);
         assert!(matches!(action, DownAction::StartPageDrag { .. }));
     }
@@ -245,8 +213,6 @@ mod tests {
         (slot.icon_rect.center_x(), slot.icon_rect.center_y())
     }
 
-    /// Tapping an icon while the previous app is still shrinking must launch
-    /// that icon, not interrupt-and-restore the outgoing window.
     #[test]
     fn press_on_icon_while_closing_launches_it() {
         let m = model();
@@ -264,8 +230,6 @@ mod tests {
         }
     }
 
-    /// Same for the fast swipe-up settle, which is the state that fast gesture
-    /// actually lands in.
     #[test]
     fn press_on_icon_while_settling_home_launches_it() {
         let m = model();
@@ -285,8 +249,6 @@ mod tests {
         }
     }
 
-    /// A press away from any icon still interrupts the animation and re-grabs
-    /// the outgoing window.
     #[test]
     fn press_off_icon_while_closing_interrupts() {
         let m = model();
@@ -303,8 +265,6 @@ mod tests {
         ));
     }
 
-    /// A settle back to the app is not a Home-bound animation — every press
-    /// interrupts it, icon or not.
     #[test]
     fn press_on_icon_while_settling_back_to_app_interrupts() {
         let m = model();
@@ -337,7 +297,6 @@ mod tests {
             resolve_drop((x, y), &l, IconSource::Grid, 0, 0, (w, h)),
             DropAction::Pin
         );
-        // Straight from a library folder onto the dock pins it too.
         assert_eq!(
             resolve_drop((x, y), &l, IconSource::Library, 0, 0, (w, h)),
             DropAction::Pin

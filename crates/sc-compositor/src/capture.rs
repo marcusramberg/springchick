@@ -1,15 +1,6 @@
-//! Shared screencopy (`ext-image-copy-capture-v1`) buffer plumbing.
-//!
-//! Clients pick *one* of the buffer types we advertise in
-//! [`crate::handlers`]'s `capture_constraints`. dmabuf is the fast path (the
-//! backend blits the scene straight into the client's buffer), but the common
-//! screenshot tools — grim included — only ever allocate **shm**, so a
-//! dmabuf-only implementation makes `grim` fail with
-//! "failed to copy output <name>" and nothing in our log.
-//!
-//! The shm path here renders the scene into an offscreen GLES texture, reads it
-//! back with `glReadPixels` (via smithay's `ExportMem`) and memcpys it into the
-//! client's pool, honouring its stride.
+//! Screencopy (`ext-image-copy-capture-v1`) buffers. dmabuf is the fast path,
+//! but grim and most tools only allocate shm; for those the scene is drawn
+//! offscreen and read back into the client's pool.
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
@@ -21,15 +12,13 @@ use smithay::wayland::shm;
 
 use tracing::warn;
 
-/// Geometry of a client shm capture buffer.
 pub struct ShmTarget {
     pub size: Size<i32, smithay::utils::Buffer>,
     pub stride: i32,
     pub fourcc: Fourcc,
 }
 
-/// Inspect a capture frame's buffer: `Some` if it is an shm buffer in a format
-/// we can render into, `None` for dmabuf (handled elsewhere) or anything else.
+/// `None` for dmabuf (handled elsewhere) or unsupported formats.
 pub fn shm_target(buffer: &WlBuffer) -> Option<ShmTarget> {
     let data = shm::with_buffer_contents(buffer, |_, _, data| data).ok()?;
     let fourcc = match data.format {
@@ -47,11 +36,8 @@ pub fn shm_target(buffer: &WlBuffer) -> Option<ShmTarget> {
     })
 }
 
-/// Allocate the offscreen texture a scene is drawn into before readback.
-///
-/// `size` is the whole scene, which is not necessarily the client's buffer:
-/// wlr-screencopy can ask for a sub-region, and the scene still has to be
-/// composited at full output size before that region is read out of it.
+/// `size` is the whole scene, not the client buffer: wlr-screencopy can ask
+/// for a sub-region.
 pub fn offscreen(
     renderer: &mut GlesRenderer,
     fourcc: Fourcc,
@@ -66,8 +52,6 @@ pub fn offscreen(
     }
 }
 
-/// Read the drawn framebuffer back into a tightly packed RGBA `Vec`, for the
-/// compositor's own screenshot (no client buffer involved).
 pub fn readback_rgba(
     renderer: &mut GlesRenderer,
     framebuffer: &<GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -96,13 +80,8 @@ pub fn readback_rgba(
     Some(out)
 }
 
-/// Read the drawn framebuffer back and copy it into the client's shm pool.
-///
-/// `framebuffer` must be the one bound to the texture from [`offscreen`], with
-/// the scene already drawn into it. `src` is the part of it to read; its size
-/// must be the client buffer's size. The framebuffer's row 0 is the top of the
-/// image (the scene is drawn y-flipped, as it is for scanout), so `src.loc` is
-/// measured from the top-left like every other rect in the shell.
+/// `framebuffer` must be bound to the [`offscreen`] texture with the scene
+/// drawn. `src` is sized like the client buffer; row 0 is the image top.
 pub fn readback_into_shm(
     renderer: &mut GlesRenderer,
     framebuffer: &<GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -126,8 +105,7 @@ pub fn readback_into_shm(
         }
     };
 
-    // `copy_framebuffer` hands back tightly packed rows; the client's pool may
-    // be wider, so copy row by row rather than in one shot.
+    // The client's stride may be wider than tightly packed rows.
     let src_stride = (target.size.w * 4) as usize;
     let dst_stride = target.stride as usize;
     let rows = target.size.h as usize;
@@ -139,9 +117,8 @@ pub fn readback_into_shm(
             return false;
         }
         for y in 0..rows {
-            // SAFETY: `ptr`/`len` describe the client's mapped pool for the
-            // duration of this closure, and the bounds check above keeps every
-            // write inside `[offset, offset + dst_stride * rows)`.
+            // SAFETY: `ptr`/`len` are the client's mapped pool for this closure and the
+            // bounds check above keeps writes inside it.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     pixels.as_ptr().add(y * src_stride),

@@ -1,31 +1,16 @@
-# Arrange-mode (home-screen icon reorder) test.
+# Arrange mode: a long press on empty background engages it (launching
+# nothing); a press then lifts an icon with no second hold; dropping it
+# reorders the grid, persisted to state.toml; dropping on the dock pins.
+# Arrange keeps Home as Home, so this asserts on the `arrange` log lines and
+# state.toml.
 #
-# The one gesture path the other VM tests never reach, because it is the only
-# one gated on *time* rather than motion: empty home background must be held
-# past HOLD_MS (500ms) without moving into a swipe before arrange mode engages.
-# (Holding an *icon* opens its context menu instead — see vm-icon-menu.)
-# It exercises:
-#   - long-press on empty background engages arrange mode (launches nothing);
-#   - once in arrange, pressing an icon lifts it with no second hold, and
-#     dragging it to another slot and releasing reorders the grid;
-#   - the new order is persisted to state.toml, so it survives a restart;
-#   - dragging an icon onto the dock pins it.
-#
-# Arrange mode changes no `UiState` discriminant (Home stays Home), so the
-# `state changed to ...` trace log the other tests assert on never fires here.
-# This test asserts on the `arrange engaged` / `arrange drop` trace logs and on
-# the persisted state.toml instead.
-#
-# Build for the host arch:  nix build .#checks.aarch64-linux.vm-arrange -L
+# Run:  nix build .#checks.aarch64-linux.vm-arrange -L
 { self, pkgs }:
 
 let
   inherit (import ./test-support.nix { inherit self pkgs; }) mkTest phone;
 
-  # Three catalog apps placed on home by `homePages` below, in a known order so
-  # the initial grid is fixed before the first gesture. They never need to run —
-  # the test only reorders their icons — but the exec must be valid for the
-  # catalog to accept the entry.
+  # Never run, but the exec must be valid for the catalog to accept them.
   gridApp =
     name:
     pkgs.makeDesktopItem {
@@ -37,8 +22,6 @@ in
 mkTest {
   name = "springchick-arrange";
 
-  # A fresh install leaves home empty (everything lives in the library), so the
-  # grid this test drags around has to be seeded.
   homePages = [
     [
       "aaa"
@@ -49,7 +32,6 @@ mkTest {
 
   packages = [
     pkgs.foot
-    # The test reads the persisted model back with tomllib.
     pkgs.python3
     (gridApp "aaa")
     (gridApp "bbb")
@@ -72,10 +54,8 @@ mkTest {
             f"SPRINGCHICK_IPC_SOCK={IPC_SOCK} springchick ipc {line}"
         ).strip()
 
-    # Grid geometry in physical output pixels, mirrored from the layout
-    # constants in crates/sc-layout/src/lib.rs. Eyeballed fractions are not good
-    # enough here: an icon rect is only ~0.07H tall, so a press that misses it
-    # reads as empty space and no long-press ever arms.
+    # Mirrored from crates/sc-layout/src/lib.rs. An icon is only ~0.07H tall, so
+    # eyeballed fractions miss.
     W = ${toString phone.width}
     H = ${toString phone.height}
     H_MARGIN, TOP_PAD = 0.04, 0.04
@@ -102,8 +82,7 @@ mkTest {
 
     def order():
         """The first page's app order, read straight from the persisted model."""
-        # state.toml is only written after an arrange edit; before the first one
-        # it may not exist at all.
+        # Not written until the first arrange edit.
         if machine.succeed(f"test -f {STATE} && echo y || echo n").strip() == "n":
             return None
         raw = machine.succeed(
@@ -112,14 +91,11 @@ mkTest {
         ).strip()
         return raw.split()
 
-    # Only three apps are installed, so every row below the first is empty
-    # background — the surface the arrange long-press now lives on.
+    # Only three apps, so row 4 is empty background.
     EMPTY = row(4)
 
-    # --- Long-press on empty background engages arrange mode ---
-    # Hold still, well past HOLD_MS (500ms). `down` + sleep + `up` is the whole
-    # point of this test: the hold is a *timer*, so the compositor must keep
-    # advancing frames while a perfectly still finger rests on the screen.
+    # The hold is a timer: the compositor must keep advancing frames under a
+    # perfectly still finger.
     dbg(f"down {col(0)} {EMPTY}")
     machine.sleep(2)
     machine.wait_until_succeeds(
@@ -128,9 +104,7 @@ mkTest {
     dbg("up")
     machine.screenshot("01-arrange-engaged")
 
-    # In arrange mode an icon is lifted by the press itself — no second hold.
-    # Drag the first icon to the third slot of the first row and release. The
-    # move is well past the tap slop, so this is a reorder, not a tap.
+    # Drag slot 0 to slot 2, well past the tap slop.
     dbg(f"down {col(0)} {ROW0}")
     dbg(f"move {col(1)} {ROW0}")
     dbg(f"move {col(2)} {ROW0}")
@@ -141,21 +115,17 @@ mkTest {
     )
     machine.screenshot("02-after-reorder")
 
-    # Neither the hold nor the drag may launch anything: arrange mode consumes
-    # the pending launch. No toplevel ever mapped, so no App state was entered.
+    # Arrange consumes the pending launch.
     machine.fail(f"{JOURNAL} | grep -qF 'state changed to App'")
 
-    # --- The reorder landed in the model, and was persisted ---
-    # `homePages` seeded page 0 as [aaa, bbb, ccc]. Dragging slot 0 to slot 2
-    # must rotate exactly those three.
+    # Page 0 was [aaa, bbb, ccc]; slot 0 → 2 rotates them.
     after = order()
     assert after is not None, "state.toml was never written after the arrange edit"
     assert after[:3] == ["bbb", "ccc", "aaa"], (
         f"expected page 0 to start [bbb, ccc, aaa] after the drag, got {after[:6]}"
     )
 
-    # --- Dragging onto the dock pins ---
-    # Still in arrange mode (a drag release keeps it), so the press lifts.
+    # Still in arrange, so the press lifts.
     dbg(f"down {col(0)} {ROW0}")
     dbg(f"move {col(0)} {int(0.5 * H)}")
     dbg(f"move {col(1)} {DOCK}")
@@ -166,14 +136,13 @@ mkTest {
     )
     machine.screenshot("03-after-pin")
 
-    # The reorder above left bbb in slot 0, so that is the icon this second
-    # drag picked up and dropped on the dock.
+    # bbb is in slot 0 after the reorder.
     pinned = machine.succeed(
         f"python3 -c \"import tomllib;"
         f"print(' '.join(tomllib.load(open('{STATE}','rb')).get('dock',[])))\""
     ).strip().split()
     assert pinned == ["bbb"], f"expected bbb pinned to the dock, dock={pinned}"
-    # Pinning removes it from the grid — it lives in exactly one place.
+    # Pinned apps leave the grid.
     assert "bbb" not in order(), f"bbb is pinned but still on the grid: {order()[:6]}"
 
     machine.fail(

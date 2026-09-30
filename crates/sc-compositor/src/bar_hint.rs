@@ -1,61 +1,36 @@
-//! Home-bar visibility.
-//!
-//! The pill is not a permanent fixture: it sits over video, over a game, over
-//! whatever is in front. Hiding it outright leaves no clue the gesture exists,
-//! so on arriving in an app it blinks once to say "here", then fades away.
-//! Touching the bar zone brings it back for a moment, and it stays lit for the
-//! whole of a drag (switcher, quick-switch, grab), where it is the thing being
-//! dragged. On Home it is never drawn at all.
-//!
-//! Only the *drawn* alpha changes. The gesture zone is untouched, so a hidden
-//! pill still swipes exactly like a visible one — which is what makes fading it
-//! out safe.
-//!
-//! Clock-injected and pure: the caller supplies `Instant`s, so every timing rule
-//! here is unit-testable without sleeping.
+//! Home-bar pill visibility. In an app it blinks once on arrival, then fades
+//! out; touching the bar zone brings it back briefly, and it stays lit during
+//! a drag. Never drawn on Home. Only the drawn alpha changes; the gesture zone
+//! is always live.
 
 use std::time::Instant;
 
-/// Arriving in an app: hold, blink down and back, hold, then fade away.
 const BLINK_HOLD: f32 = 0.30;
 const BLINK_DIP: f32 = 0.15;
-/// How dark the blink's dip goes. Not to zero: a pill that vanishes completely
-/// reads as a glitch rather than as a wink.
+/// Not to zero: a pill that vanishes reads as a glitch.
 const BLINK_DIP_ALPHA: f32 = 0.15;
 const BLINK_SETTLE: f32 = 0.45;
 const BLINK_FADE: f32 = 0.50;
 
-/// Touched while hidden: appear quickly, stay for a beat, fade back out.
 const REVEAL_IN: f32 = 0.12;
 const REVEAL_HOLD: f32 = 1.00;
 const REVEAL_OUT: f32 = 0.45;
 
-/// What the shell is showing, as far as the pill is concerned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarMode {
-    /// Home: never drawn (the gesture still works).
     Off,
-    /// A drag is in flight — the pill is what the finger is holding, so it
-    /// stays lit for the duration.
     Shown,
-    /// In an app: blink once on arrival, then keep out of the way.
     Auto,
 }
 
-/// What the bar is doing right now.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
-    /// Drawn unconditionally (a drag is in flight).
     Steady,
-    /// Just arrived in an app: the blink-then-fade sequence, started at `Instant`.
     Blink(Instant),
-    /// Out of the way.
     Hidden,
-    /// The bar zone was touched: shown again from `Instant`.
     Reveal(Instant),
 }
 
-/// Drawn-alpha policy for the home pill.
 #[derive(Clone, Copy, Debug)]
 pub struct BarHint {
     phase: Phase,
@@ -71,7 +46,6 @@ impl Default for BarHint {
     }
 }
 
-/// Linear ramp from `from` to `to` across `dur` seconds of `t`.
 fn ramp(t: f32, dur: f32, from: f32, to: f32) -> f32 {
     if dur <= 0.0 {
         return to;
@@ -84,8 +58,7 @@ impl BarHint {
         BarHint::default()
     }
 
-    /// What the shell is showing. Idempotent: only a change restarts a
-    /// sequence, so the per-frame caller can hand it the same value forever.
+    /// Idempotent: only a change restarts a sequence.
     pub fn set_mode(&mut self, mode: BarMode, now: Instant) {
         if mode == self.mode {
             return;
@@ -98,16 +71,13 @@ impl BarHint {
         };
     }
 
-    /// A finger landed in the bar's gesture zone. Brings a hidden pill back so
-    /// the user can see what they are dragging; a no-op on Home, where the pill
-    /// stays out of it.
+    /// A no-op on Home.
     pub fn touched(&mut self, now: Instant) {
         if self.mode == BarMode::Auto {
             self.phase = Phase::Reveal(now);
         }
     }
 
-    /// Drawn alpha for the pill, 0..1.
     pub fn alpha(&self, now: Instant) -> f32 {
         match self.phase {
             Phase::Steady => 1.0,
@@ -117,8 +87,7 @@ impl BarHint {
         }
     }
 
-    /// Retire a finished sequence so `alpha` stops doing arithmetic and the
-    /// render loop stops being told there is an animation. Called once a frame.
+    /// Called once a frame.
     pub fn advance(&mut self, now: Instant) {
         let done = match self.phase {
             Phase::Blink(start) => secs_since(start, now) >= Self::BLINK_TOTAL,
@@ -130,7 +99,6 @@ impl BarHint {
         }
     }
 
-    /// Whether the alpha is still changing, so the frame loop keeps drawing.
     pub fn is_animating(&self, now: Instant) -> bool {
         match self.phase {
             Phase::Steady | Phase::Hidden => false,
@@ -163,7 +131,6 @@ impl BarHint {
         ramp(t - edge, BLINK_FADE, 1.0, 0.0)
     }
 
-    /// in → hold → out.
     fn reveal_alpha(t: f32) -> f32 {
         if t < REVEAL_IN {
             return ramp(t, REVEAL_IN, 0.0, 1.0);
@@ -213,14 +180,10 @@ mod tests {
         let t0 = Instant::now();
         hint.set_mode(BarMode::Auto, t0);
 
-        // Visible at first, so the eye catches it where it already was.
         assert_eq!(hint.alpha(t0), 1.0);
-        // Dips mid-blink...
         let dip = hint.alpha(at(t0, BLINK_HOLD + BLINK_DIP));
         assert!(dip < 0.5, "expected a dip, got {dip}");
-        // ...comes back...
         assert_eq!(hint.alpha(at(t0, BLINK_HOLD + 2.0 * BLINK_DIP + 0.01)), 1.0);
-        // ...then fades away and stays away.
         assert!(hint.alpha(at(t0, BarHint::BLINK_TOTAL)) < 0.001);
         let late = at(t0, BarHint::BLINK_TOTAL + 5.0);
         hint.advance(late);
@@ -282,8 +245,7 @@ mod tests {
         let mut hint = BarHint::new();
         let t0 = Instant::now();
         hint.set_mode(BarMode::Auto, t0);
-        // Grabbing the bar while it is still blinking must leave it lit, not
-        // let the blink's own fade run out from under the finger.
+        // Grabbing mid-blink must keep it lit.
         let mid = at(t0, BLINK_HOLD + BLINK_DIP);
         hint.touched(mid);
         assert_eq!(hint.alpha(at(mid, REVEAL_IN + 0.1)), 1.0);

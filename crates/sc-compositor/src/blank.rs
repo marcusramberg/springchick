@@ -1,25 +1,19 @@
-//! Display blanking policy.
-//!
-//! The flag itself is backend-agnostic and testable; turning the CRTC off lives
-//! in `drm_backend.rs`, and the winit backend simply ignores it.
+//! Display blanking policy. The CRTC side lives in `drm_backend.rs`; winit
+//! ignores it.
 
-/// What a key press means while the panel is blanked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyWhileBlanked {
     /// The press woke the screen and must not fire its binding.
     Woke,
-    /// Panel stays dark and the key goes nowhere: nothing is watching, so a
-    /// press in a pocket must not fire a binding either.
+    /// Nobody is watching: a pocket press must not fire a binding.
     Swallow,
-    /// Handle the key normally — either the screen is on, or an external display
-    /// is showing the session while the phone panel sleeps.
+    /// Screen on, or an external display shows the session.
     Normal,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Blank {
     blanked: bool,
-    /// Set when the state changed, so the backend can act on it once.
     dirty: bool,
 }
 
@@ -37,9 +31,7 @@ impl Blank {
         self.dirty = true;
     }
 
-    /// Drive the flag to a known state, rather than flipping whatever it is now.
-    /// Idempotent: setting it to what it already is changes nothing and leaves
-    /// the backend with no work to do.
+    /// Idempotent.
     pub fn set(&mut self, blanked: bool) {
         if self.blanked == blanked {
             return;
@@ -48,7 +40,6 @@ impl Blank {
         self.dirty = true;
     }
 
-    /// Consume the "state changed" flag. Returns `Some(blanked)` once per change.
     pub fn take_change(&mut self) -> Option<bool> {
         self.dirty.then(|| {
             self.dirty = false;
@@ -56,18 +47,9 @@ impl Blank {
         })
     }
 
-    /// A key press arrived while the panel may be blanked.
-    ///
-    /// Only the key that turned the panel off turns it back on (`wake_key`: the
-    /// key bound to `toggle-display`, i.e. the power button). Any other key used
-    /// to wake it, which is wrong the moment a keyboard is attached — every
-    /// keystroke typed at an externally mirrored session yanked the phone panel
-    /// back on.
-    ///
-    /// What the other keys do while dark depends on whether anyone can see the
-    /// session: with an external display attached they are ordinary input and
-    /// travel on to the app; with nothing but the dark phone panel they are
-    /// swallowed, so a key pressed in a pocket cannot fire a binding.
+    /// Only `wake_key` (the `toggle-display` key) wakes the panel; typing at an
+    /// external display must not. Other keys are swallowed unless an external
+    /// display is attached.
     pub fn on_key_press(&mut self, wake_key: bool, external_display: bool) -> KeyWhileBlanked {
         if !self.blanked {
             return KeyWhileBlanked::Normal;
@@ -85,20 +67,16 @@ impl Blank {
     }
 }
 
-/// Idle-blank policy: how long since the last input, and whether that has
-/// crossed the configured timeout. Pure and clock-free — the caller passes the
-/// current `Instant`, so tests drive it with synthetic time. Acting on the
-/// result (flipping [`Blank`]) is the backend's job.
+/// Idle-blank timer. Acting on it is the backend's job.
 #[derive(Clone, Copy, Debug)]
 pub struct Idle {
-    /// `None` disables idle blanking (config `idle_blank_secs = 0`).
+    /// `None` disables idle blanking.
     timeout: Option<std::time::Duration>,
     last_activity: std::time::Instant,
 }
 
 impl Idle {
-    /// `secs == 0` disables idle blanking. `now` seeds the activity clock so a
-    /// freshly built `Idle` does not fire until a full timeout has elapsed.
+    /// `secs == 0` disables. `now` seeds the clock so it waits a full timeout.
     pub fn new(secs: u64, now: std::time::Instant) -> Self {
         Idle {
             timeout: (secs > 0).then(|| std::time::Duration::from_secs(secs)),
@@ -106,14 +84,11 @@ impl Idle {
         }
     }
 
-    /// Record that input arrived, resetting the idle countdown.
     pub fn activity(&mut self, now: std::time::Instant) {
         self.last_activity = now;
     }
 
-    /// Whether the idle timeout has elapsed since the last activity. Always
-    /// `false` when disabled. The caller must still check the panel isn't
-    /// already blanked before acting.
+    /// The caller must still check the panel isn't already blanked.
     pub fn should_blank(&self, now: std::time::Instant) -> bool {
         match self.timeout {
             Some(timeout) => now.duration_since(self.last_activity) >= timeout,
@@ -138,23 +113,17 @@ mod tests {
         assert_eq!(b.on_key_press(true, false), KeyWhileBlanked::Normal);
     }
 
-    /// The regression that motivated `wake_key`: any keystroke used to wake.
     #[test]
     fn other_keys_never_wake_the_panel() {
         let mut b = Blank::new();
         b.set(true);
         assert_eq!(b.take_change(), Some(true));
-        // Nothing watching: dark, and the key fires nothing.
         assert_eq!(b.on_key_press(false, false), KeyWhileBlanked::Swallow);
-        // External display attached: dark phone, but the key is real input.
         assert_eq!(b.on_key_press(false, true), KeyWhileBlanked::Normal);
         assert!(b.is_blanked());
         assert_eq!(b.take_change(), None);
     }
 
-    /// What the pre-suspend blank relies on: it runs whatever the panel was
-    /// doing, and asking for a state the panel is already in is not a change the
-    /// backend has to act on.
     #[test]
     fn setting_a_state_is_idempotent() {
         let mut b = Blank::new();
@@ -166,8 +135,6 @@ mod tests {
         assert!(b.is_blanked());
         assert_eq!(b.take_change(), None);
 
-        // And the power press after a suspend-blank reads as a wake, not as a
-        // binding.
         assert_eq!(b.on_key_press(true, false), KeyWhileBlanked::Woke);
         assert!(!b.is_blanked());
     }
@@ -198,9 +165,7 @@ mod tests {
         let t0 = Instant::now();
         let mut idle = Idle::new(600, t0);
         idle.activity(t0 + Duration::from_secs(500));
-        // 590s since t0, but only 90s since the activity: not yet.
         assert!(!idle.should_blank(t0 + Duration::from_secs(590)));
-        // 500 + 600 = 1100s: timeout since the activity has now elapsed.
         assert!(idle.should_blank(t0 + Duration::from_secs(1100)));
     }
 

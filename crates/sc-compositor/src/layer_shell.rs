@@ -1,23 +1,9 @@
-//! wlr-layer-shell geometry + app-area reservation, backed by smithay's
-//! [`LayerMap`].
+//! wlr-layer-shell on smithay's [`LayerMap`], plus the app-area reservation.
+//! `LayerMap::arrange` only configures mapped surfaces; configuring one
+//! mid-unmap sends a zero-size configure that kills the client.
 //!
-//! We used to hand-roll surface tracking, geometry and configures. That missed
-//! the map/unmap lifecycle smithay's `LayerMap` gets right: configuring a
-//! surface mid-unmap (after smithay resets its cached anchor/size to Default)
-//! sent a `(0,0)`/no-anchor configure that the client committed back, tripping
-//! the `width 0 requested without setting left and right anchors` protocol
-//! error and killing the whole client. `LayerMap::arrange` only ever configures
-//! *mapped* surfaces, so it can't happen.
-//!
-//! ## Coordinate spaces
-//!
-//! `LayerMap` works in **logical** coordinates at the output scale. Our output
-//! scale is `Scale::Fractional(dpi)`, so logical = physical / `dpi`. The rest of
-//! the compositor (render origins, touch hit-testing, the Skia home bar) works
-//! in **physical** px, so every geometry we read back from the map is scaled up
-//! by `dpi` here. Layer clients render at fractional scale `dpi` (advertised via
-//! `wp_fractional_scale`), so the logical configures the map sends them line up
-//! with the physical buffers they produce.
+//! The map is logical (physical / `dpi`); everything read back is scaled to
+//! physical here.
 
 use sc_layout::Rect;
 use smithay::backend::renderer::utils::{with_renderer_surface_state, Buffer};
@@ -31,44 +17,32 @@ use smithay::wayland::shell::wlr_layer::{
 };
 use std::collections::{HashMap, HashSet};
 
-/// `(surface, physical origin)` pairs to composite, in bottom-to-top order.
 pub type RenderList = Vec<(WlSurface, (i32, i32))>;
 
-/// Seconds a bottom-docked layer surface (the OSK) takes to slide up into place
-/// after it maps. Short enough not to delay typing, long enough to read as a
-/// move rather than a pop.
+/// OSK slide-in duration after it maps.
 const SLIDE_SECS: f32 = 0.18;
 
-/// Seconds an area *increase* (the OSK unmapping) is held back before apps are
-/// resized up again. An OSK that unmaps and remaps inside this window — wvkbd
-/// swapping layouts, or a client that drops `zwp_text_input` focus for a beat —
-/// never reaches the apps at all, so no configure storm follows it.
+/// Hold area increases this long, so an OSK that unmaps and remaps (wvkbd
+/// swapping layouts, a brief text-input focus drop) never resizes apps.
 const REGROW_DELAY: f32 = 0.25;
 
-/// Window in which repeated map transitions of the same surface count as
-/// flapping.
 const FLAP_WINDOW: f32 = 3.0;
 
-/// Maps within [`FLAP_WINDOW`] that trip the latch.
 const FLAP_LIMIT: usize = 4;
 
-/// How long the usable area is pinned at its smallest once flapping is seen.
-/// Long enough to outlast the cycle; short enough that a keyboard genuinely
-/// dismissed afterwards still gives the space back.
+/// How long the usable area stays pinned at its smallest after flapping.
 const FLAP_HOLD: f32 = 10.0;
 
-/// Whether a layer surface's `wl_surface` is currently mapped (has a buffer).
 pub fn is_mapped(surface: &WlSurface) -> bool {
     with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
 }
 
-/// The committed buffer's size in logical px, if any.
+/// Logical px.
 pub fn buffer_size(surface: &WlSurface) -> Option<(i32, i32)> {
     with_renderer_surface_state(surface, |state| state.buffer_size().map(|s| (s.w, s.h)))
         .unwrap_or(None)
 }
 
-/// Scale a logical rectangle up to a physical [`Rect`].
 fn to_physical(r: Rectangle<i32, Logical>, dpi: f64) -> Rect {
     Rect {
         x: (r.loc.x as f64 * dpi) as f32,
@@ -78,33 +52,25 @@ fn to_physical(r: Rectangle<i32, Logical>, dpi: f64) -> Rect {
     }
 }
 
-/// One layer surface as the compositor sees it, for the `layers` IPC dump.
-///
-/// Deliberately plain data: the formatting below is pure and unit-tested, so a
-/// dump read off a device can be reasoned about without a compositor.
+/// One layer surface, for the `layers` IPC dump.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayerInfo {
     pub namespace: String,
-    /// `background` / `bottom` / `top` / `overlay`.
     pub layer: &'static str,
-    /// Logical `(x, y, w, h)` from the map. `None` while the map has no
-    /// geometry for it (created, never arranged).
+    /// Logical `(x, y, w, h)`; `None` until arranged.
     pub geo: Option<(i32, i32, i32, i32)>,
-    /// Where it is drawn this frame, physical px, slide offset included.
+    /// Physical, slide offset included.
     pub placed: Option<Rect>,
-    /// Size of the committed buffer, logical px. `None` = nothing to draw.
+    /// Logical px. `None` = nothing to draw.
     pub buffer: Option<(i32, i32)>,
-    /// Still in the unmapped set: waiting for the commit that maps it.
+    /// Waiting for the commit that maps it.
     pub pending_map: bool,
-    /// `zwlr_layer_surface_v1.set_anchor` bits, as the client set them.
     pub anchor: u32,
-    /// Exclusive zone: `>0` reserved, `0` neutral, `-1` don't care.
+    /// `>0` reserved, `0` neutral, `-1` don't care.
     pub exclusive: i32,
-    /// Slide-in progress in `[0, 1)` while one is running.
     pub slide: Option<f32>,
 }
 
-/// Short name for a layer, for the dump.
 fn layer_name(layer: Layer) -> &'static str {
     match layer {
         Layer::Background => "background",
@@ -114,7 +80,6 @@ fn layer_name(layer: Layer) -> &'static str {
     }
 }
 
-/// `x,y+wxh`, rounded — dump geometry, not pixel-exact reporting.
 fn fmt_rect(r: Rect) -> String {
     format!(
         "{},{}+{}x{}",
@@ -125,7 +90,6 @@ fn fmt_rect(r: Rect) -> String {
     )
 }
 
-/// One `LayerInfo` as a dump field group. `idx` is its draw order.
 pub fn format_layer(idx: usize, l: &LayerInfo) -> String {
     let mut s = format!("#{idx} ns={} layer={}", l.namespace, l.layer);
     match l.geo {
@@ -150,74 +114,48 @@ pub fn format_layer(idx: usize, l: &LayerInfo) -> String {
     s
 }
 
-/// A bottom-docked layer surface (the OSK) whose client just hid it — by
-/// null-committing or by destroying the layer surface — still drawn from its
-/// last committed buffer while it slides back down.
-///
-/// The buffer is captured before smithay's `update_buffer` reset (a pre-commit
-/// hook) or the wl_surface destruction hook wipes the state — both are what
-/// make an unmap disappear instantly, and neither can be seen after the fact.
-/// Holding the clone (an Arc) withholds the client's `wl_buffer.release` until
-/// the animation drops it, so the client cannot legally reuse the pixels first.
+/// A bottom-docked surface (the OSK) the client just hid, still drawn from
+/// its last buffer while it slides out. The buffer is captured in a
+/// pre-commit/destruction hook before smithay resets it; holding the clone
+/// withholds `wl_buffer.release` until the animation ends.
 struct ClosingLayer {
-    /// Identity only — to tell a remap of the same surface (the null-commit
-    /// path) from a different keyboard. May already be destroyed (the destroy
-    /// path), which is fine: only handle equality is used.
+    /// Identity only, to spot a remap of the same surface. May be destroyed.
     surface: WlSurface,
     buffer: Buffer,
-    /// Where it was drawn when the client hid it, physical px (a mid-flight
-    /// slide-in included — the slide-out continues from there).
+    /// Physical; a mid-flight slide-in continues from here.
     rect: Rect,
-    /// Slide-out progress, `0..=1`.
     progress: f32,
 }
 
-/// Owns the per-output [`LayerMap`] handle and the not-yet-mapped surface set.
 pub struct LayerShell {
     output: Output,
-    /// Surfaces created but not yet mapped (no buffer committed). Drives the
-    /// initial configure and the map/unmap transitions, mirroring niri.
+    /// Created but not yet mapped; drives the initial configure and map/unmap
+    /// transitions (mirrors niri).
     unmapped: HashSet<WlSurface>,
-    /// Last physical usable area handed to apps; compared to detect changes.
     last_usable: Rect,
-    /// Slide-in progress in `[0, 1)` for surfaces that just mapped, keyed by
-    /// `wl_surface`. Entries are added on the unmapped→mapped transition and
-    /// dropped once they reach 1 (and on unmap/destroy). Only *bottom-docked*
-    /// surfaces actually move — see `place`.
+    /// Slide-in progress `[0, 1)`; only bottom-docked surfaces move.
     slides: HashMap<WlSurface, f32>,
-    /// Physical output height, for the home-bar bottom exclusive zone.
     output_h: f32,
-    /// Debounce + flap latch on area increases. See [`RegrowGuard`].
     regrow: RegrowGuard,
-    /// Timestamps of recent unmapped→mapped transitions, per surface, trimmed
-    /// to [`FLAP_WINDOW`]. Feeds the flap latch.
+    /// Per-surface map timestamps within [`FLAP_WINDOW`].
     map_events: HashMap<WlSurface, Vec<f32>>,
-    /// Last layer surface a finger went down on. An `OnDemand` surface only
-    /// takes keyboard focus after such a tap, per the layer-shell protocol.
+    /// An `OnDemand` surface only takes keyboard focus after a tap on it.
     focus_tap: Option<WlSurface>,
-    /// The OSK (or another bottom-docked surface) sliding out after its client
-    /// unmapped it. One at a time — a second unmap replaces the first.
+    /// One at a time; a second unmap replaces the first.
     closing: Option<ClosingLayer>,
 }
 
-/// Rate limiting on *growing* the app area back.
-///
-/// Resizing an app is what makes some clients drop `zwp_text_input` focus,
-/// which unmaps the OSK, which grows the app back — a cycle that on device
-/// looks like the keyboard being summoned and dismissed forever. So an increase
-/// waits out [`REGROW_DELAY`] (an OSK that returns inside it never reaches the
-/// apps at all), and once a surface is seen flapping, increases are refused
-/// entirely for [`FLAP_HOLD`]. Holding the app at the smaller size costs
-/// nothing — the space it gives up is empty.
+/// Rate limit on growing the app area back. Resizing an app can make it drop
+/// text-input focus, which unmaps the OSK, which grows the app: an endless
+/// show/hide cycle. Increases wait [`REGROW_DELAY`], and a flapping surface
+/// blocks them for [`FLAP_HOLD`].
 #[derive(Debug, Default)]
 struct RegrowGuard {
-    /// Monotonic seconds, advanced by [`RegrowGuard::tick`]. Only differences
-    /// matter, so the origin is arbitrary.
+    /// Monotonic seconds, arbitrary origin.
     now: f32,
-    /// Deadline at which a held-back increase may be applied. Set the first
-    /// time the area grows, cleared when applied or when it shrinks again.
+    /// When a held-back increase may apply.
     pending: Option<f32>,
-    /// While `now` is below this, increases are refused outright.
+    /// Increases are refused until then.
     flap_until: f32,
 }
 
@@ -226,14 +164,12 @@ impl RegrowGuard {
         self.now += dt;
     }
 
-    /// Whether an area increase may be applied now. Starts (or continues) the
-    /// debounce when it may not.
+    /// Starts or continues the debounce when not yet allowed.
     fn allow_grow(&mut self) -> bool {
         if self.now < self.flap_until {
             return false;
         }
         match self.pending {
-            // First frame of the increase: start the debounce.
             None => {
                 self.pending = Some(self.now + REGROW_DELAY);
                 false
@@ -242,35 +178,28 @@ impl RegrowGuard {
         }
     }
 
-    /// The area settled (grew and was applied, or shrank): drop the debounce.
     fn resolved(&mut self) {
         self.pending = None;
     }
 
-    /// Pre-arm the debounce to expire at `deadline`. Used when an OSK
-    /// slide-out starts, so the held-back grow lands the moment the keyboard
-    /// finishes leaving instead of a debounce-length beat after it.
+    /// Pre-arm the debounce to expire when an OSK slide-out ends.
     fn hold_until(&mut self, deadline: f32) {
         self.pending = Some(deadline);
     }
 
-    /// A surface flapped: pin the area at its smallest for [`FLAP_HOLD`].
     fn latch(&mut self) {
         self.flap_until = self.now + FLAP_HOLD;
     }
 
-    /// Whether an increase is being held back right now, either by the debounce
-    /// or the flap latch. The frame loop keeps drawing while this is true so the
-    /// hold has a frame to expire on — otherwise a keyboard that stops flapping
-    /// and stays gone leaves the app shrunk until some unrelated commit.
+    /// Keeps the frame loop drawing so the hold has a frame to expire on;
+    /// otherwise the app stays shrunk until an unrelated commit.
     fn holding(&self) -> bool {
         self.pending.is_some() || self.now < self.flap_until
     }
 }
 
-/// Record a map at `now` in `events` and report whether the surface has now
-/// mapped [`FLAP_LIMIT`] times inside [`FLAP_WINDOW`]. Trips at most once per
-/// burst: a run that trips clears its history.
+/// Records a map and reports [`FLAP_LIMIT`] maps within [`FLAP_WINDOW`].
+/// Clears the history when it trips.
 fn flapped(events: &mut Vec<f32>, now: f32) -> bool {
     events.retain(|t| now - *t <= FLAP_WINDOW);
     events.push(now);
@@ -301,11 +230,8 @@ impl LayerShell {
         }
     }
 
-    /// Advance every in-flight slide by `dt` seconds, dropping the ones that
-    /// finished. Returns true while any is still moving, so the frame loop keeps
-    /// presenting. Covers the slide-in (`slides`) and the slide-out (`closing`);
-    /// dropping a finished `closing` releases its held buffer back to the
-    /// client.
+    /// Returns true while anything is moving. Dropping a finished `closing`
+    /// releases its buffer to the client.
     pub fn tick_slides(&mut self, dt: f32) -> bool {
         self.regrow.tick(dt);
         self.slides.retain(|_, p| {
@@ -321,27 +247,19 @@ impl LayerShell {
         !self.slides.is_empty() || self.closing.is_some()
     }
 
-    /// Drop every in-flight slide, releasing a closing surface's held buffer.
-    /// For when frames stop entirely (the panel blanks): nothing would tick
-    /// them, so a slide-out would hang mid-air and sit on the client's buffer
-    /// until the screen came back.
+    /// For when frames stop (panel blanked): nothing would tick the slides, and
+    /// a slide-out would hold the client's buffer until wake.
     pub fn end_slides(&mut self) {
         self.slides.clear();
         self.closing = None;
     }
 
-    /// True while any layer surface is still sliding in or out.
     pub fn sliding(&self) -> bool {
         !self.slides.is_empty() || self.closing.is_some()
     }
 
-    /// A layer surface is about to null-commit (its pending commit removes the
-    /// buffer). Called from a pre-commit hook, so the surface state — and with
-    /// it the last buffer — is still intact. If the surface is a mapped
-    /// bottom-docked one, hold its buffer and start a slide-out next frame.
-    ///
-    /// Non-docked surfaces (a top bar, a fullscreen overlay) just vanish as
-    /// before: they would travel the wrong way.
+    /// Pre-commit hook for a null commit: the last buffer is still intact. A
+    /// mapped bottom-docked surface keeps it and slides out; others just vanish.
     pub fn note_hide(&mut self, surface: &WlSurface, dpi: f64) {
         let removing = with_states(surface, |states| {
             matches!(
@@ -374,29 +292,22 @@ impl LayerShell {
             rect,
             progress: 0.0,
         });
-        // Sync the app's resize to the slide's end: `recompute_layers` bails
-        // while any slide runs, so the first `usable_changed` after the
-        // slide-out lands must find the debounce already expired.
+        // `recompute_layers` bails while a slide runs, so the debounce must already
+        // be expired when the slide-out lands.
         self.regrow.hold_until(self.regrow.now + SLIDE_SECS);
     }
 
-    /// The closing keyboard for this frame: its held buffer and where it is
-    /// drawn now, slide offset included. `None` when no slide-out is running.
     pub fn closing_view(&self) -> Option<(Buffer, Rect)> {
         let c = self.closing.as_ref()?;
         let mut rect = c.rect;
         let dist = self.output_h - rect.y;
-        // Ease-out on the way *out* too: the slide-in curve run backwards would
-        // hang for most of the duration and then snap off screen.
+        // Ease-out on the way out too; the slide-in curve reversed hangs then snaps.
         rect.y += sc_anim::ease_out_cubic(c.progress) * dist;
         Some((c.buffer.clone(), rect))
     }
 
-    /// Recompute the usable area after an arrange. Returns `Some(new)` if it
-    /// changed since the last call (so the caller resizes app toplevels).
-    ///
-    /// Increases are debounced, and refused outright while a client is flapping
-    /// its keyboard — see [`RegrowGuard`].
+    /// `Some(new)` when the usable area changed. Increases go through
+    /// [`RegrowGuard`].
     pub fn usable_changed(&mut self, dpi: f64) -> Option<Rect> {
         let now = self.usable(dpi);
         if now == self.last_usable {
@@ -410,14 +321,10 @@ impl LayerShell {
         Some(now)
     }
 
-    /// True while an area increase is being held back (debounce or flap latch),
-    /// so the frame loop keeps rendering long enough to apply it.
     pub fn regrow_pending(&self) -> bool {
         self.regrow.holding()
     }
 
-    /// Record an unmapped→mapped transition, latching the guard if this surface
-    /// is cycling.
     fn record_map(&mut self, surface: &WlSurface) {
         let now = self.regrow.now;
         let events = self.map_events.entry(surface.clone()).or_default();
@@ -427,29 +334,23 @@ impl LayerShell {
         }
     }
 
-    /// A new layer surface was created. Track it as unmapped and register it
-    /// with the map; geometry + initial configure follow on its first commit.
+    /// Geometry and the initial configure follow on its first commit.
     pub fn new_surface(&mut self, surface: WlrLayerSurface, namespace: String) {
         self.unmapped.insert(surface.wl_surface().clone());
         let mut map = layer_map_for_output(&self.output);
-        // Only fails if already mapped, which a fresh surface never is.
+        // Only fails if already mapped.
         let _ = map.map_layer(&LayerSurface::new(surface, namespace));
     }
 
-    /// A layer surface was destroyed — wvkbd 0.20's hide path, and any shell
-    /// client exiting. The role is gone but its `wl_surface` is still alive
-    /// (its own destruction hook — the one that resets the buffer state —
-    /// runs after the role's), so the last buffer can still be held for a
-    /// slide-out, the same animation the null-commit path gets via
-    /// [`Self::note_hide`]. Returns true if it was mapped (so the caller
-    /// recomputes the app area).
+    /// wvkbd 0.20 hides by destroying the layer surface. The `wl_surface` is
+    /// still alive (its hook runs after the role's), so the last buffer can be
+    /// held for a slide-out. Returns true if it was mapped.
     pub fn destroyed(&mut self, surface: &WlrLayerSurface, dpi: f64) -> bool {
         let wl = surface.wl_surface();
         let was_mapped = !self.unmapped.contains(wl);
         self.unmapped.remove(wl);
         self.slides.remove(wl);
-        // A client that exits and relaunches its keyboard is not the cycle this
-        // guards against, so its history goes with it.
+        // A client relaunching its keyboard isn't the flap cycle.
         self.map_events.remove(wl);
         if self.focus_tap.as_ref() == Some(wl) {
             self.focus_tap = None;
@@ -458,7 +359,7 @@ impl LayerShell {
         let Some(layer) = map.layers().find(|l| l.layer_surface() == surface).cloned() else {
             return false;
         };
-        // Capture before `unmap_layer`, which drops the geometry.
+        // Before `unmap_layer`, which drops the geometry.
         let geo = map.layer_geometry(&layer).filter(|_| was_mapped);
         let buffer = was_mapped
             .then(|| with_renderer_surface_state(wl, |s| s.buffer().cloned()))
@@ -481,9 +382,7 @@ impl LayerShell {
         true
     }
 
-    /// Handle a `wl_surface` commit. Returns true if it belonged to a layer
-    /// surface (so the caller recomputes the app area / redraws). Arranges the
-    /// map and drives the map/unmap transition, mirroring niri's flow.
+    /// Returns true if it belonged to a layer surface. Mirrors niri's flow.
     pub fn handle_commit(&mut self, surface: &WlSurface) -> bool {
         let mut map = layer_map_for_output(&self.output);
         if map
@@ -493,42 +392,34 @@ impl LayerShell {
             return false;
         }
 
-        // Arrange before the initial configure so the client's requested size is
-        // respected. `arrange` only configures mapped surfaces.
+        // Arrange before the initial configure so the requested size is respected.
         map.arrange();
         let layer = map
             .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
             .unwrap()
             .clone();
-        // Everything below works off the clone; dropping the guard here keeps
-        // `&mut self` usable (the map borrows `self.output`).
+        // Release the map guard; it borrows `self.output`.
         drop(map);
 
         if is_mapped(surface) {
-            // Unmapped → mapped: start the slide-in. Commits on an
-            // already-mapped surface (the OSK redrawing) must not restart it.
+            // Only the unmapped → mapped transition starts a slide-in.
             if self.unmapped.remove(surface) {
                 self.slides.insert(surface.clone(), 0.0);
                 self.record_map(surface);
-                // The keyboard came back mid slide-out (wvkbd swapping
-                // layouts): stop drawing the held old buffer and let the
-                // pre-armed regrow drop with the shrink below it.
+                // Back mid slide-out (wvkbd swapping layouts): drop the held buffer.
                 if self.closing.as_ref().is_some_and(|c| &c.surface == surface) {
                     self.closing = None;
                     self.regrow.resolved();
                 }
             }
         } else if !self.unmapped.contains(surface) {
-            // Was mapped, now unmapped via a null commit: it must redo the
-            // initial configure sequence before mapping again.
+            // Unmapped by a null commit: must redo the initial configure to remap.
             self.unmapped.insert(surface.clone());
             self.slides.remove(surface);
             if self.focus_tap.as_ref() == Some(surface) {
                 self.focus_tap = None;
             }
         } else {
-            // Still unmapped. If we haven't sent the initial configure, do so;
-            // otherwise `arrange` already sent any needed configure.
             let initial_sent = with_states(surface, |states| {
                 states
                     .data_map
@@ -545,10 +436,7 @@ impl LayerShell {
         true
     }
 
-    /// Whether `surface` belongs to a currently *mapped* layer surface.
-    ///
-    /// Used by [`crate::idle_inhibit`]: an idle inhibitor on a shell layer
-    /// surface counts, but only while that surface is actually on screen.
+    /// For [`crate::idle_inhibit`]: counts only while on screen.
     pub fn is_mapped_layer(&self, surface: &WlSurface) -> bool {
         if self.unmapped.contains(surface) {
             return false;
@@ -558,27 +446,22 @@ impl LayerShell {
             .is_some()
     }
 
-    /// Physical usable area (the output minus exclusive-zone reservations).
+    /// Output minus exclusive zones, physical.
     pub fn usable(&self, dpi: f64) -> Rect {
         let zone = layer_map_for_output(&self.output).non_exclusive_zone();
         let mut r = to_physical(zone, dpi);
-        // Reserve the home gesture bar's zone off the bottom (physical px, so
-        // it matches the pill draw_bar renders at physical framebuffer size).
-        // Always reserved: bottom-docked layer surfaces (the OSK) are lifted by
-        // the same amount (see `shift_docked`), so the pill's strip stays clear
-        // beneath them rather than the gap landing above the keyboard.
+        // Always reserve the home bar zone. Bottom-docked surfaces are lifted by
+        // the same amount (`shift_docked`), so the pill's strip stays below them.
         r.h = (r.h - self.gesture_zone()).max(0.0);
         r
     }
 
-    /// Physical height of the home gesture bar's bottom reservation.
     fn gesture_zone(&self) -> f32 {
         sc_layout::gesture_exclusive_zone(self.output_h)
     }
 
-    /// Lift a physical layer rect docked to the screen bottom (the OSK, bottom
-    /// bars) up by the gesture zone, so the home pill's strip stays clear
-    /// beneath it. Fullscreen surfaces (reaching the top edge too) are left be.
+    /// Lift a bottom-docked rect clear of the home pill. Fullscreen surfaces are
+    /// left alone.
     fn shift_docked(&self, mut r: Rect) -> Rect {
         if self.is_docked(r) {
             r.y -= self.gesture_zone();
@@ -586,18 +469,12 @@ impl LayerShell {
         r
     }
 
-    /// Whether a physical layer rect is docked to the bottom edge (and isn't a
-    /// fullscreen surface reaching the top too).
     fn is_docked(&self, r: Rect) -> bool {
         r.y + r.h >= self.output_h - 1.0 && r.y > 1.0
     }
 
-    /// Where a layer surface is drawn right now: its logical geometry scaled to
-    /// physical, lifted clear of the home pill, and pushed back down by however
-    /// much of its slide-in remains.
-    ///
-    /// Only bottom-docked surfaces slide — a top bar or fullscreen overlay would
-    /// travel the wrong way, so they just appear.
+    /// Scaled to physical, lifted clear of the pill, offset by the remaining
+    /// slide-in. Only bottom-docked surfaces slide.
     fn place(&self, surface: &WlSurface, geo: Rectangle<i32, Logical>, dpi: f64) -> Rect {
         let phys = to_physical(geo, dpi);
         let mut r = self.shift_docked(phys);
@@ -609,9 +486,8 @@ impl LayerShell {
         r
     }
 
-    /// `(surface, physical origin)` pairs for the render pass, split into those
-    /// drawn below the app (background, bottom) and above it (top, overlay),
-    /// each in bottom-to-top order.
+    /// Below the app (background, bottom) and above it (top, overlay), each
+    /// bottom-to-top.
     pub fn render_lists(&self, dpi: f64) -> (RenderList, RenderList) {
         let map = layer_map_for_output(&self.output);
         let collect = |layers: &[Layer]| {
@@ -632,10 +508,8 @@ impl LayerShell {
         )
     }
 
-    /// Every layer surface in the map, in the order [`LayerShell::render_lists`]
-    /// draws them. For the `layers` IPC dump — the point is to show surfaces the
-    /// render lists carry but the eye can't account for (a keyboard that is
-    /// still drawn after the client moved on), so nothing is filtered out here.
+    /// Unfiltered on purpose: the dump is for finding surfaces drawn that
+    /// shouldn't be.
     pub fn dump(&self, dpi: f64) -> Vec<LayerInfo> {
         let map = layer_map_for_output(&self.output);
         let mut out = Vec::new();
@@ -660,8 +534,6 @@ impl LayerShell {
         out
     }
 
-    /// Header line for the `layers` dump: output/usable geometry and the state
-    /// of the regrow guard, which is what suppresses an app resize.
     pub fn dump_header(&self, dpi: f64) -> String {
         let u = self.usable(dpi);
         let closing = self
@@ -683,11 +555,9 @@ impl LayerShell {
         )
     }
 
-    /// Whether any Top/Overlay surface overlaps `rect` (physical) — used to hide
-    /// the home bar when the on-screen keyboard covers it.
+    /// Hides the home bar when the OSK covers it.
     pub fn top_overlaps(&self, rect: Rect, dpi: f64) -> bool {
         let map = layer_map_for_output(&self.output);
-        // Collect first so the `layers()` borrow ends before `layer_geometry`.
         let tops: Vec<LayerSurface> = map
             .layers()
             .filter(|l| matches!(l.layer(), Layer::Top | Layer::Overlay))
@@ -699,14 +569,10 @@ impl LayerShell {
         })
     }
 
-    /// The topmost hit-testable (Top/Overlay) surface containing the physical
-    /// point, with its physical origin. Overlay is above Top; within a layer,
-    /// later-created is on top.
+    /// Overlay above Top; within a layer, later-created is on top.
     pub fn hit_test(&self, x: f32, y: f32, dpi: f64) -> Option<(WlSurface, (i32, i32))> {
         let map = layer_map_for_output(&self.output);
         for wanted in [Layer::Overlay, Layer::Top] {
-            // Collect (ending the `layers()` borrow), then `.rev()` on insertion
-            // order gives the topmost (latest-created) match within the layer.
             let candidates: Vec<LayerSurface> = map
                 .layers()
                 .filter(|l| l.layer() == wanted)
@@ -714,8 +580,7 @@ impl LayerShell {
                 .collect();
             for layer in candidates.iter().rev() {
                 if let Some(geo) = map.layer_geometry(layer) {
-                    // The animated position, so a tap lands where the surface is
-                    // drawn rather than where it will settle.
+                    // The animated position, so a tap lands where the surface is drawn.
                     let rect = self.place(layer.wl_surface(), geo, dpi);
                     if rect.contains(x, y) {
                         return Some((layer.wl_surface().clone(), (rect.x as i32, rect.y as i32)));
@@ -726,21 +591,17 @@ impl LayerShell {
         None
     }
 
-    /// Note a touch-down on `surface`, so an `OnDemand` layer surface can take
-    /// keyboard focus on tap. A tap anywhere else clears it.
+    /// A tap anywhere else clears it.
     pub fn note_tap(&mut self, surface: &WlSurface) {
-        // `surface` may be a subsurface the tap actually landed on; focus is a
-        // property of the layer surface itself, so resolve back to its root.
+        // Focus belongs to the layer surface, not the tapped subsurface.
         self.focus_tap = layer_map_for_output(&self.output)
             .layer_for_surface(surface, WindowSurfaceType::ALL)
             .map(|l| l.wl_surface().clone());
     }
 
-    /// The mapped layer surface that should hold keyboard focus, if any.
-    /// `Exclusive` takes it outright (topmost first, Overlay above Top);
-    /// `OnDemand` only once tapped. Without this a shell dialog never sees a
-    /// key, and `zwp_text_input` never gets focus there, so the OSK cannot
-    /// auto-show for it.
+    /// `Exclusive` takes focus outright (topmost first); `OnDemand` once tapped.
+    /// Without this `zwp_text_input` never focuses a shell dialog and the OSK
+    /// can't auto-show.
     pub fn keyboard_focus(&self) -> Option<WlSurface> {
         let map = layer_map_for_output(&self.output);
         let mut on_demand = None;
@@ -794,8 +655,6 @@ mod tests {
         }
     }
 
-    /// The dump line carries everything needed to tell a live surface from one
-    /// left behind: geometry, where it is actually drawn, and its buffer.
     #[test]
     fn format_layer_reports_geometry_and_buffer() {
         assert_eq!(
@@ -805,8 +664,6 @@ mod tests {
         );
     }
 
-    /// A surface with nothing committed is the interesting case (it still sits
-    /// in the render lists), so it must be visible rather than blank.
     #[test]
     fn format_layer_marks_unmapped_and_sliding() {
         let l = LayerInfo {
@@ -824,21 +681,17 @@ mod tests {
         );
     }
 
-    /// An OSK that unmaps and comes back inside the debounce never resizes the
-    /// app: the increase is asked for, refused, and dropped when it shrinks.
     #[test]
     fn brief_unmap_never_grows_the_app() {
         let mut g = RegrowGuard::default();
         assert!(!g.allow_grow(), "first ask starts the debounce");
         g.tick(REGROW_DELAY / 2.0);
         assert!(!g.allow_grow());
-        // OSK back: the area shrank again, so the pending grow is dropped.
         g.resolved();
         g.tick(1.0);
         assert!(!g.allow_grow(), "a later unmap starts a fresh debounce");
     }
 
-    /// A keyboard really dismissed gives the space back once the debounce ends.
     #[test]
     fn settled_unmap_grows_after_the_delay() {
         let mut g = RegrowGuard::default();
@@ -847,8 +700,6 @@ mod tests {
         assert!(g.allow_grow());
     }
 
-    /// The pre-armed deadline from an OSK slide-out replaces the debounce:
-    /// the grow lands when the slide ends, not a full debounce later.
     #[test]
     fn hold_until_expires_at_the_slide_end() {
         let mut g = RegrowGuard::default();
@@ -858,7 +709,6 @@ mod tests {
         assert!(g.allow_grow());
     }
 
-    /// While latched, no increase is applied however long it is asked for.
     #[test]
     fn flap_latch_refuses_grows_then_releases() {
         let mut g = RegrowGuard::default();
@@ -869,7 +719,6 @@ mod tests {
         }
         assert!(g.holding());
         g.tick(0.1);
-        // Latch expired: the normal debounce takes over, then the grow lands.
         assert!(!g.allow_grow());
         g.tick(REGROW_DELAY + 0.01);
         assert!(g.allow_grow());
@@ -880,21 +729,16 @@ mod tests {
     #[test]
     fn flap_trips_only_on_a_fast_burst() {
         let mut events = Vec::new();
-        // Slow, legitimate keyboard use: each map is outside the window of the
-        // one before it, so nothing accumulates.
         let mut t = 0.0;
         for _ in 0..10 {
             t += FLAP_WINDOW + 0.1;
             assert!(!flapped(&mut events, t));
         }
-        // A cycling client: FLAP_LIMIT maps inside one window trips it. The
-        // last slow map above is still inside the window, so it counts as the
-        // first of the burst.
+        // FLAP_LIMIT maps inside one window trips it; the last slow map counts.
         for i in 2..FLAP_LIMIT {
             assert!(!flapped(&mut events, t + i as f32 * 0.1), "map {i}");
         }
         assert!(flapped(&mut events, t + (FLAP_LIMIT - 1) as f32 * 0.1));
-        // History cleared, so the same burst has to build up again.
         assert!(!flapped(&mut events, t + 10.0));
     }
 }

@@ -1,13 +1,7 @@
-//! Pure geometry for wlr-layer-shell surfaces.
-//!
-//! No wayland types: the compositor translates protocol state into these plain
-//! inputs and reads back plain [`Rect`]s. Two jobs — reserve screen space for
-//! exclusive zones ([`usable_area`]), and place one layer surface against the
-//! output ([`layer_rect`]).
+//! wlr-layer-shell geometry: exclusive-zone reservations and surface placement.
 
 use crate::Rect;
 
-/// Screen edge a layer surface anchors to / reserves against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edge {
     Top,
@@ -16,8 +10,7 @@ pub enum Edge {
     Right,
 }
 
-/// The four anchor flags of a layer surface. Anchoring to opposite edges
-/// stretches the surface across that axis.
+/// Anchoring to opposite edges stretches across that axis.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Anchor {
     pub top: bool,
@@ -26,7 +19,7 @@ pub struct Anchor {
     pub right: bool,
 }
 
-/// Per-edge margins (logical px).
+/// Logical px.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Margins {
     pub top: f32,
@@ -35,17 +28,13 @@ pub struct Margins {
     pub right: f32,
 }
 
-/// One surface's claim on screen space via its exclusive zone.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reservation {
     pub edge: Edge,
     pub size: f32,
 }
 
-/// Shrink the full output by each reservation to get the area apps may use.
-///
-/// Reservations stack on their edge (two bottom bars reserve the sum). The
-/// result never collapses past zero on either axis.
+/// Reservations on the same edge stack. Never goes negative.
 pub fn usable_area(output_w: f32, output_h: f32, reserved: &[Reservation]) -> Rect {
     let mut left = 0.0_f32;
     let mut top = 0.0_f32;
@@ -62,7 +51,6 @@ pub fn usable_area(output_w: f32, output_h: f32, reserved: &[Reservation]) -> Re
         }
     }
 
-    // Clamp so a too-large reservation yields an empty (not negative) area.
     if right < left {
         right = left;
     }
@@ -77,12 +65,8 @@ pub fn usable_area(output_w: f32, output_h: f32, reserved: &[Reservation]) -> Re
     }
 }
 
-/// Place one layer surface against the full output.
-///
-/// `size` is the client's requested size; a zero dimension means "stretch to
-/// the anchored span" (valid only when anchored to both edges on that axis).
-/// Margins inset from the anchored edges. A surface anchored to neither edge on
-/// an axis is centered on that axis.
+/// A zero `size` dimension stretches across the anchored span. Unanchored
+/// axes are centered.
 pub fn layer_rect(
     output_w: f32,
     output_h: f32,
@@ -91,7 +75,6 @@ pub fn layer_rect(
     req_h: f32,
     margins: Margins,
 ) -> Rect {
-    // Horizontal.
     let (x, w) = axis(
         output_w,
         anchor.left,
@@ -100,7 +83,6 @@ pub fn layer_rect(
         margins.left,
         margins.right,
     );
-    // Vertical.
     let (y, h) = axis(
         output_h,
         anchor.top,
@@ -112,8 +94,7 @@ pub fn layer_rect(
     Rect { x, y, w, h }
 }
 
-/// Resolve one axis (position, length) from anchors, requested length and
-/// margins. `near` is top/left, `far` is bottom/right.
+/// `near` is top/left, `far` is bottom/right.
 fn axis(
     extent: f32,
     anchor_near: bool,
@@ -123,18 +104,14 @@ fn axis(
     margin_far: f32,
 ) -> (f32, f32) {
     match (anchor_near, anchor_far) {
-        // Both edges: stretch across, inset by both margins. A nonzero request
-        // is ignored — stretching wins.
+        // Stretching wins over a nonzero request.
         (true, true) => {
             let pos = margin_near;
             let len = (extent - margin_near - margin_far).max(0.0);
             (pos, len)
         }
-        // Near edge only: sit against it, inset by the near margin.
         (true, false) => (margin_near, req),
-        // Far edge only: sit against it, inset by the far margin.
         (false, true) => (extent - margin_far - req, req),
-        // Neither: center.
         (false, false) => ((extent - req) / 2.0, req),
     }
 }
@@ -278,7 +255,6 @@ mod tests {
             ..Margins::default()
         };
         let r = layer_rect(W, H, bottom_anchor(), 0.0, 400.0, m);
-        // Bottom edge stays anchored; the bottom margin lifts it.
         assert_eq!(r.y, H - 400.0 - 20.0);
     }
 
@@ -298,7 +274,6 @@ mod tests {
 
     #[test]
     fn unanchored_axis_is_centered() {
-        // Anchored to neither left nor right: centered horizontally.
         let anchor = Anchor {
             top: true,
             bottom: true,
@@ -308,7 +283,6 @@ mod tests {
         let r = layer_rect(W, H, anchor, 200.0, 0.0, Margins::default());
         assert_eq!(r.x, (W - 200.0) / 2.0);
         assert_eq!(r.w, 200.0);
-        // Anchored top+bottom: stretched vertically.
         assert_eq!(r.y, 0.0);
         assert_eq!(r.h, H);
     }

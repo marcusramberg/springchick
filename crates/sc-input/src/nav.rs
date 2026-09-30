@@ -1,67 +1,58 @@
 use crate::gesture::Tracker;
 use crate::thresholds as th;
 
-/// Live navigation phase (drives what the shell renders during the drag).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NavState {
     Idle,
-    Grabbing,        // window detached, tracking finger, no deck yet
-    SwitcherPreview, // dragged past reveal: neighbor cards fanning in
-    QuickSwitching,  // horizontal drag swapping adjacent app
+    Grabbing,        // window detached, no deck yet
+    SwitcherPreview, // past reveal: neighbour cards fanning in
+    QuickSwitching,
 }
 
-/// Where the gesture lands on release.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NavTarget {
     BackToApp,
     Home,
     Switcher,
-    QuickSwitch(i32), // -1 = previous/more-recent (swipe left), +1 = next/older (swipe right)
+    QuickSwitch(i32), // -1 = more recent (swipe left), +1 = older (swipe right)
 }
 
-/// Live phase from the current tracker (called each frame during a grab).
+/// Called each frame during a grab.
 pub fn live_state(t: &Tracker) -> NavState {
     let horizontal = t.dx().abs() > t.up_progress();
     if horizontal && t.dx().abs() >= th::QUICK_SWITCH_PROGRESS {
         return NavState::QuickSwitching;
     }
     let up = t.up_progress();
-    // Band B (reveal..mid): live fan. Band C (>= mid, past mid-screen): fan
-    // collapses back to the single card heading home, so report plain Grabbing.
+    // Past HOME_MIN the fan collapses back to the single card heading home.
     if (th::SWITCHER_REVEAL_PROGRESS..th::HOME_MIN_PROGRESS).contains(&up) {
         return NavState::SwitcherPreview;
     }
     NavState::Grabbing
 }
 
-/// Classify the release target (spec: release-targets table).
 pub fn classify_release(t: &Tracker) -> NavTarget {
-    // Horizontal quick-switch wins if it dominates by travel or velocity.
     let horizontal_dominant = t.dx().abs() > t.up_progress();
     if horizontal_dominant
         && (t.dx().abs() >= th::QUICK_SWITCH_PROGRESS
             || t.velocity.x.abs() >= th::QUICK_SWITCH_VELOCITY)
     {
-        // Handedness matches the carousel (most-recent on the right): swipe
-        // right (dx > 0) walks to the older/next app, swipe left to the
-        // more-recent/previous app.
+        // Most recent is on the right, matching the carousel.
         return NavTarget::QuickSwitch(if t.dx() < 0.0 { -1 } else { 1 });
     }
 
     let progress = t.up_progress();
-    // Barely moved → fall back into the app.
     if progress < th::BACK_TO_APP_MAX_PROGRESS {
         return NavTarget::BackToApp;
     }
-    // Home two ways: any quick upward flick, or dragging all the way up. The
-    // fan stack is what a *slow* drag settles into — speed is the divide.
+    // Home on any quick flick, or on dragging far enough. Only a slow drag
+    // settles in the fan.
     if t.velocity.y <= th::HOME_FLICK_VELOCITY {
         return NavTarget::Home;
     }
     if progress >= th::HOME_MIN_PROGRESS {
         return NavTarget::Home;
     }
-    // Everything else — the whole slow middle band — settles in the fan stack.
     NavTarget::Switcher
 }
 
@@ -70,7 +61,6 @@ mod tests {
     use super::*;
     use crate::gesture::Pt;
 
-    // Build a tracker with an explicit end position and velocity.
     fn t_with(start: Pt, end: Pt, vel: Pt) -> Tracker {
         let mut t = Tracker::begin(start);
         t.current = end;
@@ -100,13 +90,10 @@ mod tests {
 
     #[test]
     fn quick_flick_goes_home_not_to_the_switcher() {
-        // A short, quick flick off the card — the travel lands squarely in the
-        // fan band, so only the speed distinguishes it from a slow drag. The
-        // velocity here is what the low-pass actually reports for a 20%-of-screen
-        // flick in ~120ms, not its true instantaneous speed.
+        // Velocity is what the low-pass reports for a 20% flick in ~120ms.
         let t = t_with(
             Pt { x: 0.5, y: 0.95 },
-            Pt { x: 0.5, y: 0.75 }, // up_progress 0.20 (band B)
+            Pt { x: 0.5, y: 0.75 },
             Pt { x: 0.0, y: -1.0 },
         );
         assert_eq!(classify_release(&t), NavTarget::Home);
@@ -114,7 +101,6 @@ mod tests {
 
     #[test]
     fn a_drag_just_under_flick_speed_still_settles_in_the_fan() {
-        // The divide has to stay a divide: below it, the fan is still reachable.
         let t = t_with(
             Pt { x: 0.5, y: 0.95 },
             Pt { x: 0.5, y: 0.75 },
@@ -125,10 +111,9 @@ mod tests {
 
     #[test]
     fn slow_mid_drag_settles_in_switcher() {
-        // A slow drag into band B (below mid-screen) lands in the switcher.
         let t = t_with(
             Pt { x: 0.5, y: 0.95 },
-            Pt { x: 0.5, y: 0.65 }, // up_progress 0.30 (band B, below 0.35 mid)
+            Pt { x: 0.5, y: 0.65 },
             Pt { x: 0.0, y: -0.5 },
         );
         assert_eq!(classify_release(&t), NavTarget::Switcher);
@@ -136,10 +121,9 @@ mod tests {
 
     #[test]
     fn slow_drag_past_mid_goes_home() {
-        // Past mid-screen (band C), a slow release goes home, not switcher.
         let t = t_with(
             Pt { x: 0.5, y: 0.95 },
-            Pt { x: 0.5, y: 0.35 }, // up_progress 0.60 >= 0.50
+            Pt { x: 0.5, y: 0.35 },
             Pt { x: 0.0, y: -0.5 },
         );
         assert_eq!(classify_release(&t), NavTarget::Home);
@@ -147,10 +131,9 @@ mod tests {
 
     #[test]
     fn live_state_collapses_fan_past_mid() {
-        // Above mid-screen the fan collapses: live_state reports plain Grabbing.
         let t = t_with(
             Pt { x: 0.5, y: 0.95 },
-            Pt { x: 0.5, y: 0.35 }, // up_progress 0.60 >= 0.50
+            Pt { x: 0.5, y: 0.35 },
             Pt { x: 0.0, y: -0.5 },
         );
         assert_eq!(live_state(&t), NavState::Grabbing);
@@ -158,7 +141,6 @@ mod tests {
 
     #[test]
     fn all_the_way_up_goes_home() {
-        // Slow drag almost to the top (progress 0.88) → home, not switcher.
         let t = t_with(
             Pt { x: 0.5, y: 0.95 },
             Pt { x: 0.5, y: 0.07 },
@@ -169,8 +151,6 @@ mod tests {
 
     #[test]
     fn moderate_slow_drag_settles_in_fan_stack() {
-        // A slow drag into the middle band should land in the switcher, not
-        // home — the whole slow middle is forgiving now.
         let t = t_with(
             Pt { x: 0.5, y: 0.95 },
             Pt { x: 0.5, y: 0.65 },
@@ -181,7 +161,6 @@ mod tests {
 
     #[test]
     fn short_slow_drag_just_past_backstop_is_switcher() {
-        // Just past the back-to-app deadzone, a slow drag already reveals the fan.
         let t = t_with(
             Pt { x: 0.5, y: 0.95 },
             Pt { x: 0.5, y: 0.80 },
@@ -192,8 +171,6 @@ mod tests {
 
     #[test]
     fn horizontal_flick_left_quick_switches_to_previous() {
-        // Leftward flick (dx < 0) walks to the more-recent/previous app (-1),
-        // matching the carousel handedness (most-recent on the right).
         let t = t_with(
             Pt { x: 0.5, y: 0.95 },
             Pt { x: 0.2, y: 0.93 },
@@ -206,7 +183,7 @@ mod tests {
     fn live_state_reveals_switcher_past_threshold() {
         let t = t_with(
             Pt { x: 0.5, y: 0.95 },
-            Pt { x: 0.5, y: 0.75 }, // up_progress 0.20 (band B: reveal..mid)
+            Pt { x: 0.5, y: 0.75 },
             Pt { x: 0.0, y: -0.5 },
         );
         assert_eq!(live_state(&t), NavState::SwitcherPreview);

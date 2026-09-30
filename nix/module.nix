@@ -20,10 +20,7 @@ in
       description = "The springchick package to install.";
     };
 
-    # Named `config`, not `keybindings`: config.toml is a general file (a
-    # [keybinds] table today, more sections later), and `cfg.config` here is
-    # unrelated to this module's own `config = lib.mkIf cfg.enable { ... }`
-    # output attribute below — same name, two different things.
+    # Not to be confused with this module's own `config = lib.mkIf ...` output.
     config = lib.mkOption {
       type = lib.types.nullOr lib.types.lines;
       default = null;
@@ -41,38 +38,27 @@ in
 
       systemPackages = [ cfg.package ];
 
-      # GSettings schemas for the session's own helpers.
       sessionVariables.XDG_DATA_DIRS = [
-        # mobi.phosh.FileSelector — the file selector's own settings.
+        # mobi.phosh.FileSelector
         "${pkgs.xdg-desktop-portal-phosh}/share/gsettings-schemas/${pkgs.xdg-desktop-portal-phosh.name}"
-        # org.gnome.desktop.{interface,privacy,sound,…} — read by libadwaita/GTK
-        # for theme, fonts and animation preferences.
+        # org.gnome.desktop.*, read by libadwaita/GTK.
         "${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}"
       ];
     };
 
-    # Puts share/wayland-sessions/springchick.desktop into the system profile so
-    # greeters (greetd's regreet/gtkgreet, GDM, …) list springchick as a session.
+    # Lists springchick in greeters.
     services.displayManager.sessionPackages = [ cfg.package ];
 
-    # Add cpuset to what the user manager may control, so the compositor can pin
-    # backgrounded apps to the efficiency cluster (`[resources].bg_allowed_cpus`).
-    # systemd ships `Delegate=pids memory cpu` on user@.service and nothing
-    # enables cpuset further down the user tree, so without this the whole
-    # AllowedCPUs= call is refused. The other four are systemd's own defaults,
-    # repeated because Delegate= replaces the list rather than adding to it.
+    # cpuset for `[resources].bg_allowed_cpus`. Delegate= replaces systemd's list
+    # (`pids memory cpu`), so the defaults are repeated.
     systemd.services."user@".serviceConfig.Delegate = "cpu cpuset io memory pids";
 
-    # The compositor runs as a Type=notify user service rather than being exec'd
-    # straight from the greeter. This is the niri model and the only correct way
-    # to satisfy the graphical-session.target contract: the service
-    # BindsTo=+Before= that target, so when the compositor sends sd_notify READY
-    # the target is pulled active.
+    # A Type=notify user service that BindsTo graphical-session.target, so
+    # READY pulls the target active (the niri model).
     systemd.user.services.springchick = {
       description = "springchick Wayland compositor";
       documentation = [ "https://github.com/marcusramberg/springchick" ];
-      # Deliberately not WantedBy any target: it is started on demand by
-      # springchick-session, never pulled up automatically at login.
+      # Started by springchick-session only.
       bindsTo = [ "graphical-session.target" ];
       before = [
         "graphical-session.target"
@@ -83,14 +69,10 @@ in
         "graphical-session-pre.target"
         "xdg-desktop-autostart.target"
       ];
-      # NixOS defaults this to true, which pins a stripped Environment=PATH=
-      # (per-unit, highest precedence) onto the service and shadows the full
-      # login PATH that springchick-session imports into the user manager.
-      # With it off the compositor — and every app/shortcut it spawns —
-      # inherits that imported login PATH. Same fix as niri.service upstream.
+      # The default pins a stripped PATH on the unit, shadowing the login PATH
+      # springchick-session imports. Same as niri.service.
       enableDefaultPath = false;
       environment = {
-        # Device backend (DRM/libseat), previously set on the session wrapper.
         SPRINGCHICK_BACKEND = "drm";
         XDG_CURRENT_DESKTOP = "springchick";
         XDG_SESSION_TYPE = "wayland";
@@ -100,23 +82,16 @@ in
         NotifyAccess = "main";
         Slice = "session.slice";
         ExecStart = "${cfg.package}/bin/springchick";
-        # If the compositor dies the session is over; do not respawn it.
         Restart = "no";
-        # Compositor holds the DRM master + input; give it room to shut down.
         TimeoutStopSec = "10s";
-        # A thrashing app must not stall the render thread. Weight only bites
-        # under contention (default is 100); MemoryMin keeps the compositor's
-        # pages off the reclaim list, so a memory-hungry app gets squeezed
-        # before the shell does. Requires the cpu and memory controllers to be
-        # delegated to user@.service, which is the NixOS default.
+        # Keep a thrashing app from stalling the render thread.
         CPUWeight = 200;
         MemoryMin = "128M";
       };
     };
 
-    # Force-teardown target. springchick-session starts this after the
-    # compositor exits; conflicting with graphical-session.target(-pre) stops
-    # the whole session tree irreversibly, mirroring niri-shutdown.target.
+    # Started by springchick-session after the compositor exits; conflicting with
+    # graphical-session.target tears the session down (as niri-shutdown.target).
     systemd.user.targets.springchick-shutdown = {
       description = "Shutdown running springchick session";
       unitConfig = {
@@ -137,28 +112,19 @@ in
       text = cfg.config;
     };
 
-    # Reference config with every option at its default, for users to copy to
-    # config.toml and edit. Kept as .example so it never shadows the built-in
-    # defaults or a user's own /etc/springchick/config.toml.
+    # .example so it never shadows the defaults or a user's config.toml.
     environment.etc."springchick/config.toml.example".source =
       "${cfg.package}/share/springchick/config.example.toml";
 
-    # DRM master + libinput come from the logind seat the greeter hands over.
     hardware.graphics.enable = lib.mkDefault true;
     security.polkit.enable = lib.mkDefault true;
 
-    # xdg-desktop-portal: needed for apps like Fractal (Matrix secrets portal),
-    # file pickers, screenshots, etc. `config.springchick` writes
-    # /etc/xdg/xdg-desktop-portal/springchick-portals.conf, matched by
-    # XDG_CURRENT_DESKTOP=springchick set in the service environment.
-    # Mirrors niri.nix upstream.
+    # Matched by XDG_CURRENT_DESKTOP=springchick. Mirrors niri.nix.
     xdg.portal = {
       enable = true;
       extraPortals = [
         pkgs.xdg-desktop-portal-gnome
-        # Only for its `phrosh` backend (Account/AppChooser/FileChooser/
-        # Wallpaper) — see the FileChooser note below. The sibling `phosh`
-        # backend (Notification/Settings) is not selected anywhere here.
+        # Only for its `phrosh` backend.
         pkgs.xdg-desktop-portal-phosh
       ];
       config.springchick = {
@@ -166,39 +132,21 @@ in
           "gnome"
           "gtk"
         ];
-        # Secret portal only works with gnome backend (delegates to gnome-keyring).
         "org.freedesktop.impl.portal.Secret" = "gnome-keyring";
-        # GNOME's/GTK's file and app pickers have a widget minimum width well
-        # over the ~360 logical px a phone has, and a client may ignore the
-        # narrower size we configure — so they run off the screen edge and
-        # their action buttons become unreachable. phrosh (xdg-desktop-portal-
-        # phosh's Rust backend) is GTK4 + libadwaita and adaptive, built for
-        # exactly this width. Named explicitly because its .portal declares
-        # `UseIn=phosh`, which XDG_CURRENT_DESKTOP=springchick does not match;
-        # an explicit preference here overrides UseIn (xdg-desktop-portal ≥1.18).
+        # GTK's pickers are wider than a phone and ignore the configured size.
+        # phrosh is adaptive. Named explicitly because its `UseIn=phosh` doesn't
+        # match springchick (explicit preference overrides UseIn, portal ≥1.18).
         "org.freedesktop.impl.portal.FileChooser" = "phrosh";
         "org.freedesktop.impl.portal.AppChooser" = "phrosh";
       };
     };
 
-    # Required for gnome-keyring Secret portal backend.
     services.gnome.gnome-keyring.enable = lib.mkDefault true;
 
-    # …but enabling the daemon is not enough for it to be *usable*. The Secret
-    # portal (and plain libsecret, which unsandboxed apps use directly) both end
-    # up at org.freedesktop.secrets, which serves nothing until the login
-    # keyring is unlocked. pam_gnome_keyring is what unlocks it, using the
-    # password from the PAM stack that started the session — and the
-    # gnome-keyring module wires that into `login` only. springchick sessions
-    # come from a greeter, so on greetd the module never ran and every secret
-    # lookup fails. GDM does this for itself; greetd does not.
-    #
-    # Note this can only work for a greetd that actually authenticates the user.
-    # Under autologin (initial_session) there is no password to hand over, so
-    # the keyring stays locked and gcr will prompt on first use instead.
-    # mkIf wraps the whole attrset, not just the value: defining
-    # `security.pam.services.greetd` at all would otherwise conjure an empty PAM
-    # service named greetd on systems not using it.
+    # The keyring serves nothing until pam_gnome_keyring unlocks it, and the
+    # gnome-keyring module only wires that into `login`, not greetd. Needs a
+    # greetd that authenticates; autologin leaves it locked.
+    # mkIf the whole attrset, or an empty greetd PAM service appears.
     security.pam.services = lib.mkIf config.services.greetd.enable {
       greetd.enableGnomeKeyring = lib.mkDefault true;
     };

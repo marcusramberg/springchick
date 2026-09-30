@@ -1,64 +1,39 @@
-//! Home-screen and switcher-deck gesture decisions.
-//!
-//! [`nav`](crate::nav) classifies the in-app grab gesture; this module covers
-//! everything the *shell* interprets — page drags, the pull-down search, the
-//! Home bar, the switcher deck, and the live quick-switch slide.
-//!
-//! Every function here is a pure decision: screen-space numbers in, a verdict
-//! out. The compositor's job is to feed them measurements and then apply what
-//! they return, so that "what does this gesture mean" is testable without a
-//! Wayland display, a GPU, or a compositor `State`.
-//!
-//! Distances arrive in output pixels and are compared against the fractions in
-//! [`thresholds`](crate::thresholds), so behaviour is resolution-independent
-//! except where a threshold is deliberately in pixels (finger jitter).
+//! Pure gesture decisions for the shell: page drags, pull-down search, the
+//! Home bar, the switcher deck, and quick-switch. Distances are output pixels,
+//! compared against [`thresholds`](crate::thresholds).
 
 use crate::thresholds as th;
 
-/// What a released drag on the Home bar means.
-///
-/// The Home bar is the inverse of the in-app grab: from Home the deck is what
-/// you reach for, not an individual app. Swiping up opens the switcher, swiping
-/// right slides straight onto the app at the front of the stack. A leftward
-/// swipe has nothing behind it (the stack only extends one way from Home), so it
-/// is deliberately inert.
+/// From Home the bar reaches for the deck: up opens the switcher, right slides
+/// onto the front app. Left is inert; the stack only extends one way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarRelease {
-    /// Swiped up: animate into the app switcher deck (or bounce if nothing is
-    /// running).
+    /// Bounces if nothing is running.
     OpenSwitcher,
-    /// Swiped right: slide Home leftwards onto the top card of the stack.
     SlideToTop,
-    /// Neither threshold reached — the press was a tap or a stray wobble.
     None,
 }
 
-/// What a drag on a switcher card is currently doing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CardDrag {
-    /// Dominantly vertical: the close axis, tracked live. Positive up to `1.0`
-    /// (toward closing), negative down to a small rubber-banded push below the
-    /// stack that never commits.
+    /// Mostly vertical. Positive up to `1.0` toward closing; negative is a small
+    /// rubber-banded push that never commits.
     Close { progress: f32 },
-    /// Otherwise: panning the carousel to this scroll position, in cards.
+    /// Carousel scroll position, in cards.
     Scroll { position: f32 },
 }
 
-/// What a released live quick-switch slide means.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum QuickSwitchRelease {
-    /// Past the threshold with an app in that direction: commit to it. `dir`
-    /// walks the MRU cursor; `target` is where the offset spring settles.
-    Commit { dir: i32, target: f32 },
-    /// Short of the threshold, or nothing in that direction: spring back.
+    /// `dir` walks the MRU cursor; `target` is where the offset spring settles.
+    Commit {
+        dir: i32,
+        target: f32,
+    },
     Reject,
 }
 
-/// Live page-spring value for a page drag of `dx` output pixels.
-///
-/// Tracks the finger directly (no spring physics while dragging) and
-/// rubber-bands past the first and last page. Returned in pages, so `1.5` means
-/// halfway between pages 1 and 2.
+/// In pages. Tracks the finger directly, rubber-banding past the ends.
 pub fn page_drag_value(dx: f32, width: f32, page: usize, page_count: usize) -> f32 {
     let raw = page as f32 - dx / width;
     let max_page = page_count.saturating_sub(1) as f32;
@@ -71,22 +46,14 @@ pub fn page_drag_value(dx: f32, width: f32, page: usize, page_count: usize) -> f
     }
 }
 
-/// The page a released page drag of `dx` output pixels settles on.
-///
-/// Two ways to commit to a neighbour, either alone enough:
-/// - distance: past [`th::PAGE_COMMIT_FRAC`] of the width, at any speed;
-/// - flick: moving faster than [`th::PAGE_FLICK_VELOCITY`] in that direction,
-///   having covered at least [`th::PAGE_FLICK_MIN_FRAC`].
-///
-/// Without the flick case a quick swipe that lets go early — the natural way to
-/// page — dies short of 30% and springs back. `vx` is the release velocity in
-/// fractions of output width per second, positive rightward (toward the
-/// *previous* page). Never settles past either end of the page strip.
+/// Commits to a neighbour by distance ([`th::PAGE_COMMIT_FRAC`]) or by flick
+/// ([`th::PAGE_FLICK_VELOCITY`] past [`th::PAGE_FLICK_MIN_FRAC`]). `vx` is in
+/// widths/s, positive rightward (toward the previous page).
 pub fn page_after_swipe(dx: f32, vx: f32, width: f32, page: usize, page_count: usize) -> usize {
-    let delta = -dx / width; // positive = swiping toward the next page
-    let flick = -vx; // positive = flicking toward the next page
-                     // Asked once per direction, so a flick only counts when it agrees with the
-                     // travel: a drag out and a snap back must not page the wrong way.
+    let delta = -dx / width;
+    let flick = -vx;
+    // A flick only counts in the direction of travel, so a drag-out-and-back
+    // doesn't page the wrong way.
     let toward = |sign: f32| {
         commits_by_distance_or_flick(
             sign * delta,
@@ -107,56 +74,39 @@ pub fn page_after_swipe(dx: f32, vx: f32, width: f32, page: usize, page_count: u
     }
 }
 
-/// Whether an arrange-mode empty-area release travelled far enough to be a page
-/// swipe rather than a still tap (which exits arrange mode).
 pub fn is_arrange_page_swipe(dx: f32, width: f32) -> bool {
     dx.abs() > width * th::ARRANGE_PAGE_SWIPE_FRAC
 }
 
-/// Whether a drag from an armed pull-down has become a search gesture: far
-/// enough down, and more vertical than horizontal.
-///
-/// `dy_down` is positive downward; `dx` is signed and compared by magnitude.
+/// `dy_down` is positive downward.
 pub fn is_pull_down_search(dx: f32, dy_down: f32, height: f32) -> bool {
     dy_down > height * th::PULL_DOWN_SEARCH_FRAC && dy_down > dx.abs()
 }
 
-/// Whether movement from an icon press has exceeded the tap slop, making the
-/// gesture a swipe and cancelling the pending launch.
 pub fn exceeds_icon_tap_slop(dx: f32, dy: f32) -> bool {
     (dx * dx + dy * dy).sqrt() > th::ICON_TAP_SLOP_PX
 }
 
-/// Whether movement from a press has exceeded the *hold* slop, cancelling the
-/// long press it was waiting on.
 pub fn exceeds_icon_hold_slop(dx: f32, dy: f32) -> bool {
     (dx * dx + dy * dy).sqrt() > th::ICON_HOLD_SLOP_PX
 }
 
-/// Whether a press on the switcher deck stayed still enough to be a tap.
 pub fn is_switcher_tap(dx: f32, dy: f32) -> bool {
     dx.abs() < th::SWITCHER_TAP_SLOP_PX && dy.abs() < th::SWITCHER_TAP_SLOP_PX
 }
 
-/// Classify a released drag on the Home bar. `dy_up` is positive upward.
+/// `dy_up` is positive upward.
 pub fn classify_bar_release(dx: f32, dy_up: f32, width: f32, height: f32) -> BarRelease {
     if dy_up > height * th::BAR_RAISE_FRAC {
         BarRelease::OpenSwitcher
     } else if dx > width * th::BAR_SWITCH_FRAC {
-        // Only rightward: the stack sits to the right of Home (carousel
-        // handedness), so a leftward swipe would be walking off the near end.
         BarRelease::SlideToTop
     } else {
         BarRelease::None
     }
 }
 
-/// Classify a live drag on a switcher card. `dx`/`dy` are from the press point,
-/// `dy` negative upward; `start_scroll` is the deck position when it began.
-///
-/// A vertically-dominant drag is a close drag either way: upward gives positive
-/// progress toward the commit threshold, downward a small rubber-banded
-/// negative progress that always springs back.
+/// `dy` is negative upward; `start_scroll` is the deck position at press.
 pub fn classify_card_drag(
     dx: f32,
     dy: f32,
@@ -167,13 +117,11 @@ pub fn classify_card_drag(
     if dy.abs() > dx.abs() {
         let travel = dy / height;
         let progress = if dy < 0.0 {
-            // Upward: the card rides the finger exactly (progress is in screen
-            // heights, and the deck lifts a card by `progress * height`).
+            // The card rides the finger exactly.
             (-travel).min(1.0)
         } else {
-            // Downward: nothing to commit to below the stack, so the card only
-            // rubber-bands a short way and springs back on release. Asymptotic,
-            // not clamped — a hard cap reads as the card snapping off the finger.
+            // Asymptotic, not clamped: a hard cap reads as the card snapping off the
+            // finger.
             let max = th::CARD_PUSH_DOWN_MAX;
             -max * (1.0 - (-travel * th::CARD_PUSH_DOWN_RUBBER / max).exp())
         };
@@ -186,15 +134,8 @@ pub fn classify_card_drag(
     }
 }
 
-/// Whether a released drag commits, by either of the two routes every drag in
-/// this shell uses: carried far enough (`commit`) at any speed, or flicked —
-/// faster than `flick_velocity` *and* past a token `flick_min`, so a fast
-/// jitter can't trigger it.
-///
-/// `travel` and `velocity` are both positive in the committing direction and in
-/// the same units (fractions of the relevant screen axis, per second for
-/// velocity), so a gesture that commits *upward* passes the negation of its
-/// screen-space y values.
+/// Distance at any speed, or a flick past a token distance. `travel` and
+/// `velocity` are positive in the committing direction, same units.
 pub fn commits_by_distance_or_flick(
     travel: f32,
     velocity: f32,
@@ -205,10 +146,7 @@ pub fn commits_by_distance_or_flick(
     travel >= commit || (velocity >= flick_velocity && travel >= flick_min)
 }
 
-/// Whether a released card-close drag actually closes the card. `vy` is the
-/// release velocity in fractions of screen height per second, negative upward —
-/// the same figure (and the same flick divide) the in-app grab classifies a
-/// fling home with. A downward push (negative progress) never commits.
+/// `vy` is negative upward, the same divide as the in-app fling home.
 pub fn card_close_commits(progress: f32, vy: f32) -> bool {
     commits_by_distance_or_flick(
         progress,
@@ -219,10 +157,7 @@ pub fn card_close_commits(progress: f32, vy: f32) -> bool {
     )
 }
 
-/// Live offset (in screens, `-1.0..=1.0`) for a quick-switch slide of `dx`
-/// output pixels, rubber-banding when there is no app in that direction.
-///
-/// Positive offset slides right, revealing the older/`prev` app.
+/// In screens, `-1.0..=1.0`. Positive slides right, revealing the older app.
 pub fn quick_switch_offset(dx: f32, width: f32, has_prev: bool, has_next: bool) -> f32 {
     let mut f = dx / width;
     let at_end = (f > 0.0 && !has_prev) || (f < 0.0 && !has_next);
@@ -232,15 +167,13 @@ pub fn quick_switch_offset(dx: f32, width: f32, has_prev: bool, has_next: bool) 
     f.clamp(-1.0, 1.0)
 }
 
-/// Classify a released quick-switch slide sitting at `offset`.
 pub fn classify_quick_switch_release(
     offset: f32,
     has_prev: bool,
     has_next: bool,
 ) -> QuickSwitchRelease {
-    // The `prev` slot (rightward slide) holds the older/next app, so committing
-    // it walks the cursor forward (+1); the `next` slot (leftward) holds the
-    // more-recent app (-1). `target` follows the slide direction, not the app.
+    // Rightward (`prev` slot) holds the older app, so it walks +1; leftward -1.
+    // `target` follows the slide direction.
     if offset >= th::QUICK_SWITCH_COMMIT_FRAC && has_prev {
         QuickSwitchRelease::Commit {
             dir: 1,
@@ -263,21 +196,15 @@ mod tests {
     const W: f32 = 1000.0;
     const H: f32 = 2000.0;
 
-    // --- page drag ---
-
     #[test]
     fn page_drag_tracks_the_finger() {
-        // Half a screen dragged left sits halfway to the next page.
         assert_eq!(page_drag_value(-500.0, W, 0, 3), 0.5);
-        // Dragging right from page 1 walks back toward page 0.
         assert_eq!(page_drag_value(500.0, W, 1, 3), 0.5);
     }
 
     #[test]
     fn page_drag_rubber_bands_at_both_ends() {
-        // Past the first page: only 30% of the travel is followed.
         assert_eq!(page_drag_value(500.0, W, 0, 3), -0.15);
-        // Past the last page, likewise.
         assert_eq!(page_drag_value(-500.0, W, 2, 3), 2.0 + 0.15);
     }
 
@@ -289,7 +216,6 @@ mod tests {
 
     #[test]
     fn page_commits_only_past_the_threshold() {
-        // 29% of a screen is not enough at a standstill; 31% is.
         assert_eq!(page_after_swipe(-290.0, 0.0, W, 0, 3), 0);
         assert_eq!(page_after_swipe(-310.0, 0.0, W, 0, 3), 1);
         assert_eq!(page_after_swipe(310.0, 0.0, W, 1, 3), 0);
@@ -297,20 +223,15 @@ mod tests {
 
     #[test]
     fn quick_flick_pages_short_of_the_distance_threshold() {
-        // 10% of the width, but still moving fast leftward: pages forward.
         assert_eq!(page_after_swipe(-100.0, -1.2, W, 0, 3), 1);
-        // Same travel rightward from page 1: pages back.
         assert_eq!(page_after_swipe(100.0, 1.2, W, 1, 3), 0);
-        // Slow drag over the same distance still springs back.
         assert_eq!(page_after_swipe(-100.0, -0.2, W, 0, 3), 0);
     }
 
     #[test]
     fn flick_needs_travel_and_a_matching_direction() {
-        // Fast but barely moved — a jittery tap, not a swipe.
         assert_eq!(page_after_swipe(-20.0, -2.0, W, 0, 3), 0);
-        // Dragged out then snapped back: velocity points away from the travel,
-        // so it must not page in either direction.
+        // Dragged out then snapped back: must not page either way.
         assert_eq!(page_after_swipe(-100.0, 1.5, W, 1, 3), 1);
     }
 
@@ -343,20 +264,13 @@ mod tests {
         );
     }
 
-    // --- pull-down search ---
-
     #[test]
     fn pull_down_opens_search_only_when_dominantly_downward() {
         assert!(is_pull_down_search(0.0, 200.0, H));
-        // Far enough down, but more sideways than down → still a page swipe.
         assert!(!is_pull_down_search(300.0, 200.0, H));
-        // Dominantly downward but too short.
         assert!(!is_pull_down_search(0.0, 100.0, H));
-        // Upward never opens search.
         assert!(!is_pull_down_search(0.0, -300.0, H));
     }
-
-    // --- tap slop ---
 
     #[test]
     fn icon_tap_slop_is_radial() {
@@ -364,7 +278,6 @@ mod tests {
         assert!(!exceeds_icon_tap_slop(8.0, 8.0), "11.3px is inside 12px");
         assert!(exceeds_icon_tap_slop(9.0, 9.0), "12.7px is outside");
         assert!(exceeds_icon_tap_slop(-13.0, 0.0), "sign does not matter");
-        // A wobble that cancels the launch must still keep the hold alive.
         assert!(!exceeds_icon_hold_slop(-13.0, 0.0));
         assert!(exceeds_icon_hold_slop(33.0, 0.0));
     }
@@ -376,8 +289,6 @@ mod tests {
         assert!(!is_switcher_tap(0.0, -16.0));
     }
 
-    // --- home bar ---
-
     #[test]
     fn bar_swipe_up_opens_the_switcher() {
         assert_eq!(
@@ -388,7 +299,6 @@ mod tests {
 
     #[test]
     fn bar_swipe_up_outranks_a_sideways_component() {
-        // Both thresholds cleared: up wins.
         assert_eq!(
             classify_bar_release(400.0, 200.0, W, H),
             BarRelease::OpenSwitcher
@@ -401,13 +311,11 @@ mod tests {
             classify_bar_release(200.0, 0.0, W, H),
             BarRelease::SlideToTop
         );
-        // Short of the threshold is still nothing.
         assert_eq!(classify_bar_release(100.0, 0.0, W, H), BarRelease::None);
     }
 
     #[test]
     fn bar_swipe_left_does_nothing() {
-        // Home is the near end of the stack — there is nothing to the left.
         assert_eq!(classify_bar_release(-400.0, 0.0, W, H), BarRelease::None);
     }
 
@@ -416,12 +324,8 @@ mod tests {
         assert_eq!(classify_bar_release(100.0, 100.0, W, H), BarRelease::None);
     }
 
-    // --- switcher cards ---
-
     #[test]
     fn dominant_up_drag_closes_a_card() {
-        // Progress is the finger's own travel, in screen heights, capped at a
-        // full screen.
         assert_eq!(
             classify_card_drag(0.0, -H, W, H, 0.0),
             CardDrag::Close { progress: 1.0 }
@@ -438,12 +342,10 @@ mod tests {
 
     #[test]
     fn sideways_drag_scrolls_the_carousel() {
-        // 42% of the width advances exactly one card.
         assert_eq!(
             classify_card_drag(420.0, 0.0, W, H, 0.0),
             CardDrag::Scroll { position: 1.0 }
         );
-        // Scrolling is relative to where the drag began.
         assert_eq!(
             classify_card_drag(420.0, 0.0, W, H, 2.0),
             CardDrag::Scroll { position: 3.0 }
@@ -452,7 +354,6 @@ mod tests {
 
     #[test]
     fn a_diagonal_drag_needs_up_to_dominate_to_close() {
-        // More sideways than up → scroll, not close.
         assert!(matches!(
             classify_card_drag(300.0, -200.0, W, H, 0.0),
             CardDrag::Scroll { .. }
@@ -468,11 +369,8 @@ mod tests {
         let CardDrag::Close { progress } = classify_card_drag(0.0, 300.0, W, H, 0.0) else {
             panic!("downward drag should be a close drag");
         };
-        // Negative (below rest), and well short of the finger's own travel:
-        // 300px of a 2000px-high screen would be -0.15 unbanded.
         assert!(progress < 0.0);
         assert!(progress > -0.1, "progress={progress}");
-        // Never commits, at any release speed.
         assert!(!card_close_commits(progress, 0.0));
         assert!(!card_close_commits(progress, -5.0));
     }
@@ -487,7 +385,6 @@ mod tests {
             "{progress}"
         );
         assert!(!card_close_commits(progress, 0.0));
-        // Approaches the cap smoothly — no discontinuity where it used to clip.
         let near = |dy: f32| match classify_card_drag(0.0, dy, W, H, 0.0) {
             CardDrag::Close { progress } => progress,
             _ => panic!("downward drag should be a close drag"),
@@ -498,7 +395,6 @@ mod tests {
 
     #[test]
     fn upward_drag_tracks_the_finger_one_to_one() {
-        // The card rides the finger exactly: progress is in screen heights.
         let CardDrag::Close { progress } = classify_card_drag(0.0, -H * 0.3, W, H, 0.0) else {
             panic!("upward drag should be a close drag");
         };
@@ -510,36 +406,27 @@ mod tests {
         let just_under = th::CARD_CLOSE_COMMIT - 0.01;
         assert!(!card_close_commits(just_under, 0.0));
         assert!(card_close_commits(th::CARD_CLOSE_COMMIT, 0.0));
-        // A slow drag past the distance still commits.
         assert!(card_close_commits(th::CARD_CLOSE_COMMIT, -0.05));
     }
 
     #[test]
     fn card_close_commits_on_a_short_upward_flick() {
         let short = th::CARD_CLOSE_COMMIT / 2.0;
-        // Fast enough up (negative vy) and past the token distance.
         assert!(card_close_commits(short, -th::CARD_CLOSE_FLICK_VELOCITY));
-        // Same speed downward never closes.
         assert!(!card_close_commits(short, th::CARD_CLOSE_FLICK_VELOCITY));
-        // A fast flick that barely moved is jitter, not a close.
         assert!(!card_close_commits(0.001, -5.0));
     }
-
-    // --- quick switch ---
 
     #[test]
     fn quick_switch_offset_tracks_and_clamps() {
         assert_eq!(quick_switch_offset(500.0, W, true, true), 0.5);
         assert_eq!(quick_switch_offset(-500.0, W, true, true), -0.5);
-        // Never past a whole screen.
         assert_eq!(quick_switch_offset(3000.0, W, true, true), 1.0);
     }
 
     #[test]
     fn quick_switch_offset_rubber_bands_at_the_stack_ends() {
-        // Sliding right with no older app behind: only 30% is followed.
         assert_eq!(quick_switch_offset(500.0, W, false, true), 0.15);
-        // Sliding left with nothing more recent.
         assert_eq!(quick_switch_offset(-500.0, W, true, false), -0.15);
     }
 

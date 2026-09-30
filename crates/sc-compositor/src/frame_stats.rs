@@ -1,13 +1,8 @@
-//! Pure frame-timing statistics for perf validation (M4).
-//!
-//! Records per-frame wall-clock durations in a ring buffer and computes
-//! fps / p50 / p99 / dropped-frame counts. Backend-agnostic so winit and DRM
-//! numbers are directly comparable.
+//! Frame-timing stats (fps, p50/p99, over-budget count) over a ring buffer.
 
 use std::collections::VecDeque;
 use std::time::Duration;
 
-/// A computed snapshot of recent frame timings.
 #[derive(Clone, Copy, Debug)]
 pub struct StatsSnapshot {
     pub fps: f64,
@@ -17,7 +12,6 @@ pub struct StatsSnapshot {
     pub samples: usize,
 }
 
-/// Ring buffer of recent frame durations.
 pub struct FrameStats {
     budget: Duration,
     cap: usize,
@@ -25,7 +19,6 @@ pub struct FrameStats {
 }
 
 impl FrameStats {
-    /// Default capacity ~ a couple seconds at 90 Hz.
     pub fn new(budget: Duration) -> Self {
         Self::with_capacity(budget, 256)
     }
@@ -38,7 +31,6 @@ impl FrameStats {
         }
     }
 
-    /// Record one frame's wall-clock duration.
     pub fn record_frame(&mut self, dt: Duration) {
         if self.samples.len() == self.cap {
             self.samples.pop_front();
@@ -46,7 +38,6 @@ impl FrameStats {
         self.samples.push_back(dt);
     }
 
-    /// Compute a snapshot. Returns zeros when empty.
     pub fn snapshot(&self) -> StatsSnapshot {
         if self.samples.is_empty() {
             return StatsSnapshot {
@@ -79,7 +70,6 @@ impl FrameStats {
         }
     }
 
-    /// One-line summary for logging.
     pub fn format_line(&self) -> String {
         let s = self.snapshot();
         format!(
@@ -100,13 +90,12 @@ mod tests {
 
     #[test]
     fn percentiles_from_known_set() {
-        let mut s = FrameStats::new(Duration::from_micros(11_111)); // 90 Hz budget
+        let mut s = FrameStats::new(Duration::from_micros(11_111));
         for v in [10.0, 10.0, 10.0, 10.0, 30.0] {
             s.record_frame(ms(v));
         }
         let snap = s.snapshot();
         assert!((snap.p50_ms - 10.0).abs() < 0.5);
-        // p99 of this tiny set is the max sample.
         assert!((snap.p99_ms - 30.0).abs() < 0.5);
     }
 
@@ -123,7 +112,7 @@ mod tests {
     fn fps_is_inverse_of_mean() {
         let mut s = FrameStats::new(Duration::from_micros(11_111));
         for _ in 0..10 {
-            s.record_frame(ms(10.0)); // 10 ms => 100 fps
+            s.record_frame(ms(10.0));
         }
         let snap = s.snapshot();
         assert!((snap.fps - 100.0).abs() < 1.0);
@@ -135,7 +124,6 @@ mod tests {
         for v in [100.0, 100.0, 100.0, 10.0, 10.0, 10.0] {
             s.record_frame(ms(v));
         }
-        // Only the last 3 (all 10 ms) should remain.
         assert!((s.snapshot().p50_ms - 10.0).abs() < 0.5);
     }
 }
