@@ -1,6 +1,5 @@
-//! Per-frame shell advance: spring ticking, UI-state transitions, the popup
-//! geometry chains, the home-bar fade, and the animation gate the DRM loop uses
-//! to decide whether to keep priming page-flips.
+//! Per-frame shell advance: springs, UI transitions, popup chains, the bar
+//! fade, and the "keep rendering" gate for the DRM loop.
 
 use smithay::desktop::{
     find_popup_root_surface, get_popup_toplevel_coords, PopupKind, PopupManager,
@@ -19,8 +18,6 @@ use crate::ui_state::{self, transition, UiEvent, UiState};
 
 use std::collections::{HashMap, HashSet};
 
-/// Pill visibility policy per UI state: gone on Home, lit for the whole of a
-/// drag (it is the thing under the finger), blink-then-hide once an app is up.
 fn bar_mode(ui: &UiState) -> crate::bar_hint::BarMode {
     use crate::bar_hint::BarMode;
     match ui {
@@ -30,11 +27,8 @@ fn bar_mode(ui: &UiState) -> crate::bar_hint::BarMode {
     }
 }
 
-/// Refill `out` from the reflow springs in `springs`, shifted left by `scroll`
-/// (the live page scroll for the grid; zero for the dock, which doesn't page).
-///
-/// Updates in place: existing keys keep their `String` allocation and only their
-/// value is overwritten, so a steady grid costs no allocation per frame.
+/// Shifted left by `scroll` (zero for the dock). In place, so a steady grid
+/// allocates nothing per frame.
 fn sync_positions(
     out: &mut HashMap<String, (f32, f32)>,
     springs: &HashMap<String, (sc_anim::Spring, sc_anim::Spring)>,
@@ -52,12 +46,8 @@ fn sync_positions(
     }
 }
 
-/// Refill `out` with the app ids that have at least one open window, for the
-/// running dots. Placeholder ids are skipped: `unknown_N` matches no icon, so it
-/// would only ever be a wasted lookup.
-///
-/// In place, as [`sync_positions`]. `toplevels` holds a handful of entries, so
-/// the nested scan is cheaper than rebuilding the set.
+/// App ids with an open window, for the running dots. In place, as
+/// [`sync_positions`].
 fn sync_running_apps(out: &mut HashSet<String>, toplevels: &[Option<AppToplevel>]) {
     let shown = |id: &str| !id.starts_with("unknown_") && id != SEARCH_APP_ID;
     out.retain(|id| toplevels.iter().flatten().any(|tl| tl.app_id == *id));
@@ -68,10 +58,7 @@ fn sync_running_apps(out: &mut HashSet<String>, toplevels: &[Option<AppToplevel>
     }
 }
 
-/// Refill `out` with `(app_id, seconds since spawn)` for every launch still
-/// waiting on its window. Positional and in place: `launching` is short and
-/// ordered, so slot `i` almost always already holds the right id and only the
-/// elapsed time changes.
+/// `(app_id, seconds since spawn)` per pending launch. Positional, in place.
 fn sync_launch_pulses(out: &mut Vec<(String, f32)>, launching: &[Launching]) {
     out.truncate(launching.len());
     for (i, l) in launching.iter().enumerate() {
@@ -90,15 +77,9 @@ fn sync_launch_pulses(out: &mut Vec<(String, f32)>, launching: &[Launching]) {
 }
 
 impl State {
-    /// Popups rooted at `root`, ordered root→leaf, as `(kind, phys_origin,
-    /// phys_size)`. The origin is clamped so each popup stays fully on-screen.
-    /// `root_origin` is where the root surface's `(0, 0)` is drawn, physical.
-    /// `bound` is the space the origin is clamped into — the output, except for
-    /// popups of a rotated app, which live in the app's turned space.
-    /// smithay yields a popup tree topmost-first (each node's children, newest
-    /// first, then the node itself). Everything here wants root→leaf: painter's
-    /// order for the draw, `rposition` for the hit-test, and `popups_to_dismiss`'s
-    /// "descendants are above me". So it is reversed on the way out.
+    /// Popups under `root`, root→leaf, as `(kind, phys_origin, phys_size)`, each
+    /// clamped into `bound` (the output, or a rotated app's turned space).
+    /// smithay yields topmost-first, so this reverses it.
     fn popup_chain(
         &self,
         root: &WlSurface,
@@ -108,11 +89,8 @@ impl State {
         let dpi = self.dpi;
         let mut chain: Vec<PopupRect> = PopupManager::popups_for_surface(root)
             .map(|(kind, loc)| {
-                // Deliberately the client's *geometry*, not the drawn bbox: a
-                // popup that never sets geometry (wvkbd's key preview) reports
-                // 0x0 and must stay hit-testable by nothing. Its buffer covers
-                // the whole keyboard, so sizing it from the bbox swallows every
-                // key tap.
+                // Geometry, not the drawn bbox: wvkbd's key preview has no geometry but a
+                // buffer covering the whole keyboard, and must hit-test as nothing.
                 let geo = kind.geometry();
                 let size = (
                     (geo.size.w as f64 * dpi).round() as i32,
@@ -130,14 +108,8 @@ impl State {
         chain
     }
 
-    /// The rect a new/repositioned popup's positioner is unconstrained against,
-    /// in the popup parent's logical space. See [`popups::unconstrain_target`].
-    ///
-    /// App-rooted popups get [`State::app_popup_space`] — the usable area, or
-    /// the app's turned space while it is rotated (so a Firefox menu in
-    /// landscape is solved against the landscape height, not the portrait one);
-    /// layer-rooted popups (OSK menus) get the whole output, since the layer
-    /// surface itself lives in the reserved strip.
+    /// App-rooted popups get [`State::app_popup_space`]; layer-rooted ones
+    /// (OSK menus) the whole output.
     pub(crate) fn popup_target(&self, kind: &PopupKind) -> Rectangle<i32, Logical> {
         let root = find_popup_root_surface(kind).ok();
         let app_rooted = root.is_some() && root == self.app_focus_surface();
@@ -162,19 +134,9 @@ impl State {
         Rectangle::new((x, y).into(), (w, h).into())
     }
 
-    /// Re-run the positioner against the current [`State::popup_target`] for
-    /// every live popup and configure the ones whose geometry moved.
-    ///
-    /// Called when the area popups may occupy changes under them — the OSK
-    /// mapping/unmapping, an exclusive zone appearing. Without it a menu opened
-    /// against the full screen height stays where it was and the keyboard slides
-    /// up over it.
-    ///
-    /// Only *reactive* popups (`xdg_positioner.set_reactive`) may be
-    /// reconfigured after their initial configure; `send_pending_configure`
-    /// enforces that and errors otherwise, which is the expected outcome for a
-    /// static popup, not a problem — it keeps its original placement and the
-    /// render-time [`popups::clamp_origin`] keeps it on screen.
+    /// Re-solve every live popup when the space they may occupy changes (OSK
+    /// map/unmap). Only reactive popups can be reconfigured; others error in
+    /// `send_pending_configure`, which is expected, and stay clamped.
     pub(crate) fn reconstrain_popups(&mut self) {
         let mut roots: Vec<WlSurface> = self
             .toplevels
@@ -191,8 +153,7 @@ impl State {
             .collect();
 
         for kind in kinds {
-            // Input-method popups are positioned by the text cursor rectangle,
-            // not an xdg_positioner; nothing to re-solve.
+            // IME popups follow the text cursor, not a positioner.
             let PopupKind::Xdg(popup) = kind else {
                 continue;
             };
@@ -206,11 +167,8 @@ impl State {
         }
     }
 
-    /// The space app-rooted popups are laid out in, as `(origin, size)` in view
-    /// px: normally the usable area, but a turned view has no layers and the
-    /// app fills it. Everything downstream (clamp, unconstrain target, hit-test,
-    /// draw) has to agree on this or the popup lands somewhere the app never
-    /// asked for.
+    /// `(origin, size)` in view px: the usable area, or the whole view while
+    /// turned. Clamp, unconstrain, hit-test and draw must all agree on this.
     pub(crate) fn app_popup_space(&self) -> ((i32, i32), (i32, i32)) {
         if self.view_rotation().swaps_axes() {
             return ((0, 0), self.output_size());
@@ -222,10 +180,8 @@ impl State {
         )
     }
 
-    /// Popups parented to the fullscreen app (menus, dropdowns), root→leaf.
     fn app_popups(&self) -> Vec<PopupRect> {
-        // Clamped to the whole view, not the usable area, so a menu may still
-        // overhang its edges (bar strip).
+        // Clamped to the whole view, so a menu may overhang the bar strip.
         let (origin, _) = self.app_popup_space();
         let bound = self.output_size();
         self.app_focus_surface()
@@ -233,7 +189,6 @@ impl State {
             .unwrap_or_default()
     }
 
-    /// Popups parented to a top/overlay layer surface (e.g. an OSK menu).
     fn layer_popups(&self) -> Vec<PopupRect> {
         let mut out = Vec::new();
         let (below, above) = self.layers.render_lists(self.dpi);
@@ -243,19 +198,8 @@ impl State {
         out
     }
 
-    /// One-line snapshot of every layer surface and layer-rooted popup the
-    /// compositor would composite, answered by `springchick ipc layers`.
-    ///
-    /// This exists for the "two keyboards on screen, one wvkbd process" class of
-    /// bug: it shows what the render lists actually carry, so a surface that is
-    /// still drawn after its client moved on (stale buffer, stale geometry, or a
-    /// popup left behind) is visible without a rebuild. Fields are `key=value`,
-    /// entries separated by ` | ` — the ipc client prints one entry per line.
-    /// What the home grid is actually drawing, answered by `springchick ipc
-    /// home`. Same purpose as [`Self::layers_dump`], for the "the model says
-    /// the app is on page 3 but the screen shows a hole" class of bug: a slot
-    /// whose id is missing from the catalog draws nothing, and only this tells
-    /// them apart. `!` marks such a slot.
+    /// `springchick ipc home`: what the grid actually draws. `!` = not in the
+    /// catalog (draws nothing).
     pub(crate) fn home_dump(&self) -> String {
         let (page, page_count) = match &self.ui {
             UiState::Home {
@@ -263,8 +207,7 @@ impl State {
             } => (*page, *page_count),
             _ => (0, self.home_page_count()),
         };
-        // `!` = not in the catalog (draws nothing). `~` = no reflow spring, so
-        // the grid cannot place it however good the model looks.
+        // `!` = not in the catalog. `~` = no reflow spring, so it can't be placed.
         let slot = |id: &String, anim: &HashMap<String, (sc_anim::Spring, sc_anim::Spring)>| {
             let mut s = id.clone();
             if !self.app_catalog.contains_key(id) {
@@ -283,7 +226,6 @@ impl State {
             .collect();
         let mut parts = vec![format!(
             "ui={} page={page}/{page_count} pages=[{}] arrange={} gen={}",
-            // Variant name only; the payloads are noise here.
             format!("{:?}", self.ui)
                 .split([' ', '{', '('])
                 .next()
@@ -314,12 +256,11 @@ impl State {
         parts.join(" | ")
     }
 
+    /// `springchick ipc layers`: every layer surface and layer-rooted popup
+    /// being composited, to find surfaces drawn after their client moved on.
     pub(crate) fn layers_dump(&self) -> String {
         let infos = self.layers.dump(self.dpi);
         let popups = self.active_popups();
-        // Layer surfaces and their popups are not drawn while the view is
-        // turned, so say so rather than let the reader wonder why the dump lists
-        // surfaces they cannot see.
         let rotated = if self.view_rotation().swaps_axes() {
             " rotated=yes(layers-not-drawn)"
         } else {
@@ -342,9 +283,7 @@ impl State {
                 .map(|(i, l)| layer_shell::format_layer(i, l)),
         );
         for (kind, origin, size) in popups {
-            // `size` is the popup's *geometry*, which a client may leave at zero
-            // while still committing a buffer (wvkbd's key-preview popup does),
-            // so the buffer size is reported alongside it.
+            // Geometry may be zero while a buffer is committed (wvkbd's key preview).
             let surface = kind.wl_surface().clone();
             let buf = match layer_shell::buffer_size(&surface) {
                 Some((w, h)) => format!("{w}x{h}"),
@@ -358,15 +297,9 @@ impl State {
         parts.join(" | ")
     }
 
-    /// Popups that are on screen right now, app-rooted first then layer-rooted.
-    /// Used by touch routing to hit-test and (for grabbing popups only) dismiss.
-    /// A tap is routed into whichever popup it lands on regardless of grab; only
-    /// a *grabbing* popup swallows an outside tap and dismisses — see
-    /// `touch::popup_press`, which consults `popup_grabs` per popup.
-    ///
-    /// While the view is turned the layer surfaces are not drawn, so their
-    /// popups are not on screen either and are left out — input routing uses
-    /// this list, and an invisible popup must not take taps.
+    /// On-screen popups, app-rooted first. Every hit popup takes the tap; only
+    /// grabbing ones swallow outside taps (`touch::popup_press`). Layer popups
+    /// are left out while turned, since layers aren't drawn.
     pub(crate) fn active_popups(&self) -> Vec<PopupRect> {
         let mut v = self.app_popups();
         if !self.view_rotation().swaps_axes() {
@@ -375,15 +308,12 @@ impl State {
         v
     }
 
-    /// Whether `surface` is a popup that issued an `xdg_popup.grab()` (modal).
     pub(crate) fn popup_has_grab(&self, surface: &WlSurface) -> bool {
         self.popup_grabs.contains(surface)
     }
 
-    /// Bar-fade target: 0 when a Top/Overlay layer surface covers the pill,
-    /// else 1. The OSK is lifted above the pill's strip (see `shift_docked`),
-    /// so it no longer fades the bar; only a surface actually over the pill
-    /// (e.g. a fullscreen overlay) does.
+    /// 0 when a Top/Overlay surface covers the pill. The OSK is lifted above it
+    /// and doesn't count.
     fn bar_alpha_target(&self) -> f32 {
         if self.view_rotation().swaps_axes() {
             return 1.0;
@@ -397,13 +327,7 @@ impl State {
         }
     }
 
-    /// Step the home-bar fade toward its target and return the alpha to draw.
-    /// ~0.13s fade (0.15 per 90Hz frame).
-    ///
-    /// Two independent things dim the pill, and they multiply: `bar_alpha` is
-    /// the occlusion fade above, while [`crate::bar_hint`] owns the visibility
-    /// policy (never on Home, lit through a drag, blink-then-hide in an app).
-    /// Keeping them separate means neither has to know about the other's timing.
+    /// ~0.13s fade. Multiplied with [`crate::bar_hint`]'s visibility policy.
     fn tick_bar_alpha(&mut self, now: std::time::Instant) -> f32 {
         self.bar_hint.set_mode(bar_mode(&self.ui), now);
         let target = self.bar_alpha_target();
@@ -419,66 +343,42 @@ impl State {
         self.bar_alpha * self.bar_hint.alpha(now)
     }
 
-    /// True while the bar's drawn alpha is still changing — either fade — so the
-    /// DRM loop keeps rendering and the partial-damage fast path stays off.
+    /// Also keeps the partial-damage fast path off.
     pub(crate) fn bar_fading(&self) -> bool {
         (self.bar_alpha - self.bar_alpha_target()).abs() > f32::EPSILON
             || self.bar_hint.is_animating(std::time::Instant::now())
     }
 
-    /// True while anything on screen is still changing, so the DRM loop should
-    /// keep priming page-flips. False on a static screen (idle home, foreground
-    /// app that isn't drawing) so the vblank render loop can stop and let the
-    /// CPU/GPU idle. A fresh commit, input, or animation start re-arms rendering
-    /// via `needs_render` and the animation springs below.
+    /// False on a static screen so the vblank loop can stop and the GPU idle.
+    /// `needs_render` and the springs re-arm it.
     pub(crate) fn is_animating(&self, now: std::time::Instant) -> bool {
         self.needs_render
             || self.ui.needs_animation()
             || !self.launching.is_empty()
             || self.osd.is_active(now)
             || self.bar_fading()
-            // A layer surface (the OSK) sliding up into place.
             || self.layers.sliding()
-            // An app resize held back while the OSK's unmap is debounced: the
-            // deadline is only checked from a frame, so keep them coming.
+            // The held-back regrow is only checked from a frame.
             || self.layers.regrow_pending()
-            // A lock is engaged but not yet confirmed to the client: keep
-            // page-flipping so the locked frame it is waiting on is actually
-            // presented (see `session_lock::SessionLock::tick`).
+            // The lock confirmation waits for a presented frame.
             || self.session_lock.needs_frame()
-            // A finger held on an icon, waiting to become a long-press. The hold
-            // is checked in `advance_frame`, so without this the timer only
-            // advances while some *other* input keeps the loop awake: a
-            // perfectly still finger emits no further events, page-flips stop,
-            // and arrange mode never engages. Real panels jitter enough to hide
-            // this most of the time; synthetic input (the debug socket) does not
-            // jitter at all, so it fails there every time.
-            //
-            // Gated on `pointer_down` — the same guard `maybe_engage_arrange_hold`
-            // uses — so this can only spin while a finger is actually down. A
-            // stale `icon_press` left behind by a lost touch-up would otherwise
-            // pin the render loop on for good, which on a phone is a battery bug.
+            // A still finger sends no events, so the long-press timer needs frames.
+            // Gated on `pointer_down`: a stale `icon_press` from a lost touch-up
+            // would otherwise pin the loop on (battery).
             || (self.pointer_down && (self.icon_press.is_some() || self.bg_press.is_some()))
-            // The icon menu's open animation.
             || self
                 .icon_menu
                 .as_ref()
                 .is_some_and(|m| !m.open.is_settled())
-            // The library folder's zoom in/out.
             || self.folder.as_ref().is_some_and(|f| !f.open.is_settled())
-            // The deck's badge/title fades, which outlive the deck itself on the
-            // way out (and the scroll spring on a focus change).
+            // Deck fades outlive the deck on the way out.
             || self.card_chrome.is_animating()
-            // A debug-input gesture/key/touch/settle in flight must keep the DRM
-            // loop rendering each tick so it advances (page-flips otherwise stop
-            // on an idle screen). Inert in normal runs — these are always None.
+            // Debug-input playback; always None in normal runs.
             || self.active_gesture.is_some()
             || self.active_key.is_some()
             || self.active_touch.is_some()
             || self.pending_settle.is_some()
-            // A turn waiting out its debounce, or the fade covering one. Without
-            // this an orientation reported to an otherwise idle screen never
-            // gets a frame in which to settle, so nothing turns at all.
+            // An orientation change needs frames to settle.
             || self.orientation_settle.is_pending()
             || self.rotation_fade.is_active()
             || self
@@ -491,19 +391,13 @@ impl State {
                 .any(|(sx, sy)| !sx.is_settled() || !sy.is_settled())
     }
 
-    /// Advance the shell by one frame and produce the render snapshot: tick the
-    /// springs, apply any resulting effect, refresh `page_count`, compute the
-    /// scene, and gather the app surface, OSD, bar fade, and layer lists. Shared
-    /// by the winit and DRM backends, which differ only in how they present the
-    /// resulting frame.
+    /// Tick springs, apply effects, compute the scene, and gather the render
+    /// snapshot. Shared by both backends.
     pub(crate) fn advance_frame(&mut self, dt: f32) -> FramePrep {
-        // Confirm a pending lock once the frame that hid the session has been
-        // presented. Done first so the snapshot below reflects the same lock
-        // state the confirmation is about.
+        // First, so the snapshot matches the lock state being confirmed.
         self.session_lock.tick();
 
-        // Orientation debounce and the fade that covers a turn. Before the scene
-        // is computed, so a rotation that lands this frame is the one drawn.
+        // Before the scene, so a rotation landing this frame is the one drawn.
         self.tick_rotation(std::time::Instant::now());
 
         self.maybe_engage_arrange_hold();
@@ -518,18 +412,15 @@ impl State {
             }
         }
 
-        // Lazy-seed the grid-reflow springs on first use so they snap to the
-        // current order instead of animating in from (0,0).
+        // Seed lazily so springs snap to the current order, not in from (0,0).
         if self.grid_anim.is_empty() {
             self.reflow_grid();
         }
         if self.dock_anim.is_empty() {
             self.reflow_dock();
         }
-        // Live reorder: retarget springs to the working order each frame while
-        // an icon is being dragged. Gated on the drag itself (not `hover`) so the
-        // dragged app is dropped from `grid_anim` immediately on pickup and while
-        // over the dock — otherwise it double-draws (in-slot + ghost).
+        // Gated on the drag, not `hover`, so the dragged app leaves `grid_anim`
+        // at once instead of double-drawing.
         if self.arrange.as_ref().is_some_and(|a| a.drag.is_some()) {
             self.reflow_grid();
             self.reflow_dock();
@@ -537,19 +428,14 @@ impl State {
 
         self.tick_edge_page_flip();
 
-        // Slide a freshly-mapped OSK up into place. Purely a render offset — the
-        // client is never told about it. The app keeps its old size for the
-        // duration (`recompute_layers` bails while sliding) so the keyboard rises
-        // *over* it rather than into a strip vacated ahead of it; the resize and
-        // the popup re-solve both land on the frame the slide finishes.
+        // OSK slide-in is a render offset only. The app keeps its size until the
+        // slide ends, so the keyboard rises over it; the resize and popup re-solve
+        // land on the final frame.
         let was_sliding = self.layers.sliding();
         if !self.layers.tick_slides(dt) && was_sliding {
             self.recompute_layers();
         }
 
-        // An OSK unmap whose regrow is still debounced: re-ask every frame so
-        // the resize lands once the deadline passes (or never, if the keyboard
-        // comes back first).
         if self.layers.regrow_pending() {
             self.recompute_layers();
         }
@@ -576,11 +462,10 @@ impl State {
             _ => {}
         }
 
-        // A held-modifier switch (Super+Tab) may have queued steps — or the
-        // release itself — while the deck was still animating in.
+        // Super+Tab steps or release may have queued while the deck animated in.
         self.poll_kbd_switch();
 
-        // Animations that settle to home reset page_count to 1; restore it.
+        // Settling home resets page_count to 1; restore it.
         let pages = self.home_page_count();
         if let UiState::Home { page_count, .. } = &mut self.ui {
             *page_count = pages;
@@ -593,8 +478,7 @@ impl State {
             self.card_radius,
         );
         self.switcher_cards = scene.cards.clone();
-        // Refilled in place: a commit from a toplevel absent here doesn't get a
-        // frame (`commit_affects_frame`).
+        // A commit from a toplevel absent here gets no frame (`commit_affects_frame`).
         self.drawn_toplevels.clear();
         self.drawn_toplevels
             .extend(scene.window.as_ref().map(|(tid, _)| *tid));
@@ -609,8 +493,7 @@ impl State {
             debug!(target: "springchick::debug", "state changed to {:?} cards={}", self.ui, scene.cards.len());
         }
 
-        // Resource tiers follow focus. Self-gated on a settled state, so this is
-        // a no-op on all but the frame an app arrives in front or leaves it.
+        // No-op except on the frame focus settles.
         self.apply_resource_tiers();
 
         let app_surface = scene.window.as_ref().and_then(|(tid, _)| {
@@ -628,10 +511,8 @@ impl State {
             .then(|| (self.osd.level, self.osd.muted, self.osd.alpha(osd_now)));
         let bar_alpha = self.tick_bar_alpha(std::time::Instant::now());
         let (layers_below, layers_above) = self.layers.render_lists(self.dpi);
-        // `origin` is the popup's on-screen geometry top-left (used for clamp and
-        // hit-test). The buffer is drawn from its (0,0), which sits `geometry.loc`
-        // above-left of the geometry rect (client-side shadow/margin), so shift
-        // the render origin back by it — matching smithay's own popup placement.
+        // `origin` is the geometry top-left; the buffer's (0,0) sits `geometry.loc`
+        // above-left of it (client shadows), as in smithay's placement.
         let dpi = self.dpi;
         let to_render_list = |chain: Vec<PopupRect>| {
             chain
@@ -649,11 +530,8 @@ impl State {
         let app_popups = to_render_list(self.app_popups());
         let layer_popups = to_render_list(self.layer_popups());
 
-        // Touch indicator overlay: prune expired rings, then snapshot the marks
-        // for this frame. Empty (and cheap) unless `show_touches` is on.
         let touch_marks = if self.show_touches {
             self.touch_viz.prune(osd_now);
-            // Keep the vblank-driven DRM loop awake while rings are still fading.
             if self.touch_viz.is_active(osd_now) {
                 self.needs_render = true;
             }
@@ -662,12 +540,8 @@ impl State {
             Vec::new()
         };
 
-        // Animated icon centers in screen space. Grid springs are global (page 0
-        // origin), so subtract the live page scroll here; the dock doesn't page.
-        //
-        // All four overlays are refilled in place (see [`IconOverlays`]) — the
-        // app ids keying them are stable across frames, so rebuilding them would
-        // re-allocate every key at 90 Hz.
+        // Grid springs are global; subtract the page scroll. Overlays refill in
+        // place since their keys are stable.
         let page_scroll = self.home_page_scroll();
         let (out_w, _) = self.output_size_f();
         sync_positions(
@@ -679,9 +553,7 @@ impl State {
         sync_running_apps(&mut self.icon_overlays.running_apps, &self.toplevels);
         sync_launch_pulses(&mut self.icon_overlays.launch_pulses, &self.launching);
 
-        // Deck chrome. The title is read from the toplevel only while that card
-        // is focused; `CardChrome` owns the copy it is drawing so an outgoing
-        // title survives its fade-out (and a window that closes mid-fade).
+        // `CardChrome` owns its title copy so it survives the fade-out.
         let focused = match &self.ui {
             UiState::Switcher { cards, scroll, .. } => {
                 crate::switcher::focused_card(cards, scroll.value)
@@ -771,13 +643,8 @@ impl State {
         }
     }
 
-    /// Build the render context both backends feed to [`crate::render::draw_scene`].
-    ///
-    /// Everything here is backend-independent; the four parameters are the only
-    /// things the winit and DRM paths actually disagree about. Keeping one
-    /// builder is the point — when this was inlined in both backends the copies
-    /// drifted (the dock drop-zone highlight was guarded in one and not the
-    /// other).
+    /// The render context for [`crate::render::draw_scene`]. One builder for
+    /// both backends; inlined copies drifted.
     pub(crate) fn draw_ctx<'a>(
         &'a mut self,
         prep: &'a FramePrep,
@@ -787,21 +654,18 @@ impl State {
         rounded_tex_shader: &'a smithay::backend::renderer::gles::GlesTexProgram,
         sinks: &'a mut render::FrameSinks,
     ) -> render::DrawCtx<'a> {
-        // Resolved before the struct literal so nothing here borrows `self`
-        // while `skia` and `last_present` hold mutable borrows of it.
+        // Resolved before the literal: `skia` and `last_present` borrow `self`
+        // mutably.
         let (ox, oy) = self.app_origin();
         let app_origin = (ox.round() as i32, oy.round() as i32);
         let rotation = self.view_rotation();
-        // Resolved to an owned rect first, so the `arrange` closure below borrows
-        // nothing but `self.arrange` itself.
         let dock_zone = self.arrange.as_ref().map(|_| {
             let (w, h) = self.output_size_f();
             sc_layout::compute(w, h, self.current_home_page(), &self.model).dock_zone
         });
         let arrange = self.arrange.as_ref().map(|a| {
             let drag = a.drag.as_ref();
-            // A dock→dock drag is a no-op, so only highlight the drop target
-            // for drags that can actually pin.
+            // Dock→dock is a no-op; only highlight drags that can pin.
             let over_dock = drag.is_some_and(|d| {
                 d.source != crate::input_dispatch::IconSource::Dock
                     && dock_zone.is_some_and(|z| z.contains(d.cur.0, d.cur.1))
@@ -814,9 +678,7 @@ impl State {
         });
         let pressed_app = self.pending_launch.as_ref().map(|p| p.app_id.as_str());
 
-        // When the frame being composited is expected to land: one refresh
-        // interval out. Commits aimed at this frame are released against it,
-        // and aiming at "now" instead would hold each one back a frame.
+        // One refresh out. Targeting "now" would hold each commit back a frame.
         let frame_target = self.clock.now() + self.output_refresh_interval();
 
         render::DrawCtx {
@@ -907,8 +769,6 @@ mod tests {
         assert_eq!(out.get("b"), Some(&(3.0, 3.0)));
     }
 
-    /// The point of syncing in place: a steady grid must not re-allocate its
-    /// keys every frame. Same `String` buffer, so the same heap pointer.
     #[test]
     fn sync_positions_reuses_the_key_allocations() {
         let s = springs(&[("a", 1.0, 1.0)]);

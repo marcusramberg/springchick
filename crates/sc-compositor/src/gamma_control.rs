@@ -1,12 +1,5 @@
-//! wlr-gamma-control-unstable-v1: per-output gamma tables.
-//!
-//! Lets a privileged client (e.g. a night-light / color-temperature daemon)
-//! upload gamma ramps for the output. smithay ships no handler for this
-//! protocol, so the two interfaces are wired by hand here.
-//!
-//! The manager global is always advertised. Under the DRM backend the ramps
-//! are programmed into the CRTC LUT (see [`crate::drm_backend`]); under winit
-//! there is no real CRTC, so uploads are accepted and ignored (mock).
+//! wlr-gamma-control-unstable-v1, wired by hand (smithay has no handler).
+//! DRM programs the CRTC LUT; winit accepts and ignores the ramps.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::OwnedFd;
@@ -24,30 +17,21 @@ use tracing::warn;
 
 use crate::State;
 
-/// A gamma-table update awaiting the DRM backend.
 pub enum GammaUpdate {
-    /// Program these per-channel ramps (red, green, blue) into the CRTC LUT.
     Set([Vec<u16>; 3]),
-    /// Control released — restore the CRTC's original gamma.
+    /// Control released: restore the CRTC's original gamma.
     Reset,
 }
 
-/// Compositor-side state for the gamma-control protocol.
 pub struct GammaControl {
-    /// LUT length advertised to clients. Mock default until the DRM backend
-    /// overrides it with the real CRTC `gamma_length`.
+    /// Placeholder until the DRM backend sets the CRTC's `gamma_length`.
     pub size: u32,
-    /// The control resource that currently owns the output, if any (the
-    /// protocol grants exclusive access).
+    /// Exclusive owner.
     active: Option<ZwlrGammaControlV1>,
-    /// Latest update the backend has yet to apply; drained by
-    /// [`Self::take_pending`].
     pending: Option<GammaUpdate>,
 }
 
 impl GammaControl {
-    /// Create the manager global. `size` is the initial advertised LUT length
-    /// (256 is a safe mock; the DRM backend sets the real value).
     pub fn new(dh: &DisplayHandle, size: u32) -> Self {
         dh.create_global::<State, ZwlrGammaControlManagerV1, ()>(1, ());
         GammaControl {
@@ -57,7 +41,6 @@ impl GammaControl {
         }
     }
 
-    /// Take the pending gamma update, if any (called by the DRM loop).
     pub fn take_pending(&mut self) -> Option<GammaUpdate> {
         self.pending.take()
     }
@@ -90,7 +73,6 @@ impl Dispatch<ZwlrGammaControlManagerV1, ()> for State {
             zwlr_gamma_control_manager_v1::Request::GetGammaControl { id, output: _ } => {
                 let control = data_init.init(id, ());
                 control.gamma_size(state.gamma.size);
-                // Exclusive access: evict any previous owner.
                 if let Some(old) = state.gamma.active.replace(control) {
                     old.failed();
                 }
@@ -130,7 +112,6 @@ impl Dispatch<ZwlrGammaControlV1, ()> for State {
     }
 
     fn destroyed(state: &mut Self, _client: ClientId, resource: &ZwlrGammaControlV1, _data: &()) {
-        // The owner released control (or its client vanished): restore gamma.
         if state.gamma.active.as_ref() == Some(resource) {
             state.gamma.active = None;
             state.gamma.pending = Some(GammaUpdate::Reset);
@@ -138,10 +119,7 @@ impl Dispatch<ZwlrGammaControlV1, ()> for State {
     }
 }
 
-/// Read three `size`-length u16 ramps (red, green, blue) from the client fd.
-///
-/// The fd holds `3 * size` native-endian u16 values back to back, per the
-/// protocol. Returns an error (→ `invalid_gamma`) on any size mismatch.
+/// The fd holds `3 * size` native-endian u16s (r, g, b).
 fn read_ramps(fd: OwnedFd, size: u32) -> Result<[Vec<u16>; 3], String> {
     if size == 0 {
         return Err("gamma control unsupported (LUT size 0)".into());

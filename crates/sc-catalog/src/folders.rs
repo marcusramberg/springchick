@@ -1,19 +1,15 @@
-//! Category folders for the app library: `.desktop` `Categories=` → one folder
-//! per app, in a fixed order. Derived on every scan — no folder state is ever
-//! persisted, so an install/uninstall needs no reconciliation.
+//! Library folders from `Categories=`. Derived on every scan, never persisted.
 
 use crate::AppEntry;
 
-/// A category folder in the library, in display order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Folder {
     pub name: &'static str,
-    /// App ids, sorted by display name.
+    /// Sorted by display name.
     pub apps: Vec<String>,
 }
 
-/// Folder order on the library page. `Other` is last and catches everything
-/// unmatched.
+/// Display order. `Other` catches everything unmatched.
 const FOLDERS: &[&str] = &[
     "Media",
     "Network",
@@ -28,17 +24,14 @@ const FOLDERS: &[&str] = &[
     "Other",
 ];
 
-/// Registered main categories mapped to our folders, best match first: an entry
-/// declaring both `AudioVideo` and `Utility` lands in Media. Only main
-/// categories are consulted; additional ones (`Player`, `TextEditor`, …) are
-/// too numerous to be worth it and rarely appear alone.
+/// Main categories to folders, best match first. Additional categories are
+/// ignored.
 const MAIN: &[(&str, &str)] = &[
     ("AudioVideo", "Media"),
     ("Audio", "Media"),
     ("Video", "Media"),
     ("Game", "Game"),
-    // Office above Graphics: a document viewer declares both (Papers is
-    // `Office;Viewer;Graphics`), and it is an Office app to a user.
+    // Office before Graphics: document viewers declare both.
     ("Office", "Office"),
     ("Graphics", "Graphics"),
     ("Development", "Development"),
@@ -50,19 +43,11 @@ const MAIN: &[(&str, &str)] = &[
     ("Utility", "Utility"),
 ];
 
-/// App ids whose declared categories put them somewhere useless (or that
-/// declare none at all). Checked before `Categories=`; the name must be one of
-/// [`FOLDERS`] (asserted by `overrides_name_a_real_folder`).
-///
-/// Filled by hand from `dump_catalog` output; a Flathub-derived generator is
-/// the eventual plan.
-const OVERRIDES: &[(&str, &str)] = &[
-    ("Music Assistant", "Media"), // declares no Categories at all
-];
+/// Per-app overrides for useless or missing categories, checked first. Names
+/// must be in [`FOLDERS`].
+const OVERRIDES: &[(&str, &str)] = &[("Music Assistant", "Media")];
 
-/// Group `entries` into library folders. Empty folders are dropped; apps within
-/// a folder are sorted by display name (ties broken by id, so the order is
-/// stable across scans).
+/// Empty folders are dropped; apps sort by name, then id.
 pub fn folders(entries: &[AppEntry]) -> Vec<Folder> {
     let mut out: Vec<(&'static str, Vec<&AppEntry>)> =
         FOLDERS.iter().map(|n| (*n, Vec::new())).collect();
@@ -86,7 +71,6 @@ pub fn folders(entries: &[AppEntry]) -> Vec<Folder> {
         .collect()
 }
 
-/// The folder a single entry belongs in. Always one of [`FOLDERS`].
 pub fn folder_for(entry: &AppEntry) -> &'static str {
     if let Some((_, name)) = OVERRIDES.iter().find(|(id, _)| *id == entry.id) {
         return FOLDERS
@@ -126,7 +110,6 @@ mod tests {
 
     #[test]
     fn main_category_wins_in_listed_order() {
-        // AudioVideo outranks Utility regardless of declaration order.
         assert_eq!(
             folder_for(&app("a", "A", &["Utility", "AudioVideo"])),
             "Media"
@@ -135,7 +118,6 @@ mod tests {
             folder_for(&app("b", "B", &["Network", "Development"])),
             "Development"
         );
-        // A document viewer is Office, not Graphics.
         assert_eq!(
             folder_for(&app("c", "C", &["Office", "Viewer", "Graphics"])),
             "Office"
@@ -189,10 +171,7 @@ mod tests {
         assert_eq!(names, ["Media", "Settings", "Other"]);
     }
 
-    /// Not a test: dumps the *installed* catalog grouped by folder, so the
-    /// OVERRIDES table can be written from real data rather than guesses.
-    /// Run it on the target device after installing packages:
-    ///
+    /// Dumps the installed catalog by folder, for writing OVERRIDES:
     ///   cargo test -p sc-catalog dump_catalog -- --ignored --nocapture
     #[test]
     #[ignore]

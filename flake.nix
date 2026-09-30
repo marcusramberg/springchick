@@ -42,25 +42,11 @@
             overlay
           ];
         };
-        # The pinned toolchain, plus `llvm-tools-preview` for `cargo llvm-cov`.
-        # The extension is added here rather than in `rust-toolchain.toml` on
-        # purpose: coverage is a dev-shell concern, and extending the toolchain
-        # the *package* builds with would change its derivation and force every
-        # VM check to rebuild the release tree.
-        #
-        # `rust-analyzer` is repeated from `rust-toolchain.toml` because
-        # `.override { extensions = ... }` *replaces* that file's `components`
-        # list rather than extending it. `rustfmt` and `clippy` survive the
-        # override anyway (they are in the default profile); `rust-analyzer` is
-        # not, so without it here the shell has no language server and editors
-        # fall through to a `~/.cargo/bin` rustup shim, which on NixOS cannot
-        # download the component and dies on an openssl cipher mismatch.
-        #
-        # `rust-src` is what rust-analyzer reads `core`/`alloc`/`std` from. It is
-        # not optional polish: without the sysroot sources every unsize coercion
-        # (`&[T; N]` -> `&[T]`, `&Concrete` -> `&dyn Trait`) fails to typecheck,
-        # so the server reports a screenful of phantom E0308s on code `cargo
-        # check` accepts — including inside `tracing`'s macros.
+        # llvm-tools-preview is added here, not in rust-toolchain.toml, so the
+        # package derivation (and every VM check) doesn't rebuild.
+        # `.override` replaces the toolchain file's components, so rust-analyzer must
+        # be repeated. rust-src is required: without it rust-analyzer reports phantom
+        # E0308s on every unsize coercion.
         rust =
           (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
             extensions = [
@@ -74,11 +60,8 @@
         packages.springchick = pkgs.springchick;
         packages.default = pkgs.springchick;
 
-        # VM tests (nixos test driver). Boot-smoke gates the DRM/GL stack in a
-        # headless VM; run with `nix build .#checks.<system>.vm-boot -L`. Built
-        # for the host arch (aarch64-linux and x86_64-linux) — always build the
-        # check matching `nix eval --raw --impure --expr builtins.currentSystem`,
-        # since cross-building the guest under qemu-user emulation crashes rustc.
+        # VM tests: `nix build .#checks.<system>.vm-boot -L`. Build the check for
+        # `builtins.currentSystem`; cross-building under qemu-user crashes rustc.
         checks = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           vm-boot = import ./nix/vm-test.nix { inherit self pkgs; };
           vm-switcher = import ./nix/vm-switcher-test.nix { inherit self pkgs; };
@@ -105,7 +88,7 @@
             pkgs.mesa
             pkgs.udev
             pkgs.seatd
-            # libdbus: the iio-sensor-proxy client (accelerometer orientation).
+            # iio-sensor-proxy client.
             pkgs.dbus
             pkgs.libgbm
             pkgs.libx11
@@ -115,23 +98,17 @@
             pkgs.freetype
             pkgs.clang
             pkgs.python3
-            # `cargo llvm-cov` — see the coverage note in CONTRIBUTING.md.
             pkgs.cargo-llvm-cov
             pkgs.just
-            # Distro packaging (packaging/build.sh): one manifest → apk/deb/pkg.tar.zst.
+            # packaging/build.sh: one manifest → apk/deb/pkg.tar.zst.
             pkgs.nfpm
           ];
-          # skia-safe's build script runs bindgen — point it at libclang up front.
-          # winit's Wayland backend + EGL/GLES dlopen their libs at RUNTIME; in a nix
-          # shell those .so files aren't on the loader path, so expose them via
-          # LD_LIBRARY_PATH or you get WaylandError(NoWaylandLib) at startup.
+          # bindgen for skia-safe needs libclang. winit/EGL dlopen their libs at
+          # runtime, hence LD_LIBRARY_PATH.
           shellHook = ''
             export RUST_BACKTRACE=1
-            # A user's ~/.cargo/bin rustup shims can land ahead of us in PATH
-            # (interactive shell rc files run after nix sets PATH). The shim then
-            # reads rust-toolchain.toml, tries to *download* stable, and dies in
-            # rustup's vendored OpenSSL ("no cipher match"). Force the pinned
-            # toolchain to win regardless of PATH order.
+            # ~/.cargo/bin rustup shims can land ahead in PATH and die trying to download
+            # a toolchain. Make the pinned one win.
             export PATH="${rust}/bin:$PATH"
             export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
             export LD_LIBRARY_PATH="${
@@ -143,10 +120,7 @@
                 pkgs.libgbm
               ]
             }''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-            # cargo-llvm-cov shells out to llvm-profdata/llvm-cov and finds them
-            # via rustup by default. There is no rustup here, so point it at the
-            # pinned toolchain's own copies — they must match the rustc that
-            # produced the instrumented binaries, or the profdata is unreadable.
+            # There's no rustup; these must match the rustc that built the binaries.
             export LLVM_COV="${rust}/lib/rustlib/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/bin/llvm-cov"
             export LLVM_PROFDATA="${rust}/lib/rustlib/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/bin/llvm-profdata"
           '';

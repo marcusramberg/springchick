@@ -1,16 +1,7 @@
-//! Held-modifier app switching (Super+Tab).
-//!
-//! The touch shell reaches the switcher deck through a gesture; a keyboard
-//! reaches it by holding a modifier: each Tab steps the deck one card and
-//! letting the modifier go opens whatever card is focused. Nothing here jumps
-//! the UI — every step goes through the same [`UiState`] springs the gestures
-//! drive, so the deck slides in from the running app (or rises from Home) and
-//! the chosen card zooms out to fullscreen.
-//!
-//! The session outlives a frame: Super+Tab from an app spends a few frames
-//! animating into the deck, and the modifier may well be released before it
-//! lands. So steps and the release are queued here and applied by
-//! [`State::poll_kbd_switch`] once the deck actually exists.
+//! Held-modifier app switching (Super+Tab). Steps drive the same [`UiState`]
+//! springs as the gestures. The modifier may come up before the deck has
+//! animated in, so steps and the release are queued and applied by
+//! [`State::poll_kbd_switch`].
 
 use crate::state::State;
 use crate::switcher;
@@ -18,18 +9,15 @@ use crate::ui_state::{transition, ToplevelId, UiEvent, UiState, ZoomOrigin};
 use sc_input::NavTarget;
 use tracing::debug;
 
-/// An in-flight keyboard switching session: the modifier is (or was) held.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct KbdSwitch {
-    /// Steps requested before the deck existed, still to be applied.
+    /// Steps requested before the deck existed.
     pending: i32,
-    /// The modifier came up — open the focused card as soon as the deck is up.
     commit: bool,
 }
 
 impl State {
-    /// The switcher deck as it would be entered right now: MRU order, minus any
-    /// toplevel that has gone away since it was recorded.
+    /// MRU order, minus toplevels that have gone away.
     fn live_deck(&self) -> Vec<ToplevelId> {
         self.history
             .deck_order()
@@ -38,12 +26,10 @@ impl State {
             .collect()
     }
 
-    /// Step the switcher by `delta` cards, opening the deck first if it is not
-    /// up. Positive walks toward older apps, matching the deck's own handedness.
+    /// Positive walks toward older apps.
     pub(crate) fn switcher_step(&mut self, delta: i32) {
         match &self.ui {
-            // Deck already up (by gesture or an earlier step): step it now, and
-            // adopt the session so releasing the modifier commits.
+            // Adopt the session so releasing the modifier commits.
             UiState::Switcher { .. } => {
                 transition(&mut self.ui, UiEvent::SwitcherStep { delta });
                 self.kbd_switch.get_or_insert_default();
@@ -53,9 +39,7 @@ impl State {
                 if cards.is_empty() {
                     return;
                 }
-                // Land in the front card slot, so the app shrinking out of
-                // fullscreen flows straight into the fan — the same hand-off the
-                // bar grab makes.
+                // Land in the front slot so the shrinking app flows into the fan.
                 let (cx, cy, scale) = switcher::front_slot(self.output_size_f());
                 transition(
                     &mut self.ui,
@@ -73,8 +57,6 @@ impl State {
             UiState::Home { .. } => {
                 let cards = self.live_deck();
                 if cards.is_empty() {
-                    // Nothing to switch to: acknowledge the key the way the bar
-                    // gesture acknowledges a dead-end swipe.
                     transition(&mut self.ui, UiEvent::HomeBounce);
                     return;
                 }
@@ -86,10 +68,8 @@ impl State {
                     commit: false,
                 });
             }
-            // Mid-animation. If that animation is this session's own settle into
-            // the deck, the step belongs to it — queue it, or a quick second Tab
-            // is swallowed by the frames the deck spends flying in. Anything
-            // else is the shell already moving somewhere the user asked for.
+            // Mid-animation. If it's this session's own settle into the deck, queue the
+            // step, or a quick second Tab is swallowed.
             _ => {
                 if let Some(session) = self.kbd_switch.as_mut() {
                     session.pending += delta;
@@ -101,8 +81,7 @@ impl State {
         self.needs_render = true;
     }
 
-    /// The switching modifier came up: commit the focused card. A no-op unless a
-    /// session is running, so a bare Super tap does nothing.
+    /// A no-op without a session, so a bare Super tap does nothing.
     pub(crate) fn switcher_release(&mut self) {
         let Some(session) = self.kbd_switch.as_mut() else {
             return;
@@ -111,21 +90,19 @@ impl State {
         self.poll_kbd_switch();
     }
 
-    /// Apply whatever the session still owes now that a frame has passed. Called
-    /// once per frame, after the tick has advanced the state machine.
+    /// Called once per frame, after the tick.
     pub(crate) fn poll_kbd_switch(&mut self) {
         let Some(mut session) = self.kbd_switch else {
             return;
         };
         match &self.ui {
             UiState::Switcher { .. } => {}
-            // Still shrinking into the deck — steps and the commit wait for it.
             UiState::Settling {
                 target: NavTarget::Switcher,
                 ..
             } => return,
-            // The deck was left some other way (a tap, a close, an app opening):
-            // the session is over and must not steal the destination.
+            // The deck was left some other way; the session must not steal the
+            // destination.
             _ => {
                 self.kbd_switch = None;
                 return;
@@ -148,8 +125,7 @@ impl State {
         }
     }
 
-    /// Open the card the carousel is focused on, zooming from wherever that card
-    /// currently sits (it may still be flying).
+    /// Zooms from wherever the card is now; it may still be flying.
     fn open_focused_card(&mut self) {
         let UiState::Switcher { cards, scroll, .. } = &self.ui else {
             return;
@@ -159,8 +135,6 @@ impl State {
         }
         let idx = (scroll.target.round() as i32).clamp(0, cards.len() as i32 - 1) as usize;
         let toplevel = cards[idx];
-        // The laid-out rect from the last frame is where the card is on screen;
-        // before the first layout, fall back to the resting front slot.
         let origin = self
             .switcher_cards
             .iter()
@@ -177,7 +151,6 @@ impl State {
             .map(|t| t.app_id.clone())
             .unwrap_or_default();
         debug!(target: "springchick::debug", "kbd switch commit toplevel={toplevel} idx={idx}");
-        // Choosing a card makes it the most recent, as a tap does.
         self.history.push_foreground(toplevel);
         transition(
             &mut self.ui,

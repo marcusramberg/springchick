@@ -1,25 +1,14 @@
-//! `springchick ipc` — a thin client that talks to a running compositor over
-//! its control socket, reusing the [`crate::debug_input`] line protocol.
-//!
-//! The compositor always listens on [`socket_path`]; `springchick ipc <verb>
-//! [args...]` connects there, sends one line, prints the reply, and exits
-//! non-zero if the reply is an error. The verbs are the debug-input gestures
-//! (`tap`, `swipe`, `key`, `settle`, …) plus `action` (run a built-in
-//! keybinding action by name) and control and query verbs (`reload`, `layers`,
-//! `quit`); further verbs (`state`, …) slot in the same way.
-//!
-//! A reply is always a single line. A query that answers with several records
-//! (`layers`) packs them into that line separated by ` | `, which the client
-//! prints one per line.
+//! `springchick ipc <verb> [args...]`: sends one line over the control socket
+//! (the [`crate::debug_input`] protocol) and prints the one-line reply.
+//! Multi-record replies (`layers`) are joined with ` | `.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// Resolve the control-socket path. `SPRINGCHICK_IPC_SOCK` wins, then the legacy
-/// `SPRINGCHICK_DEBUG_SOCK` (kept so existing test harnesses keep working), else
-/// `$XDG_RUNTIME_DIR/springchick-ipc.sock` (falling back to `/tmp`).
+/// `SPRINGCHICK_IPC_SOCK`, then legacy `SPRINGCHICK_DEBUG_SOCK`, else
+/// `$XDG_RUNTIME_DIR/springchick-ipc.sock` (or `/tmp`).
 pub fn socket_path() -> PathBuf {
     if let Ok(p) = std::env::var("SPRINGCHICK_IPC_SOCK") {
         return p.into();
@@ -31,8 +20,7 @@ pub fn socket_path() -> PathBuf {
     PathBuf::from(dir).join("springchick-ipc.sock")
 }
 
-/// Run the `ipc` subcommand: connect, send `args` joined as one line, print the
-/// reply. Exit 0 on an `ok` reply, 1 on `err` or any I/O failure, 2 on misuse.
+/// Exit 0 on `ok`, 1 on `err` or I/O failure, 2 on misuse.
 pub fn run_client(args: &[String]) -> ExitCode {
     if args.is_empty() {
         eprintln!("usage: springchick ipc <command> [args...]");
@@ -63,7 +51,6 @@ pub fn run_client(args: &[String]) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    // One line of reply: `ok` / `ok <data>` / `err <msg>`.
     let mut reply = String::new();
     if let Err(e) = BufReader::new(&stream).read_line(&mut reply) {
         eprintln!("springchick ipc: read failed: {e}");
@@ -71,8 +58,6 @@ pub fn run_client(args: &[String]) -> ExitCode {
     }
     let reply = reply.trim();
     if !reply.is_empty() {
-        // One line on the wire, but a dump reply (`layers`) packs its entries
-        // with ` | ` separators — break those out so it reads as a table.
         println!("{}", reply.replace(" | ", "\n"));
     }
     if reply.starts_with("ok") {

@@ -1,60 +1,35 @@
-//! Scheduler utilization floor (`util_min`) for the render thread.
+//! Scheduler `util_min` floor for the render thread, held only while drawing.
 //!
-//! On a big.LITTLE phone the render thread's tracked utilization decays while
-//! the screen is idle, so schedutil parks it on the little cluster at a low OPP.
-//! The next touch then renders its first frames there, and short interactions —
-//! a tap, a flick — finish before the governor has ramped, so *every* frame in
-//! them is slow, not just the first.
-//!
-//! Measured on the FP5 (little `cpu_capacity` 382, budget 11.11ms at 90Hz),
-//! first frame after 12s idle over 6 trials each:
-//!
-//! | | no floor | `util_min` 450 |
-//! |---|---|---|
-//! | first frame | 11.78ms (6/6 over budget) | 8.88ms (0/6 over) |
-//! | follow-up frames | 10.21ms | 4.01ms |
-//!
-//! The floor is applied only while the compositor is actually drawing and
-//! dropped again shortly after it settles, so an idle phone is not holding a
-//! big core awake. Raising `util_min` on a task you own needs no privilege.
+//! Idle decays the thread onto the little cluster at a low OPP, and short
+//! interactions finish before schedutil ramps. On the FP5 at 90Hz, first frame
+//! after idle: 11.78ms (6/6 over budget) without, 8.88ms (0/6) with 450.
+//! No privilege needed to raise `util_min` on our own task.
 
 use std::time::{Duration, Instant};
 
 use sc_config::UclampMin;
 use tracing::{debug, info, warn};
 
-/// How long the floor stays applied after the last frame. Short interactions
-/// arrive in bursts, and dropping the clamp between them would pay the ramp-up
-/// cost again on the very next touch, which is the thing this exists to avoid.
+/// Interactions come in bursts; dropping between them pays the ramp again.
 const RELEASE_AFTER: Duration = Duration::from_millis(400);
 
-/// Where the kernel exposes per-CPU capacity, used to find the migration knee.
 const CPU_DIR: &str = "/sys/devices/system/cpu";
 
-/// Pick a floor from the per-CPU `cpu_capacity` values.
-///
-/// The useful floor sits just above the little cluster's capacity: that is the
-/// point where the load balancer stops considering a little core big enough and
-/// migrates the task. Below it nothing changes; far above it only burns extra
-/// frequency on the big core. Returns `None` when every CPU has the same
-/// capacity, since there is no larger core to be moved to.
+/// Just above the little cluster's capacity, where the balancer migrates the
+/// task. `None` when all CPUs are equal.
 pub fn derive_floor(capacities: &[u32]) -> Option<u32> {
     let min = *capacities.iter().filter(|c| **c > 0).min()?;
     let max = *capacities.iter().max()?;
     if min >= max {
         return None;
     }
-    // ~12% over the little cluster clears the knee without reaching for the top
-    // of the big cluster's range. On the FP5 (382) this gives 429; measured, 400
-    // was already enough to move the thread and 800 bought nothing further.
+    // ~12% over the little cluster. FP5 (382) → 429; 400 already moved the
+    // thread, 800 bought nothing.
     let floor = min.saturating_add((min / 8).max(1));
     Some(floor.min(1024))
 }
 
-/// Read `(cpu index, cpu_capacity)` for every CPU the kernel exposes.
-///
-/// Shared with [`crate::resources`], which derives the efficiency cluster from
-/// the same asymmetry this uses to place the render thread.
+/// `(cpu index, cpu_capacity)`; also used by [`crate::resources`].
 pub fn read_capacities() -> Vec<(u32, u32)> {
     let Ok(entries) = std::fs::read_dir(CPU_DIR) else {
         return Vec::new();
@@ -78,21 +53,16 @@ pub fn read_capacities() -> Vec<(u32, u32)> {
     out
 }
 
-/// Applies and releases the floor as the compositor starts and stops drawing.
 pub struct Uclamp {
-    /// The floor to apply while drawing. `None` disables the whole mechanism.
+    /// `None` disables the mechanism.
     floor: Option<u32>,
-    /// Whether the floor is currently applied, so transitions only syscall once.
     applied: bool,
-    /// When the compositor was last drawing, for the release delay.
     last_active: Option<Instant>,
-    /// Set once the kernel refuses a request, so a kernel without
-    /// `CONFIG_UCLAMP_TASK` produces one warning rather than one per frame.
+    /// Set once the kernel refuses (no `CONFIG_UCLAMP_TASK`), to warn only once.
     broken: bool,
 }
 
 impl Uclamp {
-    /// Resolve the configured policy against this machine's topology.
     pub fn new(cfg: UclampMin) -> Self {
         let floor = match cfg {
             UclampMin::Off => None,
@@ -121,10 +91,7 @@ impl Uclamp {
         }
     }
 
-    /// Call once per loop iteration, before rendering, with whether the
-    /// compositor is about to draw. Applying before the render is what lets the
-    /// *first* frame of a touch benefit; applying afterwards would always be a
-    /// frame late.
+    /// Call before rendering, so the first frame of a touch benefits.
     pub fn update(&mut self, drawing: bool, now: Instant) {
         let Some(floor) = self.floor else { return };
         if self.broken {
@@ -151,8 +118,7 @@ impl Uclamp {
     }
 }
 
-/// `sched_attr` as the kernel expects it. Not in libc, so it is spelled out
-/// here; `size` is validated by the kernel against what it knows.
+/// Not in libc.
 #[repr(C)]
 #[derive(Default)]
 struct SchedAttr {
@@ -168,14 +134,12 @@ struct SchedAttr {
     sched_util_max: u32,
 }
 
-// Keep the existing policy, priority and nice; change only the utilization
-// floor. Without KEEP_POLICY/KEEP_PARAMS the zeroed fields above would be
-// applied as a real (SCHED_OTHER, nice 0) request.
+// Without KEEP_POLICY/KEEP_PARAMS the zeroed fields would apply as
+// SCHED_OTHER, nice 0.
 const SCHED_FLAG_KEEP_POLICY: u64 = 0x08;
 const SCHED_FLAG_KEEP_PARAMS: u64 = 0x10;
 const SCHED_FLAG_UTIL_CLAMP_MIN: u64 = 0x20;
 
-/// Set `util_min` on the calling thread.
 fn set_util_min(value: u32) -> std::io::Result<()> {
     let mut attr = SchedAttr {
         size: std::mem::size_of::<SchedAttr>() as u32,
@@ -183,9 +147,8 @@ fn set_util_min(value: u32) -> std::io::Result<()> {
         sched_util_min: value,
         ..Default::default()
     };
-    // SAFETY: `attr` is a live, correctly sized `sched_attr` owned by this
-    // frame, and pid 0 addresses the calling thread. The kernel only reads
-    // `size` bytes from the pointer and writes nothing back.
+    // SAFETY: `attr` is a live, correctly sized `sched_attr`; pid 0 is the
+    // calling thread; the kernel only reads it.
     let rc = unsafe {
         libc::syscall(
             libc::SYS_sched_setattr,
@@ -207,7 +170,6 @@ mod tests {
 
     #[test]
     fn derives_just_above_the_little_cluster() {
-        // FP5: 4x382, 3x889, 1x1024. Measured knee is at 382.
         let fp5 = [382, 382, 382, 382, 889, 889, 889, 1024];
         let floor = derive_floor(&fp5).unwrap();
         assert!(floor > 382, "must clear the little cluster, got {floor}");
@@ -216,7 +178,6 @@ mod tests {
 
     #[test]
     fn two_cluster_split_also_clears_the_knee() {
-        // sdm845-style 4+4 split.
         let caps = [400, 400, 400, 400, 1024, 1024, 1024, 1024];
         let floor = derive_floor(&caps).unwrap();
         assert!(floor > 400 && floor < 1024, "got {floor}");
@@ -224,7 +185,6 @@ mod tests {
 
     #[test]
     fn homogeneous_cpus_get_no_floor() {
-        // Nothing bigger to migrate to, so clamping only raises frequency.
         assert_eq!(derive_floor(&[1024, 1024, 1024, 1024]), None);
     }
 
@@ -242,7 +202,6 @@ mod tests {
     fn off_disables_entirely() {
         let mut u = Uclamp::new(UclampMin::Off);
         assert!(u.floor.is_none());
-        // Must not syscall or change state.
         u.update(true, Instant::now());
         assert!(!u.applied);
     }
@@ -256,7 +215,7 @@ mod tests {
     fn holds_the_floor_briefly_after_drawing_stops() {
         let mut u = Uclamp::new(UclampMin::Fixed(450));
         if u.broken {
-            return; // kernel without uclamp support; nothing to assert
+            return; // kernel without uclamp support
         }
         let t0 = Instant::now();
         u.update(true, t0);

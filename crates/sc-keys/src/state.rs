@@ -1,26 +1,19 @@
-//! Short/long press state machine.
-//!
-//! Clock-injected: the caller supplies `Instant`s, so the timing rules are
-//! testable without sleeping. A long press fires the moment the threshold is
-//! crossed, while the key is still held; the matching short binding is then
-//! suppressed on release.
+//! Short/long press state machine. A long press fires as soon as the threshold
+//! passes, and suppresses the short binding on release.
 
 use sc_config::{Action, ModMask, PressKind};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// What the compositor should do with a key event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PressOutcome {
-    /// Run this action, and keep the key from the focused client.
+    /// Fire, and keep the key from the client.
     Fire(Action),
-    /// Keep the key from the focused client; nothing to run.
+    /// Keep the key from the client.
     Swallow,
-    /// Not bound — forward to the focused client.
     Forward,
 }
 
-/// Resolved bindings, keyed by `(keysym, modifiers)`.
 #[derive(Clone, Debug, Default)]
 pub struct KeyBindings {
     map: HashMap<(u32, ModMask), Slot>,
@@ -34,8 +27,7 @@ struct Slot {
 }
 
 impl KeyBindings {
-    /// Build from resolved `(keysym, mods, press, action)` tuples. A duplicate
-    /// `(keysym, mods, press)` triple means the last entry wins.
+    /// Last duplicate wins.
     pub fn new(
         entries: impl IntoIterator<Item = (u32, ModMask, PressKind, Action)>,
         long_press: Duration,
@@ -63,19 +55,13 @@ impl KeyBindings {
         self.map.get(&(keysym, mods))
     }
 
-    /// Whether `keysym` appears in any binding, under any modifiers. Only for
-    /// diagnostics — matching a binding needs the modifiers too (see
-    /// [`PressTracker::on_release`], where confusing the two made bare keys
-    /// repeat forever).
+    /// Diagnostics only: matching needs the modifiers too (see
+    /// [`PressTracker::on_release`]).
     pub fn binds_keysym(&self, keysym: u32) -> bool {
         self.map.keys().any(|(k, _)| *k == keysym)
     }
 
-    /// Whether `(keysym, mods)` runs `action` on either a short or a long press.
-    ///
-    /// Both presses count because the caller asking is the blanking policy: the
-    /// power key wakes the panel on the way down, before short vs long is even
-    /// decided.
+    /// Short or long: the blanking policy asks before that's decided.
     pub fn binds_action(&self, keysym: u32, mods: ModMask, action: &Action) -> bool {
         self.slot(keysym, mods).is_some_and(|slot| {
             slot.short.as_ref() == Some(action) || slot.long.as_ref() == Some(action)
@@ -83,7 +69,6 @@ impl KeyBindings {
     }
 }
 
-/// A key currently held down.
 #[derive(Clone, Debug)]
 struct Held {
     mods: ModMask,
@@ -91,7 +76,6 @@ struct Held {
     long_fired: bool,
 }
 
-/// Tracks held keys and decides short vs long.
 #[derive(Clone, Debug)]
 pub struct PressTracker {
     bindings: KeyBindings,
@@ -110,14 +94,12 @@ impl PressTracker {
         &self.bindings
     }
 
-    /// Key went down. Any bound key is swallowed, including one that only has a
-    /// long binding — an app that should see the key needs an explicit short
-    /// binding.
+    /// Any bound key is swallowed, even with only a long binding.
     pub fn on_press(&mut self, keysym: u32, mods: ModMask, now: Instant) -> PressOutcome {
         if self.bindings.slot(keysym, mods).is_none() {
             return PressOutcome::Forward;
         }
-        // A repeat press of a held key must not restart the long-press clock.
+        // A repeat press must not restart the long-press clock.
         self.held.entry(keysym).or_insert(Held {
             mods,
             pressed_at: now,
@@ -126,19 +108,11 @@ impl PressTracker {
         PressOutcome::Swallow
     }
 
-    /// Key came up. Fires the short binding only if the long one did not
-    /// already fire for this press.
     pub fn on_release(&mut self, keysym: u32, now: Instant) -> PressOutcome {
         let Some(held) = self.held.remove(&keysym) else {
-            // No record of this key going down, so `on_press` forwarded it and
-            // the client is holding a press that only this release can end.
-            //
-            // Forward it even when the keysym appears in some binding: it is
-            // bound under *modifiers*, and this press had none. Swallowing on
-            // the mere keysym match is what made a bare `s` repeat forever in a
-            // terminal once `Super+s` existed — the client saw the press, never
-            // the release, and its own key-repeat ran on. A stray release with
-            // no matching press is harmless by comparison.
+            // No record of the press, so it was forwarded and the client needs the
+            // release. Don't swallow on a keysym-only match: with `Super+s` bound, a
+            // bare `s` would repeat forever.
             return PressOutcome::Forward;
         };
 
@@ -147,8 +121,7 @@ impl PressTracker {
         }
         let elapsed = now.saturating_duration_since(held.pressed_at);
         if elapsed >= self.bindings.long_press {
-            // Held past the threshold but never polled; the long binding owns
-            // this press either way.
+            // Held past the threshold but never polled; the long binding owns it.
             return PressOutcome::Swallow;
         }
         match self
@@ -161,11 +134,10 @@ impl PressTracker {
         }
     }
 
-    /// Fire any long binding whose threshold has been crossed. Returns one
-    /// action per call; callers poll in a loop.
+    /// One action per call; callers loop.
     pub fn poll(&mut self, now: Instant) -> Option<Action> {
         let long_press = self.bindings.long_press;
-        // Deterministic order when two keys cross in the same tick: earliest press first.
+        // Earliest press first when two cross in the same tick.
         let mut ready: Vec<(u32, Instant)> = self
             .held
             .iter()
@@ -187,7 +159,6 @@ impl PressTracker {
                 }
                 return Some(action);
             }
-            // No long binding: mark it so we stop reconsidering this press.
             if let Some(h) = self.held.get_mut(&keysym) {
                 h.long_fired = true;
             }
@@ -195,7 +166,6 @@ impl PressTracker {
         None
     }
 
-    /// When the next long press would fire, for loops that want to sleep.
     pub fn next_deadline(&self) -> Option<Instant> {
         let long_press = self.bindings.long_press;
         self.held
@@ -347,17 +317,13 @@ mod tests {
 
     #[test]
     fn release_of_a_never_pressed_key_is_forwarded() {
-        // Whatever the client got the press, it must get the release.
         let (mut t, t0) = tracker();
         assert_eq!(t.on_release(VOL_UP, t0), PressOutcome::Forward);
     }
 
     #[test]
     fn a_bare_key_bound_only_under_modifiers_passes_through_both_ways() {
-        // Regression: `Super+s` is a binding, plain `s` is not. Swallowing the
-        // bare release (the keysym does appear in a binding) left the client
-        // holding a press that never ended, so a terminal repeated the letter
-        // until another key arrived.
+        // `Super+s` bound, bare `s` not: the bare release must be forwarded.
         const S: u32 = 0x73;
         let logo = ModMask {
             logo: true,
@@ -371,7 +337,6 @@ mod tests {
         assert_eq!(t.on_press(S, ModMask::NONE, t0), PressOutcome::Forward);
         assert_eq!(t.on_release(S, at(t0, 30)), PressOutcome::Forward);
 
-        // ...while the modified chord still fires and reaches no client.
         assert_eq!(t.on_press(S, logo, at(t0, 100)), PressOutcome::Swallow);
         assert!(matches!(
             t.on_release(S, at(t0, 130)),

@@ -1,10 +1,5 @@
-//! inotify watch over every XDG `applications/` dir, so apps installed or
-//! removed by a package manager appear without an `ipc reload`.
-//!
-//! The thread blocks in `read()` — idle cost is zero, no polling, nothing to
-//! pause when the display is off. It only sets a flag; the rescan itself runs
-//! on the compositor thread the next time the event loop wakes, which while
-//! blanked is the next real input.
+//! inotify watch over the XDG `applications/` dirs. The thread only sets a
+//! flag; the rescan runs on the compositor thread at the next event-loop wake.
 
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,17 +10,14 @@ use rustix::event::{PollFd, PollFlags};
 use rustix::fs::inotify;
 use tracing::{debug, warn};
 
-/// Coalesce a package-manager transaction (hundreds of file events) into one
-/// rescan.
+/// Coalesces a package-manager transaction into one rescan.
 const DEBOUNCE: Duration = Duration::from_millis(750);
 
-/// Set when the catalog on disk has changed; cleared by [`take`].
 pub type Dirty = Arc<AtomicBool>;
 
 pub fn spawn() -> Dirty {
     let dirty: Dirty = Arc::new(AtomicBool::new(false));
-    // NONBLOCK so the queue can be drained to empty; the thread parks in
-    // `poll` instead of `read`.
+    // NONBLOCK so the queue can be drained; the thread parks in `poll`.
     let fd = match inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK) {
         Ok(fd) => fd,
         Err(e) => {
@@ -45,7 +37,6 @@ pub fn spawn() -> Dirty {
         let dir = dir.join("applications");
         match inotify::add_watch(&fd, &dir, flags) {
             Ok(_) => watched += 1,
-            // Missing dirs are normal (an XDG_DATA_DIRS entry with no apps).
             Err(e) => debug!(path = %dir.display(), %e, "not watching"),
         }
     }
@@ -67,8 +58,6 @@ pub fn spawn() -> Dirty {
                     }
                 }
                 drain(&fd, &mut buf);
-                // Let a package-manager transaction finish, then swallow the
-                // rest of it so it costs one rescan, not hundreds.
                 std::thread::sleep(DEBOUNCE);
                 drain(&fd, &mut buf);
                 flag.store(true, Ordering::Relaxed);
@@ -79,13 +68,11 @@ pub fn spawn() -> Dirty {
     dirty
 }
 
-/// Read the queue until empty (the fd is non-blocking).
 fn drain(fd: &impl std::os::fd::AsFd, buf: &mut [MaybeUninit<u8>]) {
     let mut reader = inotify::Reader::new(fd, buf);
     while reader.next().is_ok() {}
 }
 
-/// True once per detected change.
 pub fn take(dirty: &Dirty) -> bool {
     dirty.swap(false, Ordering::Relaxed)
 }

@@ -1,29 +1,7 @@
-//! wlr-screencopy-unstable-v1: screen capture for the pre-`ext` tool ecosystem.
-//!
-//! springchick's primary capture protocol is `ext-image-copy-capture-v1` (see
-//! [`crate::capture`] and the handlers in [`crate::handlers`]). This module adds
-//! the older wlr protocol *as well*, because the tools that matter on this
-//! device only speak it: `wf-recorder` (the one recorder that reaches the FP5's
-//! v4l2 h264 encoder without VAAPI), OBS's wlrobs, and xdg-desktop-portal-wlr.
-//!
-//! smithay ships no handler for it, so the two interfaces are wired by hand
-//! here, like [`crate::gamma_control`]. The protocol itself is much simpler than
-//! `ext`: no sessions and no constraint negotiation — the compositor states the
-//! buffer parameters up front, the client allocates one and asks for a copy.
-//!
-//! Only **shm** buffers are offered (no `linux_dmabuf` event). That is what
-//! wf-recorder uses, and it keeps this path on the same readback code the `ext`
-//! shm path uses. A frame is filled from the render loop, so a copy always shows
-//! a complete, just-composited scene.
-//!
-//! Deliberate simplifications, all invisible to the tools above:
-//! - `copy_with_damage` copies the next frame like `copy` does, and reports the
-//!   whole captured region as damaged. Recorders use it as a "when should I grab
-//!   the next frame" signal, not as a partial-update optimisation.
-//! - `overlay_cursor` is ignored: this is a touch device and no cursor is ever
-//!   composited.
-//! - The `flags` event always reports 0 (not `y_invert`): the readback in
-//!   [`crate::capture`] is already top-down.
+//! wlr-screencopy-unstable-v1 for wlr-era tools (wf-recorder, wlrobs,
+//! xdg-desktop-portal-wlr), wired by hand. shm only, filled from the render
+//! loop. `copy_with_damage` reports the whole region, `overlay_cursor` is
+//! ignored, and `flags` is 0 since the readback is already top-down.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -44,36 +22,31 @@ use tracing::warn;
 use crate::capture::{self, ShmTarget};
 use crate::State;
 
-/// The shm format advertised to clients. `Xrgb8888` is what every wlr recorder
-/// handles, and [`crate::capture`] can read the framebuffer back into it.
 const FORMAT: wl_shm::Format = wl_shm::Format::Xrgb8888;
 
-/// Per-frame-object state. One `zwlr_screencopy_frame_v1` may be copied once.
+/// A frame object may be copied once.
 pub struct FrameData {
     inner: Mutex<FrameInner>,
 }
 
 struct FrameInner {
-    /// Region of the output this frame captures, in physical pixels.
+    /// Physical pixels.
     region: Rectangle<i32, BufferCoord>,
-    /// Set once a copy request has been accepted — a second one is a protocol
-    /// error (`already_used`).
+    /// A second copy is an `already_used` protocol error.
     used: bool,
 }
 
-/// A copy request accepted by the protocol and awaiting the render loop.
 pub struct PendingCopy {
     obj: ZwlrScreencopyFrameV1,
-    /// The client's shm buffer, already validated against `region`.
+    /// Already validated against `region`.
     pub buffer: WlBuffer,
-    /// Where in the output to read from, in physical pixels.
+    /// Physical pixels.
     pub region: Rectangle<i32, BufferCoord>,
-    /// `copy_with_damage` was used, so a `damage` event is owed before `ready`.
+    /// A `damage` event is owed before `ready`.
     with_damage: bool,
 }
 
 impl PendingCopy {
-    /// Report a completed copy: `flags`, the optional `damage`, then `ready`.
     pub fn success(self, presented: impl Into<Duration>) {
         let presented: Duration = presented.into();
         if !self.obj.is_alive() {
@@ -96,14 +69,12 @@ impl PendingCopy {
         );
     }
 
-    /// Report a failed copy. The client is expected to destroy the frame.
     pub fn failed(self) {
         if self.obj.is_alive() {
             self.obj.failed();
         }
     }
 
-    /// The shm buffer geometry to read back into.
     pub fn target(&self) -> ShmTarget {
         ShmTarget {
             size: self.region.size,
@@ -113,7 +84,6 @@ impl PendingCopy {
     }
 }
 
-/// Advertise `zwlr_screencopy_manager_v1`.
 pub fn init(dh: &DisplayHandle) {
     dh.create_global::<State, ZwlrScreencopyManagerV1, ()>(3, ());
 }
@@ -153,9 +123,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
                 height,
                 ..
             } => {
-                // Region arrives in output *logical* coordinates (xdg_output),
-                // and the output is scaled by `dpi`; the framebuffer we read
-                // back is physical, so scale before clipping.
+                // Logical (xdg_output) coords; the readback is physical.
                 let scale = state.dpi;
                 let to_phys = |v: i32| (f64::from(v) * scale).round() as i32;
                 let asked = Rectangle::new(
@@ -171,8 +139,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
             _ => return,
         };
 
-        // An empty region (fully off-output, or a zero-size request) can never
-        // produce a buffer, so fail the frame instead of advertising one.
+        // An empty region can never produce a buffer.
         if region.size.w <= 0 || region.size.h <= 0 {
             let obj = data_init.init(
                 frame,
@@ -196,7 +163,6 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
                 }),
             },
         );
-        // shm only — no `linux_dmabuf` event, see the module docs.
         obj.buffer(
             FORMAT,
             region.size.w as u32,
@@ -236,7 +202,6 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for State {
         }
         let region = inner.region;
 
-        // The buffer must match what we advertised, exactly.
         if let Err(e) = check_buffer(&buffer, region.size) {
             warn!("wlr-screencopy: {e}");
             resource.post_error(zwlr_screencopy_frame_v1::Error::InvalidBuffer, e);
@@ -251,13 +216,11 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for State {
             region,
             with_damage,
         });
-        // The copy is served from the next composited frame, so make sure one
-        // happens even if the screen is otherwise idle.
+        // Served from the next frame; make sure there is one.
         state.needs_render = true;
     }
 }
 
-/// Validate a client buffer against the parameters advertised for the frame.
 fn check_buffer(buffer: &WlBuffer, size: Size<i32, BufferCoord>) -> Result<(), &'static str> {
     let Some(target) = capture::shm_target(buffer) else {
         return Err("buffer is not a supported shm buffer");
@@ -272,7 +235,6 @@ fn check_buffer(buffer: &WlBuffer, size: Size<i32, BufferCoord>) -> Result<(), &
 }
 
 impl State {
-    /// The whole output, in the physical pixels a capture reads back.
     fn output_rect(&self) -> Rectangle<i32, BufferCoord> {
         Rectangle::from_size((self.panel_size.0, self.panel_size.1).into())
     }

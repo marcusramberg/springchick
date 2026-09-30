@@ -1,33 +1,23 @@
-//! Geometry for the app library: the folder tiles on the last home page, and
-//! the panel one of them opens.
-//!
-//! The tiles sit in the ordinary home grid cells — same columns, same icon
-//! size — so an app dragged out of a folder lands in a cell the same size it
-//! left. The panel reuses those cells too, scrolled and clipped to a card.
+//! App library geometry. Tiles and panel rows reuse the home grid cells, so an
+//! app dragged out of a folder keeps its size.
 
 use crate::{grid_metrics, grid_slot, IconSlot, Rect};
 use sc_shell_model::COLS;
 
-/// A folder tile on the library page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FolderSlot {
     pub name: String,
-    /// The rounded tile, occupying the cell's icon footprint.
     pub tile_rect: Rect,
-    /// Label below the tile.
     pub label_rect: Rect,
-    /// Up to four member-icon rects inside the tile, row-major 2x2.
+    /// Up to four member-icon rects, row-major 2x2.
     pub preview: Vec<Rect>,
 }
 
-/// Inset of the 2x2 preview inside the tile, as a fraction of the tile edge.
+/// Fractions of the tile edge.
 const PREVIEW_PAD_FRAC: f32 = 0.12;
-/// Gap between the two preview columns/rows, as a fraction of the tile edge.
 const PREVIEW_GAP_FRAC: f32 = 0.06;
 
-/// Folder tiles for the library page: `(name, member count)` in display order.
-/// Only the count is needed — the caller holds the app ids and this just makes
-/// the preview rects to draw the first four into.
+/// `(name, member count)` in display order.
 pub fn folders(width: f32, height: f32, names: &[(String, usize)]) -> Vec<FolderSlot> {
     let gm = grid_metrics(width, height);
     names
@@ -45,7 +35,6 @@ pub fn folders(width: f32, height: f32, names: &[(String, usize)]) -> Vec<Folder
         .collect()
 }
 
-/// The 2x2 mini-icon rects inside a tile, row-major, first `n` of them.
 fn preview_rects(tile: Rect, n: usize) -> Vec<Rect> {
     let pad = tile.w * PREVIEW_PAD_FRAC;
     let gap = tile.w * PREVIEW_GAP_FRAC;
@@ -60,52 +49,39 @@ fn preview_rects(tile: Rect, n: usize) -> Vec<Rect> {
         .collect()
 }
 
-/// Index of the folder tile at `(x, y)`, or `None`.
 pub fn hit_test(folders: &[FolderSlot], x: f32, y: f32) -> Option<usize> {
     folders
         .iter()
         .position(|f| f.tile_rect.contains(x, y) || f.label_rect.contains(x, y))
 }
 
-/// An open folder's panel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PanelLayout {
-    /// The rounded card. Everything inside is clipped to it.
+    /// Everything inside is clipped to it.
     pub panel: Rect,
-    /// Folder name, at the top of the card.
     pub title_rect: Rect,
-    /// Member icons, already shifted by the scroll offset — some may lie
-    /// outside `panel` and must be clipped by the caller.
+    /// Already scrolled; may lie outside `panel`, the caller clips.
     pub apps: Vec<IconSlot>,
-    /// Total height the rows occupy, unscrolled.
     pub content_h: f32,
-    /// Height visible for rows (the card minus its title and padding).
     pub view_h: f32,
 }
 
 impl PanelLayout {
-    /// Largest useful scroll offset; 0 when everything fits.
     pub fn max_scroll(&self) -> f32 {
         (self.content_h - self.view_h).max(0.0)
     }
 }
 
-/// Card inset from the screen edges, as a fraction of the smaller dimension.
 const PANEL_MARGIN_FRAC: f32 = 0.04;
-/// Title band height, as a fraction of output height.
 const TITLE_H_FRAC: f32 = 0.035;
 
-/// Lay out the panel for a folder holding `app_ids`, scrolled down by `scroll`
-/// logical pixels. `scroll` is clamped to `[0, max_scroll]`, so a caller can
-/// over-scroll freely and read back the clamped value from the slot positions.
+/// `scroll` is clamped to `[0, max_scroll]`.
 pub fn panel(width: f32, height: f32, app_ids: &[String], scroll: f32) -> PanelLayout {
     let gm = grid_metrics(width, height);
     let margin = width.min(height) * PANEL_MARGIN_FRAC;
     let title_h = height * TITLE_H_FRAC;
 
-    // The card spans the grid band: below the top padding, above the dots. The
-    // dock stays visible underneath, which is what makes a drag out of the
-    // panel and onto the dock possible.
+    // Spans the grid band, leaving the dock visible so a drag can reach it.
     let panel = Rect {
         x: margin,
         y: gm.grid_top,
@@ -124,10 +100,7 @@ pub fn panel(width: f32, height: f32, app_ids: &[String], scroll: f32) -> PanelL
     let view_h = (panel.h - title_h).max(0.0);
     let scroll = scroll.clamp(0.0, (content_h - view_h).max(0.0));
 
-    // Rows are laid out in the ordinary grid cells, then moved as a block to
-    // start under the title and shifted by the scroll. Reusing `grid_slot`
-    // keeps the icons pixel-identical to the ones on a home page, which is what
-    // makes a drag out of the panel look continuous.
+    // Same cells as a home page, shifted under the title and by the scroll.
     let dy = panel.y + title_h - gm.grid_top - scroll;
     let apps = app_ids
         .iter()
@@ -159,15 +132,14 @@ fn shift_slot(slot: &mut IconSlot, dy: f32) {
     }
 }
 
-/// What a press inside an open folder landed on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PanelHit {
-    /// A member app.
-    App { app_id: String, index: usize },
-    /// The card, but not an app — swallow it (a press here scrolls or does
-    /// nothing; it must not fall through to the page underneath).
+    App {
+        app_id: String,
+        index: usize,
+    },
+    /// Inside the card but not an app; must not fall through.
     Panel,
-    /// Outside the card: dismiss the folder.
     Outside,
 }
 
@@ -175,8 +147,7 @@ pub fn panel_hit_test(p: &PanelLayout, x: f32, y: f32) -> PanelHit {
     if !p.panel.contains(x, y) {
         return PanelHit::Outside;
     }
-    // Rows are clipped to the card, so a slot scrolled out from under the title
-    // must not stay tappable where it is no longer drawn.
+    // Rows scrolled under the title aren't drawn, so they aren't tappable.
     let rows = Rect {
         x: p.panel.x,
         y: p.title_rect.y + p.title_rect.h,
@@ -202,8 +173,8 @@ mod tests {
 
     const SIZES: &[(f32, f32)] = &[
         (1224.0, 2700.0), // Fairphone 5, portrait
-        (1901.0, 2088.0), // nested winit window
-        (2700.0, 1224.0), // rotated
+        (1901.0, 2088.0),
+        (2700.0, 1224.0),
         (720.0, 1440.0),
     ];
 
@@ -227,7 +198,6 @@ mod tests {
                     "{w}x{h} tile {i}"
                 );
             }
-            // Row-major: the first COLS tiles share a row, the next starts lower.
             assert!((f[0].tile_rect.y - f[COLS - 1].tile_rect.y).abs() < 0.01);
             assert!(f[COLS].tile_rect.y > f[0].tile_rect.y);
         }
@@ -244,7 +214,6 @@ mod tests {
                 "preview {r:?} escapes tile {t:?}"
             );
         }
-        // Row-major 2x2: second is right of first, third below it.
         assert!(f[0].preview[1].x > f[0].preview[0].x);
         assert!(f[0].preview[2].y > f[0].preview[0].y);
     }
@@ -253,7 +222,7 @@ mod tests {
     fn preview_shows_only_what_the_folder_holds() {
         let f = folders(1224.0, 2700.0, &[("One".into(), 1), ("Many".into(), 9)]);
         assert_eq!(f[0].preview.len(), 1);
-        assert_eq!(f[1].preview.len(), 4); // capped
+        assert_eq!(f[1].preview.len(), 4);
     }
 
     #[test]
@@ -270,7 +239,6 @@ mod tests {
     fn short_folder_does_not_scroll() {
         let p = panel(1224.0, 2700.0, &ids(3), 0.0);
         assert_eq!(p.max_scroll(), 0.0);
-        // First row sits under the title, inside the card.
         let first = p.apps[0].icon_rect;
         assert!(first.y >= p.title_rect.y + p.title_rect.h);
     }
@@ -285,11 +253,9 @@ mod tests {
         let scrolled = panel(w, h, &ids(40), max);
         assert!(scrolled.apps[0].icon_rect.y < unscrolled.apps[0].icon_rect.y);
 
-        // Over-scroll is clamped, not compounded.
         let over = panel(w, h, &ids(40), max * 4.0);
         assert_eq!(over.apps[0].icon_rect.y, scrolled.apps[0].icon_rect.y);
 
-        // Negative scroll is clamped too.
         let under = panel(w, h, &ids(40), -500.0);
         assert_eq!(under.apps[0].icon_rect.y, unscrolled.apps[0].icon_rect.y);
     }
@@ -307,7 +273,6 @@ mod tests {
                 }
             );
         }
-        // The title band is inside the card: swallowed, not a dismiss.
         assert_eq!(
             panel_hit_test(&p, p.title_rect.center_x(), p.title_rect.center_y()),
             PanelHit::Panel
@@ -315,16 +280,11 @@ mod tests {
         assert_eq!(panel_hit_test(&p, 1.0, 1.0), PanelHit::Outside);
     }
 
-    /// A row half-scrolled under the title is drawn clipped, so the hidden part
-    /// must not stay tappable — otherwise a press on the title launches
-    /// whatever happens to be sliding beneath it.
     #[test]
     fn the_part_of_a_row_hidden_under_the_title_is_not_tappable() {
         let (w, h) = (1224.0, 2700.0);
         let unscrolled = panel(w, h, &ids(40), 0.0);
         let rows_top = unscrolled.title_rect.y + unscrolled.title_rect.h;
-        // Scroll the first row's icon centre just above the title edge, so its
-        // lower half is still inside the rows viewport and it straddles.
         let p = panel(
             w,
             h,

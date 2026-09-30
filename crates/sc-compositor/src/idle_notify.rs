@@ -1,21 +1,7 @@
-//! ext-idle-notify-v1: tell clients when the user goes idle.
-//!
-//! Idle daemons (swayidle and friends) create a notification with a timeout and
-//! get `idled` once that much time passes without input, then `resumed` on the
-//! next input event. That is how a phone shell gets "dim after 30s, blank after
-//! 60s" driven from userspace instead of hard-coded here.
-//!
-//! smithay ships a handler for this protocol, but it drives the timeouts with
-//! calloop timers keyed to a `LoopHandle<'static, State>` — which neither
-//! backend has (the winit loop is a plain `while`, and the DRM loop's calloop
-//! data type is `App`, not `State`). Both loops already spin at ~1ms, so the
-//! two interfaces are wired by hand here and the timeouts are polled once per
-//! iteration from [`IdleNotify::refresh`].
-//!
-//! Version 2 is advertised: `get_input_idle_notification` ignores idle
-//! *inhibitors* (a media player holding the screen on via
-//! `zwp_idle_inhibit_manager_v1`, see [`crate::idle_inhibit`]), where plain
-//! `get_idle_notification` honours them.
+//! ext-idle-notify-v1, wired by hand: smithay's handler needs a
+//! `LoopHandle<'static, State>` neither backend has, so timeouts are polled
+//! from [`IdleNotify::refresh`] each loop iteration. v2's
+//! `get_input_idle_notification` ignores idle inhibitors.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -32,28 +18,21 @@ use smithay::reexports::wayland_server::{
 
 use crate::State;
 
-/// Per-notification data. Lives in the resource's user data so `destroyed` can
-/// find it, and is shared with the list in [`IdleNotify`].
+/// Shared between the resource's user data (for `destroyed`) and the list.
 #[derive(Debug)]
 pub struct NotificationData {
     timeout: Duration,
-    /// Whether `idled` has been sent and not yet followed by `resumed`.
     idled: AtomicBool,
-    /// Created with `get_input_idle_notification`: tracks raw input only, so an
-    /// idle inhibitor does not hold it back.
     ignore_inhibitor: bool,
 }
 
-/// Compositor-side state for the idle-notify protocol.
 pub struct IdleNotify {
     notifications: Vec<(ExtIdleNotificationV1, Arc<NotificationData>)>,
-    /// Last input event. Seeded at construction so a notification created at
-    /// startup waits a full timeout before firing.
+    /// Seeded at construction so a startup notification waits a full timeout.
     last_activity: Instant,
 }
 
 impl IdleNotify {
-    /// Create the notifier global.
     pub fn new(dh: &DisplayHandle, now: Instant) -> Self {
         dh.create_global::<State, ExtIdleNotifierV1, ()>(2, ());
         IdleNotify {
@@ -62,7 +41,6 @@ impl IdleNotify {
         }
     }
 
-    /// Record input. Any notification currently idled gets `resumed`.
     pub fn activity(&mut self, now: Instant) {
         self.last_activity = now;
         for (resource, data) in &self.notifications {
@@ -72,13 +50,8 @@ impl IdleNotify {
         }
     }
 
-    /// Poll the timeouts; sends `idled` to whatever has just crossed its own.
-    /// Called once per frame-loop iteration by both backends.
-    ///
-    /// `inhibited` is whether a visible surface currently holds an idle
-    /// inhibitor. While it does, inhibitor-honouring notifications never idle,
-    /// and any that already had are resumed — the same treatment as input, so a
-    /// video that starts playing pulls the screen back out of "idle".
+    /// `inhibited`: a visible surface holds an idle inhibitor. That counts as
+    /// input for inhibitor-honouring notifications.
     pub fn refresh(&mut self, now: Instant, inhibited: bool) {
         let elapsed = now.duration_since(self.last_activity);
         for (resource, data) in &self.notifications {
@@ -118,8 +91,7 @@ impl Dispatch<ExtIdleNotifierV1, ()> for State {
         _dh: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        // `seat` is ignored: springchick has exactly one seat, and idleness is a
-        // property of the whole shell here.
+        // One seat; `seat` is ignored.
         let (id, timeout, ignore_inhibitor) = match request {
             ext_idle_notifier_v1::Request::GetIdleNotification { id, timeout, .. } => {
                 (id, timeout, false)
@@ -136,8 +108,6 @@ impl Dispatch<ExtIdleNotifierV1, ()> for State {
             ignore_inhibitor,
         });
         let resource = data_init.init(id, data.clone());
-        // A zero timeout means "idle immediately"; refresh() picks that up on
-        // the next iteration, so nothing special is needed here.
         state.idle_notify.notifications.push((resource, data));
     }
 }
@@ -152,7 +122,6 @@ impl Dispatch<ExtIdleNotificationV1, Arc<NotificationData>> for State {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        // The only request is `destroy`; cleanup happens in `destroyed`.
     }
 
     fn destroyed(

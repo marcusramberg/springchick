@@ -1,40 +1,16 @@
-//! `ext-session-lock-v1`: screen locking driven by an external lock client
-//! (dms's lock screen, swaylock, ...).
+//! `ext-session-lock-v1`. Once locked, no client content but the lock surface
+//! may be shown, even if the lock client crashes: render, touch, keyboard and
+//! keybinds all gate on [`SessionLock::is_locked`], and a dead lock client
+//! leaves [`LockView::Blank`]. Only `unlock_and_destroy` from the owning lock
+//! clears it.
 //!
-//! The protocol's contract is security-shaped, not cosmetic: once a client asks
-//! for the lock, the compositor must stop showing *any* client content — and
-//! keep it hidden even if the lock client crashes. So the lock is a hard gate in
-//! front of the whole shell rather than another surface stacked on top:
+//! smithay reports every `lock` request and treats whichever `SessionLocker`
+//! we confirm as the owner, so a second `lock` is refused and lock surfaces
+//! are only adopted from the owner. Otherwise any client could take over a
+//! locked session.
 //!
-//! - [`crate::render::draw_scene`] short-circuits to [`LockView`]: the lock
-//!   surface if the client gave us one, otherwise a black screen. The home
-//!   screen, the app, the layers and the popups are not drawn at all.
-//! - [`crate::touch`] routes every press to the lock surface (or nowhere) and
-//!   the home gesture funnel is never fed.
-//! - [`crate::toplevel::State::sync_keyboard_focus`] hands the keyboard to the
-//!   lock surface, and [`crate::keybinds`] drops every shell action that could
-//!   otherwise reach past the lock.
-//!
-//! The `locked` flag is only cleared by an explicit `unlock_and_destroy` from
-//! the client. A lock client that dies without unlocking leaves us locked with
-//! no surface — [`LockView::Blank`] — which is exactly the intended failure
-//! mode: the session is unreachable, not wide open.
-//!
-//! That rule only holds if the lock stays with the client that took it. smithay
-//! reports every `lock` request to us regardless of the session's state, and
-//! treats whichever `SessionLocker` we confirm as the lock's owner — the one
-//! instance whose `unlock_and_destroy` it will honour. A second `lock` is
-//! therefore refused outright, and lock surfaces are only adopted from the
-//! owning `ext_session_lock_v1`; otherwise any client could take a locked
-//! session over, draw its own prompt, and unlock it.
-//!
-//! ## Confirming the lock
-//!
-//! `ext_session_lock_v1.locked` promises the client that nothing of the session
-//! is visible any more, so it may only be sent once a frame drawn under the lock
-//! has actually been presented. [`SessionLock::tick`] therefore holds the
-//! [`SessionLocker`] for one full frame — the lock engages visually on the frame
-//! the request arrived, and the confirmation goes out on the next one.
+//! `locked` may only be sent after a frame drawn under the lock is presented,
+//! so [`SessionLock::tick`] holds the confirmation one frame.
 
 use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
@@ -48,23 +24,15 @@ use tracing::{info, warn};
 
 use crate::state::State;
 
-/// What the render path should put on screen for the lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LockView {
-    /// No lock: draw the shell as usual.
     Unlocked,
-    /// Locked with a live lock surface — draw it, and nothing else.
     Surface,
-    /// Locked with no usable surface (the lock client hasn't produced one yet,
-    /// or died holding the lock). Draw black.
+    /// No surface yet, or the lock client died. Draw black.
     Blank,
 }
 
-/// Resolve the lock's render view from the two facts that decide it.
-///
-/// Split out from [`SessionLock::view`] so the (load-bearing) rule that a locked
-/// session without a surface still hides everything is unit-testable without a
-/// Wayland display.
+/// Split out so the locked-without-surface rule is testable.
 pub fn lock_view(locked: bool, has_surface: bool) -> LockView {
     match (locked, has_surface) {
         (false, _) => LockView::Unlocked,
@@ -73,31 +41,19 @@ pub fn lock_view(locked: bool, has_surface: bool) -> LockView {
     }
 }
 
-/// `ext-session-lock-v1` state: the manager global, the current lock, and the
-/// surface the lock client gave us.
 pub struct SessionLock {
-    /// smithay's protocol state (holds the global + the locked-output list).
     pub manager: SessionLockManagerState,
-    /// Whether the session is locked. Set the moment the request arrives (before
-    /// the client is told), cleared only by `unlock_and_destroy`.
+    /// Set when the request arrives; cleared only by `unlock_and_destroy`.
     locked: bool,
-    /// Confirmation owed to the client, held until a locked frame has been
-    /// presented. `None` once sent (or if locking was abandoned).
+    /// Held until a locked frame has been presented.
     pending: Option<SessionLocker>,
-    /// Frames prepared since the lock engaged; the confirmation waits for one.
     frames: u32,
-    /// The lock client's surface, if it has created one.
     surface: Option<LockSurface>,
-    /// The `ext_session_lock_v1` that owns the current lock. Every later request
-    /// is checked against it: smithay hands us a `SessionLocker` for *every*
-    /// `lock` request, whatever the session's state, so refusing a second one is
-    /// our job (see [`SessionLock::owns`]).
+    /// The `ext_session_lock_v1` that owns the lock; see [`SessionLock::owns`].
     owner: Option<ExtSessionLockV1>,
 }
 
 impl SessionLock {
-    /// Create the manager global. Any client may bind it — a filter would only
-    /// be useful with a security-context sandbox to filter on.
     pub fn new(dh: &DisplayHandle) -> Self {
         SessionLock {
             manager: SessionLockManagerState::new::<State, _>(dh, |_client| true),
@@ -109,21 +65,16 @@ impl SessionLock {
         }
     }
 
-    /// Whether `lock` is the `ext_session_lock_v1` that holds the current lock.
-    /// False while unlocked, and false for every other instance — including one
-    /// from the same client.
+    /// False for every other instance, including one from the same client.
     fn owns(&self, lock: &ExtSessionLockV1) -> bool {
         self.owner.as_ref() == Some(lock)
     }
 
-    /// Whether the session is locked, i.e. no client content but the lock
-    /// surface may be shown and no shell input may be acted on.
     pub fn is_locked(&self) -> bool {
         self.locked
     }
 
-    /// The lock surface's `wl_surface`, if the client made one and it is alive.
-    /// A destroyed surface reads as absent so the screen falls back to black.
+    /// A destroyed surface reads as absent.
     pub fn wl_surface(&self) -> Option<&WlSurface> {
         self.surface
             .as_ref()
@@ -131,19 +82,15 @@ impl SessionLock {
             .map(|s| s.wl_surface())
     }
 
-    /// What to draw this frame.
     pub fn view(&self) -> LockView {
         lock_view(self.locked, self.wl_surface().is_some())
     }
 
-    /// True while a confirmation is still owed, so the frame loops keep drawing
-    /// until the locked frame that satisfies it has been presented.
+    /// Keeps the frame loops drawing until the confirmation is sent.
     pub fn needs_frame(&self) -> bool {
         self.pending.is_some()
     }
 
-    /// Engage the lock. The screen goes to [`LockView::Blank`] on this frame;
-    /// the client is told on the next one (see [`Self::tick`]).
     fn engage(&mut self, confirmation: SessionLocker) {
         self.locked = true;
         self.owner = Some(confirmation.ext_session_lock().clone());
@@ -151,7 +98,6 @@ impl SessionLock {
         self.frames = 0;
     }
 
-    /// Release the lock (client sent `unlock_and_destroy`).
     fn release(&mut self) {
         self.locked = false;
         self.pending = None;
@@ -160,20 +106,16 @@ impl SessionLock {
         self.owner = None;
     }
 
-    /// Adopt the lock client's surface.
     fn set_surface(&mut self, surface: LockSurface) {
         self.surface = Some(surface);
     }
 
-    /// The lock surface was destroyed — the client unlocked, or died holding the
-    /// lock. Either way there is nothing left to draw from it.
     fn forget_surface(&mut self) {
         self.surface = None;
     }
 
-    /// Per-frame: once a full frame has been prepared under the lock, send the
-    /// confirmation. Dropping the [`SessionLocker`] instead would tell the client
-    /// locking failed, so it is only ever taken to confirm.
+    /// Dropping the [`SessionLocker`] would tell the client locking failed, so
+    /// it is only taken to confirm.
     pub fn tick(&mut self) {
         if self.pending.is_none() {
             return;
@@ -188,11 +130,9 @@ impl SessionLock {
         }
     }
 
-    /// Confirm without waiting for a frame. Only valid with the panel dark:
-    /// `render` returns before `advance_frame` while blanked, so `tick` never
-    /// runs and a lock engaged then would stay pending until the screen came
-    /// back — measured at 63s, pinning the event loop at its active timeout the
-    /// whole time. Nothing is displayed, so the confirmation is already earned.
+    /// Confirm without a frame. Only valid with the panel dark: `tick` doesn't
+    /// run while blanked, and the lock would stay pending until wake (measured
+    /// 63s with the loop pinned awake).
     pub fn confirm_dark(&mut self) {
         if let Some(confirmation) = self.pending.take() {
             confirmation.lock();
@@ -207,12 +147,8 @@ impl SessionLockHandler for State {
     }
 
     fn lock(&mut self, confirmation: SessionLocker) {
-        // smithay calls this for every `lock` request, locked or not, and
-        // whichever `SessionLocker` we confirm becomes the lock's owner — the
-        // one instance allowed to `unlock_and_destroy` it. Confirming a second
-        // one would hand a live session away to whoever asked last, so a lock
-        // already held is refused: dropping the `SessionLocker` sends `finished`
-        // and the requesting client learns it did not get the lock.
+        // Confirming a second locker would hand the session to whoever asked last.
+        // Dropping it sends `finished`.
         if self.session_lock.is_locked() {
             warn!("refusing session lock: already locked by another client");
             drop(confirmation);
@@ -220,9 +156,7 @@ impl SessionLockHandler for State {
         }
         info!("session lock requested");
         self.session_lock.engage(confirmation);
-        // Anything the user was in the middle of on the shell is over: a
-        // half-finished swipe or a held icon must not resume (or fire) when the
-        // session unlocks.
+        // A half-finished gesture must not resume after unlock.
         self.cancel_gestures();
         self.needs_render = true;
     }
@@ -230,39 +164,30 @@ impl SessionLockHandler for State {
     fn unlock(&mut self) {
         info!("session unlocked");
         self.session_lock.release();
-        // The lock painted over the whole screen without touching the app's
-        // commit cursor, so the first unlocked frame must repaint everything:
-        // damage-since-last-present would otherwise report only what the app
-        // itself changed and leave the lock's pixels on scanout.
+        // The lock never touched the app's commit cursor; force a full repaint or
+        // the lock's pixels stay on scanout.
         self.last_present = None;
         self.needs_render = true;
     }
 
     fn new_surface(&mut self, surface: LockSurface, _output: WlOutput) {
-        // A refused lock keeps a live `ext_session_lock_v1` — `finished` is not a
-        // destructor — so it can still create lock surfaces. Adopting one would
-        // put a stranger's surface in front of the locked session, which is a
-        // password prompt the user cannot tell from the real one.
+        // A refused lock's object stays alive (`finished` isn't a destructor) and
+        // can still make lock surfaces: a fake password prompt.
         if !self.session_lock.owns(surface.ext_session_lock()) {
             warn!("ignoring lock surface from a lock we did not grant");
             return;
         }
-        // Enter the output so the client learns the scale factor and renders a
-        // HiDPI buffer, exactly like an app toplevel.
+        // So the client learns the scale and renders HiDPI.
         self.output.enter(surface.wl_surface());
-        // Configure it to fill the output. The size is logical (the client
-        // scales its buffer up by `dpi`), matching how app toplevels are sized.
+        // Logical size; the client scales by `dpi`.
         let (w, h) = (self.panel_size.0 as f64, self.panel_size.1 as f64);
         let size = ((w / self.dpi).round() as u32, (h / self.dpi).round() as u32);
         surface.with_pending_state(|state| {
             state.size = Some(size.into());
         });
         surface.send_configure();
-        // A lock client that dies holding the lock leaves its last frame in the
-        // scanout buffer, and nothing else would ask for a redraw: the session
-        // is locked, so no shell animation or client commit is coming. Without
-        // this hook the screen keeps showing the dead lock screen's pixels
-        // instead of going black.
+        // Nothing else will redraw after a lock client dies; without this its last
+        // frame stays on screen.
         smithay::wayland::compositor::add_destruction_hook(
             surface.wl_surface(),
             |state: &mut State, _surface| {
@@ -290,8 +215,6 @@ mod tests {
         assert_eq!(lock_view(true, true), LockView::Surface);
     }
 
-    /// The security-critical case: a lock client that died (or hasn't drawn yet)
-    /// must leave the screen black, never fall back to showing the session.
     #[test]
     fn locked_without_surface_draws_black() {
         assert_eq!(lock_view(true, false), LockView::Blank);

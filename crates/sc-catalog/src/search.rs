@@ -1,21 +1,13 @@
-//! App search ranking, used by the pull-down search app.
-//!
-//! Pure ordering of catalog apps: the default view (empty query) surfaces the
-//! highest-frecency apps; typing filters the full catalog by a case-insensitive
-//! name substring. Ordering is always frecency (decayed to `now`) descending,
-//! tie-broken by name so the result is stable.
+//! App search ranking for the pull-down search app.
 
 use std::collections::HashMap;
 
 use crate::AppEntry;
 use sc_shell_model::{eff, AppStat, FrecencyStore};
 
-/// Order catalog apps for the search view.
-///
-/// `query` empty → the top `limit` apps by decayed frecency (the default view).
-/// `query` non-empty → catalog entries whose name contains `query`
-/// (case-insensitive), same ordering, capped at `limit`. Apps never launched
-/// (frecency score 0, or absent from the store) still appear, ranked last.
+/// Empty `query`: top `limit` apps by decayed frecency. Otherwise apps whose
+/// name contains `query` (case-insensitive). Ties break on name; never-launched
+/// apps rank last.
 pub fn rank(
     catalog: &HashMap<String, AppEntry>,
     frecency: &FrecencyStore,

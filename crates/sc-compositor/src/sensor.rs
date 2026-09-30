@@ -1,20 +1,6 @@
-//! Device orientation from iio-sensor-proxy, over the system D-Bus.
-//!
-//! The compositor never blocks on D-Bus: a worker thread owns the connection
-//! and posts [`DeviceOrientation`] changes down a channel, which both frame
-//! loops drain once a tick ([`crate::State::drain_sensor`]) — the same shape as
-//! [`crate::debug_input`], and for the same reason.
-//!
-//! **The accelerometer is only claimed while it can matter.** iio-sensor-proxy
-//! powers the sensor on for as long as anyone holds a claim, so claiming for the
-//! whole session would burn battery to answer a question that only a fullscreen
-//! app ever asks. The claim follows fullscreen instead, via
-//! [`Sensor::set_wanted`].
-//!
-//! Everything here degrades to "no rotation" rather than failing: no sensor, no
-//! proxy, or a polkit refusal all just mean the orientation stays
-//! [`DeviceOrientation::Normal`], which is exactly how a device without an
-//! accelerometer behaves.
+//! Device orientation from iio-sensor-proxy over D-Bus, on a worker thread
+//! drained once a tick. The accelerometer is only claimed while an app is
+//! fullscreen: a claim keeps the sensor powered. Any failure means no rotation.
 
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Duration;
@@ -31,47 +17,35 @@ use crate::rotation::DeviceOrientation;
 const SERVICE: &str = "net.hadess.SensorProxy";
 const PATH: &str = "/net/hadess/SensorProxy";
 const IFACE: &str = "net.hadess.SensorProxy";
-/// D-Bus call timeout. Generous: the proxy is local and this is off the render
-/// thread, but a hung call must not wedge the worker for good.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long the worker parks in `process` before re-checking its command queue.
-/// Short enough that claim/release follows fullscreen promptly, long enough that
-/// an idle worker costs nothing measurable.
+/// Worker park time between command-queue checks.
 const POLL: Duration = Duration::from_millis(200);
 
-/// What the compositor asks the worker to do.
 enum Cmd {
-    /// Claim or release the accelerometer.
     Wanted(bool),
-    /// Shut down (releasing first, if claimed).
+    /// Release first, if claimed.
     Stop,
 }
 
-/// Handle to the sensor worker. Dropping it stops the thread.
 pub struct Sensor {
     orientations: Receiver<DeviceOrientation>,
     commands: Sender<Cmd>,
-    /// Last value sent to the worker, so repeated fullscreen churn doesn't
-    /// bounce the claim.
+    /// Last value sent, so fullscreen churn doesn't bounce the claim.
     wanted: bool,
 }
 
 impl Sensor {
-    /// Claim the accelerometer (or release it) — called as apps enter and leave
-    /// fullscreen. Cheap and idempotent.
+    /// Idempotent.
     pub fn set_wanted(&mut self, wanted: bool) {
         if wanted == self.wanted {
             return;
         }
         self.wanted = wanted;
-        // A dead worker is not an error: it means there is no usable sensor, and
-        // the compositor carries on unrotated.
+        // A dead worker just means no sensor.
         let _ = self.commands.send(Cmd::Wanted(wanted));
     }
 
-    /// The most recent orientation the sensor reported, if it changed since the
-    /// last drain. Older readings in the queue are discarded — only where the
-    /// device is *now* matters.
+    /// Newest orientation since the last drain; older readings are dropped.
     pub fn latest(&self) -> Option<DeviceOrientation> {
         let mut newest = None;
         loop {
@@ -89,13 +63,8 @@ impl Drop for Sensor {
     }
 }
 
-/// Start the sensor worker. `None` only when the thread itself cannot start.
-///
-/// Connecting and probing happen *on the worker*, not here: `State::new` is on
-/// the startup path, and a system bus that is slow to answer (or activating
-/// iio-sensor-proxy on demand) would stall the compositor coming up. So this
-/// returns a handle immediately and the worker decides whether there is anything
-/// to report; if there isn't, it exits and the handle goes quiet forever.
+/// Connects on the worker: a slow system bus (or on-demand activation of
+/// iio-sensor-proxy) must not stall startup.
 pub fn spawn() -> Option<Sensor> {
     let (tx_orientation, orientations) = std::sync::mpsc::channel();
     let (commands, rx_cmd) = std::sync::mpsc::channel();
@@ -113,8 +82,6 @@ pub fn spawn() -> Option<Sensor> {
     })
 }
 
-/// Whether the proxy is there and has an accelerometer. Any error — service not
-/// running, property missing — reads as "no".
 fn has_accelerometer(conn: &Connection) -> bool {
     let proxy = conn.with_proxy(SERVICE, PATH, CALL_TIMEOUT);
     proxy
@@ -122,8 +89,7 @@ fn has_accelerometer(conn: &Connection) -> bool {
         .unwrap_or(false)
 }
 
-/// Read `AccelerometerOrientation`. Unreadable reads as `Undefined`, which does
-/// not rotate.
+/// Unreadable reads as `Undefined`, which does not rotate.
 fn read_orientation(conn: &Connection) -> DeviceOrientation {
     let proxy = conn.with_proxy(SERVICE, PATH, CALL_TIMEOUT);
     match proxy.get::<String>(IFACE, "AccelerometerOrientation") {
@@ -135,13 +101,8 @@ fn read_orientation(conn: &Connection) -> DeviceOrientation {
     }
 }
 
-/// Claim the accelerometer. Returns whether the claim was granted.
-///
-/// A refusal is expected rather than exceptional: the polkit action is
-/// `allow_active`, so only a session on an active seat may claim. springchick
-/// running as the session compositor qualifies; the same binary started over SSH
-/// does not, and gets `AccessDenied`. Either way the answer is "carry on without
-/// rotation", so this is logged once at info and never retried in a loop.
+/// The polkit action is `allow_active`: an SSH-started compositor gets
+/// `AccessDenied`. Logged once, never retried.
 fn claim(conn: &Connection) -> bool {
     let proxy = conn.with_proxy(SERVICE, PATH, CALL_TIMEOUT);
     match proxy.method_call::<(), _, _, _>(IFACE, "ClaimAccelerometer", ()) {
@@ -160,11 +121,6 @@ fn release(conn: &Connection) {
     }
 }
 
-/// The worker: connect, decide whether there is a sensor worth listening to,
-/// then hold the claim while it is wanted and forward every orientation change.
-///
-/// Returning early is the normal path on anything without an accelerometer (a
-/// dev box, the VM), so it is logged at debug rather than as a failure.
 fn worker(tx: &Sender<DeviceOrientation>, rx: &Receiver<Cmd>) {
     let conn = match Connection::new_system() {
         Ok(c) => c,
@@ -181,11 +137,7 @@ fn worker(tx: &Sender<DeviceOrientation>, rx: &Receiver<Cmd>) {
     run(conn, tx, rx);
 }
 
-/// The claim/listen loop, once there is a sensor to talk to.
 fn run(conn: Connection, tx: &Sender<DeviceOrientation>, rx: &Receiver<Cmd>) {
-    // PropertiesChanged carries the new orientation without a round trip. The
-    // match is added once and left in place; it costs nothing while unclaimed
-    // because the proxy only emits changes while someone is listening.
     let rule = MatchRule::new_signal("org.freedesktop.DBus.Properties", "PropertiesChanged")
         .with_path(PATH);
     let tx_signal = tx.clone();
@@ -213,23 +165,20 @@ fn run(conn: Connection, tx: &Sender<DeviceOrientation>, rx: &Receiver<Cmd>) {
             Ok(Cmd::Wanted(true)) if !claimed => {
                 claimed = claim(&conn);
                 if claimed {
-                    // The signal only fires on *changes*, so seed the current
-                    // value — the device may already be on its side.
+                    // The signal only fires on changes; seed the current value.
                     let _ = tx.send(read_orientation(&conn));
                 }
             }
             Ok(Cmd::Wanted(false)) if claimed => {
                 release(&conn);
                 claimed = false;
-                // Nothing will report orientation now, so stop claiming to know
-                // it: an unrotated app is the right answer while unclaimed.
+                // Unclaimed: report unrotated.
                 let _ = tx.send(DeviceOrientation::Normal);
             }
             Ok(Cmd::Wanted(_)) => {}
             Ok(Cmd::Stop) | Err(TryRecvError::Disconnected) => break,
             Err(TryRecvError::Empty) => {}
         }
-        // Blocks up to POLL, dispatching any signals that arrive.
         if let Err(e) = conn.process(POLL) {
             warn!(%e, "sensor connection error; giving up on orientation");
             break;
@@ -241,5 +190,4 @@ fn run(conn: Connection, tx: &Sender<DeviceOrientation>, rx: &Receiver<Cmd>) {
     debug!("sensor thread stopped");
 }
 
-/// The `a{sv}` payload of `PropertiesChanged`.
 type PropMap = std::collections::HashMap<String, Variant<Box<dyn RefArg>>>;

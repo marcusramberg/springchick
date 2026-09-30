@@ -1,26 +1,16 @@
-# App-library test: the category-folder page a fresh install lands next to.
+# App library: a fresh install has an empty home page plus the library;
+# swiping past the last page reaches it; a folder tile opens its panel; a
+# member launches, tagged with the launch's app id. Opening a folder keeps
+# Home as Home, so this asserts on the `folder opened` log line.
 #
-# The library is the only way a freshly installed system reaches an app at all —
-# home starts empty — so this covers the whole chain:
-#   - a fresh install has an empty home page (tapping a grid slot launches
-#     nothing) and exactly two pages: that empty one plus the library;
-#   - swiping past the last home page reaches the library;
-#   - tapping a folder tile opens its panel, with the members the catalog's
-#     `Categories=` put in it;
-#   - tapping a member launches it, tagged with the launch's app id.
-#
-# Opening a folder changes no `UiState` discriminant (Home stays Home), so this
-# asserts on the `folder opened` trace log rather than on `state changed to`.
-#
-# Build for the host arch:  nix build .#checks.aarch64-linux.vm-library -L
+# Run:  nix build .#checks.aarch64-linux.vm-library -L
 { self, pkgs }:
 
 let
   inherit (import ./test-support.nix { inherit self pkgs; }) mkTest phone;
 
-  # Two apps in a category nothing else in the guest declares. The other
-  # installed entries are foot's three (System;TerminalEmulator), so the folder
-  # list is exactly [Game, System] — fixed order, known tile positions.
+  # A category nothing else declares. foot's entries are System, so the
+  # folders are exactly [Game, System].
   gameApp =
     name:
     pkgs.makeDesktopItem {
@@ -33,7 +23,7 @@ in
 mkTest {
   name = "springchick-library";
 
-  # No `homePages`: an empty home screen is exactly what is under test.
+  # No `homePages`: the empty home is what's under test.
   packages = [
     pkgs.foot
     (gameApp "aaa")
@@ -58,10 +48,8 @@ mkTest {
     def foot_count():
         return int(machine.succeed("pgrep -c -x foot || true").strip())
 
-    # Grid geometry in physical output pixels, mirrored from the layout
-    # constants in crates/sc-layout/src/lib.rs — the same arithmetic vm-arrange
-    # uses. Folder tiles sit in the ordinary grid cells, and an open folder's
-    # rows reuse them shifted down by the panel's title band.
+    # Mirrored from crates/sc-layout/src/lib.rs, as in vm-arrange. Open-folder
+    # rows reuse the grid cells shifted below the title band.
     W = ${toString phone.width}
     H = ${toString phone.height}
     H_MARGIN, TOP_PAD = 0.04, 0.04
@@ -86,49 +74,38 @@ mkTest {
         panel's title band."""
         return (col(i % COLS), int(row(i // COLS) + TITLE_H))
 
-    # --- A fresh install has an empty home page ---
-    # Nothing was ever placed there, so the slot the first icon would occupy is
-    # bare wallpaper: a tap must launch nothing at all.
+    # An empty home: tapping the first slot launches nothing.
     dbg(f"tap {col(0)} {row(0)}")
     dbg("settle 2000")
     machine.screenshot("01-empty-home")
     machine.fail(f"{JOURNAL} | grep -qF 'state changed to App'")
     assert foot_count() == 0, "a tap on empty home must not launch anything"
 
-    # Two pages: the empty home page and the library after it. The count is
-    # logged with every Home state line, and the tap above settled back to Home.
+    # Two pages: the empty home and the library.
     machine.wait_until_succeeds(
         f"{JOURNAL} | grep -qE 'state changed to Home .*page_count: 2'", timeout=15
     )
 
-    # --- Swiping past the last home page reaches the library ---
-    # Well past PAGE_COMMIT_FRAC (0.3W), so it commits on distance alone.
+    # Past the library's edge on distance alone (> PAGE_COMMIT_FRAC).
     dbg(f"swipe {int(W * 0.85)} {int(H * 0.5)} {int(W * 0.15)} {int(H * 0.5)} 400")
     dbg("settle 2000")
     machine.screenshot("02-library-page")
 
-    # --- Tapping a folder tile opens it ---
-    # Folder order is fixed (see sc_catalog::folders): of the categories present
-    # here, Game sorts before System, so the Game folder is tile 0 and holds
-    # exactly the two apps installed above.
+    # Game sorts before System, so it's tile 0.
     dbg(f"tap {col(0)} {row(0)}")
     machine.wait_until_succeeds(
         f"{JOURNAL} | grep -qE 'folder opened index=0 name=Game members=2'", timeout=15
     )
     dbg("settle 2000")
     machine.screenshot("03-folder-open")
-    # Opening a folder is not a launch.
     assert foot_count() == 0, "opening a folder must not launch anything"
 
-    # --- Tapping a member launches it ---
-    # Members are sorted by display name, so slot 0 is aaa.
+    # Members sort by name, so slot 0 is aaa.
     mx, my = member(0)
     dbg(f"tap {mx} {my}")
     machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'state changed to App'", timeout=30)
     machine.wait_until_succeeds("pgrep -x foot", timeout=30)
-    # Tagged from the launch, not from what the client calls itself — the window
-    # is attributed before foot announces its own app_id, so this is the line
-    # that fires (`app_id resolved` is the client-announced path).
+    # Attributed from the launch before foot announces its own app_id.
     machine.wait_until_succeeds(
         f"{JOURNAL} | grep -qE 'attributed to launch .*app_id=aaa'", timeout=15
     )

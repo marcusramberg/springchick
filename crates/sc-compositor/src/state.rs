@@ -1,11 +1,4 @@
-//! The compositor's central [`State`]: every protocol state object, the shell
-//! model, input bookkeeping, and the render snapshot both backends consume.
-//!
-//! Behaviour lives in sibling modules that `impl State`:
-//! - [`crate::toplevel`] — app window lifecycle, focus, decoration, rotation.
-//! - [`crate::arrange`] — home-grid reflow springs and arrange-mode drag.
-//! - [`crate::frame`] — per-frame advance, popups, animation gating.
-//! - [`crate::handlers`] — the smithay protocol handler impls.
+//! The central [`State`]. Behaviour lives in sibling modules that `impl State`.
 
 use std::collections::{HashMap, HashSet};
 use std::process::Child;
@@ -58,85 +51,54 @@ use crate::{
 };
 use smithay::reexports::wayland_server::Resource;
 
-/// A running app's toplevel state.
 pub(crate) struct AppToplevel {
     pub surface: ToplevelSurface,
-    /// Which catalog app this window belongs to, as far as the shell is
-    /// concerned: the launch it was attributed to (see [`crate::provenance`]),
-    /// falling back to the client-reported id and then to `unknown_N`. Drives
-    /// the icon, the running dot, and tap-to-raise.
+    /// The launch it was attributed to ([`crate::provenance`]), else the
+    /// client's id, else `unknown_N`. Drives icon, running dot and tap-to-raise.
     pub app_id: String,
-    /// Whether `app_id` came from the launch rather than from the client. A
-    /// launch-owned id is authoritative: `resolve_app_id` must not overwrite it
-    /// when the client later announces something else (`foot` for a
-    /// `Terminal=true` entry).
+    /// A launch-owned id is authoritative: `resolve_app_id` must not replace it
+    /// with what the client announces (`foot` for `Terminal=true`).
     pub id_from_launch: bool,
-    /// The client's own xdg `app_id`, kept for diagnostics and as the icon
-    /// fallback for windows no launch claimed.
+    /// The client's own xdg `app_id`; icon fallback when no launch claimed it.
     pub wl_app_id: String,
-    /// Last client-set xdg window geometry logged for this toplevel, so the
-    /// size log fires on change instead of on every commit.
+    /// So the size log fires on change, not every commit.
     pub logged_size: Option<(i32, i32)>,
-    /// The rotation this window was last *configured* at — i.e. how its current
-    /// buffer is oriented, not how the shell is drawing right now.
-    ///
-    /// The two part company once the app is in the background: the view turns
-    /// with whatever is in front, while this client keeps its buffer until it
-    /// is reconfigured. A card drawn from that buffer is turned by the
-    /// difference, or it spills out of its slot in the switcher.
+    /// The rotation this window was last configured at, i.e. how its buffer is
+    /// oriented. Differs from the view once the app is backgrounded; a card
+    /// drawn from the buffer is turned by the difference.
     pub rotation: crate::rotation::Rotation,
 }
 
-/// An app spawned from the launcher but not yet mapped to a toplevel. Its Home
-/// icon pulses until the window opens, the process dies, or we time out waiting.
-///
-/// Several may be in flight at once — "new window" on an already-running app
-/// means two launches of the same id can overlap — so attribution has to pick
-/// the right one rather than assume the sole entry.
+/// Spawned but not yet mapped; its icon pulses. Several can overlap ("new
+/// window"), so attribution must pick the right one.
 pub(crate) struct Launching {
     pub app_id: String,
     pub child: Child,
-    /// The spawned process, for [`crate::provenance`] ancestry matching. Kept
-    /// separately from `child` because reaping consumes the handle.
+    /// Kept apart from `child` because reaping consumes the handle.
     pub pid: i32,
-    /// xdg-activation token handed to the child in its environment. A client
-    /// that presents it back identifies its launch exactly.
+    /// Handed to the child's env; a client presenting it names its launch.
     pub token: String,
     pub started: std::time::Instant,
 }
 
-/// How long to keep pulsing a launching icon before giving up (a daemonizing or
-/// hung launcher may never map a window; stop breathing forever).
+/// A daemonizing or hung launcher may never map a window.
 pub(crate) const LAUNCH_PULSE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The per-app icon overlays the home pass draws on top of the layout: animated
-/// positions, launch pulses, running dots.
-///
-/// Lives on [`State`] and is refilled in place by `advance_frame` rather than
-/// rebuilt into a fresh `FramePrep` — every entry is keyed by an app id, so
-/// rebuilding meant ~30 `String` allocations per frame at 90 Hz for keys that
-/// almost never change. Refilling reuses both the maps' buckets and the key
-/// allocations themselves.
+/// Per-app icon overlays for the home pass. Refilled in place each frame:
+/// rebuilding cost ~30 `String` allocations per frame at 90 Hz.
 #[derive(Default)]
 pub(crate) struct IconOverlays {
-    /// Screen-space animated center `(x, y)` per grid app: the reflow spring
-    /// position minus the current page scroll, so the grid pass can render
-    /// sliding icons without knowing about pages.
+    /// Screen space: spring position minus the page scroll.
     pub grid_positions: HashMap<String, (f32, f32)>,
-    /// Screen-space animated center `(x, y)` per dock app. Dock icons don't
-    /// scroll with pages, so these are the spring positions as-is.
+    /// Dock icons don't page, so these are the springs as-is.
     pub dock_positions: HashMap<String, (f32, f32)>,
-    /// Apps still waiting for their window, as `(app_id, seconds since spawn)`.
-    /// Each draws a breathing pulse on its icon; several can be in flight when
-    /// the user opens more than one window at a time.
+    /// `(app_id, seconds since spawn)`.
     pub launch_pulses: Vec<(String, f32)>,
-    /// Apps with at least one open window — their icons get a running dot.
     pub running_apps: HashSet<String>,
 }
 
-/// Backend-agnostic render snapshot produced by [`State::advance_frame`]. Holds
-/// everything both backends feed into [`crate::render::DrawCtx`]; each backend
-/// adds only its own output transform, Skia flip, and framebuffer binding.
+/// Render snapshot from [`State::advance_frame`]. Backends add only their
+/// output transform, Skia flip and framebuffer.
 pub(crate) struct FramePrep {
     pub scene: scene::Scene,
     pub app_surface: Option<WlSurface>,
@@ -147,49 +109,32 @@ pub(crate) struct FramePrep {
     pub layers_above: layer_shell::RenderList,
     pub app_popups: layer_shell::RenderList,
     pub layer_popups: layer_shell::RenderList,
-    /// Touch indicator marks to overlay (empty unless `show_touches`).
     pub touch_marks: Vec<touch_viz::TouchMark>,
-    /// Where to draw the mouse cursor, in physical pixels. `None` when no
-    /// pointer device has moved (or a finger has since taken over), which is the
-    /// normal state on a phone.
+    /// Physical px. `None` until a pointer moves, or after a finger takes over.
     pub cursor: Option<(f32, f32)>,
-    /// What the session lock wants on screen. Anything but
-    /// [`session_lock::LockView::Unlocked`] replaces the whole scene.
+    /// Anything but `Unlocked` replaces the whole scene.
     pub lock_view: session_lock::LockView,
-    /// The lock surface to draw when `lock_view` is `Surface`.
     pub lock_surface: Option<WlSurface>,
-    /// Open icon context menu, laid out for this frame. `None` when closed.
     pub icon_menu: Option<crate::render::MenuView>,
-    /// The library page's folder tiles. `None` when Home isn't drawn.
     pub library: Option<crate::render::LibraryView>,
-    /// The open library folder's panel. `None` when no folder is open.
     pub folder: Option<crate::render::FolderView>,
-    /// The OSK sliding out after its client hid it: the held buffer and where it
-    /// is drawn this frame. `None` when no slide-out is running.
+    /// The OSK sliding out: its held buffer and where it's drawn.
     pub closing: Option<(smithay::backend::renderer::utils::Buffer, sc_layout::Rect)>,
-    /// Per-card chrome for the switcher deck: badge opacity plus the focused
-    /// card's title and its own cross-fade.
     pub card_chrome: crate::render::CardChromeView,
-    /// How black to paint the whole screen, `0.0`..=`1.0`: the rotation
-    /// transition's dip. `0.0` on any ordinary frame.
+    /// 0..=1 black over everything: the rotation dip.
     pub dim: f32,
 }
 
-/// A popup and its clamped physical geometry: `(kind, origin, size)`. Chains are
-/// ordered root→leaf.
+/// `(kind, origin, size)`, physical. Chains are root→leaf.
 pub(crate) type PopupRect = (PopupKind, (i32, i32), (i32, i32));
 
-/// Capture buffer formats to advertise: `(render node, [(fourcc, modifiers)])`.
+/// `(render node, [(fourcc, modifiers)])`.
 pub(crate) type CaptureFormats = (DrmNode, Vec<(Fourcc, Vec<Modifier>)>);
 
-/// xdg `app_id` the pull-down search app sets on its toplevel. The compositor
-/// recognises it to give it a slide-up open animation and to keep it out of the
-/// task switcher / MRU history.
+/// Gets a slide-up open and stays out of the switcher and MRU history.
 pub(crate) const SEARCH_APP_ID: &str = "chick.springchick.Search";
-/// Exec line for the search app, spawned on the pull-down gesture.
 pub(crate) const SEARCH_APP_EXEC: &str = "sc-search";
 
-/// Per-client state.
 #[derive(Default)]
 pub(crate) struct ClientState {
     pub compositor_state: CompositorClientState,
@@ -207,17 +152,14 @@ impl ClientData for ClientState {
     }
 }
 
-/// Scan installed `.desktop` files and resolve each entry's icon. Shared by
-/// startup and `reload_catalog`; the icon-theme search path is built once, not
-/// per icon.
+/// The icon-theme search path is built once, not per icon.
 fn scan_catalog() -> (
     HashMap<String, AppEntry>,
     HashMap<String, IconPixels>,
     Vec<sc_catalog::Folder>,
 ) {
     let entries = sc_catalog::scan_apps();
-    // Folders come off the ordered scan, not the map: the map's iteration order
-    // is arbitrary and the library page must not reshuffle between rescans.
+    // From the ordered scan, not the map, so the library doesn't reshuffle.
     let folders = sc_catalog::folders(&entries);
     let app_catalog: HashMap<String, AppEntry> =
         entries.into_iter().map(|e| (e.id.clone(), e)).collect();
@@ -234,389 +176,226 @@ fn scan_catalog() -> (
     (app_catalog, icon_cache, folders)
 }
 
-/// Place newly installed apps, prune uninstalled ones, seed frecency.
 fn reconcile_catalog(model: &mut ShellModel, catalog: &HashMap<String, AppEntry>, first_run: bool) {
     let mut catalog_ids: Vec<String> = catalog.keys().cloned().collect();
-    catalog_ids.sort(); // deterministic seeding + first-run alpha order
+    catalog_ids.sort(); // deterministic seeding
     model.reconcile(&catalog_ids, unix_now(), first_run);
 }
 
-/// Main compositor state.
 pub(crate) struct State {
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
-    /// Tracks xdg_popup trees (their lifecycle + geometry) so we can render,
-    /// hit-test, and dismiss menus/dropdowns. Populated in `new_popup`.
+    /// Populated in `new_popup`.
     pub popups: PopupManager,
-    #[allow(dead_code)] // Must stay alive to keep the global registered.
+    #[allow(dead_code)] // Keeps the global registered.
     pub xdg_decoration_state: XdgDecorationState,
-    #[allow(dead_code)] // Must stay alive to keep the xdg-wm-dialog global registered.
+    #[allow(dead_code)] // Keeps the global registered.
     pub xdg_dialog_state: XdgDialogState,
     pub shm_state: ShmState,
-    /// zwp_linux_dmabuf: lets GL clients (GTK4, etc.) share buffers zero-copy
-    /// instead of falling back to slow shm software upload. The global is
-    /// created by the backend once its renderer's importable formats are known.
+    /// Global created by the backend once importable formats are known.
     pub dmabuf_state: DmabufState,
-    #[allow(dead_code)] // Must stay alive to keep the dmabuf global registered.
+    #[allow(dead_code)] // Keeps the global registered.
     pub dmabuf_global: Option<DmabufGlobal>,
-    /// Kept so focus changes can point the selection (clipboard) devices at the
-    /// newly focused client — that needs a `DisplayHandle` and `focus_changed`
-    /// doesn't get one.
+    /// `focus_changed` doesn't get a `DisplayHandle`, but pointing the selection
+    /// devices needs one.
     pub dh: DisplayHandle,
     pub data_device_state: DataDeviceState,
-    /// zwp_primary_selection: middle-click paste. foot and every other terminal
-    /// expect it alongside the normal clipboard.
+    /// Middle-click paste; terminals expect it.
     pub primary_selection_state: PrimarySelectionState,
-    /// ext-data-control clipboard-manager protocol state.
     pub data_control_state: DataControlState,
-    /// wlr-data-control: same job as ext-data-control, for wlr-era clients
-    /// (wl-clipboard before v2.2, clipman, cliphist).
-    #[allow(dead_code)] // Must stay alive to keep the global registered.
+    /// For wlr-era clients (wl-clipboard < 2.2, clipman, cliphist).
+    #[allow(dead_code)] // Keeps the global registered.
     pub wlr_data_control_state: WlrDataControlState,
     pub seat_state: SeatState<Self>,
-    #[allow(dead_code)] // Must stay alive to keep the wl_seat global registered.
+    #[allow(dead_code)] // Keeps the global registered.
     pub seat: Seat<Self>,
-    /// Seat keyboard. Owned by State (not the winit loop) so both backends
-    /// share one key path.
     pub keyboard: smithay::input::keyboard::KeyboardHandle<Self>,
-    /// Surface currently holding keyboard focus, to avoid re-sending it.
+    /// To avoid re-sending focus.
     pub focused_surface: Option<WlSurface>,
-    /// Resolved keybindings + in-flight press state.
     pub keys: keybinds::Keys,
-    /// Panel blanking (acted on by the DRM backend; inert under winit).
+    /// Acted on by DRM; inert under winit.
     pub blank: blank::Blank,
-    /// Idle-blank countdown. Reset by input in the DRM loop; when it elapses the
-    /// loop flips `blank`. Inert under winit (which never polls it).
     pub idle: blank::Idle,
-    /// Whether an external display is attached (mirroring the phone panel). Kept
-    /// on `State` because the key path needs it: with a second screen lit, the
-    /// phone panel being blanked is not "the session is asleep", so typing must
-    /// reach the app instead of waking the panel. Maintained by the DRM backend
-    /// on hotplug; always false under winit.
+    /// With a second screen lit, a blanked phone panel isn't "asleep", so typing
+    /// must reach the app. Maintained by DRM on hotplug.
     pub external_display: bool,
-    /// Set when a client commit or input changed on-screen state, so the
-    /// vblank-driven DRM loop re-primes a page-flip on the next wake. Inert
-    /// under winit (which renders every loop iteration).
+    /// Makes the vblank-driven DRM loop render on the next wake. Inert under
+    /// winit.
     pub needs_render: bool,
-    /// A `screenshot` binding fired: the next composited frame is read back and
-    /// put on the clipboard. Served by the backends, which own the renderer.
+    /// Served by the backends, which own the renderer.
     pub screenshot_pending: bool,
-    /// Commit cursor for the partial page-flip damage hint: the fullscreen app
-    /// surface and the `CommitCounter` last presented for it. See
-    /// [`crate::render::DrawCtx::last_present`].
+    /// See [`crate::render::DrawCtx::last_present`].
     pub last_present: Option<(WlSurface, smithay::backend::renderer::utils::CommitCounter)>,
-    /// Volume on-screen display state.
     pub osd: osd::Osd,
-    /// wlr-layer-shell protocol state.
     pub layer_shell_state: smithay::wayland::shell::wlr_layer::WlrLayerShellState,
-    /// `wp_fractional_scale` + `wp_viewporter`: how HiDPI-unaware clients (layer
-    /// surfaces like wvkbd, and apps) learn to render at `dpi`. Held only to keep
-    /// the globals advertised for the compositor's lifetime.
+    /// Held to keep the globals advertised.
     #[allow(dead_code)]
     pub fractional_scale_manager_state: FractionalScaleManagerState,
     #[allow(dead_code)]
     pub viewporter_state: ViewporterState,
-    /// `zxdg_output_manager_v1`: output name + logical geometry for clients that
-    /// ask (recorders). Held to keep the global advertised.
+    /// Held to keep the global advertised.
     #[allow(dead_code)]
     pub output_manager_state: OutputManagerState,
-    /// `ext-image-capture-source-v1` + `ext-image-copy-capture-v1` (screencopy):
-    /// let recorders capture the output. Held to keep the globals advertised.
+    /// Held to keep the globals advertised.
     #[allow(dead_code)]
     pub image_capture_source: ImageCaptureSourceState,
     #[allow(dead_code)]
     pub output_capture_source: OutputCaptureSourceState,
     pub image_copy_capture: ImageCopyCaptureState,
-    /// Capture buffer formats to advertise, set by the DRM backend once the
-    /// renderer exists: `(render node, [(fourcc, modifiers)])`. `None` on the
-    /// winit backend (no dmabuf capture there).
+    /// Set by the DRM backend; `None` under winit.
     pub capture_formats: Option<CaptureFormats>,
-    /// Capture frames awaiting a blit; drained by the render loop each frame.
     pub pending_captures: Vec<CaptureFrame>,
-    /// wlr-screencopy copy requests awaiting the render loop. Separate from
-    /// `pending_captures` because the two protocols reply differently.
+    /// Separate because the two protocols reply differently.
     pub wlr_captures: Vec<crate::wlr_screencopy::PendingCopy>,
-    /// Live screencopy sessions. Held because dropping a `Session` sends
-    /// `stopped` and fails the client's frames (that dropped-on-arrival session
-    /// is what made `grim` print "failed to copy output").
+    /// Dropping a `Session` sends `stopped` and fails the client's frames.
     pub capture_sessions: Vec<CaptureSession>,
-    /// Tracked layer surfaces + reserved-area bookkeeping.
     pub layers: layer_shell::LayerShell,
-    /// Seat touch handle, for forwarding taps to layer surfaces.
     pub touch: smithay::input::touch::TouchHandle<Self>,
-    /// Per-slot touch routing. The phone panel delivers concurrent slots
-    /// (fingers); each slot that lands on a client surface (OSK layer, app,
-    /// popup) gets its own target here so one finger's up never clears another's
-    /// grab, and a stray slot never leaks into the gesture funnel. Slots that
-    /// start on empty space are absent (they drive the gesture funnel instead).
-    /// Value is `(coord scale, rotated)`: the slot's `dpi` scale and whether it
-    /// routes to the rotated fullscreen app (whose coords need turning first).
-    /// Presence marks the slot client-routed.
+    /// Client-routed touch slots and their coord scale (`dpi`). Per slot, so one
+    /// finger's up never clears another's; slots on empty space are absent and
+    /// drive the gesture funnel.
     pub touch_targets: HashMap<smithay::backend::input::TouchSlot, f64>,
-    /// The single slot currently driving the home-screen gesture funnel
-    /// (`input_common`), which is inherently single-touch. Only this slot feeds
-    /// press/motion/release; additional fingers on empty space are ignored until
-    /// it lifts.
+    /// The one slot driving the single-touch gesture funnel.
     pub gesture_slot: Option<smithay::backend::input::TouchSlot>,
-    /// Whether the pointer press is currently held on a client surface.
+    /// Pointer press held on a client surface.
     pub pointer_grab: bool,
-    /// Whether this backend is responsible for drawing the cursor at all. True
-    /// on DRM, where nothing else would; false under winit, where the host
-    /// compositor already draws one over the window.
+    /// False under winit, where the host draws the cursor.
     pub cursor_overlay: bool,
-    /// Whether to draw the mouse cursor at `last_pointer_pos`. There is no
-    /// cursor on a phone until a pointer device shows up, so this starts false,
-    /// turns on with the first pointer motion/click, and turns back off on the
-    /// next touch-down — a finger and a cursor on screen at once is noise.
+    /// Off until a pointer device moves; a touch-down hides it again.
     pub cursor_visible: bool,
-    /// wl_surfaces of popups that issued an `xdg_popup.grab()`. Only these are
-    /// modal — they capture touch and dismiss on an outside press. Non-grab
-    /// popups (wvkbd's input-enabling hack popup, app tooltips/comboboxes) are
-    /// tracked and rendered but must NOT steal or dismiss touch, else they break
-    /// OSK and toplevel input. Cleared per-popup in `popup_destroyed`.
+    /// Popups that issued `xdg_popup.grab()`. Only these capture touch and
+    /// dismiss on outside presses; non-grab popups (wvkbd's hack popup,
+    /// tooltips) must not, or OSK and app input break.
     pub popup_grabs: std::collections::HashSet<WlSurface>,
-    /// Home-bar opacity, faded to 0 when a bottom exclusive-zone surface (the
-    /// on-screen keyboard) covers it.
+    /// Occlusion fade: 0 when a Top/Overlay surface covers the pill.
     pub bar_alpha: f32,
-    /// Whether to draw the touch indicator overlay (`[main].show_touches`), for
-    /// demo recordings. When true, input events feed `touch_viz`.
     pub show_touches: bool,
-    /// Live touch-visualization state (contacts + fading release rings). Only
-    /// populated while `show_touches` is set.
     pub touch_viz: touch_viz::TouchViz,
 
-    // Shell state
     pub ui: UiState,
     pub model: ShellModel,
     pub app_catalog: HashMap<String, AppEntry>,
     pub icon_cache: HashMap<String, IconPixels>,
-    /// The app library's category folders, derived from the catalog scan. Never
-    /// persisted — the library is always the whole catalog.
+    /// Derived from the catalog, never persisted.
     pub folders: Vec<sc_catalog::Folder>,
-    /// The folder the user has open on the library page. `None` when closed.
     pub folder: Option<crate::library::OpenFolder>,
-    /// Library folder tile pressed but not yet released: `(index, start pos)`.
-    /// A release that has not travelled past the tap slop opens it.
+    /// `(index, start pos)`; opens on a release within the tap slop.
     pub pending_folder: Option<(usize, (f32, f32))>,
-    /// Bumped on every catalog rescan. The renderer's uploaded icon textures are
-    /// keyed by app id alone, so a change of generation is what tells it to drop
-    /// them — otherwise a re-themed or reinstalled app keeps its old pixels.
+    /// Icon textures are keyed by app id alone; a new generation drops them.
     pub catalog_gen: u64,
     pub toplevels: Vec<Option<AppToplevel>>,
-    /// Toplevels the last frame actually drew (foreground app + deck cards).
-    /// A commit from anything else can't change the screen — see
-    /// [`State::commit_affects_frame`].
+    /// Commits from anything else can't change the screen.
     pub drawn_toplevels: Vec<ToplevelId>,
     pub children: Vec<Child>,
-    /// Apps spawned and awaiting their first toplevel — drives the pulsing
-    /// launch icons. An entry is dropped when its window maps, its process
-    /// exits, or it times out.
     pub launching: Vec<Launching>,
-    /// Running `flatpak uninstall` children; the catalog is rescanned when one
-    /// exits.
+    /// Catalog is rescanned when one exits.
     pub uninstalling: Vec<Child>,
-    /// xdg-activation token pool. Tokens minted here are passed to spawned
-    /// children so a client can name the launch it came from.
     pub xdg_activation_state: XdgActivationState,
-    /// Activation tokens clients have presented, keyed by the surface they
-    /// activated. Matched against `launching` when the surface registers as a
-    /// toplevel — the token, not the app id, so two launches of the same app
-    /// stay distinguishable.
+    /// Presented tokens by surface, matched against `launching` at register.
+    /// The token, not the app id, so two launches of one app stay distinct.
     pub pending_activation: HashMap<WlSurface, String>,
     pub history: AppHistory,
-    /// Last zoom origin (cached when launching).
     pub last_origin: ZoomOrigin,
-    /// Physical panel size (DRM mode or winit window size), fixed at
-    /// construction. The shell lays out in [`Self::output_size`], which is this
-    /// turned by the view rotation.
+    /// Physical, fixed at construction. The shell lays out in
+    /// [`Self::output_size`], which is this turned by the view rotation.
     pub panel_size: (i32, i32),
-    /// The advertised output. Retained so surfaces can `enter` it (which is how
-    /// clients learn the scale factor).
+    /// Surfaces `enter` it to learn the scale.
     pub output: Output,
-    /// Output scale (`[main].dpi`), advertised via `wp_fractional_scale` so it
-    /// may be fractional (e.g. 2.5). Client buffers are `logical * dpi`, so xdg
-    /// configure sizes are physical/dpi.
+    /// May be fractional. Client buffers are `logical * dpi`.
     pub dpi: f64,
-    /// Base card corner radius in logical px (`[main].card_radius`). Threaded
-    /// into `compute_scene` so the switcher/drag card rounding is configurable.
     pub card_radius: f32,
-    /// Prefer server-side (= no client) decorations for top-level app windows
-    /// (`[main].prefer_no_csd`). Dialogs (child toplevels) always get CSD so
-    /// their toolkit header bar — and its action buttons — stay present.
+    /// Dialogs always keep CSD so their action buttons survive.
     pub prefer_no_csd: bool,
-    /// `[main].natural_scroll`, applied to each touchpad as libinput adds it.
     pub natural_scroll: bool,
-    /// Scheduler utilization floor policy for the render thread
-    /// (`[main].uclamp_min`). Read at startup only: the floor is resolved
-    /// against CPU topology once, so changing it needs a restart like `dpi`.
+    /// Startup only.
     pub uclamp_min: sc_config::UclampMin,
-    /// Ask the panel for variable refresh rate (`[main].vrr`). DRM backend only,
-    /// read at startup: the connector is probed once, so changing it needs a
-    /// restart like `dpi`.
+    /// DRM only, startup only.
     pub vrr: bool,
-    /// Per-app resource tiers (`[resources]`), applied on focus change. See
-    /// [`crate::resources`].
     pub resources: sc_config::Resources,
-    /// `[resources].bg_allowed_cpus` resolved against this machine's topology:
-    /// the CPU list backgrounded apps are pinned to, or `None` for no pinning.
+    /// `None` for no pinning.
     pub bg_allowed_cpus: Option<String>,
-    /// The app currently held in the foreground tier, so a focus change knows
-    /// what to demote. `None` when nothing is promoted (on Home, and before the
-    /// first app is focused).
+    /// The app in the foreground tier, for demotion on focus change.
     pub tiered: Option<resources::AppCgroup>,
-    /// wlr-gamma-control state (night-light / color-temperature clients).
     pub gamma: gamma_control::GammaControl,
-    /// wlr-output-power-management state (client-driven DPMS).
     pub output_power: output_power::OutputPower,
-    /// ext-idle-notify-v1 state: client idle timers, polled by both frame loops.
     pub idle_notify: idle_notify::IdleNotify,
-    /// zwp_idle_inhibit_manager_v1 state: surfaces asking to hold off idle.
     pub idle_inhibit: idle_inhibit::IdleInhibit,
-    /// wp_content_type_v1 state (holds the global; tags live per surface).
     #[allow(dead_code)]
     pub content_type: content_type::ContentType,
-    /// ext-background-effect-v1 state (holds the global; blur regions live per
-    /// surface).
     #[allow(dead_code)]
     pub background_effect: background_effect::BackgroundEffect,
-    /// ext-session-lock-v1 state: whether the session is locked and the lock
-    /// client's surface. See [`crate::session_lock`].
     pub session_lock: session_lock::SessionLock,
-    /// wp_fifo and wp_commit_timing protocol state. Held only to keep the
-    /// globals alive; the work happens in [`crate::pacing`], driven per frame.
+    /// Held to keep the globals alive; the work is in [`crate::pacing`].
     _fifo_manager: smithay::wayland::fifo::FifoManagerState,
     _commit_timing_manager: smithay::wayland::commit_timing::CommitTimingManagerState,
-    /// How the view is turned, derived from [`Self::device_orientation`] and
-    /// whether the app the shell is anchored to is fullscreen — see
-    /// [`crate::rotation`]. Read it through [`Self::view_rotation`].
+    /// Read through [`Self::view_rotation`].
     pub rotation: rotation::Rotation,
-    /// How the device is physically held. Fed by the accelerometer (and by the
-    /// `orientation` control-socket verb, which is how the tests drive it);
-    /// `Normal` until something says otherwise, so a device with no sensor
-    /// behaves exactly as if it were held upright.
+    /// From the accelerometer or the `orientation` ipc verb. `Normal` without a
+    /// sensor.
     pub device_orientation: rotation::DeviceOrientation,
-    /// Debounce in front of [`Self::device_orientation`]: a reading has to hold
-    /// still for `rotation_settle_ms` before the app is turned. See
-    /// [`rotation::Settle`].
     pub orientation_settle: rotation::Settle,
-    /// The dip-to-black that covers a turn: the rotation is swapped while the
-    /// screen is dark. See [`rotation::Fade`].
     pub rotation_fade: rotation::Fade,
-    /// Logical size the foreground app was configured at by the turn currently
-    /// being faded through, so its first commit at that size can end the dark
-    /// stretch early. `None` when no fade is waiting on a client.
+    /// Size configured by the turn being faded through; the first commit at it
+    /// ends the dark stretch early.
     pub rotation_await_size: Option<(i32, i32)>,
-    /// iio-sensor-proxy client. `None` on anything without an accelerometer (a
-    /// dev box, the VM), where orientation only ever arrives over the control
-    /// socket. See [`crate::sensor`].
+    /// `None` without an accelerometer (dev box, VM).
     pub sensor: Option<sensor::Sensor>,
-    /// Whether the foreground app is fullscreen content that wants a landscape
-    /// display (see [`content_type::wants_landscape`]). Nothing rotates yet —
-    /// this is the signal the rotation work will read.
+    /// Foreground app is fullscreen landscape content
+    /// ([`content_type::wants_landscape`]).
     pub landscape_hint: bool,
 
-    // Rendering
     pub skia: SkiaGl,
     pub wayland_socket: String,
 
-    // Input
     pub last_pointer_pos: Option<(f32, f32)>,
-    /// Where the most recent finger was, in output pixels, whoever it was routed
-    /// to. Unlike `last_pointer_pos` (which only the shell's gesture funnel
-    /// feeds) this also tracks touches that went to a client, so the compositor
-    /// can pick a sequence up from one — see [`State::lift_from_search`].
+    /// Physical, including touches routed to clients, so the compositor can
+    /// take a sequence over ([`State::lift_from_search`]).
     pub last_touch_pos: Option<(f32, f32)>,
     pub pointer_down: bool,
-    /// Page drag tracking: origin + velocity when dragging on the home screen.
     pub page_drag: Option<input_common::FingerDrag>,
-    /// When the last motion event of the live gesture arrived, so the gesture
-    /// tracker can be fed real elapsed time instead of an assumed frame rate.
-    /// `None` between gestures; seeded on press.
+    /// Feeds the tracker real elapsed time. Seeded on press.
     pub last_motion: Option<std::time::Instant>,
-    /// Bar drag tracking from Home state: (start_x, start_y).
     pub bar_drag_start: Option<(f32, f32)>,
-    /// App icon held on Home, pending tap-to-launch (also drives the press
-    /// highlight). Cleared if the finger moves into a page swipe.
+    /// Pending tap-to-launch; cleared if the finger starts a page swipe.
     pub pending_launch: Option<input_common::PendingLaunch>,
-    /// Finger held on an icon, waiting to see if it becomes a long-press
-    /// (arrange mode) or a tap/swipe. Cleared once arrange mode engages, the
-    /// gesture becomes a swipe, or the finger releases.
     pub icon_press: Option<crate::arrange::IconPress>,
-    /// Arrange-mode state (icon reorder/pin/unpin/hide). `None` outside
-    /// arrange mode.
     pub arrange: Option<ArrangeState>,
-    /// Open icon context menu (long press on an icon). `None` when closed.
     pub icon_menu: Option<crate::icon_menu::IconMenu>,
-    /// Finger held on empty home background, waiting to see if it becomes the
-    /// long press that engages arrange mode. Cleared when the gesture turns into
-    /// a swipe, when it releases, or once arrange engages.
     pub bg_press: Option<crate::arrange::BgPress>,
-    /// Armed pull-down: `(start_x, start_y)` of an empty-space Home press that
-    /// may become a downward drag launching the search app. Cleared once resolved.
+    /// Start of an empty-space Home press that may become the search pull-down.
     pub search_arm: Option<(f32, f32)>,
-    /// Set when the search app was just spawned; the next toplevel to map is
-    /// treated as the search app (slide-up open, no switcher/frecency). winit
-    /// sets the xdg `app_id` after `new_toplevel` fires, so the client id is not
-    /// yet readable at registration — the spawn intent is the reliable signal.
+    /// The next toplevel to map is the search app. Its `app_id` isn't readable
+    /// yet at `new_toplevel`, so the spawn intent is the signal.
     pub expecting_search: bool,
-    /// Switcher deck drag state.
     pub switcher_drag: input_common::SwitcherDrag,
-    /// Switcher card rects for hit-testing during drag.
+    /// For hit-testing during a drag.
     pub switcher_cards: Vec<switcher::CardRect>,
-    /// Fades for the deck's icon badges and focused-card title.
     pub card_chrome: switcher::CardChrome,
-    /// In-flight held-modifier switching session (Super+Tab). `None` when the
-    /// keyboard is not driving the deck. See [`crate::kbd_switch`].
     pub kbd_switch: Option<crate::kbd_switch::KbdSwitch>,
-    /// Whether the home pill is drawn: never on Home, lit through a drag, and
-    /// in an app a blink on arrival then out of the way until the bar is
-    /// touched. Multiplied into `bar_alpha`, which stays the occlusion fade.
+    /// Multiplied into `bar_alpha`.
     pub bar_hint: crate::bar_hint::BarHint,
-    /// In-flight synthetic swipe from the debug socket (dev harness).
     pub active_gesture: Option<debug_input::ActiveGesture>,
-    /// In-flight synthetic key hold from the debug socket (dev harness).
     pub active_key: Option<debug_input::ActiveKey>,
     pub active_touch: Option<debug_input::ActiveTouch>,
-    /// Pending debug `settle`: reply channel + deadline.
     pub pending_settle: Option<(std::sync::mpsc::SyncSender<String>, std::time::Instant)>,
-    /// Last logged UI state: variant plus which toplevel is in front (to avoid
-    /// spam without hiding real changes). The variant alone is not enough —
-    /// swapping the foreground app leaves it in `App` either way, so a
-    /// dismissed dialog handing the screen back, or a quick-switch between two
-    /// apps, would log nothing at all.
+    /// Variant plus front toplevel: an app swap stays in `App` and would
+    /// otherwise log nothing.
     pub last_log_state: Option<(std::mem::Discriminant<UiState>, Option<ToplevelId>)>,
-    /// Per-app grid-reflow springs (x, y), keyed by app id. Drives icons
-    /// sliding to their new slot when the grid order changes (launch reorder,
-    /// arrange-mode edits). Seeded lazily on first `advance_frame` and kept in
-    /// sync with `model.pages` by `reflow_grid`.
+    /// Seeded lazily, kept in sync with `model.pages` by `reflow_grid`.
     pub grid_anim: HashMap<String, (sc_anim::Spring, sc_anim::Spring)>,
-    /// Per-app dock-reflow springs (x, y), keyed by app id. Mirror of
-    /// `grid_anim` for the dock row; seeded lazily and kept in sync by
-    /// `reflow_dock`.
     pub dock_anim: HashMap<String, (sc_anim::Spring, sc_anim::Spring)>,
-    /// Icon overlay inputs for the frame being drawn. Refilled in place by
-    /// `advance_frame`; read by `draw_ctx` for the same frame.
     pub icon_overlays: IconOverlays,
 
-    // Timing
-    /// CLOCK_MONOTONIC, the clock every timestamp we hand a client is on:
-    /// `wl_surface.frame` callbacks, input event times, and the presentation
-    /// feedback we advertise at bind. Clients mix the three — a media player
-    /// schedules its next commit from a frame callback and checks it against
-    /// presentation feedback — so they have to share a base. Measuring frames
-    /// from `start_time` instead put frame callbacks on a per-process epoch,
-    /// which made that arithmetic land days out.
+    /// CLOCK_MONOTONIC for every client timestamp: frame callbacks, input times
+    /// and presentation feedback. Clients mix them, so they must share a base.
     pub clock: Clock<Monotonic>,
 
-    // Perf instrumentation
     pub stats: frame_stats::FrameStats,
     pub perf_log: bool,
     pub last_perf_log: std::time::Instant,
-    /// End of the previous rendered frame, for the per-frame `gap_ms` trace.
-    /// `None` until the first frame is recorded.
+    /// For the per-frame `gap_ms` trace.
     pub last_frame_end: Option<std::time::Instant>,
 
-    // Control
     pub running: bool,
 }
 
@@ -629,10 +408,7 @@ impl State {
         let dh = display.handle();
         let (out_w, out_h) = output_size;
 
-        // `config.toml`, read exactly once. Both the `[main]` settings below and
-        // the `[keybinds]` table come from this same parse — reading it per
-        // setting meant six filesystem reads and six TOML parses at startup, and
-        // no guarantee they all saw the same file.
+        // Read once; `[main]` and `[keybinds]` must see the same file.
         let config = sc_config::load();
         let dpi = config.dpi.max(1.0);
         let idle_blank_secs = config.idle_blank_secs;
@@ -647,42 +423,30 @@ impl State {
         let config_rotation_settle_ms = config.rotation_settle_ms;
         let config_rotation_fade_ms = config.rotation_fade_ms;
 
-        // `WAYLAND_DISPLAY` is already in our own env (see `session`), so these
-        // inherit it and can connect.
+        // They inherit `WAYLAND_DISPLAY` from our env.
         let mut children = Vec::new();
         for command in &config.startup {
             crate::keybinds::spawn_command(command, &mut children);
         }
 
-        // v6 so clients like wvkbd that bind wl_compositor@6 can connect.
+        // v6: wvkbd binds wl_compositor@6.
         let compositor_state = CompositorState::new_v6::<Self>(&dh);
-        // Advertise only Fullscreen as a WM capability. Maximize/Minimize/
-        // WindowMenu are meaningless in a single-window phone shell, and hinting
-        // them absent tells toolkits (GTK) to omit those title-bar buttons on the
-        // few windows that do draw client-side decorations (dialogs).
+        // Only Fullscreen: hinting the rest absent makes GTK drop those buttons from
+        // CSD dialogs.
         let xdg_shell_state = XdgShellState::new_with_capabilities::<Self>(
             &dh,
             [xdg_toplevel::WmCapabilities::Fullscreen],
         );
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
-        // xdg-dialog: lets toolkits flag a toplevel as a dialog/modal. We use the
-        // hint (alongside set_parent) to keep client-side decorations — and thus
-        // action buttons — on dialogs. Portal file choosers run in their own
-        // process with no in-process parent, so the hint is the only signal that
-        // identifies them as dialogs.
+        // Portal file choosers have no in-process parent; the dialog hint is the
+        // only thing marking them for CSD.
         let xdg_dialog_state = XdgDialogState::new::<Self>(&dh);
-        // xdg-activation: the token we hand a spawned app in its environment is
-        // the strongest signal for tying its window back to the icon that
-        // launched it — see [`crate::provenance`].
         let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
-        // Global created later by the backend via `init_dmabuf_global`, once the
-        // renderer's importable formats are known.
         let dmabuf_state = DmabufState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
-        // Clipboard managers (wl-clipboard, dms, ...): both the ext- and the
-        // older wlr- flavour, since clients pick one or the other.
+        // Both ext- and wlr- flavours; clients pick one.
         let data_control_state =
             DataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), |_client| true);
         let wlr_data_control_state =
@@ -691,7 +455,6 @@ impl State {
             });
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&dh, "springchick");
-        // 200ms delay / 25Hz repeat: xkb defaults, forwarded to clients.
         let keyboard = seat
             .add_keyboard(XkbConfig::default(), 200, 25)
             .expect("add keyboard");
@@ -700,61 +463,36 @@ impl State {
 
         let layer_shell_state =
             smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<Self>(&dh);
-        // Fractional scale + viewporter: HiDPI-unaware clients (wvkbd and other
-        // layer surfaces, and apps) render at `[main].dpi` by being told a
-        // fractional scale rather than an integer output scale (which wvkbd
-        // ignores). See `FractionalScaleHandler`.
+        // wvkbd ignores integer output scale; it needs fractional scale.
         let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
         let viewporter_state = ViewporterState::new::<Self>(&dh);
-        // Screencopy: the source-manager globals let a client name our output as a
-        // capture source; the copy-capture global negotiates buffers + frames.
         let image_capture_source = ImageCaptureSourceState::new();
         let output_capture_source = OutputCaptureSourceState::new::<Self>(&dh);
         let image_copy_capture = ImageCopyCaptureState::new::<Self>(&dh);
-        // Virtual keyboard (on-screen keyboards like wvkbd). smithay's built-in
-        // handler works now that we're on smithay-git + xkbcommon 0.9, which
-        // fixed the keymap-size off-by-one that used to truncate wvkbd's uploaded
-        // keymap (xkbcommon 0.8 did `new_from_buffer(.., size - 1, ..)`).
         smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState::new::<Self, _>(
             &dh,
             |_client| true,
         );
-        // wp_fifo + wp_commit_timing: a client can ask for an update to be held
-        // for a refresh, or commit early and name the frame it wants the
-        // content on. smithay does the protocol side and blocks the commits;
-        // releasing them is `crate::pacing`, driven from the render walk.
         let fifo_manager = smithay::wayland::fifo::FifoManagerState::new::<Self>(&dh);
         let commit_timing_manager =
             smithay::wayland::commit_timing::CommitTimingManagerState::new::<Self>(&dh);
-        // wp_presentation: report the vblank a client's frame landed on, so
-        // self-pacing clients (video, browser animations) can line up with the
-        // panel instead of guessing. Timestamps go out on CLOCK_MONOTONIC, the
-        // clock both backends measure frames with.
         smithay::wayland::presentation::PresentationState::new::<Self>(
             &dh,
             libc::CLOCK_MONOTONIC as u32,
         );
-        // activate/deactivate on zwp_input_method_v2
         smithay::wayland::text_input::TextInputManagerState::new::<Self>(&dh);
         smithay::wayland::input_method::InputMethodManagerState::new::<Self, _>(&dh, |_client| {
             true
         });
 
-        // wlr-gamma-control: advertise the manager global. 256 is a mock LUT
-        // size for the winit backend; the DRM backend overrides it with the
-        // real CRTC gamma_length before clients connect.
+        // 256 is a placeholder; DRM sets the real CRTC gamma_length.
         let gamma = gamma_control::GammaControl::new(&dh, 256);
 
-        // wlr-output-power-management: let a shell blank the panel (dms's
-        // monitor power-off, swayidle). Drives the same `blank` flag the power
-        // key does, so it is a mock under winit like everything else there.
         let output_power = output_power::OutputPower::new(&dh);
 
-        // Both are announced before the wl_output global on purpose: a client
-        // that binds its per-output control from inside its wl_output registry
-        // callback only finds the manager if the manager came first. dms's
-        // gamma client does exactly that, and reports "no outputs" otherwise.
-        // Advertise an output so clients know the display geometry.
+        // Gamma and output-power managers must come before wl_output: dms binds its
+        // per-output controls from its wl_output callback and reports "no outputs"
+        // otherwise.
         let output = Output::new(
             "springchick-0".into(),
             PhysicalProperties {
@@ -767,7 +505,7 @@ impl State {
         );
         let mode = OutputMode {
             size: (out_w, out_h).into(),
-            refresh: 90_000, // 90 Hz in mHz
+            refresh: 90_000,
         };
         output.change_current_state(
             Some(mode),
@@ -777,42 +515,25 @@ impl State {
         );
         output.set_preferred(mode);
         output.create_global::<Self>(&dh);
-        // xdg-output manager (`zxdg_output_manager_v1`): reports each output's
-        // name + logical geometry. Recorders like wl-screenrec require it to
-        // resolve which output to capture. Dispatched via `delegate_output!`.
+        // wl-screenrec needs xdg-output to pick the output.
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
 
-        // wlr-screencopy: the older capture protocol, alongside the ext one.
-        // wf-recorder / wlrobs / xdg-desktop-portal-wlr speak only this.
         crate::wlr_screencopy::init(&dh);
 
-        // ext-idle-notify: idle daemons (swayidle et al) ask to be told when the
-        // user has been inactive for N ms. Timeouts are polled per frame, not by
-        // calloop timers — see `idle_notify`.
         let idle_notify = idle_notify::IdleNotify::new(&dh, std::time::Instant::now());
-        // zwp_idle_inhibit: a visible surface can hold off idle entirely (video
-        // playback keeping the screen on).
         let idle_inhibit = idle_inhibit::IdleInhibit::new(&dh);
-        // wp_content_type: clients tag a surface photo/video/game. Used as the
-        // auto-landscape hint.
         let content_type = content_type::ContentType::new(&dh);
-        // ext-background-effect: panels/OSKs can ask for their backdrop to be
-        // blurred. Advertised because `render` really blurs it.
         let background_effect = background_effect::BackgroundEffect::new(&dh);
-        // ext-session-lock: an external lock client (dms) blanks the session and
-        // draws its own lock screen over it. See `session_lock`.
         let session_lock = session_lock::SessionLock::new(&dh);
 
-        // Load shell model + app catalog.
         let model = persist::load(&persist::state_path()).unwrap_or_default();
         let (app_catalog, icon_cache, folders) = scan_catalog();
 
-        // Seed new catalog apps, drop stats for uninstalled ones, derive order.
         let mut model = model;
         let first_run = model.frecency.apps.is_empty();
         reconcile_catalog(&mut model, &app_catalog, first_run);
 
-        // +1 for the library page, which is always last and never in `pages`.
+        // +1 for the library page.
         let page_count = model.pages.len().max(1) + 1;
         let ui = UiState::home(0, page_count);
 
@@ -941,21 +662,15 @@ impl State {
             icon_overlays: IconOverlays::default(),
             clock: Clock::new(),
             stats: frame_stats::FrameStats::new(Duration::from_micros(11_111)),
-            perf_log: false, // disabled for debugging
+            perf_log: false,
             last_perf_log: std::time::Instant::now(),
             last_frame_end: None,
             running: true,
         }
     }
 
-    /// Advertise `zwp_linux_dmabuf` with the formats the backend's renderer can
-    /// import. Called once per backend after the renderer exists, so GL clients
-    /// negotiate zero-copy buffers instead of falling back to shm.
-    ///
-    /// When `main_device` is known (the DRM backend), bind version 4 with default
-    /// feedback: it advertises the render device + format tranches that zero-copy
-    /// clients and, crucially, `wl-screenrec` need to allocate importable capture
-    /// buffers. A version-3 global (no feedback) is rejected by wl-screenrec.
+    /// Called once the renderer exists. With `main_device` (DRM) it binds v4
+    /// with feedback; wl-screenrec rejects a v3 global.
     pub(crate) fn init_dmabuf_global(
         &mut self,
         dh: &DisplayHandle,
@@ -977,13 +692,8 @@ impl State {
         self.dmabuf_global = Some(global);
     }
 
-    /// Drop every in-flight touch/pointer gesture without acting on it.
-    ///
-    /// Used when something takes the screen away mid-gesture (the session lock).
-    /// The finger that was down is gone as far as the shell is concerned: no
-    /// launch fires on release, no page drag resumes, and the next press starts
-    /// a fresh sequence. Client-routed slots are dropped too, so their `up`
-    /// never re-enters the funnel.
+    /// Drop every in-flight gesture without acting on it (e.g. the session
+    /// locked mid-gesture). Client slots are dropped too.
     pub(crate) fn cancel_gestures(&mut self) {
         self.pointer_down = false;
         self.pointer_grab = false;
@@ -1002,12 +712,8 @@ impl State {
         }
     }
 
-    /// Re-read `config.toml` and re-apply it, for `springchick ipc reload`.
-    ///
-    /// `dpi` is deliberately not re-applied: it is baked into the output's
-    /// advertised fractional scale and into every buffer size clients have
-    /// already committed against. `prefer_no_csd` takes effect on the next
-    /// window that negotiates a decoration mode.
+    /// `dpi` isn't re-applied: it's baked into committed buffer sizes.
+    /// `prefer_no_csd` applies to the next window that negotiates.
     pub(crate) fn reload_config(&mut self) {
         let config = sc_config::load();
         self.card_radius = config.card_radius;
@@ -1016,30 +722,20 @@ impl State {
         self.show_touches = config.show_touches;
         self.idle = blank::Idle::new(config.idle_blank_secs, std::time::Instant::now());
         self.orientation_settle.set_hold(config.rotation_settle_ms);
-        // Takes effect on the next turn; a fade already in flight keeps the
-        // duration it started with rather than jumping mid-dip.
+        // A fade in flight keeps its duration.
         self.rotation_fade.set_duration(config.rotation_fade_ms);
         self.resources = config.resources.clone();
         self.bg_allowed_cpus = resources::resolve_allowed_cpus(&self.resources.bg_allowed_cpus);
-        // Same path as startup; `children` (spawned binding commands, still to
-        // be reaped) stays on the existing `Keys`.
+        // `children` stays on the existing `Keys`.
         self.keys.tracker = keybinds::Keys::from_config(config).tracker;
-        // Re-assert the new numbers on whatever is focused right now, instead of
-        // waiting for the next focus change to notice them.
+        // Re-apply to the focused app now.
         self.tiered = None;
         self.apply_resource_tiers();
     }
 
-    /// Put the focused app in the foreground tier and the one it replaced in the
-    /// background tier. See [`crate::resources`].
-    ///
-    /// Only resting states are acted on: `App` promotes its window, `Home`
-    /// demotes (nothing is in front, so nothing needs the CPU), and every
-    /// transition between them leaves the tiers alone — the two `systemctl`
-    /// spawns fork the compositor, which is not something to do in the middle of
-    /// a zoom. Deliberately *not* gated on `needs_animation`: a compositor whose
-    /// frames have stalled (a nested window nobody is presenting) would then
-    /// never leave the transition it is stuck in, and never tier at all.
+    /// Only resting states: `App` promotes, `Home` demotes. Transitions are left
+    /// alone since each tier change forks `systemctl`. Not gated on
+    /// `needs_animation`, or a stalled nested window would never tier.
     pub(crate) fn apply_resource_tiers(&mut self) {
         if !self.resources.enable {
             return;
@@ -1074,7 +770,6 @@ impl State {
         self.tiered = want;
     }
 
-    /// The scope the client behind `tid` is running in.
     fn toplevel_unit(&self, tid: usize) -> Option<resources::AppCgroup> {
         let tl = self.toplevels.get(tid)?.as_ref()?;
         let client = tl.surface.wl_surface().client()?;
@@ -1082,30 +777,23 @@ impl State {
         resources::unit_of_pid(pid)
     }
 
-    /// Re-scan `.desktop` files and icons, for `springchick ipc reload`.
-    ///
-    /// Newly installed apps appear in the library, uninstalled ones disappear
-    /// from pages/dock and lose their frecency stats. `first_run` seeding is
-    /// never re-triggered: an existing session has stats, so new apps seed cold.
+    /// `first_run` seeding is never re-triggered; new apps seed cold.
     pub(crate) fn reload_catalog(&mut self) {
         let (app_catalog, icon_cache, folders) = scan_catalog();
         self.app_catalog = app_catalog;
         self.icon_cache = icon_cache;
         self.folders = folders;
-        // Folder indices are positions in a list that just changed under us.
+        // Folder indices refer to a list that just changed.
         self.folder = None;
         self.catalog_gen = self.catalog_gen.wrapping_add(1);
         reconcile_catalog(&mut self.model, &self.app_catalog, false);
         if let Err(e) = persist::save(&self.model, &persist::state_path()) {
             warn!(?e, "failed to persist shell model after catalog reload");
         }
-        // The grid draws from the per-app springs, not from the model: without
-        // this an installed app has no spring and is invisible, and a removed
-        // one leaves its neighbours parked at their old slots.
+        // The grid draws from the springs, not the model.
         self.reflow_grid();
         self.reflow_dock();
-        // A pruned page can leave the model shorter than the page the shell is
-        // sitting on.
+        // A pruned page can leave the shell past the end.
         let page_count = self.home_page_count();
         if let UiState::Home {
             page,
@@ -1119,8 +807,7 @@ impl State {
         self.needs_render = true;
     }
 
-    /// The size the shell lays out and draws in: the panel, axis-swapped while
-    /// the view is turned.
+    /// The panel, axis-swapped while turned.
     pub(crate) fn output_size(&self) -> (i32, i32) {
         self.view_rotation().app_size(self.panel_size)
     }
@@ -1130,8 +817,7 @@ impl State {
         (w as f32, h as f32)
     }
 
-    /// Top-left of the area apps are drawn in: below/right of any exclusive
-    /// zones, or the view's own origin while turned (layers are hidden then).
+    /// Below/right of exclusive zones, or the view origin while turned.
     pub(crate) fn app_origin(&self) -> (f32, f32) {
         if self.view_rotation().swaps_axes() {
             return (0.0, 0.0);
@@ -1140,8 +826,7 @@ impl State {
         (u.x, u.y)
     }
 
-    /// How the whole view (shell and app) is turned relative to the panel. The
-    /// lock screen is always drawn and hit-tested upright.
+    /// The lock screen is always upright.
     pub(crate) fn view_rotation(&self) -> rotation::Rotation {
         if self.session_lock.is_locked() {
             rotation::Rotation::None
@@ -1150,12 +835,8 @@ impl State {
         }
     }
 
-    /// How long one refresh of the output lasts, from its current mode.
-    ///
-    /// Used to predict when the frame being composited will land, which is what
-    /// commit-timing releases are measured against. A mode with no usable rate
-    /// falls back to 60Hz — a wrong-but-sane interval keeps held commits moving,
-    /// where a zero would release everything immediately.
+    /// For commit-timing targets. Falls back to 60Hz: a zero would release
+    /// everything at once.
     pub(crate) fn output_refresh_interval(&self) -> Duration {
         const FALLBACK: Duration = Duration::from_nanos(16_666_666);
         let Some(mode) = self.output.current_mode() else {
@@ -1167,7 +848,6 @@ impl State {
         Duration::from_nanos(1_000_000_000_000u64 / mode.refresh as u64)
     }
 
-    /// Current Home page, or `0` when not on the home screen (app/switcher/etc).
     pub(crate) fn current_home_page(&self) -> usize {
         if let UiState::Home { page, .. } = &self.ui {
             *page
@@ -1176,18 +856,12 @@ impl State {
         }
     }
 
-    /// Record one frame's duration and emit a perf summary at most once per
-    /// second. Shared by the winit and DRM render loops.
+    /// Logs a perf summary at most once a second.
     pub(crate) fn record_and_log_frame(&mut self, frame_start: std::time::Instant) {
         let dt = frame_start.elapsed();
         self.stats.record_frame(dt);
-        // Per-frame trace, off unless `springchick::perf=trace` is requested.
-        // `gap_ms` is the idle time before this frame, so a large gap marks the
-        // first frame after the render loop was asleep — the one that pays
-        // schedutil's ramp-up cost, and the only one that shows whether a
-        // uclamp floor is worth having. The aggregate line below cannot show
-        // this: its ring still holds seconds of stale samples across an idle
-        // gap, so a short gesture never displaces them.
+        // `springchick::perf=trace`. A large `gap_ms` marks the first frame after
+        // idle, the one that pays schedutil's ramp; the aggregate can't show it.
         let now = std::time::Instant::now();
         trace!(
             target: "springchick::perf",

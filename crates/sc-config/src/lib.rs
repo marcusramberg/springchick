@@ -1,20 +1,12 @@
-//! `config.toml`: springchick's user configuration — the `[main]` settings
-//! (dpi, idle-blank, card radius, touch indicator) and the `[keybinds]` table.
-//!
-//! Validation is deliberately lenient. A bad entry is dropped with a warning and
-//! the rest of the config still applies: on a phone, a compositor that refuses to
-//! start over a config typo is a recovery session, while a skipped binding is a
-//! button that does nothing.
-//!
-//! Persisted *state* (dock, pages, frecency) is separate — see
-//! `sc_shell_model::persist` and `state.toml`.
+//! `config.toml`: `[main]`, `[resources]` and `[keybinds]`. Lenient: a bad
+//! entry is dropped with a warning and the rest applies, because a compositor
+//! that won't start over a typo on a phone means a recovery session.
 #![forbid(unsafe_code)]
 
 use serde::Deserialize;
 use tracing::warn;
 
-/// Modifiers a binding requires. Lock modifiers are deliberately absent — a
-/// stuck Caps Lock must not disable every binding.
+/// No lock modifiers: a stuck Caps Lock must not disable every binding.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ModMask {
     pub ctrl: bool,
@@ -38,41 +30,30 @@ pub enum PressKind {
     Long,
 }
 
-/// What a binding does when it fires.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Shell command, run through `sh -c`.
+    /// Run through `sh -c`.
     Command(String),
-    /// Close the front toplevel.
     CloseApp,
-    /// Return to the home screen.
     Home,
-    /// Blank / unblank the panel (DRM backend only).
+    /// DRM backend only.
     ToggleDisplay,
-    /// Raise the volume and show the OSD.
     VolumeUp,
-    /// Lower the volume and show the OSD.
     VolumeDown,
-    /// Toggle mute and show the OSD.
     VolumeMute,
-    /// Toggle the foreground app between fullscreen (immersive, rotates with the
-    /// device) and the normal maximized state.
+    /// Fullscreen (immersive, rotates) vs. maximized.
     ToggleFullscreen,
-    /// Open the search app (the same UI the Home pull-down opens).
     Search,
-    /// Step the switcher deck one card toward older apps, opening it first when
-    /// it is not up. Meant to be held on a modifier: releasing that modifier
-    /// commits the focused card (see `switcher-prev`).
+    /// Toward older apps, opening the deck if needed. Hold it on a modifier:
+    /// releasing the modifier commits the focused card.
     SwitcherNext,
-    /// Step the switcher deck one card toward more-recent apps.
     SwitcherPrev,
-    /// Capture the screen as PNG and put it on the clipboard.
+    /// PNG to the clipboard.
     Screenshot,
 }
 
 impl Action {
-    /// Resolve a built-in action's config name. `Command` has no name: it
-    /// carries a shell string, so it is spelled `command = "..."` instead.
+    /// `Command` has no name; it is spelled `command = "..."`.
     pub fn from_name(name: &str) -> Option<Action> {
         Some(match name {
             "close-app" => Action::CloseApp,
@@ -93,7 +74,7 @@ impl Action {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Binding {
-    /// xkb keysym name, resolved to a keysym by the compositor.
+    /// xkb keysym name.
     pub key: String,
     pub mods: ModMask,
     pub press: PressKind,
@@ -103,175 +84,98 @@ pub struct Binding {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub long_press_ms: u64,
-    /// Output scale advertised to clients. Fractional is allowed (e.g. `2.5`):
-    /// the compositor advertises it via `wp_fractional_scale`, and its geometry
-    /// math is `f64` throughout.
+    /// Advertised via `wp_fractional_scale`; fractional values are fine.
     pub dpi: f64,
-    /// Seconds of no input before the panel idle-blanks. `0` disables idle
-    /// blanking (the power button still blanks on demand).
+    /// `0` disables idle blanking.
     pub idle_blank_secs: u64,
-    /// Base corner radius (logical px) for shrunken app cards: the switcher deck
-    /// and the drag-lift card. Other card radii (drag growth, zoom transitions)
-    /// scale proportionally from this.
+    /// Logical px, for the switcher deck and drag-lift card; other radii scale
+    /// from it.
     pub card_radius: f32,
-    /// Draw a visual indicator under each touch/pointer contact. Off by default;
-    /// meant for demo recordings, not daily use.
+    /// For demo recordings.
     pub show_touches: bool,
-    /// Invert touchpad scrolling so content follows the fingers. Mouse wheels
-    /// are unaffected. Applies to touchpads as they are added.
+    /// Touchpads only, applied as they are added.
     pub natural_scroll: bool,
-    /// Prefer server-side (compositor-owned = no) decorations. When `true`,
-    /// top-level app windows are told to skip their own client-side titlebars
-    /// for a borderless phone look. Child windows (dialogs) always keep CSD
-    /// regardless, so toolkits like GTK still draw the header bar that holds a
-    /// file chooser's Open/Cancel buttons.
+    /// Tell top-level windows to drop client-side titlebars. Dialogs keep CSD
+    /// so GTK file choosers still get their Open/Cancel header bar.
     pub prefer_no_csd: bool,
-    /// Scheduler utilization floor (`util_min`) applied to the render thread
-    /// while it is drawing. See [`UclampMin`].
     pub uclamp_min: UclampMin,
-    /// Enable variable refresh rate on the panel when the connector reports it
-    /// capable. With render-on-demand this lets the panel drop its own refresh
-    /// on a static screen instead of scanning out at the mode's rate forever.
-    /// Ignored where the driver exposes no `VRR_ENABLED`/`vrr_capable`.
+    /// Only where the connector reports `vrr_capable`.
     pub vrr: bool,
-    /// How long (ms) one accelerometer reading must hold before the app is
-    /// turned to match it. Debounces the flip that happens the moment the phone
-    /// crosses the diagonal. `0` turns as soon as the sensor reports.
+    /// How long an accelerometer reading must hold before turning. `0` turns
+    /// immediately.
     pub rotation_settle_ms: u64,
-    /// How long (ms) each half of the dip-to-black that covers an orientation
-    /// change takes. `0` disables the transition (instant swap).
+    /// Each half of the rotation dip-to-black. `0` swaps instantly.
     pub rotation_fade_ms: u64,
-    /// Shell commands run once at startup, for setups without systemd user
-    /// units. Spawned with `sh -c` after the Wayland socket exists, so clients
-    /// launched here find `WAYLAND_DISPLAY`. Ignored on reload.
+    /// Run via `sh -c` once the Wayland socket exists, for setups without
+    /// systemd user units. Ignored on reload.
     pub startup: Vec<String>,
-    /// Per-app resource tiers applied on focus change. See [`Resources`].
     pub resources: Resources,
     pub bindings: Vec<Binding>,
 }
 
-/// What the focused app is given and what everything behind it is squeezed to.
-///
-/// The compositor launches each app into its own systemd scope and moves these
-/// limits onto that scope's cgroup as focus changes — there is no migrating of
-/// processes between tiers, only a property change on the cgroup the app (and
-/// everything it forked) already lives in.
+/// Focused app vs. background resource limits, applied as properties on each
+/// app's systemd scope cgroup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resources {
-    /// Whether to tier at all. Off leaves every app at the systemd defaults.
+    /// Off leaves every app at the systemd defaults.
     pub enable: bool,
-    /// `CPUWeight` for the focused app. Proportional, and only bites under
-    /// contention: it decides who yields when two apps want the CPU at once, it
-    /// does not cap either of them.
+    /// Proportional: only decides who yields under contention, never caps.
     pub fg_cpu_weight: u32,
-    /// `CPUWeight` for everything not focused.
     pub bg_cpu_weight: u32,
-    /// `MemoryHigh` for everything not focused, in systemd's spelling
-    /// (`"512M"`, `"infinity"` for no limit). A throttle-and-reclaim ceiling,
-    /// not a kill: a backgrounded app goes slow rather than losing its state.
-    ///
-    /// Set below what an app actually uses and it will reclaim continuously for
-    /// as long as it is backgrounded, which costs more power than it saves —
-    /// hence `"infinity"` by default, with the real value left to be measured
-    /// per device against the apps that are actually installed.
+    /// Systemd spelling (`"512M"`, `"infinity"`). Throttle-and-reclaim, not a
+    /// kill. Set below real usage it reclaims continuously and costs power,
+    /// hence `"infinity"` until measured per device.
     pub bg_memory_high: String,
-    /// `CPUQuota` for everything not focused: a hard ceiling on CPU *time*,
-    /// as a percentage of one core (`"30%"`, `"infinity"` for no cap).
-    ///
-    /// This is the knob that saves power, and the reason no app is frozen
-    /// instead. [`Self::bg_cpu_weight`] is proportional — a backgrounded app
-    /// spinning on an otherwise idle phone meets no contention and so runs at
-    /// full speed and full clocks. A quota bounds it whether or not anything
-    /// else wants the CPU, while still letting the app run: a chat client keeps
-    /// its connection, wakes for a notification and goes back to sleep, all of
-    /// which fits in a few percent of a core.
-    ///
-    /// The cap covers the whole cgroup, so an app's processes share it. Set it
-    /// too low and legitimate background work (a download, audio decode) is
-    /// slowed rather than merely deprioritized — which is why the default is
-    /// well above what idling costs.
+    /// Percentage of one core (`"30%"`, `"infinity"`), shared by the whole
+    /// cgroup. This is what saves power: a weight does nothing for an app
+    /// spinning alone on an idle phone. Too low slows legitimate background work.
     pub bg_cpu_quota: String,
-    /// `AllowedCPUs` for everything not focused: `"auto"` to pin them to the
-    /// efficiency cluster, `"off"` to leave CPU placement alone, or an explicit
-    /// list (`"0-3"`).
-    ///
-    /// `"auto"` is derived from `cpu_capacity` per device rather than written
-    /// down, because the layout is not the same on two phones — the FP5 is
-    /// 4x382 + 3x889 + 1x1024, not the 4+4 the label suggests. It disables
-    /// itself where every CPU is the same size.
-    ///
-    /// Complements the quota: a cap bounds how much CPU a background app may
-    /// burn, this decides *where* it burns it, and 30% of a little core costs
-    /// materially less than 30% of a prime core woken up for the purpose.
+    /// `"auto"` (the efficiency cluster, derived from `cpu_capacity`), `"off"`,
+    /// or a list (`"0-3"`). Auto disables itself on symmetric CPUs.
     pub bg_allowed_cpus: String,
 }
 
-/// How to pick the `util_min` floor for the render thread.
-///
-/// Without a floor the render thread's utilization decays while the screen is
-/// idle, so schedutil parks it on the little cluster at a low OPP and the first
-/// frames of a touch are slow. Measured on the FP5: first frame after 12s idle
-/// 11.78ms vs an 11.11ms budget (6/6 over), follow-up frames 10.21ms. With a
-/// floor above the little cluster's capacity, 8.88ms (0/6 over) and 4.01ms.
+/// Without a floor the render thread decays onto the little cluster at a low
+/// OPP and the first frames of a touch are slow (FP5: 11.78ms vs 11.11ms
+/// budget, 6/6 over; with a floor 8.88ms, 0/6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UclampMin {
-    /// Derive from CPU topology at startup: just above the little cluster's
-    /// `cpu_capacity`, which is where the migration knee sits. Portable across
-    /// devices with different capacity splits; disables itself on machines whose
-    /// CPUs are all the same capacity, where there is no bigger core to move to.
+    /// Just above the little cluster's `cpu_capacity`, the migration knee.
+    /// Disables itself on symmetric CPUs.
     Auto,
-    /// No floor. The kernel default.
     Off,
-    /// An explicit floor in the kernel's 0..=1024 utilization scale.
+    /// Kernel 0..=1024 scale.
     Fixed(u32),
 }
 
-/// Long-press threshold when the config does not say otherwise. 800ms so a
-/// volume nudge does not accidentally cross into the long-press action.
+/// 800ms so a volume nudge doesn't cross into the long press.
 pub const DEFAULT_LONG_PRESS_MS: u64 = 800;
 
-/// Output scale when `[main]` does not say otherwise: the FP5 panel is dense
-/// enough that 1:1 client rendering (the old M4 behavior) is illegibly small.
+/// The FP5 panel is illegible at 1:1.
 pub const DEFAULT_DPI: f64 = 3.0;
 
-/// Idle-blank timeout when `[main]` does not say otherwise: 10 minutes. `0` in
-/// the config disables idle blanking entirely.
+/// 10 minutes.
 pub const DEFAULT_IDLE_BLANK_SECS: u64 = 600;
 
-/// Card corner radius when `[main]` does not say otherwise.
 pub const DEFAULT_CARD_RADIUS: f32 = 120.0;
 
-/// Touch indicator is off unless `[main].show_touches = true`.
 pub const DEFAULT_SHOW_TOUCHES: bool = false;
 
-/// Touchpads scroll naturally unless `[main].natural_scroll = false`.
 pub const DEFAULT_NATURAL_SCROLL: bool = true;
 
-/// Prefer no client-side decorations by default: the phone shell wants
-/// borderless app windows. Dialogs keep CSD regardless (see [`Config`]).
 pub const DEFAULT_PREFER_NO_CSD: bool = true;
 
-/// Utilization floor policy when `[main]` does not say otherwise. Auto-derived
-/// from CPU topology, because the useful value is the little cluster's capacity
-/// and that differs per device (382 on the FP5).
 pub const DEFAULT_UCLAMP_MIN: UclampMin = UclampMin::Auto;
 
-/// Enable VRR by default when the panel reports it capable. The compositor can still disable
+/// Still a no-op unless the connector reports `vrr_capable`.
 pub const DEFAULT_VRR: bool = true;
 
-/// Orientation debounce when `[main]` does not say otherwise. Long enough to sit
-/// out a hand wobbling past the diagonal, short enough that a deliberate turn
-/// still feels like a response to what the user did.
 pub const DEFAULT_ROTATION_SETTLE_MS: u64 = 400;
 
-/// Half-duration of the rotation dip-to-black when `[main]` does not say
-/// otherwise: out in 130ms, back in 130ms around the swap.
 pub const DEFAULT_ROTATION_FADE_MS: u64 = 130;
 
 impl Default for Resources {
-    /// Tiering on, CPU only. The weights are a 10:1 split, which is what
-    /// decides a fight between the app in front and one behind it; the
-    /// compositor itself sits above both at 200 (see `nix/module.nix`).
+    /// 10:1 CPU weights; the compositor sits above both at 200 (`nix/module.nix`).
     fn default() -> Resources {
         Resources {
             enable: true,
@@ -284,12 +188,11 @@ impl Default for Resources {
     }
 }
 
-/// Parse `[resources]`. Each bad value is dropped back to its default rather
-/// than failing the section, like the rest of the config.
+/// Each bad value drops back to its default.
 fn parse_resources(raw: Option<RawResources>) -> Resources {
     let d = Resources::default();
     let Some(raw) = raw else { return d };
-    // 1..=10000 is systemd's accepted CPUWeight range.
+    // systemd's CPUWeight range.
     let weight = |v: Option<u32>, name: &str, default: u32| match v {
         Some(w) if (1..=10_000).contains(&w) => w,
         Some(w) => {
@@ -332,8 +235,7 @@ fn parse_resources(raw: Option<RawResources>) -> Resources {
     }
 }
 
-/// Whether `s` is `auto`, `off`, or a CPU list systemd will take for
-/// `AllowedCPUs` (`0`, `0-3`, `0-1,4`).
+/// `auto`, `off`, or an `AllowedCPUs` list (`0`, `0-3`, `0-1,4`).
 fn is_cpu_list(s: &str) -> bool {
     if s == "auto" || s == "off" {
         return true;
@@ -348,8 +250,7 @@ fn is_cpu_list(s: &str) -> bool {
         })
 }
 
-/// Whether `s` is something systemd will accept for `CPUQuota`: `infinity`, or
-/// a percentage of one core. Over 100% is legal and means more than one core.
+/// `infinity` or a percentage; over 100% means more than one core.
 fn is_cpu_quota(s: &str) -> bool {
     if s.eq_ignore_ascii_case("infinity") {
         return true;
@@ -360,10 +261,8 @@ fn is_cpu_quota(s: &str) -> bool {
     }
 }
 
-/// Whether `s` is something systemd will accept for `MemoryHigh`: `infinity`, a
-/// percentage, or a byte count with an optional unit suffix. Checked here so a
-/// typo shows up as a config warning rather than as a tier that silently never
-/// applies (the `systemctl` call is fire-and-forget).
+/// `infinity`, a percentage, or bytes with an optional suffix. Checked here
+/// because the `systemctl` call is fire-and-forget.
 fn is_memory_size(s: &str) -> bool {
     if s.eq_ignore_ascii_case("infinity") {
         return true;
@@ -376,8 +275,7 @@ fn is_memory_size(s: &str) -> bool {
         )
 }
 
-/// Parse the `uclamp_min` value: `"auto"`, `"off"`, or 0..=1024 (`0` = off).
-/// Anything else is dropped with a warning and the default applies.
+/// `"auto"`, `"off"`, or 0..=1024 (`0` = off).
 fn parse_uclamp_min(v: Option<&toml::Value>) -> UclampMin {
     let Some(v) = v else {
         return DEFAULT_UCLAMP_MIN;
@@ -400,8 +298,8 @@ fn parse_uclamp_min(v: Option<&toml::Value>) -> UclampMin {
     }
 }
 
-/// Shipped defaults, mirroring the user's niri bindings. Defined as TOML so the
-/// documented example and the built-in behavior cannot drift apart.
+/// Defined as TOML so the documented example and built-in behavior can't
+/// drift.
 pub const DEFAULT_TOML: &str = r#"
 [keybinds]
 long_press_ms = 800
@@ -472,8 +370,7 @@ press = "short"
 action = "switcher-prev"
 "#;
 
-/// Serde mirror of the on-disk shape, kept separate so the public types stay
-/// free of `Option` soup and validation lives in one place.
+/// Serde mirror of the file; validation lives in one place.
 #[derive(Deserialize, Default)]
 struct RawConfig {
     long_press_ms: Option<u64>,
@@ -481,9 +378,7 @@ struct RawConfig {
     binding: Vec<RawBinding>,
 }
 
-/// Top-level shape of `config.toml`. Other sections (display, gestures, ...)
-/// may be added here later; unknown top-level keys are ignored by serde's
-/// default behavior.
+/// Unknown top-level keys are ignored.
 #[derive(Deserialize, Default)]
 struct RawConfigFile {
     main: Option<RawMain>,
@@ -509,7 +404,6 @@ struct RawMain {
     show_touches: Option<bool>,
     natural_scroll: Option<bool>,
     prefer_no_csd: Option<bool>,
-    /// `"auto"` (the default), `"off"`, or a number in 0..=1024. `0` means off.
     uclamp_min: Option<toml::Value>,
     vrr: Option<bool>,
     rotation_settle_ms: Option<u64>,
@@ -529,14 +423,12 @@ struct RawBinding {
 }
 
 impl Config {
-    /// The compiled-in defaults.
     pub fn defaults() -> Config {
         Config::parse(DEFAULT_TOML)
     }
 
-    /// Parse config text, dropping invalid entries. A whole-file parse error
-    /// yields an empty config; use [`Config::parse_or_defaults`] to fall back to
-    /// the shipped bindings instead.
+    /// A whole-file parse error yields an empty config; see
+    /// [`Config::parse_or_defaults`].
     pub fn parse(text: &str) -> Config {
         let file: RawConfigFile = match toml::from_str(text) {
             Ok(file) => file,
@@ -596,8 +488,7 @@ impl Config {
         }
     }
 
-    /// Like [`Config::parse`], but an unparseable file leaves the defaults in
-    /// place so the hardware buttons keep working.
+    /// An unparseable file keeps the defaults so hardware buttons still work.
     pub fn parse_or_defaults(text: &str) -> Config {
         match toml::from_str::<RawConfigFile>(text) {
             Ok(_) => Config::parse(text),
@@ -609,8 +500,6 @@ impl Config {
     }
 }
 
-/// Validate one raw entry. Returns `None` (with a warning) for anything the
-/// compositor cannot act on.
 fn convert(raw: RawBinding) -> Option<Binding> {
     let press = match raw.press.as_str() {
         "short" => PressKind::Short,
@@ -662,24 +551,17 @@ fn convert(raw: RawBinding) -> Option<Binding> {
     })
 }
 
-// --- config.toml discovery + loading ---
-//
-// The counterpart to `sc_shell_model::persist` (which owns `state.toml` I/O):
-// resolving where `config.toml` lives and reading it belongs with the parser,
-// not the compositor. A missing file is normal (shipped defaults apply); an
-// unreadable or unparseable one warns but never aborts.
+// config.toml discovery and loading. A missing file is normal; unreadable or
+// unparseable warns but never aborts.
 
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-/// `SPRINGCHICK_CONFIG` override: if set, it is the only path tried, with no
-/// fallthrough to XDG or `/etc` when that file is missing. Injectable env lookup
-/// so tests don't mutate real process env vars (multithreaded test binary).
+/// If set, the only path tried. Injectable so tests don't mutate process env.
 fn env_override(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     env("SPRINGCHICK_CONFIG").map(PathBuf::from)
 }
 
-/// XDG-then-`/etc` candidates, in lookup order:
 /// `$XDG_CONFIG_HOME/springchick/config.toml` (or `~/.config/...`), then
 /// `/etc/springchick/config.toml`.
 fn candidate_paths(env: impl Fn(&str) -> Option<String>) -> Vec<PathBuf> {
@@ -696,9 +578,7 @@ fn candidate_paths(env: impl Fn(&str) -> Option<String>) -> Vec<PathBuf> {
     paths
 }
 
-/// Try to read and parse one candidate path. `None` means "this tier failed" —
-/// callers fall back to defaults (env override) or the next candidate (lookup
-/// tiers). A missing file is silent; any other read error is a warning.
+/// A missing file is silent; other read errors warn.
 fn try_read(path: &Path) -> Option<Config> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
@@ -713,9 +593,6 @@ fn try_read(path: &Path) -> Option<Config> {
     }
 }
 
-/// Read `config.toml` from the first tier that exists, falling back to the
-/// shipped defaults. A missing file is normal; unreadable/unparseable warns,
-/// never fatal.
 pub fn load() -> Config {
     let real_env = |k: &str| std::env::var(k).ok();
 
@@ -889,7 +766,6 @@ mod tests {
     fn rotation_timings_are_read_from_main_section() {
         let cfg = Config::parse("[main]\nrotation_settle_ms = 250\nrotation_fade_ms = 0\n");
         assert_eq!(cfg.rotation_settle_ms, 250);
-        // 0 is meaningful (no transition), not "unset".
         assert_eq!(cfg.rotation_fade_ms, 0);
     }
 
@@ -937,7 +813,6 @@ mod tests {
         assert_eq!(p("[main]\nuclamp_min = \"auto\"\n"), UclampMin::Auto);
         assert_eq!(p("[main]\nuclamp_min = \"AUTO\"\n"), UclampMin::Auto);
         assert_eq!(p("[main]\nuclamp_min = \"off\"\n"), UclampMin::Off);
-        // 0 is the natural way to spell "no floor" for a numeric setting.
         assert_eq!(p("[main]\nuclamp_min = 0\n"), UclampMin::Off);
         assert_eq!(p("[main]\nuclamp_min = 450\n"), UclampMin::Fixed(450));
         assert_eq!(p("[main]\nuclamp_min = 1024\n"), UclampMin::Fixed(1024));
@@ -945,8 +820,6 @@ mod tests {
 
     #[test]
     fn uclamp_min_rejects_out_of_range_and_nonsense() {
-        // Lenient parsing: a bad value falls back to the default, it does not
-        // abort the whole config.
         let p = |s: &str| Config::parse(s).uclamp_min;
         assert_eq!(p("[main]\nuclamp_min = 2000\n"), UclampMin::Auto);
         assert_eq!(p("[main]\nuclamp_min = -5\n"), UclampMin::Auto);
@@ -1128,8 +1001,6 @@ mod tests {
         );
     }
 
-    /// A bad value falls back to its own default; the rest of the section still
-    /// applies.
     #[test]
     fn resources_bad_values_drop_to_defaults() {
         let c = Config::parse(
@@ -1165,7 +1036,6 @@ mod tests {
 
     #[test]
     fn cpu_quotas_systemd_accepts() {
-        // Over 100% is legal: it means more than one core's worth.
         for ok in ["infinity", "30%", "5%", "200%"] {
             assert!(is_cpu_quota(ok), "{ok} should be accepted");
         }

@@ -1,27 +1,10 @@
-//! External-display mirroring for the DRM backend.
+//! External-display mirroring (DRM). The phone panel is the only output
+//! clients see; every other connector gets its own CRTC and swapchain, and
+//! each frame the primary's scanout dmabuf is blitted in, letterboxed.
 //!
-//! The phone panel is the *primary* output: everything — layout, input, Skia
-//! chrome, the wl_output global clients see — is sized to it and unaffected by
-//! what else is plugged in. Any other connected connector becomes a
-//! [`MirrorOutput`]: its own CRTC, mode and GBM swapchain, but no scene of its
-//! own. Each frame the primary's freshly-rendered scanout dmabuf is imported as
-//! a texture and blitted into the mirror's buffer, aspect-fit and letterboxed
-//! into its mode.
-//!
-//! The blit undoes the fullscreen-app rotation ([`crate::rotation`]). That
-//! rotation exists because the phone is being *held* sideways; an external
-//! panel is not, so mirroring the buffer verbatim would show a landscape app on
-//! its side, pillarboxed. Undoing it also means a landscape app fills a
-//! landscape panel instead of a narrow strip down the middle.
-//!
-//! Consequences of that choice, all deliberate for a first cut:
-//!
-//! - Clients never see a second `wl_output`, so nothing re-lays-out on hotplug.
-//! - A mirror renders only when the primary does, so both panels run at the
-//!   primary's pace — with one exception: while the phone panel is blanked its
-//!   CRTC issues no vblank at all, so the mirror's own vblank becomes the frame
-//!   clock and the scene is composited for the external display alone.
-//! - Input from a mirror's seat is irrelevant — touch is mapped to the primary.
+//! The blit undoes the fullscreen-app rotation: the external panel isn't
+//! being held sideways. Mirrors render when the primary does, except while
+//! the phone panel is blanked, when the mirror's vblank drives the frame.
 
 use std::error::Error;
 
@@ -37,27 +20,20 @@ use smithay::reexports::drm::control::{
 use smithay::utils::{Physical, Point, Rectangle, Size, Transform};
 use tracing::{info, warn};
 
-/// One non-primary connected output, mirroring the primary's scene.
 pub struct MirrorOutput {
     pub connector: connector::Handle,
     pub crtc: crtc::Handle,
-    /// Mode resolution — the letterbox target for the blit.
     pub size: Size<i32, Physical>,
     pub surface: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, ()>,
-    /// This connector's `DPMS` property. Blanking the phone panel does *not*
-    /// power this one down — an external display is a second screen the user is
-    /// still watching, so it keeps its power and its frames (see
-    /// `drm_backend::App::apply_blanking`). It is driven for a suspend, and to
-    /// hand the device over dark at shutdown. `None` if the driver exposes none.
+    /// Blanking the phone leaves this one on; it's driven for suspend and
+    /// shutdown. `None` if the driver has no DPMS property.
     pub dpms: Option<smithay::reexports::drm::control::property::Handle>,
-    /// True while a page-flip is in flight on this connector. A mirror that is
-    /// still waiting is simply skipped for the frame rather than stalling the
-    /// primary — an external panel at 60Hz must not drag the phone to 60.
+    /// A mirror still waiting is skipped, so a 60Hz external panel can't drag
+    /// the phone to 60.
     pub pending_flip: bool,
 }
 
 impl MirrorOutput {
-    /// Modeset `conn` on `crtc` and build its swapchain.
     pub fn new(
         drm: &mut DrmDevice,
         gbm: &GbmDevice<DrmDeviceFd>,
@@ -89,14 +65,8 @@ impl MirrorOutput {
         })
     }
 
-    /// Blit `src` (the primary's just-composited scanout buffer) into this
-    /// output's next buffer, aspect-fit into its mode.
-    ///
-    /// Does *not* present — the caller fences the GPU once for all mirrors and
-    /// then calls [`Self::queue`], so no panel scans out a half-written buffer.
-    ///
-    /// Always full-damage: the source is an opaque texture whose damage we do
-    /// not track, and the letterbox bars have to be cleared regardless.
+    /// Doesn't present: the caller fences once for all mirrors, then
+    /// [`Self::queue`]s. Always full damage.
     pub fn render_into(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -111,10 +81,7 @@ impl MirrorOutput {
         let (mut buffer, _age) = self.surface.next_buffer()?;
         let mut fb = renderer.bind(&mut buffer)?;
         {
-            // `Transform::Normal` as the frame transform: source and
-            // destination are both GBM scanout buffers rendered through the
-            // same GLES path, so the Y-origin conventions cancel and a straight
-            // copy preserves orientation.
+            // Both sides are GBM scanout buffers, so the Y-origin conventions cancel.
             let mut frame = renderer.render(&mut fb, self.size, Transform::Normal)?;
             frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[full])?;
             frame.render_texture_from_to(
@@ -125,8 +92,6 @@ impl MirrorOutput {
                 &[],
                 src_transform(rotation),
                 1.0,
-                // Default texture program, no extra uniforms: a plain copy, no
-                // rounded corners or tint.
                 None,
                 &[],
             )?;
@@ -136,7 +101,6 @@ impl MirrorOutput {
         Ok(())
     }
 
-    /// Queue the page-flip for the buffer [`Self::render_into`] just filled.
     pub fn queue(&mut self) -> Result<(), Box<dyn Error>> {
         let full = Rectangle::from_size(self.size);
         self.surface.queue_buffer(None, Some(vec![full]), ())?;
@@ -145,27 +109,15 @@ impl MirrorOutput {
     }
 }
 
-/// The `src_transform` for the mirror blit, undoing the quarter-turn the
-/// primary drew the app with.
-///
-/// The two sit in opposite conventions and it is the *inverse* that goes here.
-/// The primary passes [`crate::rotation::Rotation::transform`] as a **frame**
-/// transform ([`crate::render`]), which turns the content that way;
-/// `render_texture_from_to` takes a **source** transform and applies its
-/// inverse. Naming the same transform in both places therefore turns the image
-/// the same way twice instead of cancelling — a quarter turn out in each
-/// direction, which reads on the panel as the picture being upside down (both
-/// turns aspect-fit identically, so nothing else looks off).
+/// Inverse of the primary's transform: that one is a frame transform, this is
+/// a source transform that gets inverted again. The same value in both places
+/// turns the image 180°.
 fn src_transform(rotation: crate::rotation::Rotation) -> Transform {
     rotation.transform().invert()
 }
 
-/// Where the primary's buffer lands on a mirror of size `dst`, given the
-/// rotation it was drawn with.
-///
-/// A rotation swaps what the buffer *shows*: the phone's 1080x2160 portrait
-/// buffer holding a turned fullscreen app reads as a 2160x1080 landscape image
-/// once the blit un-rotates it, and it is that image that gets aspect-fit.
+/// A rotated app in a portrait buffer reads as landscape once un-rotated, and
+/// that is what gets aspect-fit.
 fn dst_rect(
     src: Size<i32, Physical>,
     dst: Size<i32, Physical>,
@@ -175,9 +127,7 @@ fn dst_rect(
     fit(shown, dst)
 }
 
-/// Aspect-fit `src` inside `dst`, centred — the letterboxed destination rect
-/// for the mirror blit. Degenerate sizes collapse to an empty rect at the
-/// origin rather than dividing by zero.
+/// Degenerate sizes give an empty rect.
 fn fit(src: Size<i32, Physical>, dst: Size<i32, Physical>) -> Rectangle<i32, Physical> {
     if src.w <= 0 || src.h <= 0 || dst.w <= 0 || dst.h <= 0 {
         return Rectangle::new(Point::from((0, 0)), Size::from((0, 0)));
@@ -194,22 +144,14 @@ fn fit(src: Size<i32, Physical>, dst: Size<i32, Physical>) -> Rectangle<i32, Phy
     )
 }
 
-/// A connected connector with a CRTC we can drive and the mode to drive it at.
 pub struct Candidate {
     pub connector: connector::Handle,
     pub crtc: crtc::Handle,
     pub mode: Mode,
 }
 
-/// Scan every connector on the device and pair each connected one with a free
-/// CRTC and its preferred mode.
-///
-/// `taken` seeds the set of CRTCs already in use, and `skip` the connectors
-/// already driven (the primary's, plus any mirror already running), so a rescan
-/// on hotplug never hands out a CRTC twice and never re-reports a connector we
-/// are already scanning out to. Connectors that are connected but have no
-/// reachable free CRTC are skipped with a warning — on a phone SoC there are
-/// typically only two.
+/// `taken` CRTCs and `skip` connectors are already in use, so a hotplug rescan
+/// never hands out a CRTC twice. Phones typically have only two CRTCs.
 pub fn scan(
     drm: &DrmDevice,
     taken: &[crtc::Handle],
@@ -258,18 +200,14 @@ pub fn scan(
     Ok(out)
 }
 
-/// Whether a connector is currently reporting `Connected`. Used on hotplug to
-/// decide which mirrors to tear down. A connector we can no longer query counts
-/// as gone.
+/// An unqueryable connector counts as gone.
 pub fn is_connected(drm: &DrmDevice, conn: connector::Handle) -> bool {
     drm.get_connector(conn, false)
         .map(|c| c.state() == connector::State::Connected)
         .unwrap_or(false)
 }
 
-/// Bring `mirrors` in line with what is plugged in right now: drop the ones
-/// whose connector went away, add one for every newly connected connector that
-/// is not the primary. Called from the udev hotplug handler.
+/// Called from the udev hotplug handler.
 pub fn refresh(
     mirrors: &mut Vec<MirrorOutput>,
     drm: &mut DrmDevice,
@@ -332,7 +270,6 @@ mod tests {
 
     #[test]
     fn portrait_into_landscape_pillarboxes() {
-        // 1080x2160 phone into a 1920x1080 TV: height-limited, bars left/right.
         let got = fit((1080, 2160).into(), (1920, 1080).into());
         assert_eq!(got, r(690, 0, 540, 1080));
     }
@@ -355,9 +292,6 @@ mod tests {
     #[test]
     fn rotated_app_fills_a_landscape_tv() {
         use crate::rotation::Rotation;
-        // 1080x2160 portrait buffer holding a turned fullscreen app reads as
-        // 2160x1080 — 2:1 into 16:9, so width-limited with thin bars top and
-        // bottom, not a narrow strip down the middle.
         for rot in [Rotation::LeftUp, Rotation::RightUp] {
             assert_eq!(
                 dst_rect((1080, 2160).into(), (1920, 1080).into(), rot),
@@ -369,14 +303,9 @@ mod tests {
     #[test]
     fn the_blit_undoes_the_primarys_turn() {
         use crate::rotation::Rotation;
-        // The regression: passing the primary's own transform here turns the
-        // image a second time instead of cancelling it, landing 180° out — the
-        // mirror upside down while the phone panel itself reads correctly.
         for rot in [Rotation::None, Rotation::LeftUp, Rotation::RightUp] {
             assert_eq!(src_transform(rot), rot.transform().invert());
         }
-        // An unrotated phone still blits straight through, so Home is
-        // unaffected either way.
         assert_eq!(src_transform(Rotation::None), Transform::Normal);
         assert_eq!(src_transform(Rotation::LeftUp), Transform::_90);
         assert_eq!(src_transform(Rotation::RightUp), Transform::_270);

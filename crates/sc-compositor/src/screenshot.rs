@@ -1,8 +1,4 @@
-//! Native screenshot: grab the composited frame, PNG-encode it, own the
-//! clipboard offer so the next paste yields the image.
-//!
-//! The pixels are captured by the backends (they own the renderer) through the
-//! same offscreen-draw path screencopy uses; everything after that is here.
+//! Screenshot: PNG-encode the composited frame and offer it on the clipboard.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -14,7 +10,6 @@ use tracing::{info, warn};
 
 pub const MIME: &str = "image/png";
 
-/// Encode tightly-packed RGBA into PNG.
 pub fn encode_png(rgba: &[u8], size: Size<i32, Buffer>) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let res = (|| -> Result<(), png::EncodingError> {
@@ -32,8 +27,7 @@ pub fn encode_png(rgba: &[u8], size: Size<i32, Buffer>) -> Option<Vec<u8>> {
     }
 }
 
-/// Encode and take ownership of the clipboard. The bytes live in the seat's
-/// selection user data until some client sets a selection of its own.
+/// The bytes live in the seat's selection until a client sets its own.
 pub fn to_clipboard(state: &mut crate::State, rgba: &[u8], size: Size<i32, Buffer>) {
     let Some(png) = encode_png(rgba, size) else {
         return;
@@ -49,9 +43,8 @@ pub fn to_clipboard(state: &mut crate::State, rgba: &[u8], size: Size<i32, Buffe
     set_data_device_selection(&dh, &seat, vec![MIME.to_string()], Arc::new(png));
 }
 
-/// Serve a paste of our selection. A screenshot dwarfs the 64K pipe buffer, so
-/// the write has to happen off the compositor thread or the pasting client
-/// deadlocks us.
+/// A screenshot dwarfs the 64K pipe buffer; writing on the compositor thread
+/// would deadlock against the pasting client.
 pub fn serve(fd: OwnedFd, data: Arc<Vec<u8>>) {
     std::thread::spawn(move || {
         if let Err(e) = std::fs::File::from(fd).write_all(&data) {

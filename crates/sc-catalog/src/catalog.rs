@@ -1,9 +1,7 @@
 use std::path::{Path, PathBuf};
 
-/// XDG base data directories, highest precedence first: `$XDG_DATA_HOME`
-/// (default `~/.local/share`), then each `$XDG_DATA_DIRS` entry (default
-/// `/usr/local/share:/usr/share`) left-to-right. Callers append `applications`
-/// (desktop files) or `icons` (themes) to each.
+/// XDG data dirs, highest precedence first: `$XDG_DATA_HOME`, then
+/// `$XDG_DATA_DIRS`.
 pub fn xdg_data_dirs() -> Vec<PathBuf> {
     let data_home = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -27,29 +25,21 @@ pub fn xdg_data_dirs() -> Vec<PathBuf> {
 pub struct AppEntry {
     pub id: String, // file stem, e.g. "org.gnome.Maps"
     pub name: String,
-    pub exec: String, // raw Exec line (field codes like %U left for the launcher to strip)
-    pub icon: String, // icon name or absolute path
-    /// `Terminal=true`: the app is a CLI program and must be run inside a
-    /// terminal emulator, not spawned bare.
+    pub exec: String, // raw; field codes are stripped at launch
+    pub icon: String,
+    /// Must run inside a terminal emulator.
     pub terminal: bool,
-    /// `Path=`: working directory to run the program in.
     pub path: Option<PathBuf>,
-    /// `DBusActivatable=true`: may be launched over D-Bus, and is allowed to
-    /// omit Exec entirely.
+    /// May omit Exec.
     pub dbus_activatable: bool,
-    /// Where this entry was read from; `%k` expands to it.
+    /// `%k` expands to this.
     pub desktop_file: PathBuf,
-    /// `X-Flatpak=`: the flatpak ref this entry was exported from, if any.
     pub flatpak: Option<String>,
-    /// `Categories=`, in declaration order. Raw — both main and additional
-    /// categories, unvalidated; [`crate::folders`] picks the folder from these.
+    /// Raw and unvalidated; [`crate::folders`] maps these.
     pub categories: Vec<String>,
 }
 
-/// Scan `.desktop` files from every XDG data dir's `applications/`, highest
-/// precedence first (the first entry seen for a given id wins). Skips
-/// NoDisplay/Hidden/non-Application entries via [`parse_desktop`]. Shared by the
-/// compositor and the search app so both see the same catalog.
+/// First entry seen for an id wins.
 pub fn scan_apps() -> Vec<AppEntry> {
     let env = DesktopEnv::from_env();
     let mut entries = Vec::new();
@@ -74,29 +64,14 @@ pub fn scan_apps() -> Vec<AppEntry> {
     entries
 }
 
-/// Split an Exec line into argv, honouring Desktop Entry quoting and dropping
-/// field codes (`%U %f %F %u %i %c %k` …). Shared by the compositor's launcher
-/// and the search app.
-///
-/// Splitting on whitespace alone is not enough: the spec reserves space, tab,
-/// newline and ``"'\><~|&;$*?#()` `` and requires an argument containing any of
-/// them to be double-quoted. Any URL with a query string therefore arrives
-/// quoted, and a naive split hands `Command::new` a program name with the quote
-/// characters still attached.
-///
-/// Inside quotes, `\` escapes `"`, `` ` ``, `$` and itself, and a `%` is
-/// literal - so percent-encoded URLs survive intact.
-///
-/// Single quotes are not part of the spec, which defines double quotes only,
-/// but enough real-world .desktop files use them that we accept both. They
-/// follow shell convention: everything up to the closing quote is literal, with
-/// no escape processing.
+/// Exec line to argv per the Desktop Entry spec: double quotes with `\`
+/// escaping `"`, `` ` ``, `$` and `\`, and `%` literal inside them (so encoded
+/// URLs survive). Field codes are dropped. Single quotes aren't in the spec
+/// but are common, so they're accepted shell-style with no escapes.
 pub fn parse_exec(exec: &str) -> Vec<String> {
     parse_exec_with(exec, &ExecContext::default())
 }
 
-/// Values the expandable field codes resolve to. `%i`, `%c` and `%k` carry
-/// real content rather than being dropped like the file/URL codes.
 #[derive(Debug, Default)]
 pub struct ExecContext<'a> {
     pub icon: &'a str,
@@ -104,8 +79,6 @@ pub struct ExecContext<'a> {
     pub desktop_file: &'a str,
 }
 
-/// [`parse_exec`], expanding `%i` (`--icon <Icon>`), `%c` (the name) and `%k`
-/// (the desktop file path).
 pub fn parse_exec_with(exec: &str, ctx: &ExecContext) -> Vec<String> {
     let mut argv = Vec::new();
     let mut current = String::new();
@@ -121,18 +94,14 @@ pub fn parse_exec_with(exec: &str, ctx: &ExecContext) -> Vec<String> {
                 }
             }
             quote @ ('"' | '\'') => {
-                // A quoted argument exists even if it is empty.
                 has_current = true;
                 while let Some(c) = chars.next() {
                     if c == quote {
                         break;
                     }
-                    // Single quotes are literal, shell-style; only double
-                    // quotes process escapes.
                     if c == '\\' && quote == '"' {
                         match chars.peek() {
-                            // Only these four are escapable; anything else
-                            // keeps the backslash, as a path like C:\x would.
+                            // Only these four are escapable; anything else keeps the backslash.
                             Some('"' | '`' | '$' | '\\') => {
                                 current.push(chars.next().unwrap_or_default())
                             }
@@ -144,13 +113,11 @@ pub fn parse_exec_with(exec: &str, ctx: &ExecContext) -> Vec<String> {
                 }
             }
             '%' => match chars.next() {
-                // %% is an escaped literal percent sign.
                 Some('%') => {
                     current.push('%');
                     has_current = true;
                 }
-                // %i expands to two arguments, and to nothing when there is no
-                // icon to name.
+                // %i is two arguments, or none without an icon.
                 Some('i') => {
                     if has_current {
                         argv.push(std::mem::take(&mut current));
@@ -161,8 +128,7 @@ pub fn parse_exec_with(exec: &str, ctx: &ExecContext) -> Vec<String> {
                         argv.push(ctx.icon.to_string());
                     }
                 }
-                // %c and %k are single arguments that may contain spaces, so
-                // they are pushed whole rather than appended to `current`.
+                // Pushed whole: they may contain spaces.
                 Some(code @ ('c' | 'k')) => {
                     let value = if code == 'c' {
                         ctx.name
@@ -177,8 +143,7 @@ pub fn parse_exec_with(exec: &str, ctx: &ExecContext) -> Vec<String> {
                         argv.push(value.to_string());
                     }
                 }
-                // The file/URL codes expand to nothing: we launch with no
-                // document argument.
+                // File/URL codes expand to nothing; we launch with no document.
                 Some(_) => {}
                 None => {}
             },
@@ -195,22 +160,17 @@ pub fn parse_exec_with(exec: &str, ctx: &ExecContext) -> Vec<String> {
     argv
 }
 
-/// Parse a single .desktop file. Returns None if it should not be shown
-/// (NoDisplay/Hidden, not an Application, TryExec missing, or excluded by
-/// OnlyShowIn/NotShowIn).
+/// `None` if the entry shouldn't be shown (NoDisplay/Hidden, not an
+/// Application, TryExec missing, or OnlyShowIn/NotShowIn).
 pub fn parse_desktop(path: &Path, contents: &str) -> Option<AppEntry> {
     parse_desktop_in(path, contents, &DesktopEnv::from_env())
 }
 
-/// The parts of the environment that affect parsing: which localized names we
-/// accept, and which desktop we claim to be. Taken as a value so callers read
-/// the environment once per scan, and so tests are not at the mercy of the
-/// process environment.
+/// Read once per scan; a value so tests don't depend on the process env.
 #[derive(Clone, Debug, Default)]
 pub struct DesktopEnv {
-    /// Locale suffixes to accept, best match first.
+    /// Best match first.
     pub locales: Vec<String>,
-    /// `$XDG_CURRENT_DESKTOP`, split on `:`.
     pub desktops: Vec<String>,
 }
 
@@ -233,14 +193,12 @@ impl DesktopEnv {
     }
 }
 
-/// [`parse_desktop`] against an explicit environment.
 pub fn parse_desktop_in(path: &Path, contents: &str, env: &DesktopEnv) -> Option<AppEntry> {
     let id = path.file_stem()?.to_string_lossy().to_string();
     let locales = &env.locales;
 
     let mut name: Option<String> = None;
-    // Rank of the locale that supplied `name`; lower is a better match, and
-    // usize::MAX marks the unlocalized fallback.
+    // Lower is better; usize::MAX is the unlocalized fallback.
     let mut name_rank = usize::MAX;
     let mut exec = None;
     let mut icon = String::new();
@@ -271,12 +229,10 @@ pub fn parse_desktop_in(path: &Path, contents: &str, env: &DesktopEnv) -> Option
 
         match key {
             "Name" => {
-                // Prefer the best locale match, and let any localized value
-                // beat the unlocalized one.
                 let rank = match locale {
                     Some(l) => match locales.iter().position(|c| c == l) {
                         Some(rank) => rank,
-                        None => continue, // a locale we do not speak
+                        None => continue,
                     },
                     None => usize::MAX,
                 };
@@ -319,13 +275,10 @@ pub fn parse_desktop_in(path: &Path, contents: &str, env: &DesktopEnv) -> Option
     ) {
         return None;
     }
-    // TryExec names the binary to test for: if it is not installed, the entry
-    // is not supposed to be shown at all.
     if let Some(try_exec) = try_exec {
         resolve_program(&try_exec)?;
     }
 
-    // Exec is required, except for entries that are launched over D-Bus.
     let exec = match exec {
         Some(exec) => exec,
         None if dbus_activatable => String::new(),
@@ -346,29 +299,20 @@ pub fn parse_desktop_in(path: &Path, contents: &str, env: &DesktopEnv) -> Option
     })
 }
 
-/// A resolved command line for an entry: what to run, and where.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LaunchCommand {
     pub argv: Vec<String>,
     pub cwd: Option<PathBuf>,
 }
 
-/// Resolve an entry to the command that launches it.
-///
-/// Handles the three things a bare `Exec` split does not: `Terminal=true` apps
-/// are wrapped in a terminal emulator (otherwise a CLI program is spawned with
-/// no tty and dies immediately), `Path=` becomes the working directory, and a
-/// D-Bus-activated entry with no `Exec` is launched through `gio launch`.
-///
-/// Returns None if there is nothing runnable, including when a terminal app
-/// cannot be run because no terminal emulator is installed.
+/// Wraps `Terminal=true` apps in a terminal, applies `Path=`, and launches
+/// Exec-less D-Bus entries via `gio launch`. `None` if nothing is runnable,
+/// including a terminal app with no terminal installed.
 pub fn launch_command(entry: &AppEntry) -> Option<LaunchCommand> {
     let mut argv = if entry.exec.is_empty() {
         if !entry.dbus_activatable {
             return None;
         }
-        // We do not speak D-Bus activation ourselves; gio does, and ships with
-        // glib on any system running GTK apps.
         vec![
             "gio".to_string(),
             "launch".to_string(),
@@ -401,9 +345,8 @@ pub fn launch_command(entry: &AppEntry) -> Option<LaunchCommand> {
     })
 }
 
-/// Terminal emulator argv prefix that runs the rest of the line as a command.
-/// `$TERMINAL` wins; otherwise the first known emulator on PATH, since the flag
-/// that means "run this command" differs between them.
+/// `$TERMINAL`, else the first known emulator on PATH; the run-command flag
+/// differs between them.
 fn terminal_prefix() -> Option<Vec<String>> {
     const TERMINALS: &[(&str, &[&str])] = &[
         ("foot", &["-e"]),
@@ -435,7 +378,6 @@ fn terminal_prefix() -> Option<Vec<String>> {
     })
 }
 
-/// Split `Name[nb_NO]` into `("Name", Some("nb_NO"))`.
 fn split_locale(key: &str) -> (&str, Option<&str>) {
     match key.split_once('[') {
         Some((key, rest)) => (key, rest.strip_suffix(']')),
@@ -443,8 +385,7 @@ fn split_locale(key: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Unescape a desktop-entry string value: `\s` is a space, plus `\n`, `\t`,
-/// `\r` and `\\`. Applied before Exec quoting, per the spec.
+/// `\s`, `\n`, `\t`, `\r`, `\\`. Applied before Exec quoting, per the spec.
 fn unescape_value(value: &str) -> String {
     if !value.contains('\\') {
         return value.to_string();
@@ -462,8 +403,7 @@ fn unescape_value(value: &str) -> String {
             Some('t') => out.push('\t'),
             Some('r') => out.push('\r'),
             Some('\\') => out.push('\\'),
-            // Not a defined escape: keep both characters, so an Exec value
-            // like "C:\x" survives to the quoting stage intact.
+            // Undefined escape: keep both, so "C:\x" reaches the quoting stage intact.
             Some(other) => {
                 out.push('\\');
                 out.push(other);
@@ -474,9 +414,8 @@ fn unescape_value(value: &str) -> String {
     out
 }
 
-/// The spec's fallback order: lang_COUNTRY@MODIFIER, lang_COUNTRY, lang@MODIFIER, lang.
+/// Spec fallback order: lang_COUNTRY@MODIFIER, lang_COUNTRY, lang@MODIFIER, lang.
 fn locale_candidates(raw: &str) -> Vec<String> {
-    // Encoding is not used for matching.
     let raw = raw.split('.').next().unwrap_or(raw);
     let (base, modifier) = match raw.split_once('@') {
         Some((base, modifier)) => (base, Some(modifier)),
@@ -503,7 +442,6 @@ fn locale_candidates(raw: &str) -> Vec<String> {
     candidates
 }
 
-/// Apply OnlyShowIn/NotShowIn against the current desktop names.
 fn show_in_this_desktop(
     only_show_in: Option<&str>,
     not_show_in: Option<&str>,
@@ -524,8 +462,6 @@ fn show_in_this_desktop(
     true
 }
 
-/// Find an executable: a path with a `/` is checked directly, a bare name is
-/// looked up in `$PATH`.
 fn resolve_program(program: &str) -> Option<PathBuf> {
     if program.is_empty() {
         return None;
@@ -608,14 +544,10 @@ mod tests {
 
     #[test]
     fn parse_exec_unquotes_arguments() {
-        // The program itself may be quoted - previously this reached
-        // Command::new with the quote characters still attached and no such
-        // path existed, so the app silently failed to start.
         assert_eq!(
             parse_exec(r#""/nix/store/x y/bin/app" --run "https://h/?a=1&b=2""#),
             ["/nix/store/x y/bin/app", "--run", "https://h/?a=1&b=2"]
         );
-        // A quoted argument may contain whitespace
         assert_eq!(
             parse_exec(r#"app "two words" tail"#),
             ["app", "two words", "tail"]
@@ -625,15 +557,13 @@ mod tests {
 
     #[test]
     fn parse_exec_accepts_single_quotes() {
-        // Not in the spec, but common in the wild
+        // Not in the spec, but common.
         assert_eq!(
             parse_exec("'/nix/store/x y/bin/app' --run 'https://h/?a=1&b=2'"),
             ["/nix/store/x y/bin/app", "--run", "https://h/?a=1&b=2"]
         );
         assert_eq!(parse_exec("app 'two words'"), ["app", "two words"]);
-        // Literal, shell-style: no escape processing inside single quotes
         assert_eq!(parse_exec(r"app 'a\b'"), ["app", r"a\b"]);
-        // The other quote character is just a character inside them
         assert_eq!(parse_exec(r#"app 'say "hi"'"#), ["app", r#"say "hi""#]);
         assert_eq!(parse_exec(r#"app "it's""#), ["app", "it's"]);
     }
@@ -643,19 +573,16 @@ mod tests {
         assert_eq!(parse_exec(r#"app "a\"b""#), [r#"app"#, r#"a"b"#]);
         assert_eq!(parse_exec(r#"app "a\\b""#), [r"app", r"a\b"]);
         assert_eq!(parse_exec(r#"app "p\$v""#), ["app", "p$v"]);
-        // Not an escapable character: the backslash is kept
         assert_eq!(parse_exec(r#"app "C:\x""#), [r"app", r"C:\x"]);
     }
 
     #[test]
     fn parse_exec_keeps_percent_encoding_in_quoted_urls() {
-        // Field codes are not recognised inside quotes, so %20 survives rather
-        // than being eaten as a field code
+        // Field codes aren't recognised inside quotes, so %20 survives.
         assert_eq!(
             parse_exec(r#"app "https://h/a%20b?x=1""#),
             ["app", "https://h/a%20b?x=1"]
         );
-        // %% is an escaped literal percent
         assert_eq!(parse_exec("app 50%%"), ["app", "50%"]);
     }
 
@@ -670,7 +597,6 @@ mod tests {
             parse_exec_with("app %i", &ctx),
             ["app", "--icon", "org.gnome.Maps"]
         );
-        // %c is one argument even though the name contains spaces
         assert_eq!(
             parse_exec_with("app %c", &ctx),
             ["app", "Maps of the World"]
@@ -679,8 +605,6 @@ mod tests {
             parse_exec_with("app %k", &ctx),
             ["app", "/x/org.gnome.Maps.desktop"]
         );
-        // Nothing to expand to: the code disappears rather than leaving an
-        // empty argument behind
         assert_eq!(
             parse_exec_with("app %i %c", &ExecContext::default()),
             ["app"]
@@ -698,7 +622,6 @@ mod tests {
         assert_eq!(entry.exec, "app name");
         assert_eq!(unescape_value(r"a\\b"), r"a\b");
         assert_eq!(unescape_value(r"line\nbreak"), "line\nbreak");
-        // Undefined escape: both characters survive
         assert_eq!(unescape_value(r"C:\x"), r"C:\x");
     }
 
@@ -734,19 +657,16 @@ mod tests {
             .name
         };
 
-        // Most specific match wins, then the language, then unlocalized
         assert_eq!(parse("nb_NO.UTF-8"), "Filer NO");
         assert_eq!(parse("nb"), "Filer");
         assert_eq!(parse("de_DE.UTF-8"), "Dateien");
         assert_eq!(parse(""), "Files");
-        // A locale we do not speak must not win over the unlocalized name
         assert_eq!(parse("fr_FR"), "Files");
     }
 
     #[test]
     fn localized_name_wins_regardless_of_line_order() {
-        // The localized line comes first here; the unlocalized one must not
-        // overwrite it
+        // Localized line first; the unlocalized one must not overwrite it.
         let contents = "[Desktop Entry]\nType=Application\nExec=x\nName[nb]=Filer\nName=Files\n";
         let entry =
             parse_desktop_in(Path::new("/x/a.desktop"), contents, &env_for("nb", &[])).unwrap();
@@ -761,7 +681,6 @@ mod tests {
         };
         assert!(!shown(&["springchick"]));
         assert!(shown(&["GNOME"]));
-        // XDG_CURRENT_DESKTOP may list several
         assert!(shown(&["springchick", "KDE"]));
     }
 
@@ -791,11 +710,9 @@ mod tests {
         let with_exec = "[Desktop Entry]\nType=Application\nName=A\nDBusActivatable=true\n";
         let entry = parse_desktop(Path::new("/x/a.desktop"), with_exec).unwrap();
         assert!(entry.exec.is_empty());
-        // gio speaks D-Bus activation for us
         let command = launch_command(&entry).unwrap();
         assert_eq!(command.argv, ["gio", "launch", "/x/a.desktop"]);
 
-        // Without DBusActivatable, a missing Exec still drops the entry
         let no_exec = "[Desktop Entry]\nType=Application\nName=A\n";
         assert!(parse_desktop(Path::new("/x/a.desktop"), no_exec).is_none());
     }
@@ -806,7 +723,6 @@ mod tests {
                        TryExec=/nonexistent/springchick-test-binary\n";
         assert!(parse_desktop(Path::new("/x/a.desktop"), missing).is_none());
 
-        // An installed binary keeps the entry
         let present = "[Desktop Entry]\nType=Application\nName=A\nExec=x\nTryExec=/bin/sh\n";
         assert!(parse_desktop(Path::new("/x/a.desktop"), present).is_some());
     }
@@ -835,9 +751,8 @@ mod tests {
             terminal: true,
             ..Default::default()
         };
-        // When a terminal emulator is installed, htop must not be argv[0] but
-        // must still be the command being run. When none is installed,
-        // launch_command returns None rather than spawning a tty-less CLI app.
+        // htop must be the command but not argv[0]; with no terminal installed
+        // launch_command returns None.
         if let Some(command) = launch_command(&entry) {
             assert_ne!(command.argv.first().map(String::as_str), Some("htop"));
             assert_eq!(command.argv.last().map(String::as_str), Some("htop"));

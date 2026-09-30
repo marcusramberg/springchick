@@ -1,5 +1,4 @@
-//! Home-screen icon layout: the reflow springs that slide icons to their slots,
-//! and arrange mode (long-press to wiggle, drag to reorder / pin / unpin).
+//! Home icon reflow springs and arrange mode.
 
 use std::collections::HashMap;
 
@@ -11,12 +10,10 @@ use crate::input_dispatch;
 use crate::state::State;
 use crate::ui_state::UiState;
 
-/// Hold duration (milliseconds) a press must survive to count as a long press.
 pub(crate) const HOLD_MS: u128 = 500;
 
-/// A finger held on an icon on Home, waiting to see if it becomes a long-press
-/// (which opens the icon menu). Cancelled if the finger moves past the hold slop
-/// (becomes a swipe) or releases before `HOLD_MS`.
+/// A held icon waiting to become a long press (the icon menu). Cancelled by
+/// moving past the hold slop or releasing early.
 pub(crate) struct IconPress {
     pub app_id: String,
     pub source: input_dispatch::IconSource,
@@ -24,27 +21,19 @@ pub(crate) struct IconPress {
     pub at: std::time::Instant,
 }
 
-/// A finger held on empty home background, waiting to become the long press
-/// that engages arrange mode. Cancelled on the same terms as [`IconPress`].
-///
-/// Arrange lives on the background rather than on an icon because the icon's
-/// long press is spoken for by the menu — and holding the wallpaper to
-/// rearrange is the gesture iOS itself moved to.
+/// A held background waiting to become the long press that engages arrange.
 pub(crate) struct BgPress {
     pub start: (f32, f32),
     pub at: std::time::Instant,
 }
 
-/// An icon currently being dragged in arrange mode.
 pub(crate) struct DragItem {
     pub app_id: String,
     pub source: input_dispatch::IconSource,
     pub cur: (f32, f32),
-    /// (page, index) hole the grid opens under the finger; None until first
-    /// motion or when the finger is over the dock zone.
+    /// Hole the grid opens under the finger; `None` over the dock.
     pub hover: Option<(usize, usize)>,
-    /// When the finger entered the current edge zone, for dwell-to-flip.
-    /// None when not in an edge zone.
+    /// Edge-zone entry time, for dwell-to-flip.
     pub edge_since: Option<(std::time::Instant, EdgeSide)>,
 }
 
@@ -54,27 +43,19 @@ pub(crate) enum EdgeSide {
     Right,
 }
 
-/// Arrange-mode state: icons wiggle, badges/Done button are live, and an
-/// icon may be mid-drag toward the dock (pin) or grid (unpin).
 #[derive(Default)]
 pub(crate) struct ArrangeState {
     pub drag: Option<DragItem>,
-    /// The long press that engaged arrange mode has not been lifted yet.
-    ///
-    /// Without this the gesture cancels itself: engaging happens mid-hold, and
-    /// the release that follows is exactly the "still tap on empty space" that
-    /// leaves arrange mode. The first release swallows the flag instead.
+    /// The engaging long press hasn't lifted yet. Its release would otherwise
+    /// be the still tap that exits arrange.
     pub just_engaged: bool,
 }
 
-/// Sentinel occupying the gap slot in the drag working order. Never a real app
-/// id (NUL-prefixed), so it can't collide; it is laid out for spacing but never
-/// drawn (it is not in `model.pages`, and `reflow_grid` drops it from targets).
+/// Gap slot in the drag working order. NUL-prefixed so it can't be an app id;
+/// laid out, never drawn.
 pub(crate) const HOLE: &str = "\u{0}hole";
 
-/// Global-space target (x, y) for every app currently on the grid (dock and
-/// hidden apps excluded — they aren't in `model.pages`), keyed by app id.
-/// Pure so it's cheap to unit-test independent of `State`.
+/// Global-space target per grid app.
 fn reflow_targets(
     model: &ShellModel,
     width: f32,
@@ -83,9 +64,7 @@ fn reflow_targets(
     reflow_targets_for(&model.pages, width, height)
 }
 
-/// The drag "working order": the flattened grid with `dragged` removed and, when
-/// `hover` is Some, a HOLE sentinel inserted at the hovered global index so the
-/// real icons part to show the drop target. Re-chunked into pages.
+/// Flattened grid minus `dragged`, with a HOLE at `hover`, re-chunked.
 fn working_order(
     pages: &[Vec<String>],
     dragged: &str,
@@ -109,8 +88,6 @@ fn working_order(
         .collect()
 }
 
-/// Reflow targets over an explicit page list (used for the live drag "working
-/// order": dragged app removed so remaining icons compact and open a gap).
 fn reflow_targets_for(
     pages: &[Vec<String>],
     width: f32,
@@ -129,8 +106,7 @@ fn reflow_targets_for(
 }
 
 impl State {
-    /// Persist + reflow after a manual grid/dock edit (pin/unpin/hide/reorder).
-    /// No frecency recompute — grid order is now manual.
+    /// Persist and reflow after a manual grid/dock edit.
     pub(crate) fn after_arrange_edit(&mut self) {
         self.model.repack();
         if let Err(e) =
@@ -138,10 +114,7 @@ impl State {
         {
             warn!(%e, "failed to save shell model after arrange edit");
         }
-        // The edit can have dropped a page (removing the last icon on it, or
-        // the trailing empty page an edge-dwell flip added), leaving the shell
-        // parked past the end — a blank page that is not even the library, with
-        // no dots lit and nothing to swipe back to but by luck.
+        // The edit may have dropped a page, leaving the shell parked past the end.
         let page_count = self.home_page_count();
         if let UiState::Home {
             page,
@@ -160,18 +133,12 @@ impl State {
         self.reflow_dock();
     }
 
-    /// The current pages with `dragged` removed (its slot becomes a gap the
-    /// remaining icons compact into). The dragged app renders as a ghost, so it
-    /// is intentionally absent from the reflow targets. `hover` is accepted for
-    /// future explicit-hole placement but the compacted layout already yields a
-    /// gap at/after the removed slot.
+    /// `hover` is unused so far: compacting already opens the gap.
     fn working_pages(&self, dragged: &str, hover: Option<(usize, usize)>) -> Vec<Vec<String>> {
         working_order(&self.model.pages, dragged, hover)
     }
 
-    /// Re-target the grid-reflow springs to each app's current slot position,
-    /// seeding new entries and dropping ones no longer on the grid (docked,
-    /// hidden). Called after any change to `model.pages`.
+    /// Call after any change to `model.pages`.
     pub(crate) fn reflow_grid(&mut self) {
         let (w, h) = self.output_size_f();
         let drag_app = self
@@ -191,8 +158,7 @@ impl State {
         Self::reflow_springs(&mut self.grid_anim, &targets);
     }
 
-    /// Retarget dock springs to the current dock layout, dropping a dock icon
-    /// that is being dragged (it rides as the ghost). Mirror of `reflow_grid`.
+    /// The dragged dock icon is dropped; it rides as the ghost.
     pub(crate) fn reflow_dock(&mut self) {
         let (w, h) = self.output_size_f();
         let dragged = self
@@ -201,9 +167,8 @@ impl State {
             .and_then(|a| a.drag.as_ref())
             .filter(|d| d.source == input_dispatch::IconSource::Dock)
             .map(|d| d.app_id.clone());
-        // Lay out with the dragged dock app removed so the surviving icons
-        // re-center over the N-1 cells (the dock is anchored to fixed per-index
-        // cells, so omitting the app from `targets` alone would not move them).
+        // The dock uses fixed per-index cells, so the app must leave the layout,
+        // not just `targets`, for the rest to re-center.
         let layout = if let Some(app) = &dragged {
             let mut m = self.model.clone();
             m.dock.retain(|a| a != app);
@@ -221,14 +186,8 @@ impl State {
         Self::reflow_springs(&mut self.dock_anim, &targets);
     }
 
-    /// Abandon an in-flight page drag, springing the grid back to the page it
-    /// started on.
-    ///
-    /// Dropping `page_drag` on its own is not enough: the drag drives the
-    /// spring by setting `value` *and* `target` together (so it tracks the finger
-    /// with no physics), which means a half-dragged spring reports `is_settled()`
-    /// and will never return by itself. Whoever cancels the drag has to retarget
-    /// it, or the home grid stays parked a fraction of a page off for good.
+    /// A page drag sets the spring's `value` and `target` together, so a
+    /// half-dragged spring reads as settled and never returns. Retarget it.
     pub(crate) fn cancel_page_drag(&mut self) {
         self.page_drag = None;
         if let UiState::Home {
@@ -239,9 +198,6 @@ impl State {
         }
     }
 
-    /// Generic helper to reflow animation springs to new target positions.
-    /// Updates existing springs in-place and seeds new ones for apps that
-    /// don't have them yet. Removes springs for apps no longer in targets.
     fn reflow_springs(
         anim_map: &mut HashMap<String, (sc_anim::Spring, sc_anim::Spring)>,
         targets: &HashMap<String, (f32, f32)>,
@@ -263,9 +219,8 @@ impl State {
         anim_map.retain(|app, _| targets.contains_key(app));
     }
 
-    /// Long-press hold on empty home background: engages arrange mode with
-    /// nothing picked up (the finger is on the wallpaper, not on an icon). Once
-    /// in arrange, pressing an icon lifts it immediately — no second hold.
+    /// Engages arrange with nothing lifted. In arrange, pressing an icon lifts it
+    /// without a second hold.
     pub(crate) fn maybe_engage_arrange_hold(&mut self) {
         if self.arrange.is_some() || !self.pointer_down {
             return;
@@ -276,9 +231,8 @@ impl State {
         if p.at.elapsed().as_millis() < HOLD_MS {
             return;
         }
-        // Logged so the VM test can assert arrange mode from the journal:
-        // engaging it changes no `UiState` discriminant (Home stays Home), so
-        // the `state changed to ...` line never fires for it.
+        // The VM test asserts this line: arrange doesn't change the `UiState`
+        // discriminant, so no state-change line fires.
         debug!(target: "springchick::debug", "arrange engaged from background");
         self.arrange = Some(ArrangeState {
             drag: None,
@@ -289,18 +243,9 @@ impl State {
         self.search_arm = None;
     }
 
-    /// Take a drag over from the search app: dismiss it and start an ordinary
-    /// arrange drag carrying `app_id`, with the finger still down.
-    ///
-    /// Search is a *client*, so it owns the touch sequence the drag started in.
-    /// The finger therefore has to be taken off it mid-press — `wl_touch.cancel`
-    /// so it stops tracking a contact it no longer has, then the slot is
-    /// re-pointed at the shell's own gesture funnel so the same unbroken finger
-    /// keeps driving the drag. From there `motion_arrange_drag` and
-    /// `release_arrange` own it exactly as they do for a library lift.
-    ///
-    /// `at` overrides where the finger is (output pixels) for callers driving
-    /// this by hand; a real handoff passes `None` and inherits the live touch.
+    /// Take a drag over from the search app with the finger still down. Search
+    /// owns the touch, so send `wl_touch.cancel` and repoint the slot at our own
+    /// gesture funnel. `at` overrides the position; a real handoff passes `None`.
     pub(crate) fn lift_from_search(&mut self, app_id: String, at: Option<(f32, f32)>) {
         let (w, h) = self.output_size_f();
         let at = at
@@ -308,17 +253,14 @@ impl State {
             .or(self.last_pointer_pos)
             .unwrap_or((w * 0.5, h * 0.5));
         debug!(target: "springchick::debug", "search drag lifted app_id={app_id} at={at:?}");
-        // Whichever slot the search client is holding. A pointer-driven drag
-        // (desktop, `ipc drag` in a test) has none and already drives the
-        // funnel, so `None` is the right answer there, not a failure.
+        // A pointer-driven drag has no slot and already drives the funnel.
         let slot = self.touch_targets.keys().copied().next();
         let touch = self.touch.clone();
         touch.cancel(self);
         self.touch_targets.clear();
         self.gesture_slot = slot;
 
-        // Deliberately not `cancel_gestures`: it clears `arrange.drag`, which is
-        // the thing being set up here.
+        // Not `cancel_gestures`: it clears `arrange.drag`.
         self.handle_return_home();
         self.icon_press = None;
         self.bg_press = None;
@@ -326,9 +268,8 @@ impl State {
         self.pending_launch = None;
         self.cancel_page_drag();
 
-        // `on_motion` bails unless a press is live, and `on_release` reads the
-        // last position — the handoff has to look like a press already in
-        // flight, because it is one.
+        // Look like a press already in flight: `on_motion` needs one and
+        // `on_release` reads the last position.
         self.pointer_down = true;
         self.last_pointer_pos = Some(at);
         self.arrange = Some(ArrangeState {
@@ -344,8 +285,7 @@ impl State {
         self.needs_render = true;
     }
 
-    /// Long-press hold on an icon: opens its context menu. The launch armed by
-    /// the same press is dropped — the hold was not a tap.
+    /// Drops the launch the same press armed.
     pub(crate) fn maybe_open_icon_menu(&mut self) {
         if self.icon_menu.is_some() || self.arrange.is_some() || !self.pointer_down {
             return;
@@ -357,17 +297,13 @@ impl State {
             return;
         }
         let (app_id, source) = (p.app_id.clone(), p.source);
-        // Titles are read straight off the surfaces here rather than mirrored
-        // into `State`: the menu is the only thing that wants them, and a title
-        // read at open time is by definition current.
         let windows: Vec<(crate::ui_state::ToplevelId, String)> = self
             .instances(&app_id)
             .into_iter()
             .map(|id| (id, self.toplevel_title(id)))
             .collect();
         let running = windows.len();
-        // Anchor on the icon's drawn center, so the panel points at where the
-        // finger actually is even mid-reflow.
+        // The drawn center, so it's right mid-reflow.
         let anchor = self.icon_center(&app_id, source);
         debug!(
             target: "springchick::debug",
@@ -381,9 +317,8 @@ impl State {
         self.cancel_page_drag();
     }
 
-    /// Live page scroll in pages: how far the home grid is currently shifted
-    /// left. Grid reflow springs are in global (page 0 origin) space, so this is
-    /// what turns them into screen space. Zero outside Home.
+    /// Page offset of the home grid; turns global-space springs into screen space.
+    /// Zero outside Home.
     pub(crate) fn home_page_scroll(&self) -> f32 {
         match &self.ui {
             UiState::Home { page_spring, .. } => page_spring.value,
@@ -391,8 +326,7 @@ impl State {
         }
     }
 
-    /// Where an icon is drawn right now: its live reflow-spring position when it
-    /// has one, else its static layout slot.
+    /// Live reflow-spring position, else the layout slot.
     fn icon_center(&self, app_id: &str, source: input_dispatch::IconSource) -> (f32, f32) {
         let (w, h) = self.output_size_f();
         match source {
@@ -407,8 +341,7 @@ impl State {
                     return (sx.value - page_scroll * w, sy.value);
                 }
             }
-            // A folder member has no spring — it lives in the open panel, whose
-            // layout is the only place it is drawn.
+            // Folder members have no spring; the open panel's layout places them.
             input_dispatch::IconSource::Library => {
                 if let Some(slot) = self
                     .folder_panel()
@@ -428,9 +361,8 @@ impl State {
             .unwrap_or((w / 2.0, h / 2.0))
     }
 
-    /// Edge-dwell page flip: while dragging a reorder icon, holding it against a
-    /// screen edge past EDGE_DWELL_MS flips the home page (auto-repeating), adding
-    /// a trailing page if needed.
+    /// Holding a dragged icon at an edge past EDGE_DWELL_MS flips the page,
+    /// auto-repeating.
     pub(crate) fn tick_edge_page_flip(&mut self) {
         const EDGE_FRAC: f32 = 0.12;
         const EDGE_DWELL_MS: u128 = 300;
@@ -458,23 +390,19 @@ impl State {
                 Some((since, prev)) if prev == s => {
                     if now.duration_since(since).as_millis() >= EDGE_DWELL_MS {
                         flip = Some(if s == EdgeSide::Left { -1 } else { 1 });
-                        es = Some((now, s)); // reset -> auto-repeat
+                        es = Some((now, s));
                     }
                 }
                 _ => es = Some((now, s)),
             },
         }
-        // Write edge_since back.
         if let Some(d) = self.arrange.as_mut().and_then(|a| a.drag.as_mut()) {
             d.edge_since = es;
         }
-        // Apply a flip.
         if let Some(dir) = flip {
             let cur_page = self.current_home_page();
-            // Rightward stops at the library page rather than growing pages
-            // past it: the library is always last, and dropping onto it is the
-            // remove gesture. A new page is added only to fill the gap before
-            // it, and only once.
+            // Stop at the library page, which is always last. Add at most one new page
+            // before it.
             let new_page = if dir < 0 {
                 cur_page.saturating_sub(1)
             } else if cur_page + 1 < self.model.pages.len() {
@@ -512,7 +440,7 @@ mod tests {
         let mut m = ShellModel::default();
         for i in 0..25 {
             m.place(format!("app{i:02}"));
-        } // 24 on page 0, 1 on page 1
+        }
         let t = reflow_targets(&m, 1224.0, 2700.0);
         assert_eq!(t.len(), 25);
         let page1_app = &m.pages[1][0];
@@ -524,8 +452,6 @@ mod tests {
     #[test]
     fn working_order_opens_hole_at_hover() {
         let pages = vec![vec!["a".to_string(), "b".into(), "c".into(), "d".into()]];
-        // Drag "a", hover global index 2 -> order without "a" is [b,c,d];
-        // hole at 2 -> [b, c, HOLE, d].
         let out = working_order(&pages, "a", Some((0, 2)));
         assert_eq!(
             out[0],

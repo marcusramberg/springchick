@@ -1,6 +1,4 @@
-//! The winit dev backend: a windowed compositor for desktop development. Runs
-//! the same shell as the DRM backend, differing only in event pumping and how a
-//! frame is presented.
+//! Nested winit backend for development.
 
 use std::time::Duration;
 
@@ -41,13 +39,10 @@ pub(crate) fn run_winit() {
             }
         };
 
-    // Create Wayland display + listening socket.
     let (mut display, listener, socket_name) = create_display().expect("create wayland display");
-    // Dev backend: own env only, don't disturb the host session's user services.
+    // Don't touch the host session's user services.
     publish_wayland_display(&socket_name, false);
 
-    // Build State with the actual backend window size (the host compositor may
-    // have clamped our requested dev-window size).
     let rounded_tex_shader = match render::compile_rounded_tex_shader(gfx_backend.renderer()) {
         Ok(prog) => prog,
         Err(err) => {
@@ -63,11 +58,8 @@ pub(crate) fn run_winit() {
         socket_name.clone(),
         (actual_size.w, actual_size.h),
     );
-    // Advertise dmabuf v4 with feedback when the EGL display resolves to a real
-    // render node (it does under a normal host GPU session). Recorders —
-    // wf-recorder, wl-screenrec — bind v4 unconditionally and take a fatal
-    // protocol error against a v3 global, which would make them untestable
-    // nested. Falls back to v3 if the node can't be resolved (llvmpipe, etc).
+    // dmabuf v4 when EGL resolves a render node: recorders bind v4
+    // unconditionally and die on a v3 global. Falls back to v3 (llvmpipe).
     let main_device = smithay::backend::egl::EGLDevice::device_for_display(
         gfx_backend.renderer().egl_context().display(),
     )
@@ -83,18 +75,14 @@ pub(crate) fn run_winit() {
         main_device,
     );
 
-    // Control/IPC socket (`springchick ipc …`). Always listening; the client
-    // connects to the same path. Shared setup with the DRM backend.
     let debug_chan = debug_input::spawn_listener(state.panel_size);
     let catalog_dirty = crate::catalog_watch::spawn();
 
     info!("entering frame loop");
 
     while state.running {
-        // Accept new clients.
         accept_client(&display, &listener);
 
-        // Pump winit events.
         let status = winit_evt.dispatch_new_events(|event| match event {
             WinitEvent::CloseRequested => {
                 info!("window close requested");
@@ -114,7 +102,6 @@ pub(crate) fn run_winit() {
             break;
         }
 
-        // Drain debug input (dev harness) before rendering this frame.
         if let Some(chan) = &debug_chan {
             debug_input::drain(&mut state, chan);
         }
@@ -123,22 +110,17 @@ pub(crate) fn run_winit() {
             state.reload_catalog();
         }
 
-        // ext-idle-notify timeouts (polled; see `idle_notify`).
         let inhibited = state.is_idle_inhibited();
         state
             .idle_notify
             .refresh(std::time::Instant::now(), inhibited);
 
-        // Report a blank flipped by anything other than the client itself
-        // (here, only the power key: winit never blanks for real).
         let blanked = state.blank.is_blanked();
         state.output_power.sync(blanked);
 
-        // Dispatch Wayland clients.
         display.dispatch_clients(&mut state).ok();
         display.flush_clients().ok();
 
-        // Render.
         if let Err(err) = render_frame(&mut gfx_backend, &mut state, &rounded_tex_shader) {
             match err {
                 SwapBuffersError::ContextLost(err) => {
@@ -149,18 +131,14 @@ pub(crate) fn run_winit() {
             }
         }
 
-        // Sleep remainder of frame budget.
-        // TODO: switch to calloop timer in a future cleanup.
+        // TODO: switch to a calloop timer.
         std::thread::sleep(Duration::from_millis(1));
     }
 
-    // Remove the control socket file (best-effort). `spawn` also unlinks any
-    // stale socket before binding, so this is just tidy-up.
     if debug_chan.is_some() {
         let _ = std::fs::remove_file(ipc::socket_path());
     }
 
-    // Save state.
     if let Err(e) = persist::save(&state.model, &persist::state_path()) {
         warn!(%e, "failed to save shell model");
     }
@@ -168,8 +146,7 @@ pub(crate) fn run_winit() {
     info!("compositor shut down");
 }
 
-/// Draw the just-presented scene into an offscreen texture and read it back
-/// into a client's shm capture buffer. `None` = not usable shm.
+/// `None` = not usable shm.
 fn capture_frame_shm(
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
     state: &mut State,
@@ -190,9 +167,6 @@ fn capture_frame_shm(
     )
 }
 
-/// Shared by both capture protocols: compose the scene into an offscreen
-/// texture the size of the window, then read `src` out of it into the client's
-/// shm buffer.
 fn capture_region_shm(
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
     state: &mut State,
@@ -215,12 +189,8 @@ fn capture_region_shm(
         }
     };
     {
-        // Rendering to our own FBO flips Y relative to winit's presented
-        // surface: the Skia overlay takes the DRM path's flip, and the app pass
-        // drops the Flipped180 the presented frame needs (else captures come
-        // out with the app upside down while the shell is upright).
-        // A screencopy draw goes into the client's buffer, never to the panel,
-        // so any feedback it collects is discarded rather than presented.
+        // Our own FBO is Y-flipped relative to winit's surface: Skia takes the DRM
+        // flip and the app pass drops Flipped180. Capture feedback is discarded.
         let mut sinks = render::FrameSinks::default();
         let mut ctx = state.draw_ctx(
             prep,
@@ -243,8 +213,6 @@ fn capture_region_shm(
     ))
 }
 
-/// Serve a pending `screenshot` binding: recompose the scene offscreen, read it
-/// back, hand it to the clipboard.
 fn take_screenshot(
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
     state: &mut State,
@@ -294,11 +262,9 @@ fn take_screenshot(
     }
 }
 
-/// Handle input events from the winit backend.
 fn handle_winit_input(state: &mut State, event: InputEvent<winit::WinitInput>) {
     use smithay::backend::input::{AbsolutePositionEvent, ButtonState, PointerButtonEvent};
 
-    // Any input resumes clients we told had gone idle (ext-idle-notify).
     state.idle_notify.activity(std::time::Instant::now());
 
     match event {
@@ -314,8 +280,6 @@ fn handle_winit_input(state: &mut State, event: InputEvent<winit::WinitInput>) {
             let y = event.y_transformed(state.panel_size.1) as f32;
             touch::pointer_motion(state, x, y, event.time_msec());
         }
-        // Scroll, so a wheel behaves the same nested as on device — otherwise
-        // the DRM axis path has no way to be exercised in development.
         InputEvent::PointerAxis { event } => {
             let time = event.time_msec();
             touch::pointer_axis_event::<winit::WinitInput, _>(state, &event, time);
@@ -324,7 +288,6 @@ fn handle_winit_input(state: &mut State, event: InputEvent<winit::WinitInput>) {
     }
 }
 
-/// Render one frame.
 fn render_frame(
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
     state: &mut State,
@@ -334,7 +297,6 @@ fn render_frame(
     let damage = Rectangle::from_size(size);
     let frame_start = std::time::Instant::now();
 
-    // Fixed 90 Hz step for the dev backend.
     let prep = state.advance_frame(1.0 / 90.0);
 
     keybinds::poll(state);
@@ -345,8 +307,7 @@ fn render_frame(
     let (renderer, mut framebuffer) = backend.bind()?;
     let mut sinks = render::FrameSinks::default();
     {
-        // winit presents an already-correct framebuffer (no Skia y-flip) and
-        // submits full damage, so no partial hint.
+        // winit presents an already-correct framebuffer with full damage.
         let mut ctx = state.draw_ctx(
             &prep,
             Transform::Flipped180,
@@ -362,10 +323,7 @@ fn render_frame(
     drop(framebuffer);
     let result = backend.submit(Some(&[damage]));
 
-    // Answer presentation feedback right after the swap. A nested compositor
-    // owns neither the vblank nor the CRTC sequence, so the timestamp is our
-    // own clock and the frame is flagged as a software present with no
-    // sequence — honest about what a dev backend can actually know.
+    // Nested: no vblank or sequence, so our clock and a software-present flag.
     if result.is_ok() {
         crate::presentation::present(
             sinks.presented,
@@ -379,11 +337,8 @@ fn render_frame(
         crate::presentation::discard(sinks.presented);
     }
 
-    // Record + periodically log frame timing.
     state.record_and_log_frame(frame_start);
 
-    // Screencopy: nested winit has no dmabuf blit path, but shm readback works
-    // the same as on DRM, which is what grim/wl-screenrec fall back to.
     if !state.wlr_captures.is_empty() {
         let present = smithay::utils::Clock::<smithay::utils::Monotonic>::new().now();
         for frame in std::mem::take(&mut state.wlr_captures) {

@@ -1,15 +1,8 @@
-# Pointer (mouse) support VM test for springchick.
+# Pointer support: a USB mouse driven through the QEMU monitor. Checks button
+# routing, the cursor overlay appearing, and a touch hiding it.
 #
-# Gives the phone VM a USB mouse and injects relative motion, buttons and wheel
-# events through the QEMU HMP monitor. Asserts the DRM backend routes them, that
-# the cursor overlay appears once a pointer moves, and that a finger puts it away
-# again.
-#
-# Relative motion is deliberately the shape under test: it is what the J09 ring
-# emits (see INPUT-peripherals.md), and it is all the monitor can inject — HMP
-# `mouse_move` always queues *relative* events, so an absolute device cannot be
-# driven from here however it is bound. The `PointerMotionAbsolute` arm is
-# exercised by real tablet hardware only.
+# HMP `mouse_move` only injects relative motion (what the J09 ring emits), so
+# the absolute-motion path is only covered by real hardware.
 #
 # Run:  nix build .#checks.aarch64-linux.vm-pointer -L
 { self, pkgs }:
@@ -19,7 +12,6 @@ in
 mkTest {
   name = "springchick-pointer";
 
-  # Pillow: the cursor assertions are pixel checks, not OCR.
   extraPythonPackages = p: [ p.pillow ];
 
   extraMachineConfig = {
@@ -67,15 +59,13 @@ mkTest {
         )
 
 
-    # QEMU indexes its pointing devices; `mouse_set` picks which one HMP
-    # mouse_move drives. The test driver adds an absolute tablet of its own for
-    # screenshots and it is active by default, so the relative mouse has to be
-    # selected explicitly or the motion goes nowhere useful.
+    # The driver's own absolute tablet is active by default; select our relative
+    # mouse or the motion goes elsewhere.
     mice = machine.send_monitor_command("info mice")
     print("QEMU mice:\n" + mice)
     mouse = None
     for line in mice.splitlines():
-        # Lines look like: "* Mouse #2: QEMU HID Mouse"
+        # e.g. "* Mouse #2: QEMU HID Mouse"
         if "#" not in line or "absolute" in line:
             continue
         mouse = line.split("#", 1)[1].split(":", 1)[0].strip()
@@ -87,10 +77,8 @@ mkTest {
     print(f"light px with no cursor: {baseline}")
 
     with subtest("relative motion reaches the compositor"):
-        # Drive it hard into the top-left corner, where it clamps: libinput's
-        # pointer acceleration means a delta is not a pixel count, so a corner is
-        # the only position this can pin down. The arrow hangs down and right of
-        # its tip, so parked at the origin it is entirely on screen.
+        # Pin it in the top-left corner: with libinput acceleration a corner is the
+        # only position a delta can guarantee.
         for _ in range(10):
             machine.send_monitor_command("mouse_move -200 -200")
             time.sleep(0.05)
@@ -108,14 +96,13 @@ mkTest {
         machine.send_monitor_command("mouse_button 1")
         time.sleep(0.2)
         machine.send_monitor_command("mouse_button 0")
-        # 272 == BTN_LEFT; only that button acts as a finger on the shell.
+        # 272 == BTN_LEFT.
         journal("pointer button: code=272 pressed=true")
         journal("pointer button: code=272 pressed=false")
 
     with subtest("wheel events are survivable with nothing under the cursor"):
-        # 8 == wheel up, 16 == wheel down in HMP's button bitmask. Nothing is
-        # focused, so the scroll is dropped — the assertion is that dropping it
-        # is uneventful.
+        # HMP bitmask: 8 = wheel up, 16 = wheel down. Nothing is focused, so the
+        # scroll is dropped; this only checks that's harmless.
         machine.send_monitor_command("mouse_button 8")
         machine.send_monitor_command("mouse_button 0")
         machine.send_monitor_command("mouse_button 16")
@@ -131,7 +118,6 @@ mkTest {
             after_touch <= baseline + 20
         ), f"cursor still drawn after a touch: {baseline} -> {after_touch} light px"
 
-    # No panic / crash through any of it.
     machine.fail(
         "journalctl -b | grep -iE 'panicked at|SIGSEGV|SIGABRT|stack backtrace|segfault'"
     )

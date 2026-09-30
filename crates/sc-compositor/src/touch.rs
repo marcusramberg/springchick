@@ -1,14 +1,6 @@
-//! Touch routing: layer surfaces first, then the home gesture funnel.
-//!
-//! A touch-down is hit-tested against the visible Top/Overlay layer surfaces
-//! (e.g. the on-screen keyboard). If it lands on one, the whole sequence
-//! (down/motion/up) is forwarded to that client via the seat `wl_touch`, and the
-//! gesture system never sees it. Otherwise it flows into the existing gesture
-//! funnel unchanged.
-//!
-//! Client-bound events are not flushed here: the backend calls [`frame`] when
-//! the input stack reports the end of a simultaneous batch, and [`cancel`] when
-//! it abandons the sequence.
+//! Touch and pointer routing: client surfaces first, then the gesture funnel.
+//! Client events aren't flushed here; the backend calls [`frame`] and
+//! [`cancel`].
 
 use crate::input_common;
 use crate::touch_viz;
@@ -22,27 +14,16 @@ use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Point, SERIAL_COUNTER};
 
-/// Resolve which client surface (if any) should receive input at output-pixel
-/// `(x, y)`, returning it with its origin in global space and its coordinate
-/// scale. The scale (`dpi` — OSK layer surfaces render at fractional scale
-/// `dpi`, app surfaces at output scale `dpi`) is what physical input coords are
-/// divided by to reach the surface's logical space. Checks Top/Overlay layer
-/// surfaces (the OSK); everything else
-/// falls through to the gesture funnel by returning `None`.
+/// The client surface at output pixel `(x, y)`, with its origin and the
+/// scale (`dpi`) that maps physical input into its logical space. `None`
+/// falls through to the gesture funnel.
 fn surface_under(state: &State, x: f32, y: f32) -> Option<Target> {
     root_under(state, x, y).map(|t| descend(t, x, y))
 }
 
-/// Narrow a root-surface target to the subsurface actually under `(x, y)`.
-///
-/// Every target above is a *root* surface (toplevel, layer surface, popup,
-/// lock), but a client may put real content in subsurfaces of it, and
-/// `wl_pointer`/`wl_touch` enter carries the specific surface hit — a client
-/// that gets the root instead sees the event land on nothing. Firefox draws its
-/// doorhangers (the "allow notifications?" prompt) this way: they composite over
-/// the page but are not popups, so without this they take no input at all.
-///
-/// Also respects input regions: a subsurface that excludes the point is skipped.
+/// `wl_touch`/`wl_pointer` enter must name the subsurface hit; Firefox's
+/// doorhangers are subsurfaces and take no input otherwise. Respects input
+/// regions.
 fn descend(t: Target, x: f32, y: f32) -> Target {
     let local = to_local(t.scale, x, y) - t.focus();
     match under_from_surface_tree(&t.surface, local, (0, 0), WindowSurfaceType::ALL) {
@@ -58,41 +39,27 @@ fn descend(t: Target, x: f32, y: f32) -> Target {
     }
 }
 
-/// The root surface (toplevel, layer surface, popup, lock) input at `(x, y)`
-/// belongs to, before [`descend`] narrows it to a subsurface.
 fn root_under(state: &State, x: f32, y: f32) -> Option<Target> {
-    // 0. A locked session routes everything to the lock surface and nothing
-    //    else — no popups, no layers, no app. With no lock surface (client
-    //    crashed, or hasn't made one yet) input goes nowhere at all; it must
-    //    never fall through to the shell underneath.
+    // Locked: only the lock surface, or nowhere. Never the shell.
     if state.session_lock.is_locked() {
         return state
             .session_lock
             .wl_surface()
             .map(|s| Target::at(s.clone(), (0.0, 0.0), state.dpi));
     }
-    // 1. Open popups (menus, dropdowns) sit above everything and win, topmost
-    //    first. They render at output scale `dpi`, same mapping as apps.
+    // Popups first, topmost wins.
     if let Some(hit) = popup_under(state, x, y) {
         return Some(hit);
     }
-    // 2. Top/Overlay layer surfaces (a status panel, the OSK) win. They render
-    //    at fractional scale `dpi`, so their logical coord space is physical/dpi
-    //    — map input by /dpi. The rect origin is physical, so surface-local =
-    //    (input-origin)/dpi.
-    //
-    //    While the view is turned they are not drawn (see `render::draw_scene`),
-    //    so they must not be hit-tested either: an invisible panel swallowing
-    //    taps over landscape video is the worst of both.
+    // Top/Overlay layers (OSK). Not drawn while the view is turned, so not
+    // hit-tested either.
     if !state.view_rotation().swaps_axes() {
         if let Some((surface, (ox, oy))) = state.layers.hit_test(x, y, state.dpi) {
             return Some(Target::at(surface, (ox as f64, oy as f64), state.dpi));
         }
     }
-    // 3. The focused fullscreen app, except the bottom bar zone (home gesture).
-    //    App surfaces render at `dpi`, so input maps into logical space by /dpi.
-    //    The app is drawn at the usable-area origin (below a top bar / right of
-    //    a left bar), so its input origin must match, not (0, 0).
+    // The focused app, minus the bar zone. It's drawn at the usable-area
+    // origin, not (0, 0).
     if let crate::ui_state::UiState::App { toplevel, .. } = &state.ui {
         let (w, h) = state.output_size_f();
         let bar = sc_layout::bar_rect(w, h);
@@ -110,14 +77,11 @@ fn root_under(state: &State, x: f32, y: f32) -> Option<Target> {
     None
 }
 
-/// Stable numeric id for a touch slot, for touch-visualization keying. Kept in
-/// the positive `i32` range so it never aliases [`touch_viz::POINTER_ID`].
+/// Positive `i32` range, so it never aliases [`touch_viz::POINTER_ID`].
 fn slot_id(slot: TouchSlot) -> u64 {
     i32::from(slot) as u64
 }
 
-/// Where an input event is routed: a client surface, its origin in view space,
-/// and the scale mapping view pixels → its logical space.
 struct Target {
     surface: WlSurface,
     origin: (f64, f64),
@@ -133,8 +97,7 @@ impl Target {
         }
     }
 
-    /// The focus point smithay subtracts from the event location to get
-    /// surface-local coordinates.
+    /// What smithay subtracts to get surface-local coordinates.
     fn focus(&self) -> Point<f64, smithay::utils::Logical> {
         Point::from((self.origin.0 / self.scale, self.origin.1 / self.scale))
     }
@@ -144,19 +107,16 @@ fn to_local(scale: f64, x: f32, y: f32) -> Point<f64, smithay::utils::Logical> {
     Point::from((x as f64 / scale, y as f64 / scale))
 }
 
-/// A physical panel point in view space: the one place input is turned, so
-/// everything downstream (hit-tests, gestures, clients) sees what the user sees.
+/// The one place input is rotated into view space.
 fn to_view(state: &State, x: f32, y: f32) -> (f32, f32) {
     state.view_rotation().map_input(x, y, state.panel_size)
 }
 
-/// Whether physical point `(x, y)` falls inside a popup's physical rect.
 fn rect_contains(origin: (i32, i32), size: (i32, i32), x: f32, y: f32) -> bool {
     let (ox, oy) = (origin.0 as f32, origin.1 as f32);
     x >= ox && y >= oy && x < ox + size.0 as f32 && y < oy + size.1 as f32
 }
 
-/// Topmost open popup under `(x, y)`, with its physical origin and coord scale.
 fn popup_under(state: &State, x: f32, y: f32) -> Option<Target> {
     let popups = state.active_popups();
     let i = popups
@@ -170,33 +130,21 @@ fn popup_under(state: &State, x: f32, y: f32) -> Option<Target> {
     })
 }
 
-/// What a press should do with respect to open popups.
 enum PopupPress {
-    /// Nothing to do here — no popup was hit and no *grabbing* popup is open, so
-    /// the tap falls through to normal surface routing. A non-grab popup that
-    /// wasn't hit (e.g. a Firefox menu, tapped outside) leaves itself open and
-    /// lets the underlying app receive the tap; the client dismisses on its own.
+    /// No popup hit and none grabbing: the tap falls through. A non-grab popup
+    /// stays open; the client dismisses it itself.
     None,
-    /// The tap landed outside a *grabbing* (modal) popup chain: the chain was
-    /// dismissed and the tap must be swallowed (popup grab semantics).
+    /// Missed a grabbing chain: dismissed, and the tap is swallowed.
     Consumed,
-    /// The tap hit a popup; route input into it. Grabbing submenus above the hit
-    /// popup were dismissed first.
+    /// Grabbing submenus above the hit were dismissed first.
     Route(Target),
 }
 
-/// Resolve a press against open popups.
-///
-/// Hit-testing considers every open popup so a tap always reaches the menu item
-/// under it. Dismissal, though, is modal-only: only popups that issued an
-/// `xdg_popup.grab()` swallow an outside tap and get `popup_done`. Non-grab
-/// popups (wvkbd's input-hack popup, Firefox's non-grab menus, tooltips) never
-/// steal or dismiss a tap they weren't hit by — that outside tap flows through
-/// to the app, matching what the client expects.
+/// Hit-testing considers every popup; dismissal only grabbing ones. Non-grab
+/// popups (wvkbd's hack popup, Firefox menus, tooltips) never swallow an
+/// outside tap.
 fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
-    // Nothing of the session is on screen while locked, popups included, so
-    // there is nothing here to hit or dismiss; the press goes on to the lock
-    // surface (or nowhere) via `surface_under`.
+    // Nothing is shown while locked; `surface_under` routes to the lock.
     if state.session_lock.is_locked() {
         return PopupPress::None;
     }
@@ -204,7 +152,6 @@ fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
     if popups.is_empty() {
         return PopupPress::None;
     }
-    // Snapshot grab status per popup before we mutate `state`.
     let grabs: Vec<bool> = popups
         .iter()
         .map(|(kind, _, _)| state.popup_has_grab(kind.wl_surface()))
@@ -212,9 +159,7 @@ fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
     let hit = popups
         .iter()
         .rposition(|(_, origin, size)| rect_contains(*origin, *size, x, y));
-    // Which popups to close: the set `popups_to_dismiss` would close for this
-    // hit (whole chain on a miss, descendants of the hit popup otherwise),
-    // restricted to grabbing popups — non-grab popups are never force-closed.
+    // Never force-close non-grab popups.
     let dismiss: Vec<usize> = crate::popups::popups_to_dismiss(popups.len(), hit)
         .into_iter()
         .filter(|&i| grabs[i])
@@ -237,29 +182,22 @@ fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
             };
             PopupPress::Route(descend(t, x, y))
         }
-        // Missed every popup. Only a modal (grabbing) popup consumes the tap;
-        // if nothing grabbing was open, `dismiss` is empty and we fall through.
         None if dismiss.is_empty() => PopupPress::None,
         None => PopupPress::Consumed,
     }
 }
 
-/// Linux `BTN_LEFT`. The only button that drives the shell's own gestures: a
-/// right- or middle-click on Home would otherwise read as a tap and launch
-/// whatever icon is under the cursor.
+/// Only left-click drives shell gestures; right/middle on Home would launch
+/// the icon under the cursor.
 const BTN_LEFT: u32 = 0x110;
 
-/// Where the cursor currently is, in output pixels. Before any pointer event has
-/// been seen there is no position at all, and the screen centre is the only
-/// defensible guess — (0, 0) would silently aim every click at the top-left
-/// corner (a layer surface, or the first icon).
+/// Screen centre before any pointer event; (0, 0) would aim at a corner.
 fn cursor_pos(state: &State) -> (f32, f32) {
     let (w, h) = state.output_size_f();
     state.last_pointer_pos.unwrap_or((w * 0.5, h * 0.5))
 }
 
-/// Forward a pointer position to a client surface, entering it if the pointer
-/// was elsewhere. `None` leaves whatever surface the pointer was over.
+/// `None` leaves the current surface.
 fn send_motion(state: &mut State, target: Option<Target>, x: f32, y: f32, time: u32) {
     let ptr = state.seat.get_pointer().unwrap();
     let (focus, location) = match &target {
@@ -281,9 +219,6 @@ fn send_motion(state: &mut State, target: Option<Target>, x: f32, y: f32, time: 
     ptr.frame(state);
 }
 
-/// Pointer moved to `(x, y)` (winit/desktop, or a mouse on DRM). Forwards to a
-/// client surface under the cursor while a press is held on it, else hovers the
-/// surface under it and drives gestures.
 pub fn pointer_motion(state: &mut State, x: f32, y: f32, time: u32) {
     let (x, y) = to_view(state, x, y);
     pointer_motion_view(state, x, y, time);
@@ -291,13 +226,11 @@ pub fn pointer_motion(state: &mut State, x: f32, y: f32, time: u32) {
 
 fn pointer_motion_view(state: &mut State, x: f32, y: f32, time: u32) {
     state.last_pointer_pos = Some((x, y));
-    // A real pointer moved: show the cursor (a touch-down hides it again).
     if !state.cursor_visible {
         state.cursor_visible = true;
     }
     state.needs_render = true;
-    // Track the pointer as a touch contact only while a button is held (a
-    // gesture press or a client grab), so a bare hover leaves no mark.
+    // Only mark while a button is held, so bare hover leaves no trace.
     if state.show_touches && (state.pointer_grab || state.pointer_down) {
         state
             .touch_viz
@@ -309,11 +242,8 @@ fn pointer_motion_view(state: &mut State, x: f32, y: f32, time: u32) {
             return;
         }
     }
-    // Hover. With no button held the pointer still enters and leaves client
-    // surfaces, so hover states and cursor-shape requests work as on a desktop —
-    // a touchscreen has no equivalent, which is why this is pointer-only.
-    // Suppressed while a shell gesture owns the press: those coordinates belong
-    // to the gesture, not to whatever surface happens to be underneath.
+    // Hover enters/leaves client surfaces, except while a shell gesture owns
+    // the press.
     if !state.pointer_down {
         let target = surface_under(state, x, y);
         send_motion(state, target, x, y, time);
@@ -324,7 +254,6 @@ fn pointer_motion_view(state: &mut State, x: f32, y: f32, time: u32) {
     input_common::on_motion(state, x, y);
 }
 
-/// Pointer button changed (winit/desktop, or a mouse on DRM).
 pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) {
     let (x, y) = cursor_pos(state);
     state.cursor_visible = true;
@@ -348,7 +277,6 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
         };
         if let Some(target) = target {
             let ptr = state.seat.get_pointer().unwrap();
-            // Enter/position the pointer, then press.
             let focus = target.focus();
             let location = to_local(target.scale, x, y);
             ptr.motion(
@@ -373,13 +301,10 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
             state.pointer_grab = true;
             return;
         }
-        // Locked with no lock surface: the press is dropped, never funnelled
-        // into the shell's gestures.
+        // Locked with no lock surface: drop it, never funnel it.
         if state.session_lock.is_locked() {
             return;
         }
-        // Only a left-click acts as a finger on the shell. Right/middle on empty
-        // Home space do nothing rather than launching the icon under the cursor.
         if button != BTN_LEFT {
             return;
         }
@@ -410,42 +335,28 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
     }
 }
 
-/// Relative pointer motion (mouse). Accumulates `(dx, dy)` into the tracked
-/// cursor position, clamps to output bounds, then delegates to
-/// [`pointer_motion`] with the resolved absolute position. This is how a
-/// relative-pointer device like a Bluetooth mouse ring drives the shell.
+/// Accumulates relative motion (e.g. a Bluetooth mouse ring) into the cursor.
 pub fn pointer_motion_relative(state: &mut State, dx: f64, dy: f64, time: u32) {
     let (w, h) = state.output_size_f();
     let (mut x, mut y) = cursor_pos(state);
-    // Clamp to the last addressable pixel, not to `w`/`h`: hit-testing treats
-    // rects as half-open, so a cursor parked exactly on `w` is outside every
-    // one of them.
+    // Hit-testing is half-open, so clamp to `w - 1`, not `w`.
     x = (x + dx as f32).clamp(0.0, (w - 1.0).max(0.0));
     y = (y + dy as f32).clamp(0.0, (h - 1.0).max(0.0));
     pointer_motion_view(state, x, y, time);
 }
 
-/// One axis of a scroll event, as libinput reported it.
 #[derive(Clone, Copy, Debug)]
 pub struct AxisMotion {
-    /// Continuous scroll distance in logical pixels. `Some` for finger and
-    /// continuous sources; a zero value from those sources means "scrolling
-    /// stopped" and is sent as `wl_pointer.axis_stop`, not as a zero value.
+    /// Logical px, for finger and continuous sources. Zero means scrolling
+    /// stopped and is sent as `axis_stop`.
     pub amount: Option<f64>,
-    /// Discrete scroll in 1/120ths of a wheel click — the same unit
-    /// `wl_pointer.axis_value120` uses, so it is forwarded unscaled. `Some` for
-    /// wheel sources.
+    /// 1/120ths of a click, forwarded unscaled as `axis_value120`.
     pub v120: Option<f64>,
-    /// Whether physical motion matches the axis direction (natural scrolling
-    /// inverts it).
     pub direction: AxisRelativeDirection,
 }
 
-/// Extract both axes of a backend scroll event and forward them as one frame.
-/// Generic over the backend so winit and libinput share the extraction: an
-/// event carrying *both* axes (a diagonal or tilt scroll) must not lose one, and
-/// `amount` returning `Some(0.0)` on an untouched axis makes "pick the non-`None`
-/// one" the wrong shape.
+/// Both axes in one frame. `amount` is `Some(0.0)` on an untouched axis, so
+/// picking "the non-`None` one" is wrong.
 pub fn pointer_axis_event<B, E>(state: &mut State, event: &E, time: u32)
 where
     B: smithay::backend::input::InputBackend,
@@ -455,8 +366,6 @@ where
     let read = |axis: Axis| {
         let amount = event.amount(axis);
         let v120 = event.amount_v120(axis);
-        // An axis the device did not scroll at all reports nothing on either
-        // measure; skip it so the frame carries only what moved.
         if amount.is_none() && v120.is_none() {
             return None;
         }
@@ -475,10 +384,8 @@ where
     );
 }
 
-/// Pointer scroll/axis event (mouse wheel, touchpad). Forwards to the client
-/// surface under the cursor, if any. When no client is under the cursor the
-/// event is dropped — the shell's gesture system is absolute-touch and has no
-/// meaningful scroll interpretation for a wheel.
+/// Dropped when no client is under the cursor; the shell has no scroll
+/// gestures.
 pub fn pointer_axis(
     state: &mut State,
     source: AxisSource,
@@ -500,9 +407,7 @@ pub fn pointer_axis(
         let Some(m) = motion else { continue };
         frame = frame.relative_direction(axis, m.direction);
         match m.amount {
-            // Finger/continuous sources signal the end of a scroll with a zero
-            // amount. A client waiting for `axis_stop` to release its kinetic
-            // scroll never gets it if that is sent as a zero value instead.
+            // Kinetic scrolling waits for `axis_stop`; a zero value won't end it.
             Some(v) if v == 0.0 && matches!(source, AxisSource::Finger) => {
                 frame = frame.stop(axis);
             }
@@ -510,8 +415,6 @@ pub fn pointer_axis(
             None => {}
         }
         if let Some(v120) = m.v120 {
-            // Already in 1/120ths of a click, which is exactly what
-            // `wl_pointer.axis_value120` carries — no conversion.
             frame = frame.v120(axis, v120 as i32);
         }
     }
@@ -520,15 +423,11 @@ pub fn pointer_axis(
     ptr.frame(state);
 }
 
-/// A finger touched down at output-pixel `(x, y)`. Routed per-slot: a slot that
-/// lands on a client surface is recorded in `touch_targets` and forwarded there;
-/// a slot on empty space drives the gesture funnel — but only the first such
-/// slot (`gesture_slot`), since the funnel is single-touch.
+/// Per slot: a slot on a client surface goes there; on empty space only the
+/// first slot (`gesture_slot`) drives the single-touch funnel.
 pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
     let (x, y) = to_view(state, x, y);
     state.last_touch_pos = Some((x, y));
-    // A finger took over: park the mouse cursor until the pointer moves again,
-    // the way a laptop hides it while you type.
     if state.cursor_visible {
         state.cursor_visible = false;
         state.needs_render = true;
@@ -545,8 +444,7 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
         PopupPress::None => surface_under(state, x, y),
     };
     if let Some(target) = target {
-        // Record how to map this slot's later motion. Presence marks the slot
-        // as client-routed; smithay's TouchHandle tracks the focused surface.
+        // Presence marks the slot client-routed.
         state.touch_targets.insert(slot, target.scale);
         state.layers.note_tap(&target.surface);
         let touch = state.touch.clone();
@@ -560,10 +458,7 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
         touch.down(state, Some((target.surface, focus)), &event);
         return;
     }
-    // Not on a client surface — drive the gesture system, but only from the one
-    // slot that owns it. Extra fingers on empty space are ignored until it lifts.
-    // A locked session has no gestures at all: the shell is not on screen, so a
-    // swipe on the blank area must not open Home behind the lock.
+    // Locked: no gestures, or a swipe could open Home behind the lock.
     if state.gesture_slot.is_none() && !state.session_lock.is_locked() {
         state.gesture_slot = Some(slot);
         input_common::on_motion(state, x, y);
@@ -571,7 +466,6 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
     }
 }
 
-/// A finger moved to `(x, y)`.
 pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
     let (x, y) = to_view(state, x, y);
     state.last_touch_pos = Some((x, y));
@@ -589,7 +483,6 @@ pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
             location,
             time,
         };
-        // Focus is only used for DnD during motion; we pass none.
         touch.motion(state, None, &event);
         return;
     }
@@ -598,31 +491,17 @@ pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
     }
 }
 
-/// End of a set of touch changes that happened at the same instant (libinput
-/// `TOUCH_FRAME`). Flushes them to the client as one `wl_touch.frame`.
-///
-/// Driving this from the real frame event rather than firing one after every
-/// single down/motion/up is what makes a multi-finger update atomic: two fingers
-/// that moved in the same hardware report reach the client in one frame, which
-/// is what toolkit gesture recognizers expect when they decide pinch-vs-scroll.
-///
-/// Safe to call with nothing pending — smithay skips slots whose events have
-/// already been framed, so no empty frame reaches the client.
+/// libinput `TOUCH_FRAME`. Batching on the real frame keeps multi-finger
+/// updates atomic for toolkit pinch/scroll recognition. Safe with nothing
+/// pending.
 pub fn frame(state: &mut State) {
     let touch = state.touch.clone();
     touch.frame(state);
 }
 
-/// The touch stream was cancelled by the input stack (libinput `TOUCH_CANCEL` —
-/// palm/thumb rejection, or the device dropping the sequence mid-gesture).
-///
-/// Without this the cancelled slot leaks: `gesture_slot` stays claimed forever,
-/// so the *next* finger on empty space fails the single-touch guard in [`down`]
-/// and its whole swipe is silently dropped; and a client-routed slot keeps a
-/// phantom contact down, because its `up` never arrives.
-///
-/// `wl_touch.cancel` is seat-wide by protocol — the client drops *all* its touch
-/// points — so this cancels every slot rather than just the reported one.
+/// libinput `TOUCH_CANCEL`. Without this `gesture_slot` stays claimed and
+/// the next swipe is dropped, and client slots keep phantom contacts.
+/// `wl_touch.cancel` is seat-wide, so every slot is cancelled.
 pub fn cancel(state: &mut State) {
     if state.show_touches {
         let now = std::time::Instant::now();
@@ -638,13 +517,10 @@ pub fn cancel(state: &mut State) {
     }
     let touch = state.touch.clone();
     touch.cancel(state);
-    // Drops the shell-side gesture too: no launch fires, no drag resumes, and
-    // `gesture_slot`/`touch_targets` are cleared so the next finger starts fresh.
     state.cancel_gestures();
     state.needs_render = true;
 }
 
-/// A finger lifted.
 pub fn up(state: &mut State, slot: TouchSlot, time: u32) {
     if state.show_touches {
         state

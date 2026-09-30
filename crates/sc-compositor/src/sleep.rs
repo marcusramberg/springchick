@@ -1,31 +1,11 @@
-//! Blank the panel before the system suspends, over the system D-Bus.
+//! Blank the panel before suspend, via a logind `delay` inhibitor.
 //!
-//! A worker thread owns the connection and posts [`Event`]s into the event loop
-//! through a calloop channel — the same shape as [`crate::sensor`], except the
-//! channel is a loop *source* rather than a once-a-tick drain: a suspend can
-//! arrive while nothing is rendering, and a `std::sync::mpsc` receiver would sit
-//! unread until something else happened to wake the loop.
+//! Without it `Blank` stays unblanked across the suspend, so the waking power
+//! press falls through to `toggle-display` and turns the screen off. The
+//! inhibitor keeps the DRM commit from racing the suspend.
 //!
-//! **Why blank at all.** [`crate::blank::Blank`] is the compositor's idea of
-//! whether the panel is lit, and suspending does not change it. Sleep with the
-//! panel on and it stays `false` across the resume, so the press that wakes the
-//! machine is not seen as a wake: [`crate::blank::Blank::on_key_press`] returns
-//! `Normal` and the press falls through to its binding, which for the power
-//! button is `toggle-display`. The screen the user just woke goes black, and it
-//! takes a second press to get it back. Blanking on the way down keeps the state
-//! honest, and is what the panel should be doing while the machine is asleep
-//! anyway.
-//!
-//! **Why a delay inhibitor.** logind emits `PrepareForSleep(true)` and then
-//! suspends; without holding it off, the DRM commit races the suspend and may
-//! land after the panel has already lost power. A `delay` inhibitor makes logind
-//! wait for the fd to close, so the blank is applied before the system goes
-//! down. logind caps that wait (`InhibitDelayMaxSec`, 5s by default) and we ack
-//! in a single ioctl, so this cannot hold up a suspend for long — and
-//! [`ACK_TIMEOUT`] drops the inhibitor even if the compositor never answers.
-//!
-//! Everything here degrades to "the old behaviour": no system bus, no logind, or
-//! a refused inhibit all just mean the panel is not blanked before sleep.
+//! The channel is a calloop source, not an mpsc drain: a suspend can arrive
+//! while nothing is rendering. Any D-Bus failure just skips the blank.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -41,40 +21,25 @@ const SERVICE: &str = "org.freedesktop.login1";
 const PATH: &str = "/org/freedesktop/login1";
 const MANAGER: &str = "org.freedesktop.login1.Manager";
 
-/// D-Bus call timeout, matching [`crate::sensor`]: local service, off the render
-/// thread, but a hung call must not wedge the worker for good.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long the worker parks in `process`. Long on purpose: `PrepareForSleep`
-/// is dispatched the moment it arrives and wakes `process` early, so this only
-/// sets the idle wakeup rate, and the thread must keep running while the panel
-/// is dark — a suspend is exactly what happens then.
+/// Idle wakeup only; `PrepareForSleep` wakes `process` early. The thread must
+/// keep running while the panel is dark.
 const POLL: Duration = Duration::from_secs(30);
-/// How long to hold up the suspend waiting for the compositor to confirm the
-/// blank. Well under logind's `InhibitDelayMaxSec` so a wedged compositor
-/// delays the suspend rather than having logind override us.
+/// Wait for the compositor's ack. Under logind's `InhibitDelayMaxSec`.
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// What the worker tells the compositor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// The system is about to suspend. Blank, then ack: the suspend is being
-    /// held off until the ack lands or [`ACK_TIMEOUT`] passes.
+    /// Blank, then ack; the suspend waits for the ack or [`ACK_TIMEOUT`].
     AboutToSleep,
 }
 
-/// Handle to the sleep worker. Dropping it stops the thread.
 pub struct Sleep {
-    /// Loop source carrying [`Event`]s. Taken once, when inserting into the
-    /// event loop.
     pub events: calloop::channel::Channel<Event>,
-    /// Sender the compositor acks on, releasing the inhibitor.
     pub acks: Sender<()>,
 }
 
-/// Start the sleep worker. `None` only when the thread itself cannot start.
-///
-/// Connecting happens *on the worker*: `State::new` is on the startup path and a
-/// slow system bus must not stall the compositor coming up.
+/// Connects on the worker so a slow system bus can't stall startup.
 pub fn spawn() -> Option<Sleep> {
     let (tx_event, events) = calloop::channel::channel();
     let (acks, rx_ack) = std::sync::mpsc::channel();
@@ -88,8 +53,6 @@ pub fn spawn() -> Option<Sleep> {
     Some(Sleep { events, acks })
 }
 
-/// Take a `delay` inhibitor on sleep. `None` on any refusal, which just means
-/// the blank races the suspend instead of preceding it.
 fn inhibit(conn: &Connection) -> Option<OwnedFd> {
     let proxy = conn.with_proxy(SERVICE, PATH, CALL_TIMEOUT);
     match proxy.method_call::<(OwnedFd,), _, _, _>(
@@ -110,8 +73,6 @@ fn inhibit(conn: &Connection) -> Option<OwnedFd> {
     }
 }
 
-/// The worker: hold a delay inhibitor, and on every `PrepareForSleep(true)` ask
-/// the compositor to blank before letting the suspend proceed.
 fn worker(tx: &calloop::channel::Sender<Event>, rx_ack: &Receiver<()>) {
     let conn = match Connection::new_system() {
         Ok(c) => c,
@@ -121,9 +82,8 @@ fn worker(tx: &calloop::channel::Sender<Event>, rx_ack: &Receiver<()>) {
         }
     };
 
-    // The signal is handled out here rather than in the match callback: acking
-    // blocks, and re-arming the inhibitor is a method call on the same
-    // connection we would still be dispatching on.
+    // Handled outside the match callback: acking blocks, and re-arming calls on
+    // the connection still being dispatched.
     let pending: Arc<Mutex<Option<bool>>> = Arc::default();
     let rule = MatchRule::new_signal(MANAGER, "PrepareForSleep").with_path(PATH);
     let seen = Arc::clone(&pending);
@@ -149,8 +109,6 @@ fn worker(tx: &calloop::channel::Sender<Event>, rx_ack: &Receiver<()>) {
         if start {
             debug!(target: "springchick::debug", "suspend imminent; blanking");
             if tx.send(Event::AboutToSleep).is_err() {
-                // The loop is gone, so the compositor is on its way out; there
-                // is nothing left to blank and nothing to hold the suspend for.
                 return;
             }
             match rx_ack.recv_timeout(ACK_TIMEOUT) {
@@ -160,13 +118,10 @@ fn worker(tx: &calloop::channel::Sender<Event>, rx_ack: &Receiver<()>) {
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
             }
-            // Closing the fd is what lets logind proceed, so this drop is the
-            // point of the whole exchange rather than mere tidying.
+            // Closing the fd is what lets logind proceed.
             drop(inhibitor.take());
         } else {
-            // Resumed. The panel stays blanked and `Blank` agrees, so the first
-            // press wakes the screen instead of toggling it off. Re-arm for the
-            // next suspend: the inhibitor was consumed by the last one.
+            // Resumed. The inhibitor was consumed; re-arm for the next suspend.
             debug!(target: "springchick::debug", "resumed; re-arming the sleep inhibitor");
             inhibitor = inhibit(&conn);
         }

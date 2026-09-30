@@ -1,25 +1,21 @@
-//! Scene state: per-frame snapshot for rendering.
-//!
-//! Computes window transforms from UiState for the renderer to apply.
+//! Per-frame scene: window transforms computed from UiState.
 
 use crate::switcher;
 use crate::ui_state::{ToplevelId, UiState};
 use sc_input::Tracker;
 
-/// Window transform applied to the composited app texture.
 #[derive(Clone, Copy, Debug)]
 pub struct WindowTransform {
-    /// Scale factor (1.0 = fullscreen, 0.0 = invisible).
+    /// 1.0 = fullscreen.
     pub scale: f32,
-    /// Center position in logical pixels.
+    /// Logical px.
     pub center_x: f32,
     pub center_y: f32,
-    /// Corner radius in logical pixels (0 = sharp/fullscreen).
+    /// Logical px.
     pub corner_radius: f32,
 }
 
 impl WindowTransform {
-    /// Identity: fullscreen, no rounding.
     pub fn fullscreen(width: f32, height: f32) -> Self {
         Self {
             scale: 1.0,
@@ -29,8 +25,7 @@ impl WindowTransform {
         }
     }
 
-    /// Interpolate between start scale (at origin.center) and fullscreen.
-    /// progress: 0 = origin, 1 = fullscreen.
+    /// `progress`: 0 = at `origin`, 1 = fullscreen.
     pub fn from_zoom_progress(
         progress: f32,
         origin: crate::ui_state::ZoomOrigin,
@@ -55,11 +50,8 @@ impl WindowTransform {
         }
     }
 
-    /// Slide up full-size from below the bottom edge. `progress`: 0 = fully
-    /// below the screen, 1 = centered/fullscreen. Held just under fullscreen
-    /// scale so the shared renderer keeps it on the card path (drawn over home,
-    /// honouring the offset) until the state settles to `App`; the final 2% pop
-    /// to true fullscreen is imperceptible.
+    /// `progress` 0 = below the screen, 1 = centered. Held just under fullscreen
+    /// scale so the renderer keeps it on the card path until the state settles.
     pub fn slide_up(progress: f32, width: f32, height: f32, card_radius: f32) -> Self {
         let p = progress.clamp(0.0, 1.0);
         let ease = sc_anim::ease_out_cubic(p);
@@ -71,15 +63,9 @@ impl WindowTransform {
         }
     }
 
-    /// Slide in full-size from the left edge, as Home is dragged off to the
-    /// right: the stack sits to the *left* of Home, so pushing Home rightwards
-    /// pulls its top card in behind it. `progress`: 0 = fully off the left edge,
-    /// 1 = centered. Held just under fullscreen scale for the same reason as
-    /// [`Self::slide_up`]: it keeps the card path (drawn over home, rounded)
-    /// until the state settles to `App`.
-    ///
-    /// Paired with [`home_slide_out`], which moves Home the other way by the
-    /// same eased amount so the two travel as one sheet.
+    /// Slides in from the left as Home is pushed right, paired with
+    /// [`home_slide_out`] so they move as one sheet. Held under fullscreen scale
+    /// like [`Self::slide_up`].
     pub fn slide_in_from_left(progress: f32, width: f32, height: f32, card_radius: f32) -> Self {
         let ease = sc_anim::ease_out_cubic(progress);
         Self {
@@ -90,30 +76,22 @@ impl WindowTransform {
         }
     }
 
-    /// Freeform grab: window follows finger, pivoting from the bottom.
-    /// The finger stays at the bottom edge of the scaled window.
-    /// Scale shrinks aggressively so the top moves down toward the finger.
+    /// The window follows the finger, which stays at its bottom edge.
     pub fn from_tracker(tracker: &Tracker, width: f32, height: f32, card_radius: f32) -> Self {
         let up = tracker.up_progress().clamp(0.0, 1.0);
 
-        // Aggressive scaling: 1.0 → 0.20 over full vertical travel, so the card
-        // shrinks fast enough that its top edge doesn't reach the screen top
-        // early in the drag. Ease-in so it accelerates as you drag further.
+        // 1.0 → 0.20, fast enough that the top edge doesn't reach the screen top.
         let scale = 1.0 - up.powf(0.6) * 0.8;
 
-        // Finger position in screen coords.
         let finger_x = tracker.current.x * width;
         let finger_y = tracker.current.y * height;
 
-        // Finger is at the bottom edge of the card.
         let card_h = height * scale;
         let center_x = finger_x;
         let center_y = finger_y - card_h / 2.0;
 
-        // Corner radius: a base so the card reads as rounded the instant it
-        // lifts off the bottom (while held near full scale), growing as it
-        // shrinks. Approaches the switcher deck's `CORNER` at full travel so the
-        // grab→switcher hand-off is seamless.
+        // Rounded from lift-off, approaching the deck's radius at full travel so
+        // the hand-off is seamless.
         let corner_radius = card_radius * 0.6 + (1.0 - scale) * card_radius * 0.7;
 
         Self {
@@ -125,64 +103,45 @@ impl WindowTransform {
     }
 }
 
-/// How far Home has been dragged off to the right, in pixels, for a slide onto
-/// the top card of the stack. Rides the same eased curve as
-/// [`WindowTransform::slide_in_from_left`], one screen width in the opposite
-/// direction, so Home and the incoming card move as one sheet.
+/// Pixels; the same eased curve as [`WindowTransform::slide_in_from_left`].
 fn home_slide_out(progress: f32, width: f32) -> f32 {
     sc_anim::ease_out_cubic(progress) * width
 }
 
-/// Backdrop blur behind a card being dragged up off an app. Full from the
-/// first pixel through the switcher band, then eases out across the go-home
-/// band so Home is only sharp once the card reaches the top third. Also drives
-/// the settle to Home, which continues from `up`.
+/// Full through the switcher band, easing out across the go-home band. Also
+/// drives the settle to Home.
 fn grab_backdrop_blur(up: f32) -> f32 {
     use sc_input::thresholds as th;
     const SHARP_AT: f32 = 2.0 / 3.0;
     ((SHARP_AT - up) / (SHARP_AT - th::HOME_MIN_PROGRESS)).clamp(0.0, 1.0)
 }
 
-/// Full scene state for one frame.
 #[derive(Clone, Debug)]
 pub struct Scene {
-    /// Transform for the foreground app window (None = no app visible).
+    /// `None` = no app visible.
     pub window: Option<(ToplevelId, WindowTransform)>,
-    /// Whether to draw the home screen behind the window.
     pub show_home: bool,
-    /// Home screen page (for rendering).
     pub home_page: usize,
-    /// Switcher deck cards (empty for non-switcher states), sorted ascending z.
+    /// Sorted ascending z.
     pub cards: Vec<switcher::CardRect>,
-    /// Vertical offset applied to the whole home screen, in pixels, positive =
-    /// drawn higher. Non-zero only while the Home bounce spring is ringing.
+    /// Pixels, positive = up. Only while the Home bounce rings.
     pub home_lift: f32,
-    /// Horizontal offset applied to the whole home screen, in pixels, positive =
-    /// drawn further right. Non-zero only while Home is being dragged off to the
-    /// right by a slide onto the top card of the stack.
+    /// Pixels, positive = right. Only during a slide onto the top card.
     pub home_shift: f32,
-    /// Strength (0..1) of the frosted-glass blur applied to everything already
-    /// drawn *behind* the switcher deck — i.e. the home screen. 0 = no blur pass
-    /// at all. Ramps with the switcher entrance so the backdrop softens as the
-    /// deck comes up and sharpens again on the way out.
+    /// 0..1 blur of what's behind the deck; 0 skips the pass.
     pub backdrop_blur: f32,
 }
 
 impl Scene {
-    /// Whether the app window (if any) fully covers the screen this frame.
-    /// When true, home must not be drawn — it would paint over the window's
-    /// content, since the window itself is drawn opaque and undamaged behind
-    /// it. Mirrors the `is_fullscreen` threshold used to pick the app's draw
-    /// pass in the renderer.
+    /// When true, home must not be drawn: it would paint over the window.
+    /// Mirrors the renderer's `is_fullscreen` threshold.
     pub fn window_covers_screen(&self) -> bool {
         self.window.is_none_or(|(_, t)| t.scale >= 0.99)
     }
 }
 
-/// Compute the scene from the current UiState. `usable_origin` is the physical
-/// top-left of the usable area (output minus exclusive-zone reservations, e.g. a
-/// top panel); full-height cards are shifted by it so they sit where the real
-/// fullscreen app sits instead of riding up over the reserved zone.
+/// `usable_origin` is the physical top-left of the usable area; full-height
+/// cards shift by it to sit where the real app sits.
 pub fn compute_scene(
     state: &UiState,
     output_size: (i32, i32),
@@ -194,7 +153,6 @@ pub fn compute_scene(
         UiState::Home { page, bounce, .. } => Scene {
             window: None,
             show_home: true,
-            // The bounce spring is in fractions of screen height.
             home_lift: bounce.value * h,
             home_shift: 0.0,
             home_page: *page,
@@ -229,8 +187,7 @@ pub fn compute_scene(
                     WindowTransform::from_zoom_progress(p, *origin, w, h, card_radius)
                 }
             };
-            // Only the sideways slide takes Home with it; the zoom and the
-            // pull-down search both play over a stationary Home.
+            // Only the sideways slide moves Home.
             let home_shift = match open_mode {
                 crate::ui_state::OpenMode::SlideFromLeft => home_slide_out(p, w),
                 _ => 0.0,
@@ -271,17 +228,14 @@ pub fn compute_scene(
             let up = tracker.up_progress();
             let t = WindowTransform::from_tracker(tracker, w, h, card_radius);
             let blur = grab_backdrop_blur(up);
-            // Band B (reveal..mid): unfold the live fan behind the finger-tracked
-            // front card. Bands A/C: just the single card (window path).
+            // Between reveal and mid: the live fan. Otherwise just the window.
             let preview = matches!(
                 sc_input::live_state(tracker),
                 sc_input::NavState::SwitcherPreview
             ) && cards.len() > 1;
             if preview {
                 use sc_input::thresholds as th;
-                // Neighbours sit at full switcher spread and simply fade in after
-                // the reveal point / fade out before the mid collapse (no gradual
-                // unfolding). Linear ramps over FADE either side.
+                // Neighbours sit at full spread and just fade in/out over FADE.
                 const FADE: f32 = 0.06;
                 let a_in = ((up - th::SWITCHER_REVEAL_PROGRESS) / FADE).clamp(0.0, 1.0);
                 let a_out = ((th::HOME_MIN_PROGRESS - up) / FADE).clamp(0.0, 1.0);
@@ -295,8 +249,6 @@ pub fn compute_scene(
                     t.corner_radius,
                     (w, h),
                 );
-                // Front (current) card on top, drawn from the finger transform;
-                // it is the live window, always fully opaque.
                 card_rects.push(switcher::CardRect {
                     toplevel: *toplevel,
                     center_x: t.center_x,
@@ -340,7 +292,6 @@ pub fn compute_scene(
             use sc_input::NavTarget;
             let transform = match target {
                 NavTarget::BackToApp => {
-                    // Settle back to fullscreen: interpolate from current toward fullscreen.
                     let p = progress.value.clamp(0.0, 1.0);
                     let scale = 1.0 - p * 0.5;
                     WindowTransform {
@@ -351,11 +302,8 @@ pub fn compute_scene(
                     }
                 }
                 NavTarget::Switcher => {
-                    // Settling into the fan deck: the deck's cards are rounded at
-                    // `card_radius`, so hold the radius there the whole way rather
-                    // than letting `from_zoom_progress` collapse it toward 0 (which
-                    // flashed the card square at release before the deck popped it
-                    // back to rounded).
+                    // Hold the deck's radius the whole way; `from_zoom_progress` would flash
+                    // the card square before the deck rounds it again.
                     let mut t = WindowTransform::from_zoom_progress(
                         1.0 - progress.value,
                         *origin,
@@ -374,11 +322,8 @@ pub fn compute_scene(
                     card_radius,
                 ),
             };
-            // Settling into the switcher keeps the neighbour fan on screen the
-            // whole way: neighbours fan around the front card as it zooms into
-            // the deck's front slot, ending exactly at the switcher rest layout
-            // (fan_around and switcher::layout share the same peek gap). The
-            // switcher is then entered already-unfolded, so no vanish/re-fan.
+            // Keep the fan while settling so it ends exactly at the switcher layout
+            // (fan_around and layout share the peek gap).
             if matches!(target, NavTarget::Switcher) && cards.len() > 1 {
                 let mut card_rects = switcher::fan_around(
                     transform.center_x,
@@ -406,9 +351,7 @@ pub fn compute_scene(
                     home_lift: 0.0,
                     home_shift: 0.0,
                     home_page: 0,
-                    // Already blurred by the grab preview when release happened;
-                    // hold it at full through the settle so the hand-off into
-                    // the deck doesn't flash a sharp Home for a frame.
+                    // Hold full blur so the hand-off doesn't flash a sharp Home.
                     backdrop_blur: 1.0,
                     cards: card_rects,
                 };
@@ -434,21 +377,16 @@ pub fn compute_scene(
             offset,
             ..
         } => {
-            // Rounded, FULL-HEIGHT cards with a margin between them slide
-            // horizontally as a pair (no fullscreen pop, but not raised — a pure
-            // left/right slide keeps full height). The current app's centre
-            // shifts by `offset` screen-widths; the revealed neighbour sits one
-            // card-width-plus-gap away on the appropriate side.
+            // Full-height rounded cards sliding as a pair. The current card shifts by
+            // `offset` widths; the neighbour sits one card plus gap away.
             const QS_SCALE: f32 = 1.0;
             let gap = w * 0.03;
             let step = w * QS_SCALE + gap;
             let off = offset.value;
-            // Anchor to the usable area so a full-height card lands exactly where
-            // the fullscreen app sits (below a top panel), not raised to y=0.
+            // Anchored to the usable area, where the fullscreen app sits.
             let cur_cx = usable_origin.0 + w / 2.0 + off * w;
             let cy = usable_origin.1 + h / 2.0;
             let mut cards = Vec::with_capacity(2);
-            // Neighbour first (z=0, drawn behind).
             let neighbor = if off > 0.0 {
                 prev.as_ref().map(|(t, _)| (*t, cur_cx - step))
             } else if off < 0.0 {
@@ -498,14 +436,11 @@ pub fn compute_scene(
             let close_geo = close.map(|c| (c.toplevel, c.progress.value));
             let mut card_rects =
                 switcher::layout(cards, scroll.value, (w, h), close_geo, card_radius);
-            // Entrance from Home: the whole deck rises from below the bottom
-            // edge into its rest layout. Entered from a grab the spring is
-            // already at 1 and this is a no-op.
+            // From Home the deck rises from below; from a grab `enter` is already 1.
             let travel = 1.0 - enter.value.clamp(0.0, 1.0);
             if travel > 0.0 {
                 for c in &mut card_rects {
-                    // Far enough that the rightmost (front) card clears the left
-                    // edge, not just its own centre.
+                    // Far enough that the front (rightmost) card clears the edge.
                     if *exit_left {
                         c.center_x -= travel * w * 1.7;
                     } else {
@@ -513,7 +448,6 @@ pub fn compute_scene(
                     }
                 }
             }
-            // Sort ascending z for back-to-front draw order.
             card_rects.sort_by_key(|r| r.z);
             Scene {
                 window: None,
@@ -521,9 +455,6 @@ pub fn compute_scene(
                 home_lift: 0.0,
                 home_shift: 0.0,
                 home_page: 0,
-                // Rides the entrance spring: opened from Home the backdrop
-                // frosts as the deck rises; entered from a grab `enter` is
-                // already 1, matching the blur the preview/settle left behind.
                 backdrop_blur: enter.value.clamp(0.0, 1.0),
                 cards: card_rects,
             }
@@ -549,11 +480,8 @@ mod tests {
 
     #[test]
     fn app_opening_stops_covering_home_once_fullscreen() {
-        // Regression: near the end of the icon-zoom-in animation the window
-        // reaches fullscreen scale before the spring is formally "settled"
-        // (state is still AppOpening, show_home still true). The renderer
-        // must treat this as "home occluded" — window_covers_screen() is the
-        // signal it uses to skip drawing home on top of the finished window.
+        // The window reaches fullscreen scale while still AppOpening with
+        // show_home true; window_covers_screen() must say home is occluded.
         use crate::ui_state::{transition, UiEvent, ZoomOrigin};
 
         let mut state = UiState::home(0, 1);
@@ -568,7 +496,6 @@ mod tests {
         );
         assert!(matches!(state, UiState::AppOpening { .. }));
 
-        // Tick until the window transform reaches (near-)fullscreen scale.
         let mut scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         for _ in 0..200 {
             if scene.window_covers_screen() {
@@ -582,9 +509,6 @@ mod tests {
             scene.window_covers_screen(),
             "window never reached fullscreen scale"
         );
-        // At this point show_home is still true (state hasn't settled to
-        // UiState::App yet) — window_covers_screen() is what the renderer
-        // must consult to avoid painting home over the finished window.
         assert!(scene.show_home);
     }
 
@@ -601,7 +525,6 @@ mod tests {
                 open_mode: OpenMode::SlideFromLeft,
             },
         );
-        // Part-way through: home has moved right, the card is still left of centre.
         transition(&mut state, UiEvent::Tick { dt: 1.0 / 30.0 });
         let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert!(scene.show_home);
@@ -660,7 +583,6 @@ mod tests {
         let settled = compute_scene(&mk(1.0), TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert_eq!(opening.backdrop_blur, 0.0);
         assert_eq!(settled.backdrop_blur, 1.0);
-        // Home itself is never blurred.
         assert_eq!(
             compute_scene(&UiState::home(0, 1), TEST_SIZE, (0.0, 0.0), TEST_RADIUS).backdrop_blur,
             0.0
@@ -707,7 +629,6 @@ mod tests {
             (0.0, 0.0),
             TEST_RADIUS,
         );
-        // Every card starts a full screen height below its rest slot.
         for (r, rest) in rising.cards.iter().zip(at_rest.cards.iter()) {
             assert_eq!(r.toplevel, rest.toplevel);
             assert!(
@@ -723,7 +644,6 @@ mod tests {
     #[test]
     fn slide_enters_from_the_left_edge_as_home_leaves_right() {
         let (w, h) = (TEST_SIZE.0 as f32, TEST_SIZE.1 as f32);
-        // Fully off the left edge at progress 0, with Home still in place …
         let start = WindowTransform::slide_in_from_left(0.0, w, h, TEST_RADIUS);
         assert!(
             (start.center_x + w * 0.5).abs() < 1.0,
@@ -732,14 +652,12 @@ mod tests {
         );
         assert_eq!(home_slide_out(0.0, w), 0.0);
         assert!(start.corner_radius > 0.0, "rounded while travelling");
-        // … centered (and square) once arrived, Home a full width to the right.
         let end = WindowTransform::slide_in_from_left(1.0, w, h, TEST_RADIUS);
         assert!((end.center_x - w / 2.0).abs() < 1.0);
         assert!((end.center_y - h / 2.0).abs() < 1.0);
         assert!(end.corner_radius < 0.01);
         assert!((home_slide_out(1.0, w) - w).abs() < 1.0);
-        // Home and the card stay exactly one screen apart the whole way: they
-        // travel as one sheet, no gap and no overlap.
+        // One sheet: always exactly one screen apart.
         for p in [0.0, 0.25, 0.5, 0.75, 1.0] {
             let card = WindowTransform::slide_in_from_left(p, w, h, TEST_RADIUS);
             let home_cx = w / 2.0 + home_slide_out(p, w);
@@ -769,7 +687,6 @@ mod tests {
         assert_eq!(grab_backdrop_blur(0.0), 1.0);
         assert_eq!(grab_backdrop_blur(th::SWITCHER_REVEAL_PROGRESS), 1.0);
         assert_eq!(grab_backdrop_blur(0.25), 1.0);
-        // Still mostly blurred mid-screen; sharp only in the top third.
         assert_eq!(grab_backdrop_blur(th::HOME_MIN_PROGRESS), 1.0);
         assert!(grab_backdrop_blur(0.5) > 0.4);
         assert_eq!(grab_backdrop_blur(2.0 / 3.0), 0.0);
@@ -796,12 +713,9 @@ mod tests {
         let mut tracker = Tracker::begin(sc_input::Pt { x: 0.5, y: 0.95 });
         tracker.current = sc_input::Pt { x: 0.5, y: 0.7 };
         let t = WindowTransform::from_tracker(&tracker, w, h, TEST_RADIUS);
-        // Window should be scaled down.
         assert!(t.scale < 1.0);
-        // Finger at bottom of card: center_y should be above finger.
         let finger_y = 0.7 * h;
         assert!(t.center_y < finger_y);
-        // Corner radius should be non-zero.
         assert!(t.corner_radius > 0.0);
     }
 
@@ -815,10 +729,8 @@ mod tests {
 
     #[test]
     fn grabbing_band_b_unfolds_live_fan() {
-        // Finger dragged up into band B (reveal..mid) with a multi-app deck:
-        // the scene renders a rounded fan (no window), current card on top.
         let mut tracker = Tracker::begin(sc_input::Pt { x: 0.5, y: 0.95 });
-        tracker.current = sc_input::Pt { x: 0.5, y: 0.75 }; // up_progress 0.20 (band B)
+        tracker.current = sc_input::Pt { x: 0.5, y: 0.75 }; // band B
         let state = UiState::Grabbing {
             toplevel: 7,
             app_id: "x".into(),
@@ -828,17 +740,14 @@ mod tests {
         let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert!(scene.window.is_none(), "fan uses the card path, not window");
         assert_eq!(scene.cards.len(), 3, "front + two neighbours");
-        // Front card is the current app, sits on top (highest z), fully opaque.
         let front = scene.cards.iter().max_by_key(|c| c.z).unwrap();
         assert_eq!(front.toplevel, 7);
         assert_eq!(front.alpha, 1.0);
-        // Neighbours are faded to full here (mid of band B) and rounded.
         assert!(scene.cards.iter().all(|c| c.corner_radius > 0.0));
         let nb = scene.cards.iter().find(|c| c.toplevel == 3).unwrap();
         assert!(nb.alpha > 0.9, "neighbour visible in mid-band");
     }
 
-    /// Neighbour opacity at a given up_progress (0 if there is no fan).
     fn fan_neighbour_alpha(up: f32) -> Option<f32> {
         let mut tracker = Tracker::begin(sc_input::Pt { x: 0.5, y: 0.95 });
         tracker.current = sc_input::Pt {
@@ -861,24 +770,18 @@ mod tests {
 
     #[test]
     fn grabbing_fan_fades_in_and_out_at_band_edges() {
-        // Below reveal (0.12): no fan at all — the single card is on the window
-        // path, no neighbour cards.
         assert!(fan_neighbour_alpha(0.05).is_none());
-        // Fading in just above reveal: partially transparent, not popped to full.
         let a_in = fan_neighbour_alpha(0.15).expect("fan present");
         assert!(a_in > 0.0 && a_in < 1.0, "fade-in alpha was {a_in}");
-        // Fully opaque through the middle of the band.
         assert!((fan_neighbour_alpha(0.23).expect("fan present") - 1.0).abs() < 1e-6);
-        // Fading out approaching mid (0.35): partially transparent again.
         let a_out = fan_neighbour_alpha(0.32).expect("fan present");
         assert!(a_out > 0.0 && a_out < 1.0, "fade-out alpha was {a_out}");
     }
 
     #[test]
     fn grabbing_band_a_keeps_single_window() {
-        // A tiny lift stays below the reveal threshold: single card, no fan.
         let mut tracker = Tracker::begin(sc_input::Pt { x: 0.5, y: 0.95 });
-        tracker.current = sc_input::Pt { x: 0.5, y: 0.92 }; // up_progress 0.03
+        tracker.current = sc_input::Pt { x: 0.5, y: 0.92 };
         let state = UiState::Grabbing {
             toplevel: 7,
             app_id: "x".into(),
@@ -894,7 +797,7 @@ mod tests {
     fn quick_switch_cards_are_rounded_and_scaled() {
         use sc_anim::Spring;
         let mut offset = Spring::new(0.0);
-        offset.value = -0.2; // sliding left, revealing `next`
+        offset.value = -0.2;
         let state = UiState::QuickSwitch {
             current: 1,
             current_app: "a".into(),
@@ -908,13 +811,10 @@ mod tests {
         };
         let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert_eq!(scene.cards.len(), 2, "current + revealed neighbour");
-        // Full-height on a pure horizontal slide, but rounded (not a sharp pop).
         assert!(scene
             .cards
             .iter()
             .all(|c| (c.scale - 1.0).abs() < 1e-6 && c.corner_radius > 0.0));
-        // Neighbour separated from the current card by more than a card width
-        // (there is a visible margin, not a flush seam).
         let cur = scene.cards.iter().find(|c| c.toplevel == 1).unwrap();
         let nb = scene.cards.iter().find(|c| c.toplevel == 3).unwrap();
         assert!((nb.center_x - cur.center_x).abs() > TEST_SIZE.0 as f32 * 0.9);
@@ -934,7 +834,6 @@ mod tests {
         let w = TEST_SIZE.0 as f32;
         for (a, b) in at_rest.cards.iter().zip(&gone.cards) {
             assert!(b.center_x < a.center_x, "cards travel left");
-            // Fully clear of the screen: right edge past x = 0.
             assert!(b.center_x + w * b.scale / 2.0 < 0.0);
             assert_eq!(b.center_y, a.center_y, "no vertical travel on this exit");
         }
@@ -954,7 +853,6 @@ mod tests {
         assert_eq!(scene.cards.len(), 3);
         assert!(scene.show_home);
         assert!(scene.window.is_none());
-        // Cards sorted ascending z: back card first.
         assert!(scene.cards[0].z < scene.cards[1].z);
         assert!(scene.cards[1].z < scene.cards[2].z);
     }

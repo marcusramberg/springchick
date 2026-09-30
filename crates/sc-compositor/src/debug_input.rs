@@ -1,18 +1,10 @@
-//! Debug input socket — the line protocol behind the control socket.
+//! The control socket's line protocol; `springchick ipc <verb>` is the
+//! client. A reader thread parses commands and the render loop injects them
+//! through `input_common`.
 //!
-//! The compositor (both winit and DRM backends) always listens on
-//! [`crate::ipc::socket_path`]; `springchick ipc <verb>` is the client. A reader
-//! thread parses newline commands off the unix socket into [`DebugCmd`] values
-//! and hands them to the render loop, which injects them through the existing
-//! `input_common` funnel. See
-//! `docs/superpowers/specs/2026-07-24-debug-input-socket-design.md`.
-//!
-//! The gesture verbs answer `ok locked` and do nothing while an
-//! `ext-session-lock` client holds the session (see [`crate::session_lock`]) —
-//! the harness gets exactly as far as a finger would. `key` still goes through:
-//! that is how a scripted password reaches the lock client.
+//! Gesture verbs answer `ok locked` and do nothing under a session lock.
+//! `key` still works: that's how a scripted password reaches the lock client.
 
-/// A parsed command from the debug socket.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DebugCmd {
     Down(f32, f32),
@@ -27,81 +19,58 @@ pub enum DebugCmd {
     Settle {
         timeout_ms: u32,
     },
-    /// Press a key by xkb keysym name, holding it `hold_ms` before release.
     Key {
         name: String,
         hold_ms: u32,
     },
-    /// Press (`down = true`) or release a key by xkb keysym name and return
-    /// immediately, leaving it held across later commands.
-    ///
-    /// This is how a chord is scripted: `keydown Super_L`, `key Tab`,
-    /// `keyup Super_L`. Unlike [`DebugCmd::Key`] it takes no in-flight slot, so
-    /// the held modifier is still down while the next verb runs — which is the
-    /// whole point for held-modifier bindings like Super+Tab.
+    /// Press or release a key and return at once, leaving it held, so chords
+    /// (`keydown Super_L`, `key Tab`, `keyup Super_L`) can be scripted. Takes no
+    /// in-flight slot.
     KeyHold {
         name: String,
         down: bool,
     },
-    /// A real touch-down+up tap at `(x, y)` through the surface-routing path
-    /// (`touch::down`/`up`), for exercising layer-surface/app input.
+    /// A real tap through `touch::down`/`up`.
     Touch(f32, f32),
-    /// Hand a drag of `app_id` over from the search app to the home grid, with
-    /// the finger still down. Sent by sc-search when a result is long-pressed.
-    ///
-    /// `at` (output pixels) is an override for driving this by hand, where there
-    /// is no finger to inherit; a real handoff omits it and the compositor uses
-    /// the live touch position, which it knows and the client would have to
-    /// convert out of its own surface space to express.
+    /// Take over a drag from the search app with the finger still down. `at`
+    /// (output pixels) is for driving it by hand; a real handoff uses the live
+    /// touch.
     Drag {
         app_id: String,
         at: Option<(f32, f32)>,
     },
-    /// Pretend the device was turned. Drives the same path the accelerometer
-    /// will, so rotation policy is testable with no sensor.
+    /// Fakes an accelerometer report.
     Orientation(crate::rotation::DeviceOrientation),
-    /// Re-read `config.toml` (live-changeable settings only) and rescan the
-    /// app catalog.
+    /// Re-read `config.toml` (live settings only) and rescan the catalog.
     Reload,
-    /// Shut the compositor down, as SIGTERM does. This is how a shell's logout
-    /// action ends the session — springchick has no other exit path.
+    /// As SIGTERM. The shell's logout goes through this.
     Quit,
-    /// Report every layer surface and layer-rooted popup being composited, with
-    /// geometry, buffer and map state. A query, not input — see
-    /// [`State::layers_dump`].
+    /// A query; see [`State::layers_dump`].
     Layers,
-    /// Dump the home grid model + which slots resolve in the catalog.
     Home,
-    /// Open a catalog app by id, exactly as an icon tap would: raise its most
-    /// recent window if it has one, else launch it. `new_window` forces a fresh
-    /// instance instead. This is how the search app opens things, so its
-    /// launches get the same attribution and de-duplication as icon taps.
+    /// Open an app as an icon tap would (raise, else launch); `new_window`
+    /// forces a new instance. The search app uses this for attribution and
+    /// de-duplication.
     Launch {
         app_id: String,
         new_window: bool,
     },
-    /// Run a built-in keybinding action by its config name, as a bound key
-    /// would. `command` is not reachable this way: the caller can run a shell
-    /// command itself.
+    /// A built-in action by config name. `command` isn't reachable.
     Action(sc_config::Action),
 }
 
-/// Parse one command line. `w`/`h` are the logical output bounds used for the
-/// inclusive coordinate range check `[0,w] x [0,h]`.
-///
-/// Returns a short error tag on failure (`parse ...`, `range`).
+/// `w`/`h` bound the inclusive coordinate check. Errors are short tags
+/// (`parse ...`, `range`).
 pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
     let mut tok = line.split_whitespace();
     let verb = tok.next().ok_or_else(|| "parse: empty".to_string())?;
 
-    // Parse the next token as f32.
     fn num<'a>(t: &mut impl Iterator<Item = &'a str>) -> Result<f32, String> {
         t.next()
             .ok_or_else(|| "parse: missing arg".to_string())?
             .parse::<f32>()
             .map_err(|_| "parse: not a number".to_string())
     }
-    // Parse an optional trailing u32, defaulting if absent.
     fn opt_u32<'a>(t: &mut impl Iterator<Item = &'a str>, default: u32) -> Result<u32, String> {
         match t.next() {
             None => Ok(default),
@@ -110,10 +79,8 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
                 .map_err(|_| "parse: not an integer".to_string()),
         }
     }
-    // Inclusive range check.
     let in_bounds = |x: f32, y: f32| x >= 0.0 && x <= w && y >= 0.0 && y <= h;
 
-    // Ensure no trailing tokens remain.
     fn done<'a>(mut t: impl Iterator<Item = &'a str>) -> Result<(), String> {
         match t.next() {
             None => Ok(()),
@@ -149,8 +116,7 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
                 .next()
                 .ok_or_else(|| "parse: missing orientation".to_string())?;
             done(tok)?;
-            // Same spelling as iio-sensor-proxy's AccelerometerOrientation, so
-            // a test drives exactly what the sensor would report.
+            // Same spelling as iio-sensor-proxy.
             let o = crate::rotation::DeviceOrientation::from_sensor(name);
             if o == crate::rotation::DeviceOrientation::Undefined && name != "undefined" {
                 return Err(format!("parse: unknown orientation {name}"));
@@ -272,13 +238,11 @@ use std::time::Instant;
 use crate::input_common;
 use crate::State;
 
-/// Reply written back to the socket client (already newline-terminated).
+/// Newline-terminated.
 type Reply = String;
 
-/// A command paired with the channel to answer it on.
 type Job = (DebugCmd, SyncSender<Reply>);
 
-/// An in-flight swipe advanced across render-loop ticks.
 pub struct ActiveGesture {
     start: Instant,
     dur_ms: u32,
@@ -288,32 +252,25 @@ pub struct ActiveGesture {
     reply: SyncSender<Reply>,
 }
 
-/// A key held down across render-loop ticks, released once `hold_ms` elapses.
 pub struct ActiveKey {
     keycode: smithay::backend::input::Keycode,
     release_at: Instant,
     reply: SyncSender<Reply>,
 }
 
-/// A touch held down across render-loop ticks, lifted once `release_at` passes,
-/// so clients see a realistic tap dwell rather than an instant down+up.
+/// Held until `release_at` so clients see a real tap dwell.
 pub struct ActiveTouch {
     slot: smithay::backend::input::TouchSlot,
     release_at: Instant,
     reply: SyncSender<Reply>,
 }
 
-/// Handle held by the render loop: the receiving end of the command channel.
 pub struct DebugChannel {
     rx: Receiver<Job>,
 }
 
-/// Bind the socket at `path` and spawn a detached reader thread. Returns the
-/// channel the render loop drains, or an error string if the socket can't bind.
-///
-/// `w`/`h` are the logical output bounds for the coordinate range check.
 pub fn spawn(path: &str, w: f32, h: f32) -> std::io::Result<DebugChannel> {
-    // Unlink any stale socket from a previous (crashed) run before binding.
+    // Remove a stale socket from a crashed run.
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path)?;
     let (tx, rx) = std::sync::mpsc::channel::<Job>();
@@ -325,9 +282,7 @@ pub fn spawn(path: &str, w: f32, h: f32) -> std::io::Result<DebugChannel> {
     Ok(DebugChannel { rx })
 }
 
-/// Bind the control socket at [`crate::ipc::socket_path`] and start its reader
-/// thread. Shared by both backends so the listener setup lives in one place;
-/// returns `None` (logged) if the bind fails, which is non-fatal.
+/// Bind failure is logged and non-fatal.
 pub fn spawn_listener(output_size: (i32, i32)) -> Option<DebugChannel> {
     let path = crate::ipc::socket_path();
     match spawn(
@@ -346,7 +301,6 @@ pub fn spawn_listener(output_size: (i32, i32)) -> Option<DebugChannel> {
     }
 }
 
-/// Accept clients one at a time; parse each line and forward valid commands.
 fn reader_loop(listener: UnixListener, tx: Sender<Job>, w: f32, h: f32) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
@@ -358,34 +312,30 @@ fn reader_loop(listener: UnixListener, tx: Sender<Job>, w: f32, h: f32) {
         for line in reader.lines() {
             let Ok(line) = line else { break };
             let reply = match parse_line(&line, w, h) {
-                // Parse/range errors are answered directly by the reader.
                 Err(e) => format!("err {e}\n"),
-                // Valid commands go to the render loop; block on its reply so
-                // only one command is ever in flight.
+                // Block on the reply: one command in flight at a time.
                 Ok(cmd) => {
                     let (rtx, rrx) = std::sync::mpsc::sync_channel::<Reply>(1);
                     if tx.send((cmd, rtx)).is_err() {
-                        break; // render loop gone
+                        break;
                     }
                     rrx.recv().unwrap_or_else(|_| "err loop-gone\n".into())
                 }
             };
             if writer.write_all(reply.as_bytes()).is_err() {
-                break; // client disconnected
+                break;
             }
         }
     }
 }
 
-/// Drain and dispatch debug commands. Call once per render-loop tick, before
-/// rendering. Advances any in-flight swipe/settle first, else pops one command.
+/// Call once per tick, before rendering. An in-flight swipe/key/settle holds
+/// the slot; otherwise one command is popped.
 pub fn drain(state: &mut State, chan: &DebugChannel) {
-    // A swipe is stateful across ticks; advance it and take no new command.
     if state.active_gesture.is_some() {
         advance_gesture(state);
         return;
     }
-    // A held key likewise holds the one-in-flight slot until it is released.
     if state.active_key.is_some() {
         advance_key(state);
         return;
@@ -394,7 +344,6 @@ pub fn drain(state: &mut State, chan: &DebugChannel) {
         advance_touch(state);
         return;
     }
-    // A pending settle likewise holds the one-in-flight slot.
     if state.pending_settle.is_some() {
         check_settle(state);
         return;
@@ -405,10 +354,8 @@ pub fn drain(state: &mut State, chan: &DebugChannel) {
 }
 
 fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
-    // Injected input counts as user activity, so ext-idle-notify clients see a
-    // resume from a scripted tap the same way they would from a real one.
-    // `settle`/`layers` are queries and `reload` a control verb, not input: none
-    // of them must reset the countdown.
+    // Injected input resets idle like real input; queries and control verbs
+    // don't.
     if !matches!(
         cmd,
         DebugCmd::Settle { .. }
@@ -419,13 +366,8 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
     ) {
         state.idle_notify.activity(Instant::now());
     }
-    // The gesture verbs (`down`/`move`/`up`/`tap`/`swipe`) feed the shell's
-    // gesture funnel directly rather than going through `touch::down`, so the
-    // session lock has to be honoured here too: a locked session takes no shell
-    // input from a finger, and the harness must not be able to drive the UI
-    // behind a lock screen either. `touch` routes through the real path (which
-    // checks the lock itself), and `key` must keep working — that is how a
-    // password reaches the lock client.
+    // Gesture verbs bypass `touch::down`, so the lock is checked here. `touch`
+    // takes the real path, and `key` must work so a password can be typed.
     if state.session_lock.is_locked()
         && matches!(
             cmd,
@@ -441,8 +383,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
         let _ = reply.send("ok locked\n".into());
         return;
     }
-    // Synthetic contacts stand in for a finger, so they park the mouse cursor
-    // exactly as a real touch-down does (see `touch::down`).
+    // Synthetic contacts hide the cursor like a real touch-down.
     if matches!(
         cmd,
         DebugCmd::Down(..) | DebugCmd::Tap(..) | DebugCmd::Swipe { .. }
@@ -532,14 +473,11 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             let _ = reply.send("ok\n".into());
         }
         DebugCmd::Touch(x, y) => {
-            // Real touch tap through the surface-routing path, held ~120ms so
-            // clients register a proper tap. Slot 0 = a valid libinput slot;
-            // real monotonic time so clients don't see stale events.
+            // Held ~120ms so clients register a tap.
             let slot = smithay::backend::input::TouchSlot::from(Some(0));
             let time = state.clock.now().as_millis();
             crate::touch::down(state, x, y, slot, time);
-            // Synthetic input has no libinput frame event behind it, so the
-            // one-finger batch is closed by hand.
+            // No libinput frame event behind synthetic input.
             crate::touch::frame(state);
             state.active_touch = Some(ActiveTouch {
                 slot,
@@ -548,29 +486,24 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             });
         }
         DebugCmd::Reload => {
-            // Allowed while locked: it takes no shell input, and a config reload
-            // is exactly the kind of thing a session may need behind the lock.
             state.reload_config();
             state.reload_catalog();
             let _ = reply.send("ok\n".into());
         }
         DebugCmd::Layers => {
-            // Allowed while locked: it reads state and drives nothing.
             let _ = reply.send(format!("ok {}\n", state.layers_dump()));
         }
         DebugCmd::Home => {
             let _ = reply.send(format!("ok {}\n", state.home_dump()));
         }
         DebugCmd::Quit => {
-            // Answer before stopping: once the loop exits nothing drains this
-            // channel, and the client would block until the socket closed.
+            // Answer first: nothing drains the channel once the loop exits.
             let _ = reply.send("ok\n".into());
             tracing::info!("quit requested over ipc");
             state.running = false;
         }
         DebugCmd::Action(action) => {
-            // `run_action` applies the session-lock policy itself, so a locked
-            // session drops the same actions here as it does from a key.
+            // `run_action` applies the lock policy itself.
             crate::keybinds::run_action(state, action);
             let _ = reply.send("ok\n".into());
         }
@@ -579,8 +512,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
                 let _ = reply.send(format!("err unknown app {app_id}\n"));
                 return;
             }
-            // Centered origin: there is no icon to zoom from when the request
-            // came over the socket (or from the search app's list).
+            // No icon to zoom from; use the centre.
             let (w, h) = state.output_size_f();
             let origin = crate::ui_state::ZoomOrigin::icon((w / 2.0, h / 2.0));
             if new_window {
@@ -604,24 +536,17 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
 
 fn advance_gesture(state: &mut State) {
     let mut g = state.active_gesture.take().expect("advance with gesture");
-    // The session locked mid-swipe: abandon it rather than keep feeding motion
-    // into a shell the user can no longer see. `cancel_gestures` already dropped
-    // whatever the press had started.
+    // Locked mid-swipe: abandon it.
     if state.session_lock.is_locked() {
         let _ = g.reply.send("ok locked\n".into());
         return;
     }
-    // The press tick emits no motion, and restarts the clock: the finger is at
-    // `from` at t=0 by definition.
-    //
-    // Emitting the first motion here instead would hand the velocity tracker a
-    // position already advanced along the path over a `motion_dt` of ~0 — the
-    // press has just stamped `last_motion` — which reads as tens of screens per
-    // second. The low-pass sheds it over a few samples, but a slow swipe on a
-    // slow output only gets a few samples in total, so the phantom speed
-    // survives to the release and every deliberate drag classifies as a flick.
+    // The press tick emits no motion and restarts the clock. A motion here,
+    // right after the press stamped `last_motion`, reads as tens of screens per
+    // second, and on a slow output the phantom speed survives to the release as
+    // a flick.
     if !g.started {
-        input_common::on_motion(state, g.from.0, g.from.1); // seed before press
+        input_common::on_motion(state, g.from.0, g.from.1);
         input_common::on_press(state);
         g.started = true;
         g.start = Instant::now();
@@ -635,18 +560,13 @@ fn advance_gesture(state: &mut State) {
     input_common::on_motion(state, px, py);
 
     if t >= 1.0 {
-        // Final on_motion(to) has landed; release now carries correct velocity.
         input_common::on_release(state);
         let _ = g.reply.send("ok\n".into());
-        // Dropped: gesture complete.
     } else {
         state.active_gesture = Some(g);
     }
 }
 
-/// Release a held debug key once its hold time has passed. Long-press bindings
-/// fire from the normal per-frame poll while it is still held, exactly as they
-/// do for a real key.
 fn advance_touch(state: &mut State) {
     let t = state.active_touch.take().expect("advance with touch");
     if Instant::now() < t.release_at {
@@ -685,10 +605,8 @@ fn check_settle(state: &mut State) {
     }
 }
 
-/// Compositor idle: no springs animating, no gesture, pointer up.
 fn idle(state: &State) -> bool {
-    // Grid-reflow springs live on `State`, not `UiState`, so `needs_animation`
-    // can't see them — include them here so `settle` waits out a reflow.
+    // `needs_animation` can't see the grid springs on `State`.
     let grid_settled = state
         .grid_anim
         .values()
@@ -696,9 +614,7 @@ fn idle(state: &State) -> bool {
     is_idle(
         state.ui.needs_animation()
             || !grid_settled
-            // A turn waiting out its debounce, or the fade covering one: a
-            // screenshot taken mid-dip is black, and one taken before the turn
-            // lands shows the old orientation.
+            // Mid-dip screenshots are black.
             || state.orientation_settle.is_pending()
             || state.rotation_fade.is_active(),
         state.active_gesture.is_some()
@@ -708,8 +624,7 @@ fn idle(state: &State) -> bool {
     )
 }
 
-/// Normalized swipe progress for `elapsed_ms` of a `dur_ms` gesture. Clamped to
-/// `[0,1]`; a zero-duration swipe is immediately complete (`1.0`).
+/// Clamped to `[0,1]`; zero duration is `1.0`.
 pub fn swipe_t(elapsed_ms: f32, dur_ms: u32) -> f32 {
     if dur_ms == 0 {
         return 1.0;
@@ -717,8 +632,7 @@ pub fn swipe_t(elapsed_ms: f32, dur_ms: u32) -> f32 {
     (elapsed_ms / dur_ms as f32).clamp(0.0, 1.0)
 }
 
-/// The compositor is idle (safe to screenshot) when no springs are animating,
-/// no synthetic gesture is in flight, and no pointer is held down.
+/// Safe to screenshot.
 pub fn is_idle(needs_animation: bool, gesture_active: bool, pointer_down: bool) -> bool {
     !needs_animation && !gesture_active && !pointer_down
 }
@@ -736,15 +650,15 @@ mod tests {
         assert_eq!(swipe_t(100.0, 200), 0.5);
         assert_eq!(swipe_t(200.0, 200), 1.0);
         assert_eq!(swipe_t(999.0, 200), 1.0);
-        assert_eq!(swipe_t(50.0, 0), 1.0); // zero-duration completes immediately
+        assert_eq!(swipe_t(50.0, 0), 1.0);
     }
 
     #[test]
     fn idle_only_when_all_quiet() {
         assert!(is_idle(false, false, false));
-        assert!(!is_idle(true, false, false)); // animating
-        assert!(!is_idle(false, true, false)); // gesture in flight
-        assert!(!is_idle(false, false, true)); // pointer held
+        assert!(!is_idle(true, false, false));
+        assert!(!is_idle(false, true, false));
+        assert!(!is_idle(false, false, true));
     }
 
     #[test]
@@ -757,7 +671,6 @@ mod tests {
 
     #[test]
     fn parses_drag_with_and_without_position() {
-        // No position: the compositor inherits the live finger.
         assert_eq!(
             parse_line("drag foo", W, H),
             Ok(DebugCmd::Drag {
@@ -784,7 +697,6 @@ mod tests {
             parse_line("drag foo 1 2 3", W, H),
             Err("parse: trailing tokens".into())
         );
-        // A half-offscreen finger is a typo, not a handoff.
         assert_eq!(parse_line("drag foo 10 99999", W, H), Err("range".into()));
     }
 
@@ -825,7 +737,7 @@ mod tests {
             Ok(DebugCmd::Touch(10.0, 20.0))
         );
         assert!(parse_line("touch 10", W, H).is_err());
-        assert!(parse_line("touch -1 20", W, H).is_err()); // out of bounds
+        assert!(parse_line("touch -1 20", W, H).is_err());
         assert!(parse_line("touch 10 20 30", W, H).is_err());
     }
 
@@ -897,8 +809,8 @@ mod tests {
                 new_window: true,
             })
         );
-        assert!(parse_line("launch", W, H).is_err()); // needs an app id
-        assert!(parse_line("launch foot copy", W, H).is_err()); // unknown flag
+        assert!(parse_line("launch", W, H).is_err());
+        assert!(parse_line("launch foot copy", W, H).is_err());
     }
 
     #[test]
@@ -907,9 +819,8 @@ mod tests {
             parse_line("action screenshot", W, H),
             Ok(DebugCmd::Action(sc_config::Action::Screenshot))
         );
-        assert!(parse_line("action", W, H).is_err()); // needs a name
+        assert!(parse_line("action", W, H).is_err());
         assert!(parse_line("action nope", W, H).is_err());
-        // `command` takes a shell string, so it has no name to call by.
         assert!(parse_line("action command", W, H).is_err());
     }
 
@@ -918,24 +829,23 @@ mod tests {
         assert_eq!(parse_line("layers", W, H), Ok(DebugCmd::Layers));
         assert_eq!(parse_line("home", W, H), Ok(DebugCmd::Home));
         assert!(parse_line("home now", W, H).is_err());
-        assert!(parse_line("layers all", W, H).is_err()); // no args
+        assert!(parse_line("layers all", W, H).is_err());
     }
 
     #[test]
     fn parses_quit() {
         assert_eq!(parse_line("quit", W, H), Ok(DebugCmd::Quit));
-        assert!(parse_line("quit now", W, H).is_err()); // no args
+        assert!(parse_line("quit now", W, H).is_err());
     }
 
     #[test]
     fn parses_reload() {
         assert_eq!(parse_line("reload", W, H), Ok(DebugCmd::Reload));
-        assert!(parse_line("reload now", W, H).is_err()); // no args
+        assert!(parse_line("reload now", W, H).is_err());
     }
 
     #[test]
     fn coord_bounds_are_inclusive() {
-        // Exactly on the boundary is accepted (edge gestures).
         assert_eq!(parse_line("down 0 0", W, H), Ok(DebugCmd::Down(0.0, 0.0)));
         assert_eq!(
             parse_line("down 1224 2700", W, H),
@@ -948,7 +858,6 @@ mod tests {
         assert_eq!(parse_line("down -1 0", W, H), Err("range".into()));
         assert_eq!(parse_line("down 1225 0", W, H), Err("range".into()));
         assert_eq!(parse_line("down 0 2701", W, H), Err("range".into()));
-        // Swipe endpoints checked too.
         assert!(parse_line("swipe 0 0 9999 0", W, H).is_err());
     }
 
@@ -958,12 +867,12 @@ mod tests {
         assert!(parse_line("wobble 1 2", W, H)
             .unwrap_err()
             .starts_with("parse"));
-        assert!(parse_line("down 1", W, H).unwrap_err().starts_with("parse")); // arity
+        assert!(parse_line("down 1", W, H).unwrap_err().starts_with("parse"));
         assert!(parse_line("down x y", W, H)
             .unwrap_err()
-            .starts_with("parse")); // non-numeric
+            .starts_with("parse"));
         assert!(parse_line("up extra", W, H)
             .unwrap_err()
-            .starts_with("parse")); // trailing
+            .starts_with("parse"));
     }
 }

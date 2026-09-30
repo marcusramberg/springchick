@@ -1,13 +1,4 @@
-//! springchick compositor — a phone shell on smithay.
-//!
-//! Module map:
-//! - [`state`] — the central `State` struct and its construction.
-//! - [`handlers`] — smithay protocol handler impls + `delegate_*` glue.
-//! - [`toplevel`] — app window lifecycle, focus, decoration, rotation.
-//! - [`arrange`] — home-grid reflow springs + arrange-mode drag.
-//! - [`frame`] — per-frame shell advance and the render snapshot.
-//! - [`winit_backend`] / [`drm_backend`] — the two ways to present it.
-//! - [`session`] — Wayland display/socket plumbing shared by both backends.
+//! springchick: a phone shell compositor on smithay.
 
 mod app_history;
 mod arrange;
@@ -62,7 +53,6 @@ pub mod ui_state;
 mod winit_backend;
 mod wlr_screencopy;
 
-// Re-exported so sibling modules can keep using the short `crate::State` path.
 pub(crate) use arrange::{DragItem, IconPress};
 pub(crate) use session::{accept_client, create_display, publish_wayland_display};
 pub(crate) use state::{AppToplevel, FramePrep, State};
@@ -70,9 +60,7 @@ pub(crate) use state::{AppToplevel, FramePrep, State};
 use tracing::info;
 
 fn main() -> std::process::ExitCode {
-    // `springchick ipc <verb> [args...]` runs as a control-socket client against
-    // a running compositor instead of starting one. Handled before tracing so
-    // the client's stdout stays clean.
+    // Handled before tracing so the ipc client's stdout stays clean.
     let args: Vec<String> = std::env::args().collect();
     if matches!(args.get(1).map(String::as_str), Some("--version" | "-V")) {
         println!("springchick {}", env!("CARGO_PKG_VERSION"));

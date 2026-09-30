@@ -1,6 +1,3 @@
-//! Wayland display + socket plumbing shared by both backends: creating the
-//! listening socket, publishing `WAYLAND_DISPLAY`, and accepting clients.
-
 use std::sync::Arc;
 
 use smithay::reexports::wayland_server::{Display, ListeningSocket};
@@ -9,8 +6,6 @@ use tracing::{debug, info, warn};
 
 use crate::state::{ClientState, State};
 
-/// Create the Wayland display + an auto-bound listening socket. Shared by the
-/// winit and DRM backends.
 pub(crate) fn create_display(
 ) -> Result<(Display<State>, ListeningSocket, String), Box<dyn std::error::Error>> {
     let display: Display<State> = Display::new()?;
@@ -24,15 +19,9 @@ pub(crate) fn create_display(
     Ok((display, listener, socket_name))
 }
 
-/// Publish the compositor's Wayland socket so clients can find it.
-///
-/// `WAYLAND_DISPLAY` goes into our own environment so directly-spawned children
-/// (launched apps, keybinding commands) inherit it. When running as a real
-/// session (`import_to_systemd`), it is also pushed into the systemd/dbus user
-/// activation environment so user services — e.g. the on-screen keyboard
-/// `wvkbd-mobintl` — connect to us instead of failing with "Failed to create
-/// display". The winit dev backend skips the systemd import so it does not
-/// clobber the host session's value.
+/// Export `WAYLAND_DISPLAY` to our children, and with `import_to_systemd` to
+/// the systemd/dbus activation env so user services (wvkbd) find us. winit
+/// skips the import so it doesn't clobber the host session.
 pub(crate) fn publish_wayland_display(socket_name: &str, import_to_systemd: bool) {
     std::env::set_var("WAYLAND_DISPLAY", socket_name);
     if !import_to_systemd {
@@ -56,7 +45,6 @@ pub(crate) fn publish_wayland_display(socket_name: &str, import_to_systemd: bool
     }
 }
 
-/// Accept one pending client on the listener, if any.
 pub(crate) fn accept_client(display: &Display<State>, listener: &ListeningSocket) {
     if let Some(stream) = listener.accept().ok().flatten() {
         debug!("new wayland client connected");
