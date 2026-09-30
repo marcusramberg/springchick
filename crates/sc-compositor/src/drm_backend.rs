@@ -31,7 +31,7 @@ use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::drm::control::{
     connector, crtc, property, Device as ControlDevice, ModeTypeFlags,
 };
-use smithay::reexports::input::Libinput;
+use smithay::reexports::input::{Device, DeviceCapability, Libinput, SendEventsMode};
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 use smithay::reexports::wayland_server::{Display, ListeningSocket};
@@ -358,6 +358,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         listener,
         last_frame: Instant::now(),
         clock: Clock::new(),
+        touch_devices: Vec::new(),
     };
 
     // calloop sources
@@ -609,6 +610,7 @@ struct App {
     listener: ListeningSocket,
     last_frame: Instant,
     clock: Clock<Monotonic>,
+    touch_devices: Vec<Device>,
 }
 
 impl App {
@@ -701,6 +703,12 @@ impl App {
                     event.time_msec(),
                 );
             }
+            InputEvent::DeviceAdded { device }
+                if device.has_capability(DeviceCapability::Touch) =>
+            {
+                self.touch_devices.push(device);
+            }
+            InputEvent::DeviceRemoved { device } => self.touch_devices.retain(|d| *d != device),
             // Only touchpads report tap fingers; mouse wheels keep their direction.
             InputEvent::DeviceAdded { mut device } if device.config_tap_finger_count() > 0 => {
                 let natural = self.state.natural_scroll;
@@ -719,6 +727,17 @@ impl App {
         };
         // A dark panel can't act on orientation; drop the claim.
         self.state.sync_sensor_claim();
+        // Disabling closes the evdev fd; libinput cancels any touch in flight.
+        let mode = if blanked {
+            SendEventsMode::DISABLED
+        } else {
+            SendEventsMode::ENABLED
+        };
+        for d in &mut self.touch_devices {
+            if let Err(e) = d.config_send_events_set_mode(mode) {
+                warn!("send-events on {}: {e:?}", d.name());
+            }
+        }
         if blanked {
             // External displays keep power and frames while the phone panel sleeps.
             let mirroring = self.drm.mirroring();
