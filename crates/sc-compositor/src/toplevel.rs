@@ -707,6 +707,9 @@ impl State {
             Some(None) => false,
             None => self.rotation.swaps_axes(),
         };
+        if self.blank.is_blanked() && self.external_display {
+            return rotation::mirror_only_rotation(self.rotation, fullscreen);
+        }
         rotation::desired_rotation(self.device_orientation, fullscreen)
     }
 

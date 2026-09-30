@@ -54,6 +54,17 @@ pub fn desired_rotation(device: DeviceOrientation, fullscreen: bool) -> Rotation
     }
 }
 
+/// Panel dark, external display showing: the sensor is moot and the mirror
+/// un-rotates the blit, so a fullscreen app is always landscape. Keeps the
+/// turn it already has.
+pub fn mirror_only_rotation(current: Rotation, fullscreen: bool) -> Rotation {
+    match (fullscreen, current) {
+        (false, _) => Rotation::None,
+        (true, Rotation::None) => Rotation::LeftUp,
+        (true, turned) => turned,
+    }
+}
+
 /// Named for the device edge that is up.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Rotation {
@@ -392,6 +403,19 @@ mod tests {
         );
         assert_eq!(
             desired_rotation(DeviceOrientation::BottomUp, true),
+            Rotation::None
+        );
+    }
+
+    #[test]
+    fn mirror_only_is_landscape_whatever_the_sensor_says() {
+        assert_eq!(mirror_only_rotation(Rotation::None, true), Rotation::LeftUp);
+        assert_eq!(
+            mirror_only_rotation(Rotation::RightUp, true),
+            Rotation::RightUp
+        );
+        assert_eq!(
+            mirror_only_rotation(Rotation::LeftUp, false),
             Rotation::None
         );
     }
