@@ -667,7 +667,7 @@ impl State {
     }
 
     /// Committed, not just requested.
-    fn foreground_is_fullscreen(&self) -> bool {
+    pub(crate) fn foreground_is_fullscreen(&self) -> bool {
         ui_state::desired_focus(&self.ui).is_some_and(|tid| self.is_fullscreen(tid))
     }
 

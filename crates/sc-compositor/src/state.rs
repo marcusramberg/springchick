@@ -819,7 +819,7 @@ impl State {
 
     /// Below/right of exclusive zones, or the view origin while turned.
     pub(crate) fn app_origin(&self) -> (f32, f32) {
-        if self.view_rotation().swaps_axes() {
+        if self.view_rotation().swaps_axes() || self.foreground_is_fullscreen() {
             return (0.0, 0.0);
         }
         let u = self.layers.usable(self.dpi);

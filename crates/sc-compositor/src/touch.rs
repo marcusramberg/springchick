@@ -57,6 +57,11 @@ fn root_under(state: &State, x: f32, y: f32) -> Option<Target> {
         if let Some((surface, (ox, oy))) = state.layers.hit_test(x, y, state.dpi) {
             return Some(Target::at(surface, (ox as f64, oy as f64), state.dpi));
         }
+        if !state.foreground_is_fullscreen() {
+            if let Some((surface, (ox, oy))) = state.layers.hit_test_bottom(x, y, state.dpi) {
+                return Some(Target::at(surface, (ox as f64, oy as f64), state.dpi));
+            }
+        }
     }
     // The focused app, minus the bar zone. It's drawn at the usable-area
     // origin, not (0, 0).
