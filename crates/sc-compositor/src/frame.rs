@@ -168,9 +168,10 @@ impl State {
     }
 
     /// `(origin, size)` in view px: the usable area, or the whole view while
-    /// turned. Clamp, unconstrain, hit-test and draw must all agree on this.
+    /// turned or fullscreen. Clamp, unconstrain, hit-test and draw must all
+    /// agree on this.
     pub(crate) fn app_popup_space(&self) -> ((i32, i32), (i32, i32)) {
-        if self.view_rotation().swaps_axes() {
+        if self.view_rotation().swaps_axes() || self.foreground_is_fullscreen() {
             return ((0, 0), self.output_size());
         }
         let u = self.layers.usable(self.dpi);

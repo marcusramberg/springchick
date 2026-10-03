@@ -571,8 +571,27 @@ impl LayerShell {
 
     /// Overlay above Top; within a layer, later-created is on top.
     pub fn hit_test(&self, x: f32, y: f32, dpi: f64) -> Option<(WlSurface, (i32, i32))> {
+        self.hit_test_layers(&[Layer::Overlay, Layer::Top], x, y, dpi)
+    }
+
+    /// Bottom-layer panels (a waybar under fullscreen apps), only in the
+    /// exclusive-zone strips: inside the usable area the app or Home wins.
+    pub fn hit_test_bottom(&self, x: f32, y: f32, dpi: f64) -> Option<(WlSurface, (i32, i32))> {
+        if self.usable(dpi).contains(x, y) {
+            return None;
+        }
+        self.hit_test_layers(&[Layer::Bottom], x, y, dpi)
+    }
+
+    fn hit_test_layers(
+        &self,
+        layers: &[Layer],
+        x: f32,
+        y: f32,
+        dpi: f64,
+    ) -> Option<(WlSurface, (i32, i32))> {
         let map = layer_map_for_output(&self.output);
-        for wanted in [Layer::Overlay, Layer::Top] {
+        for &wanted in layers {
             let candidates: Vec<LayerSurface> = map
                 .layers()
                 .filter(|l| l.layer() == wanted)

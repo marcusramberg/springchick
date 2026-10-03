@@ -364,7 +364,9 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             | DebugCmd::Home
             | DebugCmd::Quit
     ) {
-        state.idle_notify.activity(Instant::now());
+        let now = Instant::now();
+        state.idle.activity(now);
+        state.idle_notify.activity(now);
     }
     // Gesture verbs bypass `touch::down`, so the lock is checked here. `touch`
     // takes the real path, and `key` must work so a password can be typed.
