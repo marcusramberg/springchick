@@ -145,7 +145,12 @@ pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, t
                 PressOutcome::Forward => FilterResult::Forward,
                 PressOutcome::Swallow => FilterResult::Intercept(()),
                 PressOutcome::Fire(action) => {
+                    let step = matches!(action, Action::SwitcherNext | Action::SwitcherPrev);
                     run_action(state, action);
+                    // Short binds fire on Tab's release, which may come after Super's.
+                    if step && !mods.logo && !state.session_lock.is_locked() {
+                        state.switcher_release();
+                    }
                     FilterResult::Intercept(())
                 }
             }
