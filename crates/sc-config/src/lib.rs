@@ -306,7 +306,6 @@ long_press_ms = 800
 
 [[keybinds.binding]]
 key = "XF86AudioRaiseVolume"
-press = "short"
 action = "volume-up"
 
 [[keybinds.binding]]
@@ -316,7 +315,6 @@ action = "close-app"
 
 [[keybinds.binding]]
 key = "XF86AudioLowerVolume"
-press = "short"
 action = "volume-down"
 
 [[keybinds.binding]]
@@ -326,7 +324,6 @@ command = "pkill -SIGRTMIN -f wvkbd-mobintl"
 
 [[keybinds.binding]]
 key = "XF86PowerOff"
-press = "short"
 action = "toggle-display"
 
 [[keybinds.binding]]
@@ -337,36 +334,30 @@ command = "systemctl poweroff"
 [[keybinds.binding]]
 key = "h"
 mods = ["Super"]
-press = "short"
 action = "home"
 
 [[keybinds.binding]]
 key = "f"
 mods = ["Super"]
-press = "short"
 action = "toggle-fullscreen"
 
 [[keybinds.binding]]
 key = "s"
 mods = ["Super"]
-press = "short"
 action = "search"
 
 [[keybinds.binding]]
 key = "Print"
-press = "short"
 action = "screenshot"
 
 [[keybinds.binding]]
 key = "Tab"
 mods = ["Super"]
-press = "short"
 action = "switcher-next"
 
 [[keybinds.binding]]
 key = "ISO_Left_Tab"
 mods = ["Super", "Shift"]
-press = "short"
 action = "switcher-prev"
 "#;
 
@@ -417,7 +408,7 @@ struct RawBinding {
     key: String,
     #[serde(default)]
     mods: Vec<String>,
-    press: String,
+    press: Option<String>,
     command: Option<String>,
     action: Option<String>,
 }
@@ -501,7 +492,7 @@ impl Config {
 }
 
 fn convert(raw: RawBinding) -> Option<Binding> {
-    let press = match raw.press.as_str() {
+    let press = match raw.press.as_deref().unwrap_or("short") {
         "short" => PressKind::Short,
         "long" => PressKind::Long,
         other => {
@@ -625,7 +616,6 @@ mod tests {
             [keybinds]
             [[keybinds.binding]]
             key = "XF86AudioRaiseVolume"
-            press = "short"
             command = "wpctl set-volume @DEFAULT_SINK@ 5%+"
             "#,
         );

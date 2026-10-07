@@ -68,7 +68,7 @@ long_press_ms = 800          # optional, global
 
 [[keybinds.binding]]
 key = "XF86AudioRaiseVolume" # xkb keysym name
-press = "short"              # "short" | "long"
+press = "short"              # "short" (default) | "long"
 action = "volume-up"         # internal action; mutually exclusive with `command`
 
 [[keybinds.binding]]
@@ -79,7 +79,6 @@ action = "close-app"
 [[keybinds.binding]]
 key = "Return"
 mods = ["Super"]             # optional; exact match on Ctrl/Alt/Shift/Super
-press = "short"
 command = "foot"
 ```
 
