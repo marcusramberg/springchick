@@ -1,0 +1,65 @@
+// springchick: no sway IPC, no polling scripts. Bottom layer so a fullscreen
+// app covers the bar; maximized apps stay below its exclusive zone.
+// Run: waybar -c springchick.jsonc -s springchick.css
+{
+  "layer": "bottom",
+  "position": "top",
+  "height": 26,
+  "spacing": 4,
+  "modules-left": ["clock"],
+  "modules-right": ["tray", "custom/screenshot", "custom/vol-down", "pulseaudio", "custom/vol-up", "backlight", "network", "battery"],
+
+  "clock": {
+    "format": "{:%H:%M}",
+    "format-alt": "{:%a %d %b  %H:%M}",
+    "tooltip": false
+  },
+  "custom/screenshot": {
+    "format": "󰹑",
+    "on-click": "springchick ipc action screenshot",
+    "tooltip": false
+  },
+  "custom/vol-down": {
+    "format": "󰍴",
+    "on-click": "springchick ipc action volume-down",
+    "tooltip": false
+  },
+  "custom/vol-up": {
+    "format": "󰐕",
+    "on-click": "springchick ipc action volume-up",
+    "tooltip": false
+  },
+  "tray": { "icon-size": 16, "spacing": 6 },
+  "pulseaudio": {
+    "format": "{icon} {volume}%",
+    "format-muted": "󰝟",
+    "format-icons": { "headphone": "󰋋", "default": ["󰕿", "󰖀", "󰕾"] },
+    "on-click": "springchick ipc action volume-mute",
+    "on-scroll-up": "springchick ipc action volume-up",
+    "on-scroll-down": "springchick ipc action volume-down",
+    "on-click-right": "pavucontrol",
+    "tooltip": false
+  },
+  "backlight": {
+    "format": "󰃠 {percent}%",
+    "tooltip": false
+  },
+  "network": {
+    "interval": 30,
+    "format-wifi": "{icon}",
+    "format-icons": ["󰤟", "󰤢", "󰤥", "󰤨"],
+    "format-ethernet": "󰈀",
+    "format-disconnected": "󰤭",
+    "format-disabled": "󰤮",
+    "tooltip-format-wifi": "{essid} {signalStrength}%",
+    "on-click": "foot -e nmtui"
+  },
+  "battery": {
+    "interval": 60,
+    "states": { "warning": 25, "critical": 10 },
+    "format": "{icon} {capacity}%",
+    "format-charging": "󰂄 {capacity}%",
+    "format-icons": ["󰁺", "󰁼", "󰁾", "󰂀", "󰁹"],
+    "tooltip": false
+  }
+}
