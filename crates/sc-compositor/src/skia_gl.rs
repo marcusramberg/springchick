@@ -487,8 +487,8 @@ impl SkiaGl {
         let mut current_layout = sc_layout::compute(width as f32, height as f32, page, model);
         current_layout.shift_done_below(top_inset);
 
-        let dock_slots =
-            visible_dock_slots(&current_layout, dock_positions, width as f32, height as f32);
+        draw_dock_frame(canvas, &current_layout);
+        let dock_slots = visible_dock_slots(&current_layout, dock_positions);
         for slot in &dock_slots {
             draw_icon_slot(canvas, slot, assets, cues(slot));
         }
@@ -1392,6 +1392,20 @@ fn draw_dock_highlight(canvas: &skia_safe::Canvas, layout: &Layout) {
     canvas.draw_rect(rect, &paint);
 }
 
+fn draw_dock_frame(canvas: &skia_safe::Canvas, layout: &Layout) {
+    let z = &layout.dock_zone;
+    // Full band height: dock icons already sit tight to its top.
+    let inset = z.h * 0.16;
+    let rect = Rect::new(z.x + inset, z.y, z.x + z.w - inset, z.y + z.h);
+
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_style(skia_safe::paint::Style::Stroke);
+    paint.set_stroke_width((z.h * 0.012).max(1.0));
+    paint.set_color(Color::from_argb(48, 255, 255, 255));
+    canvas.draw_round_rect(rect, z.h * 0.22, z.h * 0.22, &paint);
+}
+
 /// Skipped if the icon isn't uploaded yet.
 fn draw_drag_ghost(
     canvas: &skia_safe::Canvas,
@@ -1452,8 +1466,6 @@ pub(crate) fn visible_grid_slots(
 pub(crate) fn visible_dock_slots(
     layout: &Layout,
     dock_positions: &HashMap<String, (f32, f32)>,
-    width: f32,
-    height: f32,
 ) -> Vec<IconSlot> {
     // A dragged dock icon is absent from `dock_positions`; it renders only as
     // the ghost.
@@ -1461,9 +1473,9 @@ pub(crate) fn visible_dock_slots(
         .dock
         .iter()
         .filter_map(|slot| {
-            dock_positions.get(&slot.app_id).map(|&(cx, cy)| {
-                sc_layout::slot_at_center(slot.app_id.clone(), cx, cy, width, height)
-            })
+            dock_positions
+                .get(&slot.app_id)
+                .map(|&(cx, cy)| slot.centered_at(cx, cy))
         })
         .collect()
 }

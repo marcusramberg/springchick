@@ -6,7 +6,7 @@ pub mod layer;
 pub mod library;
 pub mod menu;
 
-use sc_shell_model::{ShellModel, COLS, DOCK_CAP, ROWS};
+use sc_shell_model::{ShellModel, COLS, DOCK_CAP, PAGE_CAP, ROWS};
 
 /// Origin top-left.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -40,6 +40,28 @@ pub struct IconSlot {
     pub badge_rect: Rect,
     /// Running indicator; drawn only, never hit-tested.
     pub dot_rect: Rect,
+}
+
+impl IconSlot {
+    /// Same size, icon moved to (`cx`, `cy`).
+    pub fn centered_at(&self, cx: f32, cy: f32) -> IconSlot {
+        let (dx, dy) = (
+            cx - self.icon_rect.center_x(),
+            cy - self.icon_rect.center_y(),
+        );
+        let mv = |r: Rect| Rect {
+            x: r.x + dx,
+            y: r.y + dy,
+            ..r
+        };
+        IconSlot {
+            app_id: self.app_id.clone(),
+            icon_rect: mv(self.icon_rect),
+            label_rect: mv(self.label_rect),
+            badge_rect: mv(self.badge_rect),
+            dot_rect: mv(self.dot_rect),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -88,7 +110,7 @@ const ICON_SIZE_FRAC: f32 = 0.62;
 /// Of cell height.
 const LABEL_HEIGHT_FRAC: f32 = 0.18;
 /// Gap below a label, as a fraction of the icon+label band.
-const CELL_V_PAD_FRAC: f32 = 0.06;
+const CELL_V_PAD_FRAC: f32 = 0.18;
 
 /// Fits both the cell width and the band shared with the label. Width alone
 /// overflows on cells wider than tall (4x6 on a portrait phone), and the
@@ -96,6 +118,11 @@ const CELL_V_PAD_FRAC: f32 = 0.06;
 fn fit_icon_size(cell_w: f32, band_h: f32, label_h: f32) -> f32 {
     let available = band_h - label_h - band_h * CELL_V_PAD_FRAC;
     (cell_w * ICON_SIZE_FRAC).min(available).max(0.0)
+}
+
+/// Off the long edge, so a landscape dock keeps a portrait-sized band.
+fn dock_band_h(width: f32, height: f32) -> f32 {
+    width.max(height) * DOCK_HEIGHT
 }
 
 pub fn bar_rect(width: f32, height: f32) -> Rect {
@@ -150,10 +177,11 @@ struct GridMetrics {
     cell_h: f32,
     icon_size: f32,
     label_h: f32,
+    cols: usize,
 }
 
 fn grid_metrics(width: f32, height: f32) -> GridMetrics {
-    let dock_top = bar_rect(width, height).y - height * DOCK_HEIGHT;
+    let dock_top = bar_rect(width, height).y - dock_band_h(width, height);
     let dots_top = dock_top - height * DOTS_HEIGHT;
 
     let grid_top = height * TOP_PAD;
@@ -163,8 +191,14 @@ fn grid_metrics(width: f32, height: f32) -> GridMetrics {
     let usable_width = width * (1.0 - 2.0 * H_MARGIN);
     let grid_left = width * H_MARGIN;
 
-    let cell_w = usable_width / COLS as f32;
-    let cell_h = grid_height / ROWS as f32;
+    // Landscape transposes the page: same PAGE_CAP and row-major order.
+    let (cols, rows) = if width > height {
+        (ROWS, COLS)
+    } else {
+        (COLS, ROWS)
+    };
+    let cell_w = usable_width / cols as f32;
+    let cell_h = grid_height / rows as f32;
     let label_h = cell_h * LABEL_HEIGHT_FRAC;
     let icon_size = fit_icon_size(cell_w, cell_h, label_h);
 
@@ -177,13 +211,14 @@ fn grid_metrics(width: f32, height: f32) -> GridMetrics {
         cell_h,
         icon_size,
         label_h,
+        cols,
     }
 }
 
 /// Cell `index` on the page offset by `x_offset`.
 fn grid_slot(gm: &GridMetrics, index: usize, x_offset: f32, app_id: String) -> IconSlot {
-    let col = index % COLS;
-    let row = index / COLS;
+    let col = index % gm.cols;
+    let row = index / gm.cols;
     let cell_x = gm.grid_left + col as f32 * gm.cell_w + x_offset;
     let cell_y = gm.grid_top + row as f32 * gm.cell_h;
     let icon_rect = Rect {
@@ -244,11 +279,12 @@ pub fn global_slot_pos(page: usize, index: usize, width: f32, height: f32) -> (f
 /// `x` is screen-space. Callers still clamp to the page's fill length.
 pub fn nearest_grid_index(width: f32, height: f32, x: f32, y: f32) -> usize {
     let gm = grid_metrics(width, height);
+    let rows = PAGE_CAP / gm.cols;
     let col =
-        (((x - gm.grid_left) / gm.cell_w).floor() as isize).clamp(0, COLS as isize - 1) as usize;
+        (((x - gm.grid_left) / gm.cell_w).floor() as isize).clamp(0, gm.cols as isize - 1) as usize;
     let row =
-        (((y - gm.grid_top) / gm.cell_h).floor() as isize).clamp(0, ROWS as isize - 1) as usize;
-    row * COLS + col
+        (((y - gm.grid_top) / gm.cell_h).floor() as isize).clamp(0, rows as isize - 1) as usize;
+    row * gm.cols + col
 }
 
 /// Same sizing as the grid, for icons in flight between slots.
@@ -312,7 +348,7 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
         .unwrap_or_default();
 
     let dock_cell_w = usable_width / DOCK_CAP as f32;
-    let dock_band_h = height * DOCK_HEIGHT;
+    let dock_band_h = dock_band_h(width, height);
     let dock_label_h = dock_band_h * LABEL_HEIGHT_FRAC;
     let dock_icon_size = fit_icon_size(dock_cell_w, dock_band_h, dock_label_h);
     let dock = model
@@ -322,7 +358,7 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
         .map(|(i, app_id)| {
             let cell_x = grid_left + i as f32 * dock_cell_w;
             let icon_x = cell_x + (dock_cell_w - dock_icon_size) / 2.0;
-            let icon_y = dock_top + (height * DOCK_HEIGHT - dock_icon_size - dock_label_h) / 2.0;
+            let icon_y = dock_top + (dock_band_h - dock_icon_size - dock_label_h) / 2.0;
             let icon_rect = Rect {
                 x: icon_x,
                 y: icon_y,
@@ -349,7 +385,7 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
         x: 0.0,
         y: dock_top,
         w: width,
-        h: height * DOCK_HEIGHT,
+        h: dock_band_h,
     };
     // Inside the top padding, so it never overlaps grid icons.
     let done_side = width * 0.12;
@@ -477,7 +513,7 @@ mod tests {
             let l = compute(w, h, 0, &m);
             for (i, slot) in l.grid.iter().enumerate() {
                 // The label must end before the next row's icon.
-                if let Some(below) = l.grid.get(i + COLS) {
+                if let Some(below) = l.grid.get(i + grid_metrics(w, h).cols) {
                     let label_bottom = slot.label_rect.y + slot.label_rect.h;
                     assert!(
                         label_bottom <= below.icon_rect.y,
@@ -519,7 +555,7 @@ mod tests {
                 );
             }
             for (i, slot) in l.grid.iter().enumerate() {
-                if let Some(below) = l.grid.get(i + COLS) {
+                if let Some(below) = l.grid.get(i + grid_metrics(w, h).cols) {
                     let dot_bottom = slot.dot_rect.y + slot.dot_rect.h;
                     assert!(
                         dot_bottom <= below.icon_rect.y,
@@ -567,8 +603,8 @@ mod tests {
         let m = sample_model();
         for &(w, h) in SIZES {
             let l = compute(w, h, 0, &m);
-            let dock_top = h * (1.0 - BAR_HEIGHT) - h * DOCK_HEIGHT;
-            let dock_bottom = dock_top + h * DOCK_HEIGHT;
+            let dock_top = h * (1.0 - BAR_HEIGHT) - dock_band_h(w, h);
+            let dock_bottom = dock_top + dock_band_h(w, h);
             for slot in &l.dock {
                 assert!(
                     slot.icon_rect.y >= dock_top - 0.5,
@@ -802,5 +838,25 @@ mod tests {
         assert_eq!(nearest_grid_index(w, h, p1.0, p1.1), 1);
         assert!(nearest_grid_index(w, h, -9999.0, -9999.0) < PAGE_CAP);
         assert!(nearest_grid_index(w, h, 9e9, 9e9) < PAGE_CAP);
+    }
+
+    #[test]
+    fn centered_at_keeps_the_dock_slot_size() {
+        let l = compute(2700.0, 1224.0, 0, &sample_model());
+        let d = &l.dock[0];
+        let m = d.centered_at(10.0, 20.0);
+        assert_eq!(m.icon_rect.w, d.icon_rect.w);
+        assert!((m.icon_rect.center_x() - 10.0).abs() < 0.01);
+        assert!((m.label_rect.y - m.icon_rect.y - (d.label_rect.y - d.icon_rect.y)).abs() < 0.01);
+    }
+
+    #[test]
+    fn landscape_transposes_the_grid() {
+        let (w, h) = (2700.0, 1224.0);
+        let row0 = global_slot_pos(0, ROWS - 1, w, h);
+        assert!((row0.1 - global_slot_pos(0, 0, w, h).1).abs() < 0.01);
+        let row1 = global_slot_pos(0, ROWS, w, h);
+        assert!(row1.1 > row0.1);
+        assert_eq!(nearest_grid_index(w, h, 9e9, 9e9), PAGE_CAP - 1);
     }
 }

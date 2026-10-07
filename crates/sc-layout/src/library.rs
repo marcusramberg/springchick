@@ -2,7 +2,6 @@
 //! app dragged out of a folder keeps its size.
 
 use crate::{grid_metrics, grid_slot, IconSlot, Rect};
-use sc_shell_model::COLS;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FolderSlot {
@@ -95,7 +94,7 @@ pub fn panel(width: f32, height: f32, app_ids: &[String], scroll: f32) -> PanelL
         h: title_h,
     };
 
-    let rows = app_ids.len().div_ceil(COLS);
+    let rows = app_ids.len().div_ceil(gm.cols);
     let content_h = rows as f32 * gm.cell_h;
     let view_h = (panel.h - title_h).max(0.0);
     let scroll = scroll.clamp(0.0, (content_h - view_h).max(0.0));
@@ -198,8 +197,9 @@ mod tests {
                     "{w}x{h} tile {i}"
                 );
             }
-            assert!((f[0].tile_rect.y - f[COLS - 1].tile_rect.y).abs() < 0.01);
-            assert!(f[COLS].tile_rect.y > f[0].tile_rect.y);
+            let cols = grid_metrics(w, h).cols;
+            assert!((f[0].tile_rect.y - f[cols - 1].tile_rect.y).abs() < 0.01);
+            assert!(f[cols].tile_rect.y > f[0].tile_rect.y);
         }
     }
 
