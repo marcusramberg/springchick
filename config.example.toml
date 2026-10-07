@@ -88,7 +88,7 @@ bg_memory_high = "infinity"
 # Hold time (ms) before a "long" binding fires instead of "short".
 long_press_ms = 800
 
-# Each binding: `key` (xkb keysym), `press` ("short" or "long"), and either
+# Each binding: `key` (xkb keysym), `press` ("short", the default, or "long"), and either
 # `action` or `command` (run via `sh -c`). Optional `mods`: any of
 # "Ctrl", "Alt", "Shift", "Super".
 #
@@ -101,7 +101,6 @@ long_press_ms = 800
 
 [[keybinds.binding]]
 key = "XF86AudioRaiseVolume"
-press = "short"
 action = "volume-up"
 
 [[keybinds.binding]]
@@ -111,7 +110,6 @@ action = "close-app"
 
 [[keybinds.binding]]
 key = "XF86AudioLowerVolume"
-press = "short"
 action = "volume-down"
 
 [[keybinds.binding]]
@@ -121,7 +119,6 @@ command = "pkill -SIGRTMIN -f wvkbd-mobintl"
 
 [[keybinds.binding]]
 key = "XF86PowerOff"
-press = "short"
 action = "toggle-display"
 
 [[keybinds.binding]]
@@ -132,35 +129,29 @@ command = "systemctl poweroff"
 [[keybinds.binding]]
 key = "h"
 mods = ["Super"]
-press = "short"
 action = "home"
 
 [[keybinds.binding]]
 key = "f"
 mods = ["Super"]
-press = "short"
 action = "toggle-fullscreen"
 
 [[keybinds.binding]]
 key = "s"
 mods = ["Super"]
-press = "short"
 action = "search"
 
 [[keybinds.binding]]
 key = "Print"
-press = "short"
 action = "screenshot"
 
 [[keybinds.binding]]
 key = "Tab"
 mods = ["Super"]
-press = "short"
 action = "switcher-next"
 
 # Shift turns Tab into ISO_Left_Tab, so the reverse step binds that keysym.
 [[keybinds.binding]]
 key = "ISO_Left_Tab"
 mods = ["Super", "Shift"]
-press = "short"
 action = "switcher-prev"
