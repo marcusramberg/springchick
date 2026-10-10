@@ -46,17 +46,28 @@ pub fn resolve_keysym(name: &str) -> Option<u32> {
 
 pub fn resolve(config: Config) -> KeyBindings {
     let long_press = Duration::from_millis(config.long_press_ms);
-    let entries = config
+    let (chords, singles): (Vec<_>, Vec<_>) = config
         .bindings
         .into_iter()
-        .filter_map(|b| match resolve_keysym(&b.key) {
-            Some(keysym) => Some((keysym, b.mods, b.press, b.action)),
-            None => {
-                warn!(key = %b.key, "skipping keybinding: unknown keysym name");
-                None
-            }
-        });
-    KeyBindings::new(entries, long_press)
+        .partition(|b| !b.with.is_empty());
+    let resolve_or_warn = |name: &String| {
+        let keysym = resolve_keysym(name);
+        if keysym.is_none() {
+            warn!(key = %name, "skipping keybinding: unknown keysym name");
+        }
+        keysym
+    };
+    let entries = singles
+        .into_iter()
+        .filter_map(|b| resolve_or_warn(&b.key).map(|keysym| (keysym, b.mods, b.press, b.action)));
+    let chords = chords.into_iter().filter_map(|b| {
+        let keys = std::iter::once(&b.key)
+            .chain(&b.with)
+            .map(resolve_or_warn)
+            .collect::<Option<Vec<u32>>>()?;
+        Some((keys, b.action))
+    });
+    KeyBindings::new(entries, long_press).with_chords(chords)
 }
 
 /// Either Super key.
@@ -299,7 +310,7 @@ mod tests {
 
     #[test]
     fn every_default_binding_resolves() {
-        assert_eq!(resolve(Config::defaults()).len(), 9);
+        assert_eq!(resolve(Config::defaults()).len(), 10);
     }
 
     #[test]

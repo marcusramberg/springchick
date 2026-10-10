@@ -76,6 +76,9 @@ impl Action {
 pub struct Binding {
     /// xkb keysym name.
     pub key: String,
+    /// Chord partners: fires as soon as `key` and all of these are down, in any
+    /// order. `mods` and `press` don't apply.
+    pub with: Vec<String>,
     pub mods: ModMask,
     pub press: PressKind,
     pub action: Action,
@@ -359,6 +362,11 @@ action = "switcher-next"
 key = "ISO_Left_Tab"
 mods = ["Super", "Shift"]
 action = "switcher-prev"
+
+[[keybinds.binding]]
+key = "XF86PowerOff"
+with = ["XF86AudioLowerVolume"]
+action = "screenshot"
 "#;
 
 /// Serde mirror of the file; validation lives in one place.
@@ -406,6 +414,8 @@ struct RawMain {
 #[derive(Deserialize)]
 struct RawBinding {
     key: String,
+    #[serde(default)]
+    with: Vec<String>,
     #[serde(default)]
     mods: Vec<String>,
     press: Option<String>,
@@ -492,6 +502,10 @@ impl Config {
 }
 
 fn convert(raw: RawBinding) -> Option<Binding> {
+    if !raw.with.is_empty() && raw.press.as_deref() == Some("long") {
+        warn!(key = %raw.key, "skipping keybinding: a chord (`with`) fires on press, it can't be long");
+        return None;
+    }
     let press = match raw.press.as_deref().unwrap_or("short") {
         "short" => PressKind::Short,
         "long" => PressKind::Long,
@@ -536,6 +550,7 @@ fn convert(raw: RawBinding) -> Option<Binding> {
 
     Some(Binding {
         key: raw.key,
+        with: raw.with,
         mods,
         press,
         action,
@@ -682,6 +697,28 @@ mod tests {
         );
         assert_eq!(cfg.bindings.len(), 1);
         assert_eq!(cfg.bindings[0].key, "E");
+    }
+
+    #[test]
+    fn parses_a_chord_and_rejects_a_long_one() {
+        let cfg = Config::parse(
+            r#"
+            [keybinds]
+            [[keybinds.binding]]
+            key = "XF86PowerOff"
+            with = ["XF86AudioLowerVolume"]
+            action = "screenshot"
+
+            [[keybinds.binding]]
+            key = "XF86PowerOff"
+            with = ["XF86AudioRaiseVolume"]
+            press = "long"
+            action = "home"
+            "#,
+        );
+        assert_eq!(cfg.bindings.len(), 1);
+        assert_eq!(cfg.bindings[0].with, vec!["XF86AudioLowerVolume"]);
+        assert_eq!(cfg.bindings[0].action, Action::Screenshot);
     }
 
     #[test]

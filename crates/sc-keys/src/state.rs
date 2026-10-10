@@ -17,6 +17,8 @@ pub enum PressOutcome {
 #[derive(Clone, Debug, Default)]
 pub struct KeyBindings {
     map: HashMap<(u32, ModMask), Slot>,
+    /// Every keysym in the chord, modifiers ignored.
+    chords: Vec<(Vec<u32>, Action)>,
     long_press: Duration,
 }
 
@@ -40,15 +42,28 @@ impl KeyBindings {
                 PressKind::Long => slot.long = Some(action),
             }
         }
-        KeyBindings { map, long_press }
+        KeyBindings {
+            map,
+            chords: Vec::new(),
+            long_press,
+        }
+    }
+
+    pub fn with_chords(mut self, chords: impl IntoIterator<Item = (Vec<u32>, Action)>) -> Self {
+        self.chords.extend(chords);
+        self
     }
 
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.map.len() + self.chords.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.len() == 0
+    }
+
+    fn in_chord(&self, keysym: u32) -> bool {
+        self.chords.iter().any(|(keys, _)| keys.contains(&keysym))
     }
 
     fn slot(&self, keysym: u32, mods: ModMask) -> Option<&Slot> {
@@ -58,7 +73,7 @@ impl KeyBindings {
     /// Diagnostics only: matching needs the modifiers too (see
     /// [`PressTracker::on_release`]).
     pub fn binds_keysym(&self, keysym: u32) -> bool {
-        self.map.keys().any(|(k, _)| *k == keysym)
+        self.map.keys().any(|(k, _)| *k == keysym) || self.in_chord(keysym)
     }
 
     /// Short or long: the blanking policy asks before that's decided.
@@ -94,18 +109,37 @@ impl PressTracker {
         &self.bindings
     }
 
-    /// Any bound key is swallowed, even with only a long binding.
+    /// Any bound key is swallowed, even with only a long binding or only a
+    /// chord.
     pub fn on_press(&mut self, keysym: u32, mods: ModMask, now: Instant) -> PressOutcome {
-        if self.bindings.slot(keysym, mods).is_none() {
+        if self.bindings.slot(keysym, mods).is_none() && !self.bindings.in_chord(keysym) {
             return PressOutcome::Forward;
         }
-        // A repeat press must not restart the long-press clock.
-        self.held.entry(keysym).or_insert(Held {
-            mods,
-            pressed_at: now,
-            long_fired: false,
+        // A repeat press must not restart the long-press clock or refire a chord.
+        if self.held.contains_key(&keysym) {
+            return PressOutcome::Swallow;
+        }
+        self.held.insert(
+            keysym,
+            Held {
+                mods,
+                pressed_at: now,
+                long_fired: false,
+            },
+        );
+        let chord = self.bindings.chords.iter().find(|(keys, _)| {
+            keys.contains(&keysym) && keys.iter().all(|k| self.held.contains_key(k))
         });
-        PressOutcome::Swallow
+        let Some((keys, action)) = chord else {
+            return PressOutcome::Swallow;
+        };
+        // The members' own short/long bindings are spent.
+        for k in keys {
+            if let Some(h) = self.held.get_mut(k) {
+                h.long_fired = true;
+            }
+        }
+        PressOutcome::Fire(action.clone())
     }
 
     pub fn on_release(&mut self, keysym: u32, now: Instant) -> PressOutcome {
@@ -342,6 +376,40 @@ mod tests {
             t.on_release(S, at(t0, 130)),
             PressOutcome::Fire(_)
         ));
+    }
+
+    #[test]
+    fn chord_fires_on_completion_in_either_order_and_eats_member_actions() {
+        let chord = Action::Command("chord".into());
+        for (first, second) in [(VOL_UP, VOL_DOWN), (VOL_DOWN, VOL_UP)] {
+            let mut t = PressTracker::new(
+                bindings().with_chords([(vec![VOL_UP, VOL_DOWN], chord.clone())]),
+            );
+            let t0 = Instant::now();
+            assert_eq!(t.on_press(first, ModMask::NONE, t0), PressOutcome::Swallow);
+            assert_eq!(
+                t.on_press(second, ModMask::NONE, at(t0, 50)),
+                PressOutcome::Fire(chord.clone())
+            );
+            assert_eq!(
+                t.on_press(second, ModMask::NONE, at(t0, 60)),
+                PressOutcome::Swallow
+            );
+            assert_eq!(t.poll(at(t0, 900)), None);
+            assert_eq!(t.on_release(first, at(t0, 950)), PressOutcome::Swallow);
+            assert_eq!(t.on_release(second, at(t0, 960)), PressOutcome::Swallow);
+        }
+    }
+
+    #[test]
+    fn a_key_bound_only_in_a_chord_is_swallowed_alone() {
+        let mut t = PressTracker::new(
+            KeyBindings::new(vec![], Duration::from_millis(500))
+                .with_chords([(vec![VOL_UP, VOL_DOWN], Action::Screenshot)]),
+        );
+        let t0 = Instant::now();
+        assert_eq!(t.on_press(VOL_UP, ModMask::NONE, t0), PressOutcome::Swallow);
+        assert_eq!(t.on_release(VOL_UP, at(t0, 50)), PressOutcome::Swallow);
     }
 
     #[test]
