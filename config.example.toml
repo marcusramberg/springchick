@@ -92,6 +92,10 @@ long_press_ms = 800
 # `action` or `command` (run via `sh -c`). Optional `mods`: any of
 # "Ctrl", "Alt", "Shift", "Super".
 #
+# Chords: `with` lists keys that must be held together with `key` (any order).
+# A chord fires as soon as the last key goes down, and suppresses the short
+# and long actions of every key in it. Its keys are always kept from clients.
+#
 # Actions: close-app, home, toggle-display, volume-up, volume-down,
 # volume-mute, toggle-fullscreen, search, switcher-next, switcher-prev,
 # screenshot (PNG to the clipboard).
@@ -155,3 +159,8 @@ action = "switcher-next"
 key = "ISO_Left_Tab"
 mods = ["Super", "Shift"]
 action = "switcher-prev"
+
+[[keybinds.binding]]
+key = "XF86PowerOff"
+with = ["XF86AudioLowerVolume"]
+action = "screenshot"
