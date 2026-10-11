@@ -218,6 +218,7 @@ pub struct DrawCtx<'a> {
     pub frame_time: u32,
     /// `(level, muted, alpha)`.
     pub osd: Option<(f32, bool, f32)>,
+    pub screenshot_flash: Option<f32>,
     /// Physical coords.
     pub touches: &'a [crate::touch_viz::TouchMark],
     /// Physical px.
@@ -1150,6 +1151,11 @@ fn pass_chrome(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>) {
     if let Some((level, muted, alpha)) = ctx.osd {
         ctx.skia
             .draw_osd_overlay(size.w, size.h, level, muted, alpha, ctx.skia_flip_y);
+    }
+
+    if let Some(t) = ctx.screenshot_flash {
+        ctx.skia
+            .draw_screenshot_flash(size.w, size.h, t, ctx.skia_flip_y);
     }
 
     if !ctx.touches.is_empty() {

@@ -104,6 +104,8 @@ pub(crate) struct FramePrep {
     pub app_surface: Option<WlSurface>,
     pub frame_time: u32,
     pub osd_view: Option<(f32, bool, f32)>,
+    /// Post-screenshot sparkle progress, 0..1.
+    pub screenshot_flash: Option<f32>,
     pub bar_alpha: f32,
     pub layers_below: layer_shell::RenderList,
     pub layers_above: layer_shell::RenderList,
@@ -224,6 +226,7 @@ pub(crate) struct State {
     pub needs_render: bool,
     /// Served by the backends, which own the renderer.
     pub screenshot_pending: bool,
+    pub screenshot_flash: Option<std::time::Instant>,
     /// See [`crate::render::DrawCtx::last_present`].
     pub last_present: Option<(WlSurface, smithay::backend::renderer::utils::CommitCounter)>,
     pub osd: osd::Osd,
@@ -561,6 +564,7 @@ impl State {
             external_display: false,
             needs_render: false,
             screenshot_pending: false,
+            screenshot_flash: None,
             last_present: None,
             osd: osd::Osd::new(),
             layer_shell_state,

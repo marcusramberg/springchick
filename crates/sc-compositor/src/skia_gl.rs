@@ -919,6 +919,13 @@ impl SkiaGl {
         });
     }
 
+    /// White pop, an edge glow and stars along the rim, all fading by `t` = 1.
+    pub fn draw_screenshot_flash(&mut self, width: i32, height: i32, t: f32, flip_y: bool) {
+        self.with_overlay_canvas(width, height, flip_y, |canvas| {
+            draw_screenshot_flash(canvas, width as f32, height as f32, t);
+        });
+    }
+
     pub fn draw_touches_overlay(
         &mut self,
         width: i32,
@@ -997,6 +1004,50 @@ fn draw_cursor_arrow(canvas: &skia_safe::Canvas, x: f32, y: f32, scale: f32) {
     fill.set_anti_alias(true);
     fill.set_color(Color::from_argb(255, 255, 255, 255));
     canvas.draw_path(&path, &fill);
+}
+
+fn draw_screenshot_flash(canvas: &skia_safe::Canvas, w: f32, h: f32, t: f32) {
+    let a = |x: f32| (x * 255.0).round().clamp(0.0, 255.0) as u8;
+    let full = Rect::from_xywh(0.0, 0.0, w, h);
+
+    let pop = (1.0 - t / 0.15).max(0.0) * 0.35;
+    if pop > 0.0 {
+        let mut paint = Paint::default();
+        paint.set_color(Color::from_argb(a(pop), 255, 255, 255));
+        canvas.draw_rect(full, &paint);
+    }
+
+    let glow_w = w.min(h) * 0.03;
+    let mut glow = Paint::default();
+    glow.set_anti_alias(true);
+    glow.set_stroke(true);
+    glow.set_stroke_width(glow_w);
+    glow.set_color(Color::from_argb(a((1.0 - t).powi(2) * 0.85), 255, 248, 225));
+    glow.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, glow_w * 0.6, false));
+    let radius = w.min(h) * 0.06;
+    canvas.draw_rrect(RRect::new_rect_xy(full, radius, radius), &glow);
+
+    for s in crate::screenshot::sparkles(w, h, t) {
+        let mut halo = Paint::default();
+        halo.set_anti_alias(true);
+        halo.set_color(Color::from_argb(a(s.alpha * 0.45), 255, 235, 170));
+        halo.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, s.size * 0.35, false));
+        canvas.draw_circle((s.x, s.y), s.size * 0.45, &halo);
+
+        // Four-point star: long tips on the axes, a pinched waist between.
+        let waist = s.size * 0.18;
+        let pts: Vec<skia_safe::Point> = (0..8)
+            .map(|k| {
+                let r = if k % 2 == 0 { s.size } else { waist };
+                let ang = s.angle + k as f32 * std::f32::consts::FRAC_PI_4;
+                skia_safe::Point::new(s.x + r * ang.cos(), s.y + r * ang.sin())
+            })
+            .collect();
+        let mut star = Paint::default();
+        star.set_anti_alias(true);
+        star.set_color(Color::from_argb(a(s.alpha), 255, 255, 255));
+        canvas.draw_path(&skia_safe::Path::polygon(&pts, true, None, None), &star);
+    }
 }
 
 fn draw_touch_marks(canvas: &skia_safe::Canvas, marks: &[crate::touch_viz::TouchMark]) {

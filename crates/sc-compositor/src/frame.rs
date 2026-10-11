@@ -357,6 +357,7 @@ impl State {
             || self.ui.needs_animation()
             || !self.launching.is_empty()
             || self.osd.is_active(now)
+            || crate::screenshot::flash_progress(self.screenshot_flash, now).is_some()
             || self.bar_fading()
             || self.layers.sliding()
             // The held-back regrow is only checked from a frame.
@@ -510,6 +511,7 @@ impl State {
             .osd
             .is_active(osd_now)
             .then(|| (self.osd.level, self.osd.muted, self.osd.alpha(osd_now)));
+        let screenshot_flash = crate::screenshot::flash_progress(self.screenshot_flash, osd_now);
         let bar_alpha = self.tick_bar_alpha(std::time::Instant::now());
         let (layers_below, layers_above) = self.layers.render_lists(self.dpi);
         // `origin` is the geometry top-left; the buffer's (0,0) sits `geometry.loc`
@@ -622,6 +624,7 @@ impl State {
             app_surface,
             frame_time,
             osd_view,
+            screenshot_flash,
             bar_alpha,
             layers_below,
             layers_above,
@@ -700,6 +703,7 @@ impl State {
             skia_flip_y,
             frame_time: prep.frame_time,
             osd: prep.osd_view,
+            screenshot_flash: prep.screenshot_flash,
             touches: &prep.touch_marks,
             cursor: prep.cursor,
             lock_view: prep.lock_view,
