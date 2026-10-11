@@ -843,6 +843,7 @@ impl App {
             && prep.scene.cards.is_empty()
             && !prep.scene.show_home
             && prep.osd_view.is_none()
+            && prep.screenshot_flash.is_none()
             && !self.state.bar_fading()
             && prep.dim <= 0.0
             && prep.touch_marks.is_empty()
