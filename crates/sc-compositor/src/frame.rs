@@ -430,11 +430,12 @@ impl State {
 
         self.tick_edge_page_flip();
 
-        // OSK slide-in is a render offset only. The app keeps its size until the
-        // slide ends, so the keyboard rises over it; the resize and popup re-solve
+        // Apps resize along with an OSK slide; the exact size and popup re-solve
         // land on the final frame.
         let was_sliding = self.layers.sliding();
-        if !self.layers.tick_slides(dt) && was_sliding {
+        if self.layers.tick_slides(dt) {
+            self.follow_slide();
+        } else if was_sliding {
             self.recompute_layers();
         }
 

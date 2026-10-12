@@ -224,6 +224,8 @@ pub(crate) struct State {
     /// Makes the vblank-driven DRM loop render on the next wake. Inert under
     /// winit.
     pub needs_render: bool,
+    /// Logical app size last sent while following an OSK slide.
+    pub slide_size: Option<(i32, i32)>,
     /// Served by the backends, which own the renderer.
     pub screenshot_pending: bool,
     pub screenshot_flash: Option<std::time::Instant>,
@@ -563,6 +565,7 @@ impl State {
             idle: blank::Idle::new(idle_blank_secs, std::time::Instant::now()),
             external_display: false,
             needs_render: false,
+            slide_size: None,
             screenshot_pending: false,
             screenshot_flash: None,
             last_present: None,

@@ -537,15 +537,31 @@ impl State {
         if self.layers.sliding() {
             return;
         }
-        if self.layers.usable_changed(self.dpi).is_some() {
-            self.reconfigure_toplevels();
+        // Mid-slide sizes must be undone even if the guard held the final growth.
+        let followed = self.slide_size.take().is_some();
+        if self.layers.usable_changed(self.dpi).is_some() || followed {
+            self.reconfigure_toplevels(self.layers.settled_usable());
             // Re-solve popups so an open menu flips instead of being covered.
             self.reconstrain_popups();
         }
     }
 
-    fn reconfigure_toplevels(&mut self) {
-        let usable = self.layers.usable(self.dpi);
+    /// Per frame while an OSK slides; `recompute_layers` lands the final size.
+    pub(crate) fn follow_slide(&mut self) {
+        let Some(usable) = self.layers.sliding_usable(self.dpi) else {
+            return;
+        };
+        let size = (
+            (usable.w as f64 / self.dpi).round() as i32,
+            (usable.h as f64 / self.dpi).round() as i32,
+        );
+        if self.slide_size != Some(size) {
+            self.slide_size = Some(size);
+            self.reconfigure_toplevels(usable);
+        }
+    }
+
+    fn reconfigure_toplevels(&mut self, usable: sc_layout::Rect) {
         let size = (
             (usable.w as f64 / self.dpi).round() as i32,
             (usable.h as f64 / self.dpi).round() as i32,
