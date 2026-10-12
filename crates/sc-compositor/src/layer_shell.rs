@@ -321,6 +321,29 @@ impl LayerShell {
         Some(now)
     }
 
+    /// What apps were last sized to; lags [`Self::usable`] while growth is held.
+    pub fn settled_usable(&self) -> Rect {
+        self.last_usable
+    }
+
+    /// The usable area eased along with an in-flight slide, so apps resize with
+    /// the OSK. `None` when nothing slides or a flapping surface holds growth.
+    pub fn sliding_usable(&self, dpi: f64) -> Option<Rect> {
+        let p = match &self.closing {
+            Some(c) => c.progress,
+            None => self.slides.values().copied().reduce(f32::min)?,
+        };
+        let (from, to) = (self.last_usable, self.usable(dpi));
+        if to.h > from.h && self.regrow.now < self.regrow.flap_until {
+            return None;
+        }
+        let t = sc_anim::ease_out_cubic(p);
+        Some(Rect {
+            h: from.h + (to.h - from.h) * t,
+            ..to
+        })
+    }
+
     pub fn regrow_pending(&self) -> bool {
         self.regrow.holding()
     }
