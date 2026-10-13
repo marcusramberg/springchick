@@ -108,7 +108,7 @@ Every crate except `sc-compositor` and `sc-search` is `#![forbid(unsafe_code)]`.
 - `context.reset(None)` before any Skia draw (invalidates Skia's GL state cache).
 - `context.flush_and_submit()` after Skia draws (pixels must land before swap).
 - Cache the Skia `Surface` keyed on `(fboid, width, height)`; recreate only on change.
-- The DRM `report_partial` damage fast path drops Skia overlays not listed in its guard. Add new overlays there or they vanish over fullscreen apps.
+- The DRM partial-damage fast path is off for any frame in which Skia drew (`SkiaGl::draw_count`), so overlays need no registration. Keep every Skia draw going through `ensure_surface`; a new non-Skia pass over a fullscreen app goes in `flip_damage`'s `only_app`.
 
 ### Smithay dependency
 

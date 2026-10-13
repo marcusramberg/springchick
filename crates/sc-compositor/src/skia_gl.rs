@@ -40,6 +40,7 @@ pub struct SkiaGl {
     icon_images: HashMap<String, Image>,
     icon_gen: u64,
     font: Option<Font>,
+    draws: u64,
     /// Every draw takes view-space sizes; set per frame by [`Self::set_view`].
     view: Rotation,
 }
@@ -165,6 +166,7 @@ impl SkiaGl {
             icon_images: HashMap::new(),
             icon_gen: 0,
             font: None,
+            draws: 0,
             view: Rotation::None,
         }
     }
@@ -306,11 +308,7 @@ impl SkiaGl {
         flip_y: bool,
     ) {
         self.ensure_font();
-        for (app_id, pixels) in icon_cache {
-            if !self.icon_images.contains_key(app_id) {
-                self.get_or_upload_icon(app_id, pixels);
-            }
-        }
+        self.upload_missing_icons(icon_cache);
         if !self.ensure_surface(width, height) {
             return;
         }
@@ -396,6 +394,17 @@ impl SkiaGl {
         }
     }
 
+    fn upload_missing_icons(&mut self, icon_cache: &HashMap<String, IconPixels>) {
+        if self.icon_images.len() >= icon_cache.len() {
+            return;
+        }
+        for (app_id, pixels) in icon_cache {
+            if !self.icon_images.contains_key(app_id) {
+                self.get_or_upload_icon(app_id, pixels);
+            }
+        }
+    }
+
     fn get_or_upload_icon(&mut self, app_id: &str, pixels: &IconPixels) -> Option<Image> {
         if let Some(img) = self.icon_images.get(app_id) {
             return Some(img.clone());
@@ -434,12 +443,7 @@ impl SkiaGl {
             shift,
         } = view;
         self.ensure_font();
-
-        for (app_id, pixels) in icon_cache {
-            if !self.icon_images.contains_key(app_id) {
-                self.get_or_upload_icon(app_id, pixels);
-            }
-        }
+        self.upload_missing_icons(icon_cache);
 
         // Manual acquisition: the body needs `&self.icon_images` and `&self.font`.
         if !self.ensure_surface(width, height) {
@@ -521,7 +525,14 @@ impl SkiaGl {
 
     /// Takes the view size; the render target is the panel's. On false,
     /// `cached_surface` must not be touched.
+    /// Every draw goes through `ensure_surface`, so a change across a frame
+    /// means an overlay was painted.
+    pub fn draw_count(&self) -> u64 {
+        self.draws
+    }
+
     fn ensure_surface(&mut self, width: i32, height: i32) -> bool {
+        self.draws += 1;
         let (width, height) = self.view.app_size((width, height));
         if width <= 0 || height <= 0 {
             return false;
