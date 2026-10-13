@@ -257,8 +257,8 @@ pub struct DrawCtx<'a> {
     pub grid_positions: &'a HashMap<String, (f32, f32)>,
     /// Screen-space centers from `State.dock_anim`.
     pub dock_positions: &'a HashMap<String, (f32, f32)>,
-    /// Only the app surface can have changed, so `draw_scene` may return a
-    /// narrowed damage hint. Computed by the backend.
+    /// The backend can use a narrowed damage hint; `draw_scene` decides
+    /// whether this frame qualifies.
     pub report_partial_damage: bool,
     /// The app surface and its last presented `CommitCounter`. A different
     /// surface resets to full damage.
@@ -599,7 +599,8 @@ fn plan_scene(renderer: &mut GlesRenderer, ctx: &DrawCtx<'_>) -> ScenePlan {
 }
 
 /// Full output by default. Narrowed only for a quiet fullscreen app that is a
-/// single element at the origin. Any blur region on screen disqualifies it.
+/// single element at the origin with nothing else composited. Skia overlays
+/// are caught by the draw counter in [`draw_scene`].
 fn flip_damage(
     size: Size<i32, Physical>,
     ctx: &mut DrawCtx<'_>,
@@ -615,7 +616,14 @@ fn flip_damage(
             .chain(ctx.layer_popups)
             .any(|(surface, _)| crate::background_effect::has_blur_region(surface));
 
+    let only_app = ctx.scene.cards.is_empty()
+        && ctx.layers_below.is_empty()
+        && ctx.layers_above.is_empty()
+        && ctx.app_popups.is_empty()
+        && ctx.layer_popups.is_empty()
+        && ctx.closing.is_none();
     if !(ctx.report_partial_damage
+        && only_app
         && !any_blur
         && plan.app_fills_screen
         && plan.app_elements.len() == 1)
@@ -1219,6 +1227,7 @@ pub fn draw_scene(
     let mut plan = plan_scene(renderer, ctx);
     // Before drawing: reads the pre-draw commit counter.
     let damage_hint = flip_damage(size, ctx, &plan);
+    let skia_draws = ctx.skia.draw_count();
 
     pass_background(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_home(size, ctx, &plan);
@@ -1236,6 +1245,10 @@ pub fn draw_scene(
     ctx.skia.draw_screen_dim(v.w, v.h, ctx.dim, ctx.skia_flip_y);
 
     send_frame_callbacks(ctx);
+    // Skia overlays lie outside the app damage.
+    if ctx.skia.draw_count() != skia_draws {
+        return Ok(vec![Rectangle::from_size(size)]);
+    }
     Ok(damage_hint)
 }
 

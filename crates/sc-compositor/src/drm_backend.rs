@@ -834,27 +834,8 @@ impl App {
         self.last_frame = Instant::now();
         let prep = self.state.advance_frame(dt);
 
-        // Partial damage is only safe when nothing but the app surface can change.
-        // Every Skia overlay is untracked and would never reach scanout. A locked
-        // session draws its own full frame.
-        let report_partial = prep.lock_view == crate::session_lock::LockView::Unlocked
-            && prep.scene.window_covers_screen()
-            && prep.app_surface.is_some()
-            && prep.scene.cards.is_empty()
-            && !prep.scene.show_home
-            && prep.osd_view.is_none()
-            && prep.screenshot_flash.is_none()
-            && !self.state.bar_fading()
-            && prep.dim <= 0.0
-            && prep.touch_marks.is_empty()
-            && prep.cursor.is_none()
-            && prep.layers_below.is_empty()
-            && prep.layers_above.is_empty()
-            // The OSK slide-out texture isn't in the app damage either.
-            && prep.closing.is_none()
-            // Popups draw in their own pass, outside the app damage.
-            && prep.app_popups.is_empty()
-            && prep.layer_popups.is_empty();
+        // `draw_scene` narrows only when nothing but the app surface was drawn.
+        let report_partial = prep.scene.window_covers_screen() && prep.app_surface.is_some();
 
         let (mut dmabuf, _age) = match self.drm.gbm_surface.next_buffer() {
             Ok(b) => b,

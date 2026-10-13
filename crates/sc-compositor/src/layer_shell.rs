@@ -581,15 +581,14 @@ impl LayerShell {
     /// Hides the home bar when the OSK covers it.
     pub fn top_overlaps(&self, rect: Rect, dpi: f64) -> bool {
         let map = layer_map_for_output(&self.output);
-        let tops: Vec<LayerSurface> = map
+        let hit = map
             .layers()
             .filter(|l| matches!(l.layer(), Layer::Top | Layer::Overlay))
-            .cloned()
-            .collect();
-        tops.iter().any(|l| {
-            map.layer_geometry(l)
-                .is_some_and(|g| rects_overlap(self.place(l.wl_surface(), g, dpi), rect))
-        })
+            .any(|l| {
+                map.layer_geometry(l)
+                    .is_some_and(|g| rects_overlap(self.place(l.wl_surface(), g, dpi), rect))
+            });
+        hit
     }
 
     /// Overlay above Top; within a layer, later-created is on top.

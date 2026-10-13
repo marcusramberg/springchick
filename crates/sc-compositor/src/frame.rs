@@ -191,8 +191,16 @@ impl State {
     }
 
     fn layer_popups(&self) -> Vec<PopupRect> {
-        let mut out = Vec::new();
         let (below, above) = self.layers.render_lists(self.dpi);
+        self.layer_popups_in(&below, &above)
+    }
+
+    fn layer_popups_in(
+        &self,
+        below: &layer_shell::RenderList,
+        above: &layer_shell::RenderList,
+    ) -> Vec<PopupRect> {
+        let mut out = Vec::new();
         for (surface, origin) in below.iter().chain(above.iter()) {
             out.extend(self.popup_chain(surface, *origin, self.panel_size));
         }
@@ -532,7 +540,7 @@ impl State {
                 .collect::<layer_shell::RenderList>()
         };
         let app_popups = to_render_list(self.app_popups());
-        let layer_popups = to_render_list(self.layer_popups());
+        let layer_popups = to_render_list(self.layer_popups_in(&layers_below, &layers_above));
 
         let touch_marks = if self.show_touches {
             self.touch_viz.prune(osd_now);
