@@ -20,7 +20,7 @@ use smithay::backend::renderer::element::utils::{
 };
 use smithay::backend::renderer::element::{Element, Id as ElementId, Kind};
 use smithay::backend::renderer::gles::{
-    GlesError, GlesRenderer, GlesTexProgram, Uniform, UniformName, UniformType,
+    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, Uniform, UniformName, UniformType,
 };
 use smithay::backend::renderer::utils::{draw_render_elements, CommitCounter};
 use smithay::backend::renderer::{
@@ -470,22 +470,21 @@ impl Card {
     }
 }
 
-/// Relocate and rescale the tree to the card, then draw it. Rounded cards go
-/// through the shader in one `draw_render_elements` call: the slice is
-/// front-to-back and reversed internally, so splitting it drew waydroid's
-/// opaque root over its content (a black card). Every element gets the mask,
-/// since it's in framebuffer coords.
-fn draw_scaled_card(
-    renderer: &mut GlesRenderer,
-    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+/// Relocate and rescale the tree to the card, then draw it into an open
+/// frame. Rounded cards go through the shader in one `draw_render_elements`
+/// call: the slice is front-to-back and reversed internally, so splitting it
+/// drew waydroid's opaque root over its content (a black card). Every element
+/// gets the mask, since it's in framebuffer coords.
+fn draw_card_in_frame(
+    frame: &mut GlesFrame<'_, '_>,
     size: Size<i32, Physical>,
     ctx: &DrawCtx<'_>,
     elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
     card: Card,
     pass_transform: Transform,
-) -> Result<(), SwapBuffersError> {
+) {
     if elements.is_empty() {
-        return Ok(());
+        return;
     }
     let app_scale = ctx.app_scale;
     // Before the elements are consumed.
@@ -506,10 +505,6 @@ fn draw_scaled_card(
         })
         .collect();
 
-    let mut frame = renderer
-        .render(framebuffer, size, pass_transform)
-        .map_err(SwapBuffersError::from)?;
-
     if card.corner_radius > 0.5 {
         let uniforms = vec![
             Uniform::new("corner_radius", card.corner_radius),
@@ -517,11 +512,29 @@ fn draw_scaled_card(
         ];
         frame.override_default_tex_program(ctx.rounded_tex_shader.clone(), uniforms);
     }
-    if let Err(e) = draw_render_elements(&mut frame, app_scale, &scaled, &[damage]) {
+    if let Err(e) = draw_render_elements(frame, app_scale, &scaled, &[damage]) {
         warn!(?e, "failed to draw scaled card elements");
     }
     frame.clear_tex_program_override();
+}
 
+/// One frame for a single card.
+fn draw_scaled_card(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    ctx: &DrawCtx<'_>,
+    elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+    card: Card,
+    pass_transform: Transform,
+) -> Result<(), SwapBuffersError> {
+    if elements.is_empty() {
+        return Ok(());
+    }
+    let mut frame = renderer
+        .render(framebuffer, size, pass_transform)
+        .map_err(SwapBuffersError::from)?;
+    draw_card_in_frame(&mut frame, size, ctx, elements, card, pass_transform);
     let _sync = frame.finish().map_err(SwapBuffersError::from)?;
     Ok(())
 }
@@ -932,27 +945,37 @@ fn pass_backdrop_blur(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>) {
     );
 }
 
-/// Back-to-front. Each card sits between its Skia shadow and scrim, so the
-/// shadow lands over the card behind and under this one.
+/// A deck card with its elements collected and placement solved.
+struct DeckCard {
+    elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+    placement: Card,
+    card_t: Transform,
+    decor: crate::skia_gl::CardDecor,
+    toplevel: crate::ui_state::ToplevelId,
+    app_id: String,
+    alpha: f32,
+}
+
+/// Back-to-front. Every submit costs ~1ms of driver CPU on the phone, so the
+/// cards share one frame per transform and the decor one Skia pass; the
+/// per-card shadow/scrim/card interleave is reproduced by clipping.
 fn pass_switcher_cards(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
     size: Size<i32, Physical>,
     ctx: &mut DrawCtx<'_>,
 ) -> Result<(), SwapBuffersError> {
-    let cards: Vec<crate::switcher::CardRect> = ctx.scene.cards.clone();
-    for card in cards {
+    let view = ctx.view(size);
+    let mut deck: Vec<DeckCard> = Vec::with_capacity(ctx.scene.cards.len());
+    for card in &ctx.scene.cards {
         let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) else {
             continue;
         };
-        let surface = tl.surface.wl_surface().clone();
-        let stored = tl.rotation;
-        let app_id = tl.app_id.clone();
         // Whether a card is turned depends on its buffer, so collect first.
         let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             render_elements_from_surface_tree(
                 renderer,
-                &surface,
+                tl.surface.wl_surface(),
                 (0, 0),
                 ctx.app_scale,
                 card.alpha,
@@ -961,9 +984,8 @@ fn pass_switcher_cards(
         if elements.is_empty() {
             continue;
         }
-        let card_t = card_transform(ctx, stored, &elements, size);
+        let card_t = card_transform(ctx, tl.rotation, &elements, size);
         let upright = card_t == ctx.base();
-        let view = ctx.view(size);
         let placement = Card::placed(
             view,
             card.center_x,
@@ -976,7 +998,7 @@ fn pass_switcher_cards(
         // Use the real drawn bounds: a backgrounded app keeps its old size. A card
         // turned against the view fills its slot, and its placement is in its own
         // space, so use the view-space slot.
-        let (dx, dy, dw, dh) = if upright {
+        let (x, y, w, h) = if upright {
             placement.drawn_bounds(&elements, ctx.app_scale)
         } else {
             let slot = Card::centered(
@@ -990,58 +1012,59 @@ fn pass_switcher_cards(
         };
         if upright {
             // Ascending z: the front card's rect is what's left for the pill.
-            ctx.pill_anchor = Some(sc_layout::Rect {
-                x: dx,
-                y: dy,
-                w: dw,
-                h: dh,
-            });
+            ctx.pill_anchor = Some(sc_layout::Rect { x, y, w, h });
         }
-        let decor = crate::skia_gl::CardDecor {
-            x: dx,
-            y: dy,
-            w: dw,
-            h: dh,
-            radius: placement.corner_radius,
-            alpha: card.alpha,
-            dim: card.dim,
-            chrome: ctx.card_chrome.icon_alpha,
-            dpi: ctx.app_scale as f32,
-        };
-        ctx.skia
-            .draw_card_shadow(view.w, view.h, &decor, ctx.skia_flip_y);
-        draw_scaled_card(
-            renderer,
-            framebuffer,
-            size,
-            ctx,
+        deck.push(DeckCard {
             elements,
             placement,
             card_t,
-        )?;
-        ctx.skia
-            .draw_card_dim(view.w, view.h, &decor, ctx.skia_flip_y);
-        ctx.skia.draw_card_icon(
-            view.w,
-            view.h,
-            &decor,
-            &app_id,
-            ctx.icon_cache,
-            ctx.skia_flip_y,
-        );
-        if let Some((tid, title)) = &ctx.card_chrome.title {
-            if *tid == card.toplevel {
-                ctx.skia.draw_card_title(
-                    view.w,
-                    view.h,
-                    &decor,
-                    title,
-                    card.alpha * ctx.card_chrome.title_alpha,
-                    ctx.skia_flip_y,
-                );
-            }
-        }
+            decor: crate::skia_gl::CardDecor {
+                x,
+                y,
+                w,
+                h,
+                radius: placement.corner_radius,
+                alpha: card.alpha,
+                dim: card.dim,
+                chrome: ctx.card_chrome.icon_alpha,
+                dpi: ctx.app_scale as f32,
+            },
+            toplevel: card.toplevel,
+            app_id: tl.app_id.clone(),
+            alpha: card.alpha,
+        });
     }
+
+    // A turned card breaks the batch: the frame transform is per frame.
+    let mut i = 0;
+    while i < deck.len() {
+        let t = deck[i].card_t;
+        let mut frame = renderer
+            .render(framebuffer, size, t)
+            .map_err(SwapBuffersError::from)?;
+        while i < deck.len() && deck[i].card_t == t {
+            let elements = std::mem::take(&mut deck[i].elements);
+            draw_card_in_frame(&mut frame, size, ctx, elements, deck[i].placement, t);
+            i += 1;
+        }
+        let _sync = frame.finish().map_err(SwapBuffersError::from)?;
+    }
+
+    let items: Vec<crate::skia_gl::CardDecorItem<'_>> = deck
+        .iter()
+        .map(|c| crate::skia_gl::CardDecorItem {
+            decor: c.decor,
+            app_id: &c.app_id,
+            title: ctx
+                .card_chrome
+                .title
+                .as_ref()
+                .filter(|(tid, _)| *tid == c.toplevel)
+                .map(|(_, title)| (title.as_str(), c.alpha * ctx.card_chrome.title_alpha)),
+        })
+        .collect();
+    ctx.skia
+        .draw_cards_decor(view.w, view.h, &items, ctx.icon_cache, ctx.skia_flip_y);
     Ok(())
 }
 
@@ -1245,6 +1268,7 @@ pub fn draw_scene(
     ctx.skia.draw_screen_dim(v.w, v.h, ctx.dim, ctx.skia_flip_y);
 
     send_frame_callbacks(ctx);
+    ctx.skia.end_frame();
     // Skia overlays lie outside the app damage.
     if ctx.skia.draw_count() != skia_draws {
         return Ok(vec![Rectangle::from_size(size)]);
@@ -1304,6 +1328,7 @@ fn draw_locked(
             .draw_cursor(size.w, size.h, x, y, ctx.app_scale as f32, ctx.skia_flip_y);
     }
 
+    ctx.skia.end_frame();
     if let Some(surface) = ctx.lock_surface {
         send_frames_surface_tree(surface, ctx.frame_time);
     }
