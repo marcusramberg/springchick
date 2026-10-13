@@ -44,7 +44,7 @@ A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; 
 
 `springchick ipc layers` dumps every layer surface and layer-rooted popup being composited (namespace, layer, logical geometry, the physical rect, buffer size, pending-map/slide state, anchor and exclusive zone), plus the usable area and regrow-guard state. Run it first when the screen shows something no client admits to, e.g. two on-screen keyboards from one wvkbd process.
 
-`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `prefer_no_csd` (next window to negotiate decorations), `natural_scroll` (next touchpad added), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn). `dpi`, `uclamp_min` and `vrr` are ignored on reload and need a restart.
+`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `save_screenshots`, `prefer_no_csd` (next window to negotiate decorations), `natural_scroll` (next touchpad added), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn). `dpi`, `uclamp_min` and `vrr` are ignored on reload and need a restart.
 
 `reload` also rescans the app catalog (`.desktop` files + icons): newly installed apps land on Home, uninstalled ones leave pages/dock/hidden and lose their frecency stats, and the renderer's uploaded icon textures are dropped so re-themed icons repaint. The catalog rescans itself too: `catalog_watch.rs` inotify-watches every XDG `applications/` dir, so a package-manager install/remove lands without an explicit reload. The watch has a 750 ms debounce, and the rescan runs on the compositor thread at the next event-loop wake, so a blanked screen costs nothing.
 
@@ -125,7 +125,7 @@ libinput/DRM/GBM/session types are used via `smithay::reexports::*` to avoid ver
 Notable options:
 
 - `dpi` (default 3): advertised via `wp_fractional_scale`. The FP5 panel is illegible at 1:1.
-- `idle_blank_secs`, `card_radius`, `show_touches`, `prefer_no_csd`, `natural_scroll`.
+- `idle_blank_secs`, `card_radius`, `show_touches`, `save_screenshots`, `prefer_no_csd`, `natural_scroll`.
 - `rotation_settle_ms` (default 400): accelerometer debounce.
 - `rotation_fade_ms` (default 130): half the dip-to-black that covers a turn.
 - `vrr` (default `true`): asks the panel for variable refresh. DRM backend only, no-op unless the connector reports `vrr_capable`, startup-only.

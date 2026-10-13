@@ -1,4 +1,5 @@
-//! Screenshot: PNG-encode the composited frame and offer it on the clipboard.
+//! Screenshot: PNG-encode the composited frame, offer it on the clipboard and
+//! optionally save it to `$XDG_PICTURES_DIR/Screenshots/`.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -106,9 +107,43 @@ pub fn to_clipboard(state: &mut crate::State, rgba: &[u8], size: Size<i32, Buffe
     // Started after the capture, so it isn't in the shot.
     state.screenshot_flash = Some(Instant::now());
     state.needs_render = true;
+    let png = Arc::new(png);
+    if state.save_screenshots {
+        save(png.clone());
+    }
     let dh = state.dh.clone();
     let seat = state.seat.clone();
-    set_data_device_selection(&dh, &seat, vec![MIME.to_string()], Arc::new(png));
+    set_data_device_selection(&dh, &seat, vec![MIME.to_string()], png);
+}
+
+/// `Screenshot_2026-10-13_14-05-09.png`, local time.
+fn file_name() -> String {
+    let now = unsafe { libc::time(std::ptr::null_mut()) };
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&now, &mut tm) };
+    format!(
+        "Screenshot_{:04}-{:02}-{:02}_{:02}-{:02}-{:02}.png",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
+}
+
+fn save(png: Arc<Vec<u8>>) {
+    let Some(dir) = sc_config::screenshot_dir() else {
+        warn!("screenshot: HOME unset, not saving");
+        return;
+    };
+    let path = dir.join(file_name());
+    std::thread::spawn(move || {
+        match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, &*png)) {
+            Ok(()) => info!(path = %path.display(), "screenshot saved"),
+            Err(e) => warn!("screenshot: saving {} failed: {e}", path.display()),
+        }
+    });
 }
 
 /// A screenshot dwarfs the 64K pipe buffer; writing on the compositor thread
@@ -158,6 +193,16 @@ mod tests {
         }
         assert!(seen > SPARKLES as usize / 3);
         assert!(sparkles(w, h, 1.0).iter().all(|s| s.alpha < 0.05));
+    }
+
+    #[test]
+    fn file_name_is_timestamped_png() {
+        let name = file_name();
+        assert!(
+            name.starts_with("Screenshot_20") && name.ends_with(".png"),
+            "{name}"
+        );
+        assert_eq!(name.len(), "Screenshot_2026-10-13_14-05-09.png".len());
     }
 
     #[test]

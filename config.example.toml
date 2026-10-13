@@ -34,6 +34,10 @@ rotation_fade_ms = 130
 # Draw a marker under each touch/pointer contact, for demo recordings.
 show_touches = false
 
+# Besides the clipboard, save each screenshot to Screenshots/ in your pictures
+# dir (XDG_PICTURES_DIR, else ~/Pictures).
+save_screenshots = true
+
 # Touchpad content follows the fingers. Mouse wheels are unaffected.
 natural_scroll = true
 
