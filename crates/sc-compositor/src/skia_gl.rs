@@ -63,6 +63,14 @@ pub struct CardDecor {
     pub dpi: f32,
 }
 
+/// One switcher card for [`SkiaGl::draw_cards_decor`].
+pub struct CardDecorItem<'a> {
+    pub decor: CardDecor,
+    pub app_id: &'a str,
+    /// `(text, alpha)`, already multiplied by the card alpha.
+    pub title: Option<(&'a str, f32)>,
+}
+
 /// Fractions of card width. The deck fans left, so the shadow is cast left
 /// only and kept tight enough to stay inside the neighbour's exposed strip;
 /// wider reads as dirt.
@@ -135,6 +143,136 @@ struct IconCues {
 }
 
 /// Shared by the badge and title so they can't drift apart.
+/// Drawn after the card so it tints the client's pixels.
+fn draw_card_dim_rrect(canvas: &skia_safe::Canvas, card: &CardDecor) {
+    let a = card.dim * card.alpha;
+    if a <= 0.0 {
+        return;
+    }
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(Color::from_argb(
+        (a * 255.0).round().clamp(0.0, 255.0) as u8,
+        0,
+        0,
+        0,
+    ));
+    canvas.draw_rrect(card.rrect(), &paint);
+}
+
+/// Floats above the card's top-left, after the scrim so it stays legible.
+fn draw_card_icon_image(canvas: &skia_safe::Canvas, card: &CardDecor, image: &Image, alpha: f32) {
+    let dst = card_icon_rect(card);
+    let side = dst.width();
+    let mut shadow = Paint::default();
+    shadow.set_anti_alias(true);
+    shadow.set_color(Color::from_argb(
+        (CARD_ICON_SHADOW_ALPHA * alpha * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8,
+        0,
+        0,
+        0,
+    ));
+    shadow.set_mask_filter(MaskFilter::blur(
+        BlurStyle::Normal,
+        (side * CARD_ICON_SHADOW_SIGMA_FRAC).max(1.0),
+        false,
+    ));
+    let lift = side * CARD_ICON_SHADOW_OFFSET_FRAC;
+    canvas.draw_rrect(
+        RRect::new_rect_xy(dst.with_offset((lift, lift)), side * 0.22, side * 0.22),
+        &shadow,
+    );
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_alpha_f(alpha);
+    canvas.draw_image_rect(image, None, dst, &paint);
+}
+
+/// Not ellipsized: an overrunning title fades out at the card's right edge.
+fn draw_card_title_text(
+    canvas: &skia_safe::Canvas,
+    card: &CardDecor,
+    title: &str,
+    alpha: f32,
+    base_font: &Font,
+) {
+    let alpha = alpha.clamp(0.0, 1.0);
+    if alpha <= 0.0 || title.is_empty() {
+        return;
+    }
+    let icon = card_icon_rect(card);
+    let x0 = icon.right() + icon.width() * CARD_TITLE_GAP_FRAC;
+    let right = card.x + card.w - card.w * CARD_ICON_INSET_FRAC;
+    let avail = right - x0;
+    if avail <= 0.0 {
+        return;
+    }
+    let Some(font) = base_font.with_size(icon.width() * CARD_TITLE_SIZE_FRAC) else {
+        return;
+    };
+    let Some(blob) = TextBlob::new(title, &font) else {
+        return;
+    };
+    let text_w = font.measure_str(title, None).0;
+    // Metrics are negative above the baseline.
+    let (_, metrics) = font.metrics();
+    let baseline = icon.center_y() - (metrics.ascent + metrics.descent) / 2.0;
+
+    // A DstIn fade needs its own layer or it eats the card.
+    let bounds = Rect::new(x0, icon.top(), right, icon.bottom());
+    canvas.save_layer_alpha_f(bounds, 1.0);
+    canvas.clip_rect(bounds, None, true);
+
+    let mut shadow = Paint::default();
+    shadow.set_anti_alias(true);
+    shadow.set_color(Color::from_argb(
+        (CARD_ICON_SHADOW_ALPHA * alpha * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8,
+        0,
+        0,
+        0,
+    ));
+    shadow.set_mask_filter(MaskFilter::blur(
+        BlurStyle::Normal,
+        (font.size() * 0.12).max(1.0),
+        false,
+    ));
+    canvas.draw_text_blob(&blob, (x0, baseline + font.size() * 0.06), &shadow);
+
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(Color::WHITE);
+    paint.set_alpha_f(alpha);
+    canvas.draw_text_blob(&blob, (x0, baseline), &paint);
+
+    if text_w > avail {
+        let fade = (avail * CARD_TITLE_FADE_FRAC).min(icon.width());
+        let mut mask = Paint::default();
+        mask.set_blend_mode(skia_safe::BlendMode::DstIn);
+        let stops = [
+            skia_safe::Color4f::new(1.0, 1.0, 1.0, 1.0),
+            skia_safe::Color4f::new(1.0, 1.0, 1.0, 0.0),
+        ];
+        let colors = skia_safe::gradient::Colors::new_evenly_spaced(&stops, TileMode::Clamp, None);
+        mask.set_shader(skia_safe::gradient::shaders::linear_gradient(
+            ((right - fade, 0.0), (right, 0.0)),
+            &skia_safe::gradient::Gradient::new(
+                colors,
+                skia_safe::gradient::Interpolation::default(),
+            ),
+            None,
+        ));
+        canvas.draw_rect(
+            Rect::new(right - fade, bounds.top(), right, bounds.bottom()),
+            &mask,
+        );
+    }
+    canvas.restore();
+}
+
 fn card_icon_rect(card: &CardDecor) -> Rect {
     let side = (card.w * CARD_ICON_FRAC)
         .min(CARD_ICON_MAX_LOGICAL * card.dpi)
@@ -244,6 +382,14 @@ impl SkiaGl {
         }
     }
 
+    /// One GPU submit per frame; the draws only `flush` so smithay's passes
+    /// share the driver batch instead of each forcing a kernel submit.
+    pub fn end_frame(&mut self) {
+        if let Some(ctx) = self.context.as_mut() {
+            ctx.submit(skia_safe::gpu::SubmitInfo::default());
+        }
+    }
+
     fn current_fbo(&self) -> u32 {
         let Some(get) = self.gl_get_integerv else {
             return 0;
@@ -293,7 +439,7 @@ impl SkiaGl {
         canvas.restore();
 
         if let Some(ctx) = self.context.as_mut() {
-            ctx.flush_and_submit();
+            ctx.flush(None);
         }
     }
 
@@ -381,7 +527,7 @@ impl SkiaGl {
         canvas.restore_to_count(base);
 
         if let Some(ctx) = self.context.as_mut() {
-            ctx.flush_and_submit();
+            ctx.flush(None);
         }
     }
 
@@ -519,7 +665,7 @@ impl SkiaGl {
         canvas.restore();
 
         if let Some(ctx) = self.context.as_mut() {
-            ctx.flush_and_submit();
+            ctx.flush(None);
         }
     }
 
@@ -601,7 +747,7 @@ impl SkiaGl {
         canvas.restore();
 
         if let Some(ctx) = self.context.as_mut() {
-            ctx.flush_and_submit();
+            ctx.flush(None);
         }
     }
 
@@ -716,197 +862,66 @@ impl SkiaGl {
         canvas.restore();
 
         if let Some(ctx) = self.context.as_mut() {
-            ctx.flush_and_submit();
+            ctx.flush(None);
         }
     }
 
-    /// Call right before the card's own draw: the deck overlaps, so one shadow
-    /// pre-pass would be hidden by the cards in front.
-    pub fn draw_card_shadow(&mut self, width: i32, height: i32, card: &CardDecor, flip_y: bool) {
-        if card.alpha <= 0.0 || card.w <= 0.0 || card.h <= 0.0 {
-            return;
-        }
-        self.with_overlay_canvas(width, height, flip_y, |canvas| {
-            draw_card_shadow_rrect(canvas, card)
-        });
-    }
-
-    /// Drawn right after the card so it tints the client's pixels.
-    pub fn draw_card_dim(&mut self, width: i32, height: i32, card: &CardDecor, flip_y: bool) {
-        let a = card.dim * card.alpha;
-        if a <= 0.0 || card.w <= 0.0 || card.h <= 0.0 {
-            return;
-        }
-        self.with_overlay_canvas(width, height, flip_y, |canvas| {
-            let mut paint = Paint::default();
-            paint.set_anti_alias(true);
-            paint.set_color(Color::from_argb(
-                (a * 255.0).round().clamp(0.0, 255.0) as u8,
-                0,
-                0,
-                0,
-            ));
-            canvas.draw_rrect(card.rrect(), &paint);
-        });
-    }
-
-    /// Floats above the card's top-left. Drawn after the scrim so it stays
-    /// legible; opacity is the card's times `card.chrome`.
-    pub fn draw_card_icon(
+    /// All cards' decor in one pass, back-to-front, after the cards were
+    /// drawn. Each card's pieces are clipped out of every card in front, which
+    /// is what the old draw order (shadow, card, scrim, badge per card) gave.
+    pub fn draw_cards_decor(
         &mut self,
         width: i32,
         height: i32,
-        card: &CardDecor,
-        app_id: &str,
+        cards: &[CardDecorItem<'_>],
         icon_cache: &HashMap<String, IconPixels>,
         flip_y: bool,
     ) {
-        let alpha = (card.alpha * card.chrome).clamp(0.0, 1.0);
-        if alpha <= 0.0 || card.w <= 0.0 || card.h <= 0.0 {
+        if cards.is_empty() {
             return;
         }
-        // The deck may be drawn in frames where Home wasn't.
-        let image = match icon_cache.get(app_id) {
-            Some(pixels) => self.get_or_upload_icon(app_id, pixels),
-            None => self.icon_images.get(app_id).cloned(),
-        };
-        let Some(image) = image else {
-            return;
-        };
-        let dst = card_icon_rect(card);
-        let side = dst.width();
-        self.with_overlay_canvas(width, height, flip_y, |canvas| {
-            let mut shadow = Paint::default();
-            shadow.set_anti_alias(true);
-            shadow.set_color(Color::from_argb(
-                (CARD_ICON_SHADOW_ALPHA * alpha * 255.0)
-                    .round()
-                    .clamp(0.0, 255.0) as u8,
-                0,
-                0,
-                0,
-            ));
-            shadow.set_mask_filter(MaskFilter::blur(
-                BlurStyle::Normal,
-                (side * CARD_ICON_SHADOW_SIGMA_FRAC).max(1.0),
-                false,
-            ));
-            let lift = side * CARD_ICON_SHADOW_OFFSET_FRAC;
-            canvas.draw_rrect(
-                RRect::new_rect_xy(dst.with_offset((lift, lift)), side * 0.22, side * 0.22),
-                &shadow,
-            );
-
-            let mut paint = Paint::default();
-            paint.set_anti_alias(true);
-            paint.set_alpha_f(alpha);
-            canvas.draw_image_rect(&image, None, dst, &paint);
-        });
-    }
-
-    /// Not ellipsized: an overrunning title fades out at the card's right edge.
-    /// Manual surface acquisition, as in `draw_icon_menu`.
-    pub fn draw_card_title(
-        &mut self,
-        width: i32,
-        height: i32,
-        card: &CardDecor,
-        title: &str,
-        alpha: f32,
-        flip_y: bool,
-    ) {
-        let alpha = alpha.clamp(0.0, 1.0);
-        if alpha <= 0.0 || title.is_empty() || card.w <= 0.0 {
-            return;
-        }
-        let icon = card_icon_rect(card);
-        let x0 = icon.right() + icon.width() * CARD_TITLE_GAP_FRAC;
-        let right = card.x + card.w - card.w * CARD_ICON_INSET_FRAC;
-        let avail = right - x0;
-        if avail <= 0.0 {
-            return;
-        }
-
         self.ensure_font();
+        for c in cards {
+            // The deck may be drawn in frames where Home wasn't.
+            if let Some(pixels) = icon_cache.get(c.app_id) {
+                self.get_or_upload_icon(c.app_id, pixels);
+            }
+        }
         if !self.ensure_surface(width, height) {
             return;
         }
-        let Some(font) = self
-            .font
-            .as_ref()
-            .and_then(|f| f.with_size(icon.width() * CARD_TITLE_SIZE_FRAC))
-        else {
-            return;
-        };
-        let Some(blob) = TextBlob::new(title, &font) else {
-            return;
-        };
-        let text_w = font.measure_str(title, None).0;
-        // Metrics are negative above the baseline.
-        let (_, metrics) = font.metrics();
-        let baseline = icon.center_y() - (metrics.ascent + metrics.descent) / 2.0;
-
         let view = self.view;
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
         let canvas = surface.canvas();
         canvas.save();
         orient(canvas, view, width, height, flip_y);
-        // A DstIn fade needs its own layer or it eats the card.
-        let bounds = Rect::new(x0, icon.top(), right, icon.bottom());
-        canvas.save_layer_alpha_f(bounds, 1.0);
-        canvas.clip_rect(bounds, None, true);
-
-        let mut shadow = Paint::default();
-        shadow.set_anti_alias(true);
-        shadow.set_color(Color::from_argb(
-            (CARD_ICON_SHADOW_ALPHA * alpha * 255.0)
-                .round()
-                .clamp(0.0, 255.0) as u8,
-            0,
-            0,
-            0,
-        ));
-        shadow.set_mask_filter(MaskFilter::blur(
-            BlurStyle::Normal,
-            (font.size() * 0.12).max(1.0),
-            false,
-        ));
-        canvas.draw_text_blob(&blob, (x0, baseline + font.size() * 0.06), &shadow);
-
-        let mut paint = Paint::default();
-        paint.set_anti_alias(true);
-        paint.set_color(Color::WHITE);
-        paint.set_alpha_f(alpha);
-        canvas.draw_text_blob(&blob, (x0, baseline), &paint);
-
-        if text_w > avail {
-            let fade = (avail * CARD_TITLE_FADE_FRAC).min(icon.width());
-            let mut mask = Paint::default();
-            mask.set_blend_mode(skia_safe::BlendMode::DstIn);
-            let stops = [
-                skia_safe::Color4f::new(1.0, 1.0, 1.0, 1.0),
-                skia_safe::Color4f::new(1.0, 1.0, 1.0, 0.0),
-            ];
-            let colors =
-                skia_safe::gradient::Colors::new_evenly_spaced(&stops, TileMode::Clamp, None);
-            mask.set_shader(skia_safe::gradient::shaders::linear_gradient(
-                ((right - fade, 0.0), (right, 0.0)),
-                &skia_safe::gradient::Gradient::new(
-                    colors,
-                    skia_safe::gradient::Interpolation::default(),
-                ),
-                None,
-            ));
-            canvas.draw_rect(
-                Rect::new(right - fade, bounds.top(), right, bounds.bottom()),
-                &mask,
-            );
+        for (k, c) in cards.iter().enumerate() {
+            let card = &c.decor;
+            if card.w <= 0.0 || card.h <= 0.0 {
+                continue;
+            }
+            canvas.save();
+            for front in &cards[k + 1..] {
+                canvas.clip_rrect(front.decor.rrect(), Some(ClipOp::Difference), Some(true));
+            }
+            if card.alpha > 0.0 {
+                draw_card_shadow_rrect(canvas, card);
+            }
+            draw_card_dim_rrect(canvas, card);
+            let chrome = (card.alpha * card.chrome).clamp(0.0, 1.0);
+            if chrome > 0.0 {
+                if let Some(image) = self.icon_images.get(c.app_id) {
+                    draw_card_icon_image(canvas, card, image, chrome);
+                }
+            }
+            if let (Some((title, alpha)), Some(font)) = (c.title, &self.font) {
+                draw_card_title_text(canvas, card, title, alpha, font);
+            }
+            canvas.restore();
         }
         canvas.restore();
-        canvas.restore();
-
         if let Some(ctx) = self.context.as_mut() {
-            ctx.flush_and_submit();
+            ctx.flush(None);
         }
     }
 
