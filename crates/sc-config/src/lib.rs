@@ -96,6 +96,8 @@ pub struct Config {
     pub card_radius: f32,
     /// For demo recordings.
     pub show_touches: bool,
+    /// Also write each screenshot to `$XDG_PICTURES_DIR/Screenshots/`.
+    pub save_screenshots: bool,
     /// Touchpads only, applied as they are added.
     pub natural_scroll: bool,
     /// Tell top-level windows to drop client-side titlebars. Dialogs keep CSD
@@ -163,6 +165,8 @@ pub const DEFAULT_IDLE_BLANK_SECS: u64 = 600;
 pub const DEFAULT_CARD_RADIUS: f32 = 120.0;
 
 pub const DEFAULT_SHOW_TOUCHES: bool = false;
+
+pub const DEFAULT_SAVE_SCREENSHOTS: bool = true;
 
 pub const DEFAULT_NATURAL_SCROLL: bool = true;
 
@@ -401,6 +405,7 @@ struct RawMain {
     idle_blank_secs: Option<u64>,
     card_radius: Option<f32>,
     show_touches: Option<bool>,
+    save_screenshots: Option<bool>,
     natural_scroll: Option<bool>,
     prefer_no_csd: Option<bool>,
     uclamp_min: Option<toml::Value>,
@@ -441,6 +446,7 @@ impl Config {
                     idle_blank_secs: DEFAULT_IDLE_BLANK_SECS,
                     card_radius: DEFAULT_CARD_RADIUS,
                     show_touches: DEFAULT_SHOW_TOUCHES,
+                    save_screenshots: DEFAULT_SAVE_SCREENSHOTS,
                     natural_scroll: DEFAULT_NATURAL_SCROLL,
                     prefer_no_csd: DEFAULT_PREFER_NO_CSD,
                     uclamp_min: DEFAULT_UCLAMP_MIN,
@@ -458,6 +464,7 @@ impl Config {
         let idle_blank_secs = main.idle_blank_secs.unwrap_or(DEFAULT_IDLE_BLANK_SECS);
         let card_radius = main.card_radius.unwrap_or(DEFAULT_CARD_RADIUS).max(0.0);
         let show_touches = main.show_touches.unwrap_or(DEFAULT_SHOW_TOUCHES);
+        let save_screenshots = main.save_screenshots.unwrap_or(DEFAULT_SAVE_SCREENSHOTS);
         let natural_scroll = main.natural_scroll.unwrap_or(DEFAULT_NATURAL_SCROLL);
         let prefer_no_csd = main.prefer_no_csd.unwrap_or(DEFAULT_PREFER_NO_CSD);
         let uclamp_min = parse_uclamp_min(main.uclamp_min.as_ref());
@@ -477,6 +484,7 @@ impl Config {
             idle_blank_secs,
             card_radius,
             show_touches,
+            save_screenshots,
             natural_scroll,
             prefer_no_csd,
             uclamp_min,
@@ -568,13 +576,16 @@ fn env_override(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     env("SPRINGCHICK_CONFIG").map(PathBuf::from)
 }
 
+fn config_home(env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    env("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".config")))
+}
+
 /// `$XDG_CONFIG_HOME/springchick/config.toml` (or `~/.config/...`), then
 /// `/etc/springchick/config.toml`.
 fn candidate_paths(env: impl Fn(&str) -> Option<String>) -> Vec<PathBuf> {
-    let xdg = env("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .map(|base| base.join("springchick/config.toml"));
+    let xdg = config_home(&env).map(|base| base.join("springchick/config.toml"));
 
     let mut paths = Vec::new();
     if let Some(path) = xdg {
@@ -582,6 +593,42 @@ fn candidate_paths(env: impl Fn(&str) -> Option<String>) -> Vec<PathBuf> {
     }
     paths.push(PathBuf::from("/etc/springchick/config.toml"));
     paths
+}
+
+/// `$XDG_PICTURES_DIR`, then xdg-user-dirs' `user-dirs.dirs`, then `~/Pictures`.
+fn pictures_dir(
+    env: impl Fn(&str) -> Option<String>,
+    read: impl Fn(&Path) -> Option<String>,
+) -> Option<PathBuf> {
+    if let Some(dir) = env("XDG_PICTURES_DIR") {
+        return Some(dir.into());
+    }
+    let home = env("HOME")?;
+    let from_user_dirs = config_home(&env)
+        .and_then(|c| read(&c.join("user-dirs.dirs")))
+        .and_then(|dirs| {
+            let v = dirs
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("XDG_PICTURES_DIR="))?
+                .trim()
+                .trim_matches('"')
+                .to_string();
+            let v = match v.strip_prefix("$HOME") {
+                Some(rest) => format!("{home}{rest}"),
+                None => v,
+            };
+            v.starts_with('/').then(|| PathBuf::from(v))
+        });
+    Some(from_user_dirs.unwrap_or_else(|| Path::new(&home).join("Pictures")))
+}
+
+/// Where `save_screenshots` writes. `None` without `$HOME`.
+pub fn screenshot_dir() -> Option<PathBuf> {
+    pictures_dir(
+        |k| std::env::var(k).ok(),
+        |p| std::fs::read_to_string(p).ok(),
+    )
+    .map(|p| p.join("Screenshots"))
 }
 
 /// A missing file is silent; other read errors warn.
@@ -1003,6 +1050,33 @@ mod tests {
             candidate_paths(env),
             vec![PathBuf::from("/etc/springchick/config.toml")],
         );
+    }
+
+    #[test]
+    fn pictures_dir_prefers_env_then_user_dirs_then_home() {
+        let home = |k: &str| (k == "HOME").then(|| "/home/u".to_string());
+        let none = |_: &Path| None;
+        assert_eq!(
+            pictures_dir(home, none),
+            Some(PathBuf::from("/home/u/Pictures"))
+        );
+        let user_dirs = |p: &Path| {
+            assert_eq!(p, Path::new("/home/u/.config/user-dirs.dirs"));
+            Some("# c\nXDG_DESKTOP_DIR=\"$HOME/D\"\nXDG_PICTURES_DIR=\"$HOME/Bilder\"\n".into())
+        };
+        assert_eq!(
+            pictures_dir(home, user_dirs),
+            Some(PathBuf::from("/home/u/Bilder"))
+        );
+        let env = |k: &str| match k {
+            "XDG_PICTURES_DIR" => Some("/srv/pics".to_string()),
+            _ => home(k),
+        };
+        assert_eq!(
+            pictures_dir(env, user_dirs),
+            Some(PathBuf::from("/srv/pics"))
+        );
+        assert_eq!(pictures_dir(|_| None, none), None);
     }
 
     #[test]

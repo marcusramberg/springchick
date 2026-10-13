@@ -275,6 +275,7 @@ pub(crate) struct State {
     /// Occlusion fade: 0 when a Top/Overlay surface covers the pill.
     pub bar_alpha: f32,
     pub show_touches: bool,
+    pub save_screenshots: bool,
     pub touch_viz: touch_viz::TouchViz,
 
     pub ui: UiState,
@@ -419,6 +420,7 @@ impl State {
         let idle_blank_secs = config.idle_blank_secs;
         let card_radius = config.card_radius;
         let show_touches = config.show_touches;
+        let save_screenshots = config.save_screenshots;
         let prefer_no_csd = config.prefer_no_csd;
         let natural_scroll = config.natural_scroll;
         let uclamp_min = config.uclamp_min;
@@ -591,6 +593,7 @@ impl State {
             popup_grabs: std::collections::HashSet::new(),
             bar_alpha: 1.0,
             show_touches,
+            save_screenshots,
             touch_viz: touch_viz::TouchViz::new(),
             ui,
             model,
@@ -727,6 +730,7 @@ impl State {
         self.prefer_no_csd = config.prefer_no_csd;
         self.natural_scroll = config.natural_scroll;
         self.show_touches = config.show_touches;
+        self.save_screenshots = config.save_screenshots;
         self.idle = blank::Idle::new(config.idle_blank_secs, std::time::Instant::now());
         self.orientation_settle.set_hold(config.rotation_settle_ms);
         // A fade in flight keeps its duration.
