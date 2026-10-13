@@ -647,7 +647,10 @@ pub fn on_release(state: &mut State) {
         return;
     };
     state.pointer_down = false;
-    state.last_motion = None;
+    let still_for = state
+        .last_motion
+        .take()
+        .map_or(0.0, |t| t.elapsed().as_secs_f32());
     state.search_arm = None;
 
     state.bg_press = None;
@@ -675,7 +678,7 @@ pub fn on_release(state: &mut State) {
     if release_switcher(state, x, y) == Stage::Done {
         return;
     }
-    release_grab(state);
+    release_grab(state, still_for);
 
     let pages = state.home_page_count();
     if let UiState::Home { page_count, .. } = &mut state.ui {
@@ -955,7 +958,12 @@ fn open_tapped_card(state: &mut State, x: f32, y: f32) -> Stage {
     Stage::Done
 }
 
-fn release_grab(state: &mut State) {
+/// `still_for`: seconds since the last motion, so a drag-and-hold doesn't
+/// release as a flick.
+fn release_grab(state: &mut State, still_for: f32) {
+    if let UiState::Grabbing { tracker, .. } = &mut state.ui {
+        tracker.decay(still_for);
+    }
     let UiState::Grabbing {
         tracker,
         toplevel,

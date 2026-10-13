@@ -643,10 +643,6 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                         }
                     }
                 }
-                UiState::Grabbing { tracker, .. } => {
-                    // A still hold must not read as a flick.
-                    tracker.decay(dt);
-                }
                 UiState::QuickSwitch {
                     current,
                     current_app,
@@ -872,6 +868,40 @@ mod tests {
             }
         }
         assert!(matches!(state, UiState::App { toplevel: 1, .. }));
+    }
+
+    /// Lift the card, then flick from below HOME_MIN: frames ticking between
+    /// motion events must not eat the flick's velocity.
+    #[test]
+    fn grab_lift_then_flick_goes_home() {
+        let mut state = UiState::App {
+            toplevel: 1,
+            app_id: "x".into(),
+        };
+        transition(
+            &mut state,
+            UiEvent::GrabStart {
+                point: Pt { x: 0.5, y: 0.95 },
+            },
+        );
+        let dt = 1.0 / 60.0;
+        let mut y = 0.95;
+        for step in [0.002; 25].into_iter().chain([0.0; 30]).chain([0.018; 8]) {
+            y -= step;
+            transition(
+                &mut state,
+                UiEvent::GrabMove {
+                    point: Pt { x: 0.5, y },
+                    dt,
+                },
+            );
+            transition(&mut state, UiEvent::Tick { dt });
+        }
+        transition(&mut state, UiEvent::GrabRelease);
+        match &state {
+            UiState::Settling { target, .. } => assert_eq!(*target, NavTarget::Home),
+            other => panic!("expected Settling, got {other:?}"),
+        }
     }
 
     #[test]
