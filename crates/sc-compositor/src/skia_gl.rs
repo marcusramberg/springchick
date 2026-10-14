@@ -1122,6 +1122,17 @@ fn draw_volume_osd(
     let y = height * 0.10;
     let radius = track_w / 2.0;
 
+    // Without it the white fill vanishes over a light app.
+    let pad = track_w * 0.35;
+    let mut backing = Paint::default();
+    backing.set_anti_alias(true);
+    backing.set_color(Color::from_argb(a(170.0), 20, 20, 24));
+    let backing_rect = Rect::new(x - pad, y - pad, x + track_w + pad, y + track_h + pad);
+    canvas.draw_rrect(
+        RRect::new_rect_xy(backing_rect, radius + pad, radius + pad),
+        &backing,
+    );
+
     let mut track = Paint::default();
     track.set_anti_alias(true);
     track.set_color(Color::from_argb(a(90.0), 40, 40, 40));
