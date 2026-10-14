@@ -64,28 +64,26 @@ fn reflow_targets(
     reflow_targets_for(&model.pages, width, height)
 }
 
-/// Flattened grid minus `dragged`, with a HOLE at `hover`, re-chunked.
+/// The pages minus `dragged`, with a HOLE at `hover`: what the drop would give.
 fn working_order(
     pages: &[Vec<String>],
     dragged: &str,
     hover: Option<(usize, usize)>,
 ) -> Vec<Vec<String>> {
-    let mut flat: Vec<String> = pages
-        .iter()
-        .flatten()
-        .filter(|a| *a != dragged)
-        .cloned()
-        .collect();
-    if let Some((page, index)) = hover {
-        let gi = (page
-            .saturating_mul(sc_shell_model::PAGE_CAP)
-            .saturating_add(index))
-        .min(flat.len());
-        flat.insert(gi, HOLE.to_string());
+    let mut m = ShellModel {
+        pages: pages.to_vec(),
+        ..Default::default()
+    };
+    match hover {
+        Some((page, index)) => m.move_to(dragged, page, index),
+        None => m.delete(dragged),
     }
-    flat.chunks(sc_shell_model::PAGE_CAP)
-        .map(|c| c.to_vec())
-        .collect()
+    for p in &mut m.pages {
+        for a in p.iter_mut().filter(|a| *a == dragged) {
+            *a = HOLE.to_string();
+        }
+    }
+    m.pages
 }
 
 fn reflow_targets_for(
@@ -95,7 +93,7 @@ fn reflow_targets_for(
 ) -> std::collections::HashMap<String, (f32, f32)> {
     let mut out = std::collections::HashMap::new();
     for (page, apps) in pages.iter().enumerate() {
-        for (index, app) in apps.iter().enumerate() {
+        for (index, app) in apps.iter().enumerate().filter(|(_, a)| !a.is_empty()) {
             out.insert(
                 app.clone(),
                 sc_layout::global_slot_pos(page, index, width, height),
@@ -107,8 +105,11 @@ fn reflow_targets_for(
 
 impl State {
     /// Persist and reflow after a manual grid/dock edit.
+    /// Pages stay sparse (even empty) until arrange exits.
     pub(crate) fn after_arrange_edit(&mut self) {
-        self.model.repack();
+        if self.arrange.is_none() {
+            self.model.repack();
+        }
         if let Err(e) =
             sc_shell_model::persist::save(&self.model, &sc_shell_model::persist::state_path())
         {
@@ -133,7 +134,33 @@ impl State {
         self.reflow_dock();
     }
 
-    /// `hover` is unused so far: compacting already opens the gap.
+    pub(crate) fn exit_arrange(&mut self) {
+        self.arrange = None;
+        self.after_arrange_edit();
+    }
+
+    pub(crate) fn add_home_page(&mut self) {
+        let page = self.model.add_page();
+        self.show_page(page);
+        self.reflow_grid();
+    }
+
+    /// Also refreshes the page count, which arrange edits change.
+    fn show_page(&mut self, new_page: usize) {
+        let page_count = self.home_page_count();
+        if let UiState::Home {
+            page,
+            page_spring,
+            page_count: pc,
+            ..
+        } = &mut self.ui
+        {
+            *page = new_page;
+            *pc = page_count;
+            page_spring.retarget(new_page as f32);
+        }
+    }
+
     fn working_pages(&self, dragged: &str, hover: Option<(usize, usize)>) -> Vec<Vec<String>> {
         working_order(&self.model.pages, dragged, hover)
     }
@@ -167,11 +194,10 @@ impl State {
             .and_then(|a| a.drag.as_ref())
             .filter(|d| d.source == input_dispatch::IconSource::Dock)
             .map(|d| d.app_id.clone());
-        // The dock uses fixed per-index cells, so the app must leave the layout,
-        // not just `targets`, for the rest to re-center.
+        // The app must leave the layout, not just `targets`.
         let layout = if let Some(app) = &dragged {
             let mut m = self.model.clone();
-            m.dock.retain(|a| a != app);
+            m.delete(app);
             sc_layout::compute(w, h, 0, &m)
         } else {
             sc_layout::compute(w, h, 0, &self.model)
@@ -408,25 +434,11 @@ impl State {
             } else if cur_page + 1 < self.model.pages.len() {
                 cur_page + 1
             } else if cur_page < self.library_page() {
-                if !self.model.pages.last().is_some_and(|p| p.is_empty()) {
-                    self.model.pages.push(Vec::new());
-                }
-                cur_page + 1
+                self.model.add_page()
             } else {
                 cur_page
             };
-            let page_count = self.home_page_count();
-            if let UiState::Home {
-                page,
-                page_spring,
-                page_count: pc,
-                ..
-            } = &mut self.ui
-            {
-                *page = new_page;
-                *pc = page_count;
-                page_spring.retarget(new_page as f32);
-            }
+            self.show_page(new_page);
         }
     }
 }
@@ -460,9 +472,19 @@ mod tests {
     }
 
     #[test]
-    fn working_order_no_hole_when_hover_none() {
+    fn working_order_keeps_pages_sparse() {
+        let pages = vec![vec!["a".to_string(), "b".into()], vec!["c".into()]];
+        let out = working_order(&pages, "c", Some((0, 1)));
+        assert_eq!(
+            out,
+            vec![vec!["a".to_string(), HOLE.into(), "b".into()], vec![]]
+        );
+    }
+
+    #[test]
+    fn working_order_leaves_the_lifted_cell_empty() {
         let pages = vec![vec!["a".to_string(), "b".into(), "c".into()]];
         let out = working_order(&pages, "a", None);
-        assert_eq!(out[0], vec!["b".to_string(), "c".into()]);
+        assert_eq!(out[0], vec!["".to_string(), "b".into(), "c".into()]);
     }
 }

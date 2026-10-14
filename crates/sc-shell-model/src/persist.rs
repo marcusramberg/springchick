@@ -92,7 +92,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.toml");
         let mut m = ShellModel::default();
-        m.pin("org.gnome.Console");
+        m.pin("org.gnome.Console", 0);
         save(&m, &path).unwrap();
         let back = load(&path).unwrap();
         assert_eq!(m.dock, back.dock);

@@ -73,15 +73,9 @@ pub struct Layout {
     pub page_count: usize,
     /// Full-width strip behind the dock icons.
     pub dock_zone: Rect,
+    /// Arrange-mode buttons, in the top band where the status bar is hidden.
+    pub add_button: Rect,
     pub done_button: Rect,
-}
-
-impl Layout {
-    /// Move "Done" below a top exclusive zone (physical px). Apply identically to
-    /// render and hit-test.
-    pub fn shift_done_below(&mut self, top_inset: f32) {
-        self.done_button.y += top_inset.max(0.0);
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -90,6 +84,7 @@ pub enum Hit {
     DockIcon { app_id: String, index: usize },
     Bar,
     RemoveBadge { app_id: String },
+    AddButton,
     DoneButton,
     Miss,
 }
@@ -105,6 +100,8 @@ const DOCK_HEIGHT: f32 = 0.10;
 const DOTS_HEIGHT: f32 = 0.02;
 /// Each side.
 const H_MARGIN: f32 = 0.04;
+/// Physical px: 4 logical at the default dpi.
+const BUTTON_INSET: f32 = 12.0;
 /// Of cell width.
 const ICON_SIZE_FRAC: f32 = 0.62;
 /// Of cell height.
@@ -276,7 +273,7 @@ pub fn global_slot_pos(page: usize, index: usize, width: f32, height: f32) -> (f
     (icon.center_x(), icon.center_y())
 }
 
-/// `x` is screen-space. Callers still clamp to the page's fill length.
+/// `x` is screen-space.
 pub fn nearest_grid_index(width: f32, height: f32, x: f32, y: f32) -> usize {
     let gm = grid_metrics(width, height);
     let rows = PAGE_CAP / gm.cols;
@@ -285,6 +282,12 @@ pub fn nearest_grid_index(width: f32, height: f32, x: f32, y: f32) -> usize {
     let row =
         (((y - gm.grid_top) / gm.cell_h).floor() as isize).clamp(0, rows as isize - 1) as usize;
     row * gm.cols + col
+}
+
+pub fn nearest_dock_cell(width: f32, x: f32) -> usize {
+    let left = width * H_MARGIN;
+    let cell_w = width * (1.0 - 2.0 * H_MARGIN) / DOCK_CAP as f32;
+    (((x - left) / cell_w).floor() as isize).clamp(0, DOCK_CAP as isize - 1) as usize
 }
 
 /// Same sizing as the grid, for icons in flight between slots.
@@ -342,6 +345,7 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
         .map(|apps| {
             apps.iter()
                 .enumerate()
+                .filter(|(_, app_id)| !app_id.is_empty())
                 .map(|(i, app_id)| grid_slot(&gm, i, 0.0, app_id.clone()))
                 .collect()
         })
@@ -355,6 +359,7 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
         .dock
         .iter()
         .enumerate()
+        .filter(|(_, app_id)| !app_id.is_empty())
         .map(|(i, app_id)| {
             let cell_x = grid_left + i as f32 * dock_cell_w;
             let icon_x = cell_x + (dock_cell_w - dock_icon_size) / 2.0;
@@ -387,13 +392,18 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
         w: width,
         h: dock_band_h,
     };
-    // Inside the top padding, so it never overlaps grid icons.
-    let done_side = width * 0.12;
+    // Inside the top padding, so they never overlap grid icons; inset off
+    // the panel's rounded corners.
+    let button_w = width * 0.2;
+    let add_button = Rect {
+        x: grid_left + BUTTON_INSET,
+        y: BUTTON_INSET,
+        w: button_w,
+        h: gm.grid_top,
+    };
     let done_button = Rect {
-        x: width * (1.0 - H_MARGIN) - done_side,
-        y: 0.0,
-        w: done_side,
-        h: height * TOP_PAD,
+        x: width - grid_left - BUTTON_INSET - button_w,
+        ..add_button
     };
 
     Layout {
@@ -403,6 +413,7 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
         bar_rect,
         page_count,
         dock_zone,
+        add_button,
         done_button,
     }
 }
@@ -433,8 +444,11 @@ pub fn hit_test(layout: &Layout, x: f32, y: f32) -> Hit {
     Hit::Miss
 }
 
-/// Done and badges overlap icons, so they're checked first.
+/// Badges overlap icons, so they're checked first.
 pub fn hit_test_arrange(layout: &Layout, x: f32, y: f32) -> Hit {
+    if layout.add_button.contains(x, y) {
+        return Hit::AddButton;
+    }
     if layout.done_button.contains(x, y) {
         return Hit::DoneButton;
     }
@@ -754,15 +768,29 @@ mod tests {
     }
 
     #[test]
-    fn done_button_nonempty_outside_grid() {
+    fn arrange_buttons_sit_above_the_grid_on_either_side() {
         let m = sample_model();
         let l = compute(1224.0, 2700.0, 0, &m);
-        assert!(l.done_button.w > 0.0 && l.done_button.h > 0.0);
-        for s in &l.grid {
-            assert!(!l
-                .done_button
-                .contains(s.icon_rect.center_x(), s.icon_rect.center_y()));
+        for b in [l.add_button, l.done_button] {
+            assert!(b.w > 0.0 && b.h > 0.0);
+            assert!(l.grid.iter().all(|s| b.y + b.h <= s.badge_rect.y));
         }
+        assert!(l.add_button.x + l.add_button.w < l.done_button.x);
+        assert_eq!(
+            hit_test_arrange(&l, l.add_button.center_x(), l.add_button.center_y()),
+            Hit::AddButton
+        );
+    }
+
+    #[test]
+    fn empty_dock_cells_keep_their_place() {
+        let mut m = sample_model();
+        m.dock = vec!["".into(), "b".into()];
+        let l = compute(1224.0, 2700.0, 0, &m);
+        assert_eq!(l.dock.len(), 1);
+        assert_eq!(nearest_dock_cell(1224.0, l.dock[0].icon_rect.center_x()), 1);
+        assert_eq!(nearest_dock_cell(1224.0, -50.0), 0);
+        assert_eq!(nearest_dock_cell(1224.0, 9e9), DOCK_CAP - 1);
     }
 
     #[test]

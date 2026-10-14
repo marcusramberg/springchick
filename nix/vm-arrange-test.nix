@@ -136,14 +136,32 @@ mkTest {
     )
     machine.screenshot("03-after-pin")
 
-    # bbb is in slot 0 after the reorder.
+    # bbb is in slot 0 after the reorder; dock cell 0 stays empty.
     pinned = machine.succeed(
         f"python3 -c \"import tomllib;"
-        f"print(' '.join(tomllib.load(open('{STATE}','rb')).get('dock',[])))\""
-    ).strip().split()
-    assert pinned == ["bbb"], f"expected bbb pinned to the dock, dock={pinned}"
+        f"print(','.join(tomllib.load(open('{STATE}','rb')).get('dock',[])))\""
+    ).strip().split(",")
+    assert pinned == ["", "bbb"], f"expected bbb in dock cell 1, dock={pinned}"
     # Pinned apps leave the grid.
     assert "bbb" not in order(), f"bbb is pinned but still on the grid: {order()[:6]}"
+
+    # A remove badge (ccc, cell 1 after the pin) deletes but stays arranging.
+    dbg(f"tap {int(col(1) - ICON / 2)} {int(ROW0 - ICON / 2)}")
+    machine.sleep(1)
+    home = dbg("home")
+    assert "ccc" not in order() and "arrange=true" in home, f"badge tap: {home}"
+
+    # "+" opens a menu under itself; its first row adds an empty page and goes
+    # there, still arranging.
+    INSET = 12
+    dbg(f"tap {int(W * H_MARGIN + INSET + 20)} {int(INSET + H * TOP_PAD / 2)}")
+    menu_row = int(H * TOP_PAD / 2 + INSET + H * 0.035 + H * 0.008 + H * 0.045 / 2)
+    dbg(f"tap {int(W * 0.2)} {menu_row}")
+    machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'action=AddPage'", timeout=15)
+    machine.sleep(1)
+    home = dbg("home")
+    assert "page=1/3" in home and "arrange=true" in home, f"expected the new page 1 of 3, got: {home}"
+    machine.screenshot("04-added-page")
 
     machine.fail(
         "journalctl -b | grep -iE 'panicked at|SIGSEGV|SIGABRT|stack backtrace|segfault'"

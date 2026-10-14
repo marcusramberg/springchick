@@ -52,8 +52,9 @@ fn root_under(state: &State, x: f32, y: f32) -> Option<Target> {
         return Some(hit);
     }
     // Top/Overlay layers (OSK). Not drawn while the view is turned, so not
-    // hit-tested either.
-    if !state.view_rotation().swaps_axes() {
+    // hit-tested either. Arrange hides the status bar for its own buttons.
+    let under_arrange_buttons = state.arrange.is_some() && y < state.layers.usable(state.dpi).y;
+    if !state.view_rotation().swaps_axes() && !under_arrange_buttons {
         if let Some((surface, (ox, oy))) = state.layers.hit_test(x, y, state.dpi) {
             return Some(Target::at(surface, (ox as f64, oy as f64), state.dpi));
         }

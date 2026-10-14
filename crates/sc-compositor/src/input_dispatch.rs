@@ -22,30 +22,27 @@ pub enum IconSource {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DropAction {
-    Pin,
+    Pin { cell: usize },
     Reorder { page: usize, index: usize },
-    SnapBack,
 }
 
 /// A `Pin` may still fail in the model (full dock); the caller snaps back.
-/// `page_len` is the visible page's icon count.
 pub fn resolve_drop(
     pos: (f32, f32),
     layout: &sc_layout::Layout,
-    source: IconSource,
     page: usize,
-    page_len: usize,
     size: (f32, f32),
 ) -> DropAction {
     let (x, y) = pos;
     let (w, h) = size;
-    let over_dock = layout.dock_zone.contains(x, y);
-    match (source, over_dock) {
-        (IconSource::Grid | IconSource::Library, true) => DropAction::Pin,
-        (IconSource::Dock, true) => DropAction::SnapBack, // dock -> dock: no-op
-        (_, false) => {
-            let idx = sc_layout::nearest_grid_index(w, h, x, y).min(page_len);
-            DropAction::Reorder { page, index: idx }
+    if layout.dock_zone.contains(x, y) {
+        DropAction::Pin {
+            cell: sc_layout::nearest_dock_cell(w, x),
+        }
+    } else {
+        DropAction::Reorder {
+            page,
+            index: sc_layout::nearest_grid_index(w, h, x, y),
         }
     }
 }
@@ -103,7 +100,7 @@ fn home_press(x: f32, y: f32, page: usize, model: &ShellModel, w: f32, h: f32) -
             start_y: y,
         },
         Hit::Miss => DownAction::StartPageDrag { start_x: x },
-        Hit::RemoveBadge { .. } | Hit::DoneButton => DownAction::None,
+        Hit::RemoveBadge { .. } | Hit::AddButton | Hit::DoneButton => DownAction::None,
     }
 }
 
@@ -285,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_drop_grid_over_dock_is_pin() {
+    fn resolve_drop_over_dock_pins_to_nearest_cell() {
         let (w, h) = (1224.0, 2700.0);
         let mut m = ShellModel::default();
         for i in 0..3 {
@@ -294,23 +291,14 @@ mod tests {
         let l = sc_layout::compute(w, h, 0, &m);
         let (x, y) = (l.dock_zone.center_x(), l.dock_zone.center_y());
         assert_eq!(
-            resolve_drop((x, y), &l, IconSource::Grid, 0, 0, (w, h)),
-            DropAction::Pin
+            resolve_drop((x, y), &l, 0, (w, h)),
+            DropAction::Pin {
+                cell: sc_layout::nearest_dock_cell(w, x)
+            }
         );
         assert_eq!(
-            resolve_drop((x, y), &l, IconSource::Library, 0, 0, (w, h)),
-            DropAction::Pin
-        );
-    }
-
-    #[test]
-    fn resolve_drop_dock_over_grid_is_reorder() {
-        let (w, h) = (1224.0, 2700.0);
-        let l = sc_layout::compute(w, h, 0, &ShellModel::default());
-        let p = sc_layout::global_slot_pos(0, 1, w, h);
-        assert_eq!(
-            resolve_drop(p, &l, IconSource::Dock, 0, 3, (w, h)),
-            DropAction::Reorder { page: 0, index: 1 },
+            resolve_drop((l.dock_zone.x, y), &l, 0, (w, h)),
+            DropAction::Pin { cell: 0 }
         );
     }
 
@@ -320,19 +308,19 @@ mod tests {
         let l = sc_layout::compute(w, h, 0, &ShellModel::default());
         let p = sc_layout::global_slot_pos(0, 2, w, h);
         assert_eq!(
-            resolve_drop(p, &l, IconSource::Grid, 0, 5, (w, h)),
+            resolve_drop(p, &l, 0, (w, h)),
             DropAction::Reorder { page: 0, index: 2 },
         );
     }
 
     #[test]
-    fn resolve_drop_reorder_clamps_to_page_len() {
+    fn resolve_drop_reorder_lands_past_the_last_icon() {
         let (w, h) = (1224.0, 2700.0);
         let l = sc_layout::compute(w, h, 0, &ShellModel::default());
         let p = sc_layout::global_slot_pos(0, 10, w, h);
         assert_eq!(
-            resolve_drop(p, &l, IconSource::Grid, 0, 3, (w, h)),
-            DropAction::Reorder { page: 0, index: 3 },
+            resolve_drop(p, &l, 0, (w, h)),
+            DropAction::Reorder { page: 0, index: 10 },
         );
     }
 }

@@ -3,6 +3,7 @@
 //! Keys go through `keybinds`.
 
 use crate::arrange::BgPress;
+use crate::icon_menu;
 use crate::input_dispatch::{self, DownAction};
 use crate::switcher;
 use crate::ui_state::{transition, ToplevelId, UiEvent, UiState, ZoomOrigin};
@@ -141,30 +142,20 @@ fn motion_icon_menu(state: &mut State, x: f32, y: f32) -> Stage {
     Stage::Done
 }
 
-/// Hover is computed against the page with the dragged app removed.
 fn motion_arrange_drag(state: &mut State, x: f32, y: f32) -> Stage {
-    let Some(app) = state
+    if state
         .arrange
         .as_ref()
         .and_then(|a| a.drag.as_ref())
-        .map(|d| d.app_id.clone())
-    else {
+        .is_none()
+    {
         return Stage::Fallthrough;
-    };
+    }
     let (w, h) = state.output_size_f();
     let page = state.current_home_page();
     let layout = sc_layout::compute(w, h, page, &state.model);
-    let hover = if layout.dock_zone.contains(x, y) {
-        None
-    } else {
-        let live_len = state
-            .model
-            .pages
-            .get(page)
-            .map_or(0, |p| p.iter().filter(|a| **a != app).count());
-        let idx = sc_layout::nearest_grid_index(w, h, x, y).min(live_len);
-        Some((page, idx))
-    };
+    let hover = (!layout.dock_zone.contains(x, y))
+        .then(|| (page, sc_layout::nearest_grid_index(w, h, x, y)));
     if let Some(drag) = state.arrange.as_mut().and_then(|a| a.drag.as_mut()) {
         drag.cur = (x, y);
         drag.hover = hover;
@@ -507,18 +498,22 @@ fn press_arrange(state: &mut State, x: f32, y: f32) -> Stage {
     }
     let (w, h) = state.output_size_f();
     let page = state.current_home_page();
-    let mut layout = sc_layout::compute(w, h, page, &state.model);
-    // The Done button is drawn shifted below a top bar.
-    layout.shift_done_below(state.layers.usable(state.dpi).y);
-
+    let layout = sc_layout::compute(w, h, page, &state.model);
     match sc_layout::hit_test_arrange(&layout, x, y) {
         sc_layout::Hit::RemoveBadge { app_id } => {
             state.model.delete(&app_id);
             state.after_arrange_edit();
         }
-        sc_layout::Hit::DoneButton | sc_layout::Hit::Bar => {
-            state.arrange = None;
+        sc_layout::Hit::AddButton => {
+            let anchor = (layout.add_button.x, layout.add_button.center_y());
+            state.icon_menu = Some(icon_menu::IconMenu::new(
+                String::new(),
+                anchor,
+                icon_menu::add_items(),
+            ));
+            state.needs_render = true;
         }
+        sc_layout::Hit::DoneButton | sc_layout::Hit::Bar => state.exit_arrange(),
         sc_layout::Hit::Miss => {
             // A swipe pages (in on_release); a still tap exits.
             state.page_drag = Some(FingerDrag::begin(norm(state, x, y)));
@@ -733,17 +728,15 @@ fn release_arrange(state: &mut State, x: f32) -> Stage {
         resolve_arrange_drop(state, drag);
         return Stage::Done;
     }
-    match state.page_drag.take() {
-        Some(drag) => {
-            let w = state.output_size().0 as f32;
-            let dx = x - drag.start().x * w;
-            if home::is_arrange_page_swipe(dx, w) {
-                commit_page_swipe(state, dx, drag.velocity().x);
-            } else {
-                state.arrange = None; // still tap -> exit
-            }
+    // No drag: the press hit a button or badge, which acted already.
+    if let Some(drag) = state.page_drag.take() {
+        let w = state.output_size().0 as f32;
+        let dx = x - drag.start().x * w;
+        if home::is_arrange_page_swipe(dx, w) {
+            commit_page_swipe(state, dx, drag.velocity().x);
+        } else {
+            state.exit_arrange(); // still tap
         }
-        None => state.arrange = None,
     }
     Stage::Done
 }
@@ -751,7 +744,6 @@ fn release_arrange(state: &mut State, x: f32) -> Stage {
 fn resolve_arrange_drop(state: &mut State, drag: DragItem) {
     let (w, h) = state.output_size_f();
     let page = state.current_home_page();
-    let page_len = state.model.pages.get(page).map_or(0, |p| p.len());
     let layout = sc_layout::compute(w, h, page, &state.model);
     // The library page is where unplaced apps live, so dropping there removes
     // it. The dock, drawn over it, still wins.
@@ -764,21 +756,19 @@ fn resolve_arrange_drop(state: &mut State, drag: DragItem) {
             state.model.delete(&drag.app_id);
             state.after_arrange_edit();
         } else {
-            state.model.repack();
             state.reflow_grid();
             state.reflow_dock();
         }
         return;
     }
-    let action =
-        input_dispatch::resolve_drop(drag.cur, &layout, drag.source, page, page_len, (w, h));
+    let action = input_dispatch::resolve_drop(drag.cur, &layout, page, (w, h));
     // The VM test asserts this.
     debug!(
         target: "springchick::debug",
         "arrange drop app_id={} action={:?}", drag.app_id, action
     );
     let edited = match action {
-        input_dispatch::DropAction::Pin => state.model.pin(&drag.app_id),
+        input_dispatch::DropAction::Pin { cell } => state.model.pin(&drag.app_id, cell),
         input_dispatch::DropAction::Reorder { page, index } => {
             // `page`, not `drag.hover.page`: edge-dwell flips don't refresh the hover.
             // `hover.index` is against the hole-removed order.
@@ -786,14 +776,11 @@ fn resolve_arrange_drop(state: &mut State, drag: DragItem) {
             state.model.move_to(&drag.app_id, page, ix);
             true
         }
-        input_dispatch::DropAction::SnapBack => false,
     };
     if edited {
         state.after_arrange_edit();
     } else {
-        // Drop any trailing page an edge-dwell flip added, and re-seed the dock so
-        // a snapped-back dock icon returns.
-        state.model.repack();
+        // Re-seed the dock so a snapped-back dock icon returns.
         state.reflow_grid();
         state.reflow_dock();
     }
