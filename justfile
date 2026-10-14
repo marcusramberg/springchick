@@ -84,6 +84,11 @@ vm-capture:
 vm-portal:
 	nix build .#checks.{{NIX_SYSTEM}}.vm-portal -L
 
+# Regenerate the README screenshots into assets/
+screenshots:
+	nix build .#checks.{{NIX_SYSTEM}}.vm-screenshots -L -o result-screenshots
+	install -m 0644 result-screenshots/*.png assets/
+
 # Run all VM checks
 vm-all:
 	for check in vm-boot vm-switcher vm-dialog vm-rotation vm-arrange vm-lock vm-capture vm-portal; do \

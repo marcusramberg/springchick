@@ -1,6 +1,6 @@
 .superpowers/
 /target
-/result
+/result*
 .envrc
 .direnv
 /dist
