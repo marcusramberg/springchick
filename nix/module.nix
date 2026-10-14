@@ -31,6 +31,8 @@ in
         place and does not touch /etc.
       '';
     };
+
+    waybar.enable = lib.mkEnableOption "waybar with springchick's example config (extras/waybar)";
   };
 
   config = lib.mkIf cfg.enable {
@@ -107,6 +109,24 @@ in
         "graphical-session-pre.target"
       ];
     };
+
+    # WantedBy the compositor, not graphical-session.target, so other
+    # sessions (phosh) don't get it. After= a Type=notify unit waits for
+    # READY, by which point WAYLAND_DISPLAY is in the user manager.
+    systemd.user.services.springchick-waybar = lib.mkIf cfg.waybar.enable {
+      description = "waybar for springchick";
+      wantedBy = [ "springchick.service" ];
+      partOf = [ "graphical-session.target" ];
+      after = [ "springchick.service" ];
+      # on-click commands (foot, springchick ipc) need the login PATH.
+      enableDefaultPath = false;
+      serviceConfig = {
+        ExecStart = "${lib.getExe pkgs.waybar} -c ${../extras/waybar}/springchick.jsonc -s ${../extras/waybar}/springchick.css";
+        Restart = "on-failure";
+      };
+    };
+
+    fonts.packages = lib.mkIf cfg.waybar.enable [ pkgs.nerd-fonts.jetbrains-mono ];
 
     environment.etc."springchick/config.toml" = lib.mkIf (cfg.config != null) {
       text = cfg.config;
