@@ -140,8 +140,6 @@ pub struct HomeView<'a> {
     pub dock_positions: &'a HashMap<String, (f32, f32)>,
     /// Drawn with the grid so it pages with it.
     pub library: Option<&'a LibraryView>,
-    /// The arrange Done button stays below this.
-    pub top_inset: f32,
     /// Home bounce (up) and drag-out (sideways).
     pub lift: f32,
     pub shift: f32,
@@ -722,7 +720,6 @@ fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan)
         grid_positions: ctx.grid_positions,
         dock_positions: ctx.dock_positions,
         library: ctx.library,
-        top_inset: ctx.app_origin.1 as f32,
         lift: scene.home_lift,
         shift: scene.home_shift,
     };

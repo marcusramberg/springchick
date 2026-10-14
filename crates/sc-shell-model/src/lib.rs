@@ -76,12 +76,65 @@ impl FrecencyStore {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ShellModel {
     /// Only what the user placed. Everything else lives in the library, which
-    /// is derived and never stored.
+    /// is derived and never stored. Positional cells like the dock; a page
+    /// with no apps survives only while arranging.
     #[serde(default)]
     pub pages: Vec<Vec<AppId>>,
+    /// Fixed cells; `""` is an empty one. Trailing empties are trimmed.
     pub dock: Vec<AppId>,
     #[serde(default)]
     pub frecency: FrecencyStore,
+}
+
+/// Puts `app` in `cells[cell]`, shifting occupants toward `from` (the cell
+/// it left) or else the nearest empty cell. With none free, the last cell's
+/// app falls off and is returned.
+fn put(
+    cells: &mut Vec<AppId>,
+    cap: usize,
+    app: AppId,
+    cell: usize,
+    from: Option<usize>,
+) -> Option<AppId> {
+    let cell = cell.min(cap - 1);
+    if cells.len() < cap {
+        cells.resize(cap, AppId::new());
+    }
+    let mut spill = None;
+    if !cells[cell].is_empty() {
+        let gap = from
+            .filter(|&f| f < cap && cells[f].is_empty())
+            .or_else(|| {
+                (0..cap)
+                    .filter(|&i| cells[i].is_empty())
+                    .min_by_key(|&i| i.abs_diff(cell))
+            });
+        match gap {
+            Some(gap) if gap > cell => cells[cell..=gap].rotate_right(1),
+            Some(gap) => cells[gap..=cell].rotate_left(1),
+            None => {
+                cells[cell..].rotate_right(1);
+                spill = Some(std::mem::take(&mut cells[cell]));
+            }
+        }
+    }
+    cells[cell] = app;
+    trim(cells);
+    spill
+}
+
+fn trim(cells: &mut Vec<AppId>) {
+    while cells.last().is_some_and(|a| a.is_empty()) {
+        cells.pop();
+    }
+}
+
+/// Returns the cell it held.
+fn vacate(cells: &mut Vec<AppId>, app: &str) -> Option<usize> {
+    let i = cells.iter().position(|a| a == app)?;
+    cells[i].clear();
+    trim(cells);
+    Some(i)
 }
 
 impl ShellModel {
@@ -89,10 +142,14 @@ impl ShellModel {
     /// placed on a page; they reach Home only by drag from the library.
     pub fn reconcile(&mut self, catalog_ids: &[AppId], now: u64, first_run: bool) {
         let installed: HashSet<&AppId> = catalog_ids.iter().collect();
-        self.pages
-            .iter_mut()
-            .for_each(|p| p.retain(|a| installed.contains(a)));
-        self.dock.retain(|a| installed.contains(a));
+        for cells in self.pages.iter_mut().chain([&mut self.dock]) {
+            for cell in cells.iter_mut() {
+                if !installed.contains(cell) {
+                    cell.clear();
+                }
+            }
+            trim(cells);
+        }
         self.frecency.prune(catalog_ids);
         for id in catalog_ids {
             self.frecency.seed(id, now, first_run);
@@ -101,68 +158,94 @@ impl ShellModel {
         self.repack();
     }
 
+    /// The first free cell on any page.
     pub fn place(&mut self, app: AppId) {
-        if let Some(page) = self.pages.iter_mut().find(|p| p.len() < PAGE_CAP) {
-            page.push(app);
-        } else {
-            self.pages.push(vec![app]);
+        for page in &mut self.pages {
+            if let Some(cell) = page.iter_mut().find(|a| a.is_empty()) {
+                *cell = app;
+                return;
+            }
+            if page.len() < PAGE_CAP {
+                page.push(app);
+                return;
+            }
+        }
+        self.pages.push(vec![app]);
+    }
+
+    /// It stays in the library. Leaves an emptied page for [`Self::repack`].
+    pub fn delete(&mut self, app: &str) {
+        for page in &mut self.pages {
+            vacate(page, app);
+        }
+        vacate(&mut self.dock, app);
+    }
+
+    /// Into `cell` of `page`. A full page pushes its last icon onto the next.
+    pub fn move_to(&mut self, app: &str, page: usize, cell: usize) {
+        let from = self
+            .pages
+            .get_mut(page)
+            .and_then(|cells| vacate(cells, app));
+        self.delete(app);
+        let mut item = app.to_string();
+        let (mut page, mut cell, mut from) = (page, cell, from);
+        loop {
+            if self.pages.len() <= page {
+                self.pages.resize(page + 1, Vec::new());
+            }
+            match put(&mut self.pages[page], PAGE_CAP, item, cell, from.take()) {
+                Some(spill) => (item, page, cell) = (spill, page + 1, 0),
+                None => break,
+            }
         }
     }
 
-    /// It stays in the library.
-    pub fn delete(&mut self, app: &str) {
-        self.remove_from_pages(app);
-        self.dock.retain(|a| a != app);
-        self.repack();
+    /// Returns its index. Reuses a trailing empty page rather than stacking them.
+    pub fn add_page(&mut self) -> usize {
+        if !self.pages.last().is_some_and(|p| p.is_empty()) {
+            self.pages.push(Vec::new());
+        }
+        self.pages.len() - 1
     }
 
-    /// `(page, index)` is a global position `page*PAGE_CAP + index` in the
-    /// flattened order. Repacks afterwards.
-    pub fn move_to(&mut self, app: &str, page: usize, index: usize) {
-        let mut flat: Vec<AppId> = self.flat().into_iter().filter(|a| a != app).collect();
-        self.dock.retain(|a| a != app);
-        let gi = page
-            .saturating_mul(PAGE_CAP)
-            .saturating_add(index)
-            .min(flat.len());
-        flat.insert(gi, app.to_string());
-        self.pages = flat.chunks(PAGE_CAP).map(|c| c.to_vec()).collect();
-    }
-
-    /// False if already docked or the dock is full.
-    pub fn pin(&mut self, app: &str) -> bool {
-        if self.dock.iter().any(|a| a == app) || self.dock.len() >= DOCK_CAP {
+    /// Into dock `cell`, shifting occupants toward the nearest gap. False if
+    /// the dock is full of other apps.
+    pub fn pin(&mut self, app: &str, cell: usize) -> bool {
+        let from = vacate(&mut self.dock, app);
+        if self.dock.iter().filter(|a| !a.is_empty()).count() >= DOCK_CAP {
             return false;
         }
-        self.remove_from_pages(app);
-        self.repack();
-        self.dock.push(app.to_owned());
+        put(&mut self.dock, DOCK_CAP, app.to_owned(), cell, from);
+        if from.is_none() {
+            for page in &mut self.pages {
+                vacate(page, app);
+            }
+        }
         true
     }
 
     pub fn unpin(&mut self, app: &str) {
-        if self.dock.iter().any(|a| a == app) {
-            self.dock.retain(|a| a != app);
+        if vacate(&mut self.dock, app).is_some() {
             self.place(app.to_owned());
         }
     }
 
-    fn remove_from_pages(&mut self, app: &str) {
-        for page in &mut self.pages {
-            page.retain(|a| a != app);
+    /// Caps every page and drops empty ones. Always keeps at least one page.
+    pub fn repack(&mut self) {
+        let mut i = 0;
+        while i < self.pages.len() {
+            if self.pages[i].len() > PAGE_CAP {
+                let spill = self.pages[i].split_off(PAGE_CAP);
+                if i + 1 == self.pages.len() {
+                    self.pages.push(Vec::new());
+                }
+                self.pages[i + 1].splice(0..0, spill);
+            }
+            trim(&mut self.pages[i]);
+            i += 1;
         }
         self.pages.retain(|p| !p.is_empty());
-    }
-
-    fn flat(&self) -> Vec<AppId> {
-        self.pages.iter().flatten().cloned().collect()
-    }
-
-    /// Every page but the last is full. Always keeps at least one page, even
-    /// empty.
-    pub fn repack(&mut self) {
-        let flat = self.flat();
-        self.pages = flat.chunks(PAGE_CAP).map(|c| c.to_vec()).collect();
         if self.pages.is_empty() {
             self.pages.push(Vec::new());
         }
@@ -185,15 +268,51 @@ mod tests {
     }
 
     #[test]
-    fn delete_removes_and_collapses_to_one_empty_page() {
+    fn delete_then_repack_keeps_one_empty_page() {
         let mut m = ShellModel::default();
         m.place("a".into());
         m.delete("a");
+        m.repack();
         assert_eq!(m.pages, vec![Vec::<AppId>::new()]);
     }
 
     #[test]
-    fn delete_collapses_the_page_it_emptied() {
+    fn move_to_any_cell_leaves_gaps_before_it() {
+        let mut m = ShellModel::default();
+        m.place("a".into());
+        m.place("b".into());
+        m.move_to("b", 0, 6);
+        assert_eq!(m.pages[0], vec!["a", "", "", "", "", "", "b"]);
+        m.move_to("a", 0, 5);
+        assert_eq!(m.pages[0], vec!["", "", "", "", "", "a", "b"]);
+        m.place("c".into());
+        assert_eq!(m.pages[0][0], "c");
+    }
+
+    #[test]
+    fn move_within_a_page_shifts_toward_the_vacated_cell() {
+        let mut m = ShellModel::default();
+        for n in ["a", "b", "c"] {
+            m.place(n.into());
+        }
+        m.move_to("a", 0, 2);
+        assert_eq!(m.pages[0], vec!["b", "c", "a"]);
+        m.move_to("a", 0, 0);
+        assert_eq!(m.pages[0], vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn move_to_occupied_cell_shifts_toward_nearest_gap() {
+        let mut m = ShellModel {
+            pages: vec![vec!["a".into(), "b".into(), "".into(), "c".into()]],
+            ..Default::default()
+        };
+        m.move_to("x", 0, 1);
+        assert_eq!(m.pages[0], vec!["a", "x", "b", "c"]);
+    }
+
+    #[test]
+    fn delete_leaves_a_gap() {
         let mut m = ShellModel {
             pages: vec![
                 (0..PAGE_CAP).map(|i| format!("a{i:02}")).collect(),
@@ -202,9 +321,8 @@ mod tests {
             ..Default::default()
         };
         m.delete("a05");
-        assert_eq!(m.pages.len(), 1);
-        assert_eq!(m.pages[0].len(), PAGE_CAP);
-        assert_eq!(m.pages[0][PAGE_CAP - 1], "tail");
+        assert_eq!(m.pages[0][5], "");
+        assert_eq!(m.pages[1], vec!["tail"]);
     }
 
     #[test]
@@ -218,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn move_to_cross_page_lands_at_global_index() {
+    fn move_to_cross_page_leaves_source_page_empty_until_repack() {
         let mut m = ShellModel {
             pages: vec![
                 (0..PAGE_CAP - 1).map(|i| format!("a{i:02}")).collect(),
@@ -229,7 +347,39 @@ mod tests {
         m.move_to("x", 0, 2);
         assert_eq!(m.pages[0][2], "x");
         assert_eq!(m.pages[0].len(), PAGE_CAP);
+        assert!(m.pages[1].is_empty());
+        m.repack();
         assert_eq!(m.pages.len(), 1);
+    }
+
+    #[test]
+    fn move_to_empty_page_lands_there() {
+        let mut m = ShellModel::default();
+        for n in ["a", "b"] {
+            m.place(n.into());
+        }
+        let page = m.add_page();
+        assert_eq!(m.add_page(), page);
+        m.move_to("b", page, 2);
+        assert_eq!(m.pages, vec![vec!["a"], vec!["", "", "b"]]);
+    }
+
+    #[test]
+    fn move_to_full_page_spills_its_last_icon() {
+        let mut m = ShellModel {
+            pages: vec![
+                (0..PAGE_CAP).map(|i| format!("a{i:02}")).collect(),
+                vec!["b".into(), "x".into()],
+            ],
+            ..Default::default()
+        };
+        m.move_to("x", 0, 0);
+        assert_eq!(m.pages[0][0], "x");
+        assert_eq!(m.pages[0].len(), PAGE_CAP);
+        assert_eq!(
+            m.pages[1],
+            vec![format!("a{:02}", PAGE_CAP - 1), "b".into()]
+        );
     }
 
     #[test]
@@ -339,30 +489,54 @@ mod tests {
     }
 
     #[test]
-    fn pin_adds_to_dock_under_cap() {
+    fn pin_adds_to_dock_cell_leaving_gaps() {
         let mut m = ShellModel::default();
-        assert!(m.pin("a"));
-        assert_eq!(m.dock, vec!["a"]);
+        assert!(m.pin("a", 2));
+        assert_eq!(m.dock, vec!["", "", "a"]);
     }
 
     #[test]
-    fn pin_fails_when_full_or_duplicate() {
+    fn pin_fails_when_full() {
         let mut m = ShellModel::default();
         for i in 0..DOCK_CAP {
-            assert!(m.pin(&format!("d{i}")));
+            assert!(m.pin(&format!("d{i}"), i));
         }
-        assert!(!m.pin("overflow"));
-        assert_eq!(m.dock.len(), DOCK_CAP);
-        let mut m2 = ShellModel::default();
-        assert!(m2.pin("a"));
-        assert!(!m2.pin("a"));
-        assert_eq!(m2.dock, vec!["a"]);
+        assert!(!m.pin("overflow", 0));
+        assert_eq!(m.dock, vec!["d0", "d1", "d2", "d3"]);
+    }
+
+    #[test]
+    fn pin_reorders_within_a_full_dock() {
+        let mut m = ShellModel::default();
+        for i in 0..DOCK_CAP {
+            m.pin(&format!("d{i}"), i);
+        }
+        assert!(m.pin("d3", 0));
+        assert_eq!(m.dock, vec!["d3", "d0", "d1", "d2"]);
+        assert!(m.pin("d3", 3));
+        assert_eq!(m.dock, vec!["d0", "d1", "d2", "d3"]);
+    }
+
+    #[test]
+    fn pin_onto_occupied_cell_shifts_toward_nearest_gap() {
+        let mut m = ShellModel {
+            dock: vec!["a".into(), "".into(), "b".into(), "c".into()],
+            ..Default::default()
+        };
+        assert!(m.pin("x", 3));
+        assert_eq!(m.dock, vec!["a", "b", "c", "x"]);
+        let mut m = ShellModel {
+            dock: vec!["a".into(), "b".into()],
+            ..Default::default()
+        };
+        assert!(m.pin("x", 0));
+        assert_eq!(m.dock, vec!["x", "a", "b"]);
     }
 
     #[test]
     fn unpin_removes_from_dock() {
         let mut m = ShellModel::default();
-        m.pin("a");
+        m.pin("a", 0);
         m.unpin("a");
         assert!(m.dock.is_empty());
     }
@@ -371,7 +545,7 @@ mod tests {
     fn pin_removes_from_pages_unpin_restores() {
         let mut m = ShellModel::default();
         m.place("a".into());
-        assert!(m.pin("a"));
+        assert!(m.pin("a", 0));
         assert!(!m.pages.iter().any(|p| p.contains(&"a".to_string())));
         assert!(m.dock.contains(&"a".to_string()));
         m.unpin("a");
@@ -421,7 +595,7 @@ mod tests {
         m.place("keep".into());
         m.dock.push("dgone".into());
         m.reconcile(&["keep".into()], 0, false);
-        assert_eq!(m.pages, vec![vec!["keep".to_string()]]);
+        assert_eq!(m.pages, vec![vec!["", "keep"]]);
         assert!(m.dock.is_empty());
     }
 
@@ -452,23 +626,17 @@ mod tests {
     }
 
     #[test]
-    fn repack_backfills_interior_hole() {
+    fn repack_keeps_gaps_and_drops_empty_pages() {
         let mut m = ShellModel {
-            pages: vec![
-                (0..PAGE_CAP).map(|i| format!("a{i:02}")).collect(),
-                vec!["tail".into()],
-            ],
+            pages: vec![vec!["a".into()], vec![], vec!["b".into()]],
             ..Default::default()
         };
-        m.pages[0].remove(5);
         m.repack();
-        assert_eq!(m.pages[0].len(), PAGE_CAP);
-        assert_eq!(m.pages[0][23], "tail");
-        assert_eq!(m.pages.len(), 1);
+        assert_eq!(m.pages, vec![vec!["a"], vec!["b"]]);
     }
 
     #[test]
-    fn pin_backfills_grid_across_pages() {
+    fn pin_leaves_a_gap_on_the_page() {
         let mut m = ShellModel {
             pages: vec![
                 (0..PAGE_CAP).map(|i| format!("a{i:02}")).collect(),
@@ -476,10 +644,10 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert!(m.pin("a05"));
-        assert!(m.dock.contains(&"a05".to_string()));
-        assert_eq!(m.pages[0].len(), PAGE_CAP);
-        assert_eq!(m.pages.len(), 1);
+        assert!(m.pin("a05", 0));
+        assert_eq!(m.dock, vec!["a05"]);
+        assert_eq!(m.pages[0][5], "");
+        assert_eq!(m.pages[1], vec!["tail"]);
     }
 
     #[test]

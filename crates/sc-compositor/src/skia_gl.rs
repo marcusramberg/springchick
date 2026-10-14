@@ -584,7 +584,6 @@ impl SkiaGl {
             grid_positions,
             dock_positions,
             library,
-            top_inset,
             lift,
             shift,
         } = view;
@@ -634,8 +633,7 @@ impl SkiaGl {
             canvas.restore();
         }
 
-        let mut current_layout = sc_layout::compute(width as f32, height as f32, page, model);
-        current_layout.shift_done_below(top_inset);
+        let current_layout = sc_layout::compute(width as f32, height as f32, page, model);
 
         draw_dock_frame(canvas, &current_layout);
         let dock_slots = visible_dock_slots(&current_layout, dock_positions);
@@ -651,7 +649,7 @@ impl SkiaGl {
             for slot in anim_slots.iter().chain(dock_slots.iter()) {
                 draw_remove_badge(canvas, slot);
             }
-            draw_done_button(canvas, &current_layout, &self.font);
+            draw_arrange_buttons(canvas, &current_layout, &self.font);
 
             if view.over_dock {
                 draw_dock_highlight(canvas, &current_layout);
@@ -1446,28 +1444,40 @@ fn draw_remove_badge(canvas: &skia_safe::Canvas, slot: &IconSlot) {
     canvas.draw_line((cx - half, cy), (cx + half, cy), &stroke);
 }
 
-fn draw_done_button(canvas: &skia_safe::Canvas, layout: &Layout, font: &Option<Font>) {
-    let r = &layout.done_button;
-    let rect = Rect::new(r.x, r.y, r.x + r.w, r.y + r.h);
-    let radius = (r.h * 0.4).max(4.0);
-
+/// Over the hidden status bar: a "+" disc on the left, bare "Done" on the right.
+fn draw_arrange_buttons(canvas: &skia_safe::Canvas, layout: &Layout, font: &Option<Font>) {
     let mut fill = Paint::default();
     fill.set_anti_alias(true);
-    fill.set_color(Color::from_argb(200, 40, 120, 220));
-    let rrect = RRect::new_rect_xy(rect, radius, radius);
-    canvas.draw_rrect(rrect, &fill);
+    fill.set_color(Color::from_argb(60, 255, 255, 255));
+    let add = &layout.add_button;
+    let radius = add.h * 0.3;
+    let (cx, cy) = (add.x + radius, add.center_y());
+    canvas.draw_circle((cx, cy), radius, &fill);
 
-    if let Some(f) = font {
-        let mut paint = Paint::default();
-        paint.set_anti_alias(true);
-        paint.set_color(Color::WHITE);
-        if let Some(blob) = TextBlob::new("Done", f) {
-            let text_width = f.measure_str("Done", None).0;
-            let x = r.x + (r.w - text_width) / 2.0;
-            let y = r.y + r.h * 0.7;
-            canvas.draw_text_blob(&blob, (x, y), &paint);
-        }
-    }
+    let mut stroke = Paint::default();
+    stroke.set_anti_alias(true);
+    stroke.set_color(Color::WHITE);
+    stroke.set_stroke_width((radius * 0.14).max(1.5));
+    stroke.set_stroke_cap(skia_safe::paint::Cap::Round);
+    let half = radius * 0.5;
+    canvas.draw_line((cx - half, cy), (cx + half, cy), &stroke);
+    canvas.draw_line((cx, cy - half), (cx, cy + half), &stroke);
+
+    let Some(f) = font else {
+        return;
+    };
+    let mut f = f.clone();
+    f.set_size(f.size() * 1.15);
+    f.set_embolden(true);
+    let done = &layout.done_button;
+    let width = f.measure_str("Done", None).0;
+    let (_, metrics) = f.metrics();
+    // Baseline that centers the cap height.
+    let y = done.center_y() - (metrics.ascent + metrics.descent) / 2.0;
+    let mut text = Paint::default();
+    text.set_anti_alias(true);
+    text.set_color(Color::WHITE);
+    canvas.draw_str("Done", (done.x + done.w - width, y), &f, &text);
 }
 
 fn draw_dock_highlight(canvas: &skia_safe::Canvas, layout: &Layout) {

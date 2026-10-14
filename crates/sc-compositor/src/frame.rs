@@ -218,6 +218,9 @@ impl State {
         };
         // `!` = not in the catalog. `~` = no reflow spring, so it can't be placed.
         let slot = |id: &String, anim: &HashMap<String, (sc_anim::Spring, sc_anim::Spring)>| {
+            if id.is_empty() {
+                return "_".to_string();
+            }
             let mut s = id.clone();
             if !self.app_catalog.contains_key(id) {
                 s.push('!');
@@ -231,7 +234,7 @@ impl State {
             .model
             .pages
             .iter()
-            .map(|p| p.len().to_string())
+            .map(|p| p.iter().filter(|a| !a.is_empty()).count().to_string())
             .collect();
         let mut parts = vec![format!(
             "ui={} page={page}/{page_count} pages=[{}] arrange={} gen={}",
@@ -522,7 +525,12 @@ impl State {
             .then(|| (self.osd.level, self.osd.muted, self.osd.alpha(osd_now)));
         let screenshot_flash = crate::screenshot::flash_progress(self.screenshot_flash, osd_now);
         let bar_alpha = self.tick_bar_alpha(std::time::Instant::now());
-        let (layers_below, layers_above) = self.layers.render_lists(self.dpi);
+        let (mut layers_below, mut layers_above) = self.layers.render_lists(self.dpi);
+        if self.arrange.is_some() {
+            let bars = self.layers.top_bars(self.dpi);
+            layers_below.retain(|(s, _)| !bars.contains(s));
+            layers_above.retain(|(s, _)| !bars.contains(s));
+        }
         // `origin` is the geometry top-left; the buffer's (0,0) sits `geometry.loc`
         // above-left of it (client shadows), as in smithay's placement.
         let dpi = self.dpi;

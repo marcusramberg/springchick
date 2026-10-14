@@ -531,6 +531,22 @@ impl LayerShell {
         )
     }
 
+    /// Surfaces wholly inside the top exclusive strip: the status bar arrange
+    /// mode draws over.
+    pub fn top_bars(&self, dpi: f64) -> Vec<WlSurface> {
+        let strip = self.usable(dpi).y;
+        let map = layer_map_for_output(&self.output);
+        map.layers()
+            .filter(|l| {
+                map.layer_geometry(l).is_some_and(|geo| {
+                    let r = self.place(l.wl_surface(), geo, dpi);
+                    strip > 0.0 && r.y + r.h <= strip + 1.0
+                })
+            })
+            .map(|l| l.wl_surface().clone())
+            .collect()
+    }
+
     /// Unfiltered on purpose: the dump is for finding surfaces drawn that
     /// shouldn't be.
     pub fn dump(&self, dpi: f64) -> Vec<LayerInfo> {

@@ -14,6 +14,8 @@ pub(crate) enum MenuAction {
     /// Flatpak only: arm the confirm row.
     Uninstall,
     UninstallConfirm,
+    /// From arrange mode's "+"; the menu has no app.
+    AddPage,
 }
 
 impl MenuAction {
@@ -89,6 +91,13 @@ pub(crate) fn items_for(
         });
     }
     items
+}
+
+pub(crate) fn add_items() -> Vec<MenuItem> {
+    vec![MenuItem {
+        action: MenuAction::AddPage,
+        label: "Add page".into(),
+    }]
 }
 
 /// Swapped in by Uninstall so one stray tap can't delete an app.
@@ -171,6 +180,7 @@ impl crate::state::State {
                 self.icon_menu = Some(IconMenu::new(app_id, menu.anchor, confirm_items(&name)));
             }
             MenuAction::UninstallConfirm => self.uninstall_flatpak(&app_id),
+            MenuAction::AddPage => self.add_home_page(),
         }
         self.needs_render = true;
     }
