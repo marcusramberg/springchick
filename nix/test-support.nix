@@ -29,6 +29,7 @@ let
       # Home pages as lists of .desktop ids. A fresh install's home is empty, so any
       # test that presses a grid icon must seed it.
       homePages ? [ ],
+      dock ? [ ],
     }:
     let
       seedState = homePages != [ ];
@@ -40,7 +41,7 @@ let
             page: "[" + pkgs.lib.concatMapStringsSep ", " (app: ''"${app}"'') page + "]"
           ) homePages
         }]
-        dock = []
+        dock = [${pkgs.lib.concatMapStringsSep ", " (app: ''"${app}"'') dock}]
       '';
 
       # Copied in after boot plus a service restart: the home dir doesn't reliably
