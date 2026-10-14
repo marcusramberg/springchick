@@ -119,5 +119,5 @@ Building the packages yourself: [packaging/README.md](packaging/README.md).
 
 ## Source Code
 
-_The Authorative home for this repo is <https://code.bas.es/marcus/springchick/> -
+_The Authorative home for this repo is <https://code.bas.es/marcus/springchick> -
 [Github](https://github.com/marcusramberg/springchick) is a mirror to allow easier contributions and visibility._

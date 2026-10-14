@@ -164,6 +164,31 @@ fn pick_render_node(seat: &str, scanout: &DrmDeviceFd) -> Option<std::path::Path
     None
 }
 
+/// Without a PCI boot_vga GPU, smithay's primary GPU is the first card, which
+/// on SoCs is often render-only (MT6768: card0 panfrost, card1 mediatek-drm).
+/// Then take the first card with connectors.
+fn pick_scanout_gpu(seat: &str) -> std::io::Result<Option<std::path::PathBuf>> {
+    let has_connectors = |card: &std::path::Path| {
+        let Some(name) = card.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        let prefix = format!("{name}-");
+        std::fs::read_dir("/sys/class/drm").is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+        })
+    };
+    let primary = udev::primary_gpu(seat)?;
+    if primary.as_deref().is_some_and(has_connectors) {
+        return Ok(primary);
+    }
+    Ok(udev::all_gpus(seat)?
+        .into_iter()
+        .find(|c| has_connectors(c))
+        .or(primary))
+}
+
 /// Retries: at login the greeter may still hold DRM master and logind
 /// answers EPERM until the handover finishes. Aborting there drops the user
 /// back to the greeter.
@@ -200,7 +225,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let seat_name = session.seat();
     info!(seat = %seat_name, "libseat session acquired");
 
-    let gpu_path = udev::primary_gpu(&seat_name)?.ok_or("no primary GPU found")?;
+    let gpu_path = pick_scanout_gpu(&seat_name)?.ok_or("no primary GPU found")?;
     info!(path = ?gpu_path, "scanout GPU");
 
     let fd = open_drm_node(&mut session, &gpu_path)?;
