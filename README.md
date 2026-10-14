@@ -13,17 +13,17 @@
 - **Home grid.** Pages, drag-to-reorder, hide apps, dock. Long press for menu.
   Pull down to search.
 - **Rotation.** Automatic rotation for fullscreen media and games.
-- **Hardware shortcuts.** Flexible keybinds with short and long press.
+- **Hardware bindings.** Full support for long/short/chorded hardware button mappings.
 - **Keyboard.** wvkbd pops up automatically, at the right scale.
 - **Wide protocol support.** Screencopy, screenshots, clipboard, idle inhibitor,
   session lock, external display mirroring.
 - **Power efficient** uses systemd user slices for background
-  tasks, uclamp to ensur smooth animations, and avoids unnecessary redraws. Also
+  tasks, uclamp to ensure smooth animations, and avoids unnecessary redraws. Also
   supports VRR (Depending on GPU support)
 
 > [!IMPORTANT]
 >
-> This project is made with LLMs assist, so if you have philosophical
+> This project is made with LLM assist, so if you have philosophical
 > objections to that, please don't use it. I do not consider this to be a "slop"
 > project as I've sunk a lot of time and effort into it, but I accept everyone has
 > their own opinions on the matter.
@@ -38,7 +38,8 @@
 ## Install
 
 Nightly packages are built from `main` and published to our registries on
-code.bas.es. **aarch64 only** so far, and they are unstable — expect breakage.
+code.bas.es. I daily drive them, but no stability guarantees until an actual
+release.
 Versions look like `0.1.0.20260913`. Initial stable release planned soon.
 
 ### NixOS
@@ -65,6 +66,8 @@ compositor and its `springchick-session` wrapper.
 
 ### Mobian / Debian
 
+_Untested by me, would love some feedback on these._
+
 ```sh
 sudo curl -fsSL https://code.bas.es/api/packages/marcus/debian/repository.key \
   -o /etc/apt/keyrings/forgejo-marcus.asc
@@ -74,6 +77,8 @@ sudo apt update && sudo apt install springchick
 ```
 
 ### Arch
+
+_Untested by me, would love some feedback on these._
 
 ```sh
 curl -fsSL https://code.bas.es/api/packages/marcus/arch/repository.key \
@@ -95,7 +100,7 @@ sudo pacman -Sy springchick
 
 ### Starting it
 
-All packages ship a wayland session
+All packages ship a Wayland session
 (`/usr/share/wayland-sessions/springchick.desktop`), so greetd or GDM will list
 **springchick**. `/usr/share/springchick/config.example.toml` documents every
 option at its default — copy it to `/etc/springchick/config.toml` or
@@ -105,10 +110,10 @@ Building the packages yourself: [packaging/README.md](packaging/README.md).
 
 ## Roadmap
 
-- Initial 0.1 release
-- First class PWA integration with firefoxpwa
 - Closer integration with waydroid
-- Folder support
+- Folder support and free homescreen layout
+- Richer search
+- Initial 0.1 release
 
 ## Source Code
 
