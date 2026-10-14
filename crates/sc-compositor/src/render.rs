@@ -922,10 +922,11 @@ fn pass_app_card(
 }
 
 /// Frost Home before the deck. Ramps with `scene.backdrop_blur`; popping to
-/// full reads as a cut.
-fn pass_backdrop_blur(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>) {
+/// full reads as a cut. Skipped while the app still fills the screen: Home
+/// isn't drawn, so it would frost the app itself.
+fn pass_backdrop_blur(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan) {
     let strength = ctx.scene.backdrop_blur.clamp(0.0, 1.0);
-    if strength <= 0.0 {
+    if strength <= 0.0 || plan.app_fills_screen {
         return;
     }
     let v = ctx.view(size);
@@ -1257,7 +1258,7 @@ pub fn draw_scene(
     pass_folder(size, ctx, &plan);
     pass_icon_menu(size, ctx, &plan);
     // Before any card pass, or a dragged card gets blurred too.
-    pass_backdrop_blur(size, ctx);
+    pass_backdrop_blur(size, ctx, &plan);
     pass_rotated_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_blurred_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_app_card(renderer, &mut *framebuffer, size, ctx, &mut plan)?;
