@@ -2,7 +2,7 @@
 
 ## A Wayland compositor for Linux phones, written in Rust with Smithay and Skia
 
-<img align="right" src="./assets/springchick.svg" alt="Right aligned icon">
+<img align="right" src="./assets/springchick.svg" alt="Springy chick - our mascot">
 
 ## What it does
 
@@ -49,9 +49,9 @@ Versions look like `0.1.0.20260913`. Initial stable release planned soon.
 The best supported path. Add the repo as a flake input and enable
 `programs.springchick`.
 
-### postmarketOS
+### Nura
 
-Needs a **systemd** postmarketOS install (`pmbootstrap init` → systemd).
+Needs a **systemd** Nura install (`pmbootstrap init` → systemd).
 
 ```sh
 sudo curl -JO --output-dir /etc/apk/keys \
@@ -113,11 +113,11 @@ Building the packages yourself: [packaging/README.md](packaging/README.md).
 ## Roadmap
 
 - Closer integration with waydroid
-- Folder support and free homescreen layout
+- Home screen Folder / Widget support
 - Richer search
 - Initial 0.1 release
 
 ## Source Code
 
 _The Authorative home for this repo is <https://code.bas.es/marcus/springchick/> -
-Github is a mirror to allow easier contributions and visibility._
+[Github](https://github.com/marcusramberg/springchick) is a mirror to allow easier contributions and visibility._
