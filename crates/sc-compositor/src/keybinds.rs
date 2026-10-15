@@ -4,10 +4,12 @@
 use crate::State;
 use sc_config::{Action, Config, ModMask};
 use sc_keys::{KeyBindings, PressOutcome, PressTracker};
-use smithay::backend::input::{KeyState, Keycode};
-use smithay::input::keyboard::{xkb, FilterResult, ModifiersState};
+use smithay::backend::input::{Event, InputEvent, InputTime, KeyState, KeyboardKeyEvent, Keycode};
+use smithay::input::keyboard::{xkb, FilterResult, KeyboardSource, ModifiersState, XkbConfig};
 use smithay::utils::SERIAL_COUNTER;
+use smithay::wayland::virtual_keyboard::{VirtualKeyboardBackend, VirtualKeyboardSpecialEvent};
 use std::process::{Child, Command};
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -99,11 +101,93 @@ pub fn reap(children: &mut Vec<Child>) {
 
 /// Runs inside the keyboard filter closure so `Intercept` really withholds
 /// the key.
-pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, time: u32) {
+pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, time: InputTime) {
+    use_keymap(state, None);
+    key_input(state, KeyboardSource::MAIN, key_code, key_state, time);
+}
+
+/// wvkbd keys go through the same bindings/blank/lock path as physical ones.
+pub fn on_virtual_keyboard_event(state: &mut State, event: InputEvent<VirtualKeyboardBackend>) {
+    match event {
+        InputEvent::DeviceAdded { device }
+        | InputEvent::Special(VirtualKeyboardSpecialEvent::KeymapChanged { device }) => {
+            if let Some(keymap) = device.keymap() {
+                use_keymap(state, Some(keymap));
+            }
+        }
+        InputEvent::Keyboard { event } => {
+            let device = event.device();
+            if let Some(keymap) = device.keymap() {
+                use_keymap(state, Some(keymap));
+            }
+            key_input(
+                state,
+                device.source(),
+                event.key_code(),
+                event.state(),
+                event.time(),
+            );
+        }
+        InputEvent::Special(VirtualKeyboardSpecialEvent::Modifiers {
+            device,
+            mods_depressed,
+            mods_latched,
+            mods_locked,
+            group,
+        }) => {
+            // The masks are only meaningful under the device's own keymap.
+            if device
+                .keymap()
+                .is_some_and(|k| state.vk_keymap.as_ref() != Some(&k))
+            {
+                return;
+            }
+            let keyboard = state.keyboard.clone();
+            keyboard.with_xkb_state(state, |mut ctx| {
+                ctx.set_modifier_mask(mods_depressed, mods_latched, mods_locked, group)
+            });
+        }
+        // Rebuilding the default keymap also drops modifiers the device left set.
+        InputEvent::DeviceRemoved { device }
+            if device
+                .keymap()
+                .is_some_and(|k| state.vk_keymap.as_ref() == Some(&k)) =>
+        {
+            use_keymap(state, None);
+        }
+        _ => {}
+    }
+}
+
+/// `None` is the seat's default keymap.
+fn use_keymap(state: &mut State, keymap: Option<Arc<str>>) {
+    if state.vk_keymap == keymap {
+        return;
+    }
+    let keyboard = state.keyboard.clone();
+    let res = match &keymap {
+        Some(k) => keyboard.set_keymap_from_string(state, k.to_string()),
+        None => keyboard.set_xkb_config(state, XkbConfig::default()),
+    };
+    if let Err(e) = res {
+        warn!(?e, "failed to switch keymap");
+        return;
+    }
+    state.vk_keymap = keymap;
+}
+
+fn key_input(
+    state: &mut State,
+    source: KeyboardSource,
+    key_code: Keycode,
+    key_state: KeyState,
+    time: InputTime,
+) {
     let keyboard = state.keyboard.clone();
     let now = Instant::now();
     let pressed = key_state == KeyState::Pressed;
-    keyboard.input::<(), _>(
+    keyboard.input_from_source::<(), _>(
+        source,
         state,
         key_code,
         key_state,
@@ -171,6 +255,7 @@ pub fn on_key_event(state: &mut State, key_code: Keycode, key_state: KeyState, t
 
 /// Lets the debug socket inject keys through the real path.
 pub fn keycode_for_keysym(state: &mut State, keysym: u32) -> Option<Keycode> {
+    use_keymap(state, None);
     let keyboard = state.keyboard.clone();
     keyboard.with_xkb_state(state, |ctx| {
         let xkb = ctx.xkb().lock().unwrap();

@@ -5,8 +5,8 @@
 use crate::input_common;
 use crate::touch_viz;
 use crate::State;
-use smithay::backend::input::TouchSlot;
 use smithay::backend::input::{Axis, AxisRelativeDirection, AxisSource};
+use smithay::backend::input::{InputTime, TouchSlot};
 use smithay::desktop::utils::under_from_surface_tree;
 use smithay::desktop::WindowSurfaceType;
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent as PointerMotionEvent};
@@ -204,7 +204,7 @@ fn cursor_pos(state: &State) -> (f32, f32) {
 }
 
 /// `None` leaves the current surface.
-fn send_motion(state: &mut State, target: Option<Target>, x: f32, y: f32, time: u32) {
+fn send_motion(state: &mut State, target: Option<Target>, x: f32, y: f32, time: InputTime) {
     let ptr = state.seat.get_pointer().unwrap();
     let (focus, location) = match &target {
         Some(t) => (
@@ -225,12 +225,12 @@ fn send_motion(state: &mut State, target: Option<Target>, x: f32, y: f32, time: 
     ptr.frame(state);
 }
 
-pub fn pointer_motion(state: &mut State, x: f32, y: f32, time: u32) {
+pub fn pointer_motion(state: &mut State, x: f32, y: f32, time: InputTime) {
     let (x, y) = to_view(state, x, y);
     pointer_motion_view(state, x, y, time);
 }
 
-fn pointer_motion_view(state: &mut State, x: f32, y: f32, time: u32) {
+fn pointer_motion_view(state: &mut State, x: f32, y: f32, time: InputTime) {
     state.last_pointer_pos = Some((x, y));
     if !state.cursor_visible {
         state.cursor_visible = true;
@@ -260,7 +260,7 @@ fn pointer_motion_view(state: &mut State, x: f32, y: f32, time: u32) {
     input_common::on_motion(state, x, y);
 }
 
-pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) {
+pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: InputTime) {
     let (x, y) = cursor_pos(state);
     state.cursor_visible = true;
     if state.show_touches {
@@ -342,7 +342,7 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: u32) 
 }
 
 /// Accumulates relative motion (e.g. a Bluetooth mouse ring) into the cursor.
-pub fn pointer_motion_relative(state: &mut State, dx: f64, dy: f64, time: u32) {
+pub fn pointer_motion_relative(state: &mut State, dx: f64, dy: f64, time: InputTime) {
     let (w, h) = state.output_size_f();
     let (mut x, mut y) = cursor_pos(state);
     // Hit-testing is half-open, so clamp to `w - 1`, not `w`.
@@ -363,7 +363,7 @@ pub struct AxisMotion {
 
 /// Both axes in one frame. `amount` is `Some(0.0)` on an untouched axis, so
 /// picking "the non-`None` one" is wrong.
-pub fn pointer_axis_event<B, E>(state: &mut State, event: &E, time: u32)
+pub fn pointer_axis_event<B, E>(state: &mut State, event: &E, time: InputTime)
 where
     B: smithay::backend::input::InputBackend,
     E: smithay::backend::input::PointerAxisEvent<B>,
@@ -397,7 +397,7 @@ pub fn pointer_axis(
     source: AxisSource,
     horizontal: Option<AxisMotion>,
     vertical: Option<AxisMotion>,
-    time: u32,
+    time: InputTime,
 ) {
     if horizontal.is_none() && vertical.is_none() {
         return;
@@ -431,7 +431,7 @@ pub fn pointer_axis(
 
 /// Per slot: a slot on a client surface goes there; on empty space only the
 /// first slot (`gesture_slot`) drives the single-touch funnel.
-pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
+pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: InputTime) {
     let (x, y) = to_view(state, x, y);
     state.last_touch_pos = Some((x, y));
     if state.cursor_visible {
@@ -472,7 +472,7 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
     }
 }
 
-pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: u32) {
+pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: InputTime) {
     let (x, y) = to_view(state, x, y);
     state.last_touch_pos = Some((x, y));
     if state.show_touches {
@@ -527,7 +527,7 @@ pub fn cancel(state: &mut State) {
     state.needs_render = true;
 }
 
-pub fn up(state: &mut State, slot: TouchSlot, time: u32) {
+pub fn up(state: &mut State, slot: TouchSlot, time: InputTime) {
     if state.show_touches {
         state
             .touch_viz

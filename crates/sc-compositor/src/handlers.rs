@@ -387,6 +387,19 @@ impl ImageCopyCaptureHandler for State {
     }
 }
 
+impl smithay::wayland::virtual_keyboard::VirtualKeyboardHandler for State {
+    fn process_virtual_keyboard_event(
+        &mut self,
+        event: smithay::backend::input::InputEvent<
+            smithay::wayland::virtual_keyboard::VirtualKeyboardBackend,
+        >,
+    ) {
+        crate::keybinds::on_virtual_keyboard_event(self, event);
+    }
+}
+
+impl smithay::wayland::text_input::TextInputActivation for State {}
+
 impl InputMethodHandler for State {
     fn new_popup(&mut self, surface: ImePopupSurface) {
         // Parented to the focused app surface, so `app_popups()` finds it.

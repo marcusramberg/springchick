@@ -273,7 +273,7 @@ All pointer/touch events are normalized to `Pt` (0..1) and routed on UiState:
 ## Smithay specifics
 
 - Smithay is pinned to upstream git (`https://github.com/Smithay/smithay.git`
-  rev `7ddcd17`) because crates.io lacks xkbcommon 0.9, which fixes wvkbd keymap
+  rev `8a27023`) because crates.io lacks xkbcommon 0.9, which fixes wvkbd keymap
   loading (the xkbcommon 0.8 `size-1` bug). Don't swap back to a release without
   re-checking that. Dispatch goes through the single
   `delegate_dispatch2!(State)` in `handlers.rs`; the per-protocol `delegate_*!`

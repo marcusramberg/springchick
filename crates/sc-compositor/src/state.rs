@@ -212,6 +212,8 @@ pub(crate) struct State {
     #[allow(dead_code)] // Keeps the global registered.
     pub seat: Seat<Self>,
     pub keyboard: smithay::input::keyboard::KeyboardHandle<Self>,
+    /// The virtual keyboard keymap the seat is switched to; `None` is the default.
+    pub vk_keymap: Option<std::sync::Arc<str>>,
     /// To avoid re-sending focus.
     pub focused_surface: Option<WlSurface>,
     pub keys: keybinds::Keys,
@@ -562,6 +564,7 @@ impl State {
             seat,
             keyboard,
             focused_surface: None,
+            vk_keymap: None,
             keys: keybinds::Keys::from_config(config),
             blank: blank::Blank::new(),
             idle: blank::Idle::new(idle_blank_secs, std::time::Instant::now()),
