@@ -18,6 +18,7 @@ sc-layout = { path = "../sc-layout" }
 sc-icons = { path = "../sc-icons" }
 sc-keys = { path = "../sc-keys" }
 png = "0.17"
+serde_json = "1"
 
 # Upstream smithay@8a27023 (needed for xkbcommon 0.9 → wvkbd keymap fix).
 #

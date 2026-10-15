@@ -301,6 +301,7 @@ fn render_frame(
 
     keybinds::poll(state);
     state.poll_launching();
+    state.tick_freeze(std::time::Instant::now());
     state.drain_sensor();
     state.sync_keyboard_focus();
 

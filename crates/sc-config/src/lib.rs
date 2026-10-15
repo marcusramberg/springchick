@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use tracing::warn;
 
 /// No lock modifiers: a stuck Caps Lock must not disable every binding.
@@ -138,6 +139,42 @@ pub struct Resources {
     /// `"auto"` (the efficiency cluster, derived from `cpu_capacity`), `"off"`,
     /// or a list (`"0-3"`). Auto disables itself on symmetric CPUs.
     pub bg_allowed_cpus: String,
+    /// Freeze background apps (`cgroup.freeze`) after `freeze_delay_secs`.
+    pub freeze: bool,
+    pub freeze_delay_secs: u64,
+    /// Messengers thaw for `freeze_wake_for_secs` every `freeze_wake_secs` so
+    /// notifications get through.
+    pub freeze_wake_secs: u64,
+    pub freeze_wake_for_secs: u64,
+    /// Per-app policy by catalog id, overriding the category default.
+    pub apps: BTreeMap<String, AppPolicy>,
+}
+
+/// What a background app gets. The default comes from its `.desktop`
+/// categories (`sc_compositor::resources`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppPolicy {
+    /// Never touched, not even throttled.
+    Ignore,
+    /// CPU weight/quota/pinning only.
+    Throttle,
+    /// Throttle, then freeze after the delay.
+    Freeze,
+    /// Freeze with periodic wake-ups.
+    Messenger,
+}
+
+impl std::str::FromStr for AppPolicy {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "ignore" => AppPolicy::Ignore,
+            "throttle" => AppPolicy::Throttle,
+            "freeze" => AppPolicy::Freeze,
+            "messenger" => AppPolicy::Messenger,
+            _ => return Err(()),
+        })
+    }
 }
 
 /// Without a floor the render thread decays onto the little cluster at a low
@@ -191,6 +228,11 @@ impl Default for Resources {
             bg_memory_high: "infinity".to_string(),
             bg_cpu_quota: "30%".to_string(),
             bg_allowed_cpus: "auto".to_string(),
+            freeze: true,
+            freeze_delay_secs: 60,
+            freeze_wake_secs: 30,
+            freeze_wake_for_secs: 3,
+            apps: BTreeMap::new(),
         }
     }
 }
@@ -232,6 +274,17 @@ fn parse_resources(raw: Option<RawResources>) -> Resources {
         }
         None => d.bg_allowed_cpus,
     };
+    let apps = raw
+        .apps
+        .into_iter()
+        .filter_map(|(id, policy)| match policy.parse() {
+            Ok(p) => Some((id, p)),
+            Err(()) => {
+                warn!(app = %id, value = %policy, "app policy must be ignore, throttle, freeze or messenger");
+                None
+            }
+        })
+        .collect();
     Resources {
         enable: raw.enable.unwrap_or(d.enable),
         fg_cpu_weight: weight(raw.fg_cpu_weight, "fg_cpu_weight", d.fg_cpu_weight),
@@ -239,6 +292,11 @@ fn parse_resources(raw: Option<RawResources>) -> Resources {
         bg_memory_high,
         bg_cpu_quota,
         bg_allowed_cpus,
+        freeze: raw.freeze.unwrap_or(d.freeze),
+        freeze_delay_secs: raw.freeze_delay_secs.unwrap_or(d.freeze_delay_secs),
+        freeze_wake_secs: raw.freeze_wake_secs.unwrap_or(d.freeze_wake_secs),
+        freeze_wake_for_secs: raw.freeze_wake_for_secs.unwrap_or(d.freeze_wake_for_secs),
+        apps,
     }
 }
 
@@ -397,6 +455,12 @@ struct RawResources {
     bg_memory_high: Option<String>,
     bg_cpu_quota: Option<String>,
     bg_allowed_cpus: Option<String>,
+    freeze: Option<bool>,
+    freeze_delay_secs: Option<u64>,
+    freeze_wake_secs: Option<u64>,
+    freeze_wake_for_secs: Option<u64>,
+    #[serde(default)]
+    apps: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1098,8 +1162,23 @@ mod tests {
                 bg_memory_high: "512M".to_string(),
                 bg_cpu_quota: "10%".to_string(),
                 bg_allowed_cpus: "0-3".to_string(),
+                ..Resources::default()
             }
         );
+    }
+
+    #[test]
+    fn resources_freeze_and_app_policies() {
+        let c = Config::parse(
+            "[resources]\nfreeze = false\nfreeze_delay_secs = 5\n[resources.apps]\n\"org.gnome.Maps\" = \"ignore\"\n\"x\" = \"bogus\"\n",
+        );
+        assert!(!c.resources.freeze);
+        assert_eq!(c.resources.freeze_delay_secs, 5);
+        assert_eq!(
+            c.resources.apps.get("org.gnome.Maps"),
+            Some(&AppPolicy::Ignore)
+        );
+        assert!(!c.resources.apps.contains_key("x"));
     }
 
     #[test]

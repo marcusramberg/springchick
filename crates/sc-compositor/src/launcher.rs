@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use tracing::{error, info, warn};
 
-const APP_SLICE: &str = "app.slice";
+pub(crate) const APP_SLICE: &str = "app.slice";
 
 /// Spawn a bare Exec line (our own bundled helpers).
 pub fn spawn_exec(exec: &str, wayland_display: &str, token: &str) -> Option<Child> {

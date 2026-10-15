@@ -582,6 +582,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         crate::keybinds::poll(&mut app.state);
         app.state.poll_launching();
+        app.state.tick_freeze(Instant::now());
         app.state.drain_sensor();
         app.state.sync_keyboard_focus();
         // An idle inhibitor (video) keeps the screen on and holds off client idle.

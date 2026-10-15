@@ -5,9 +5,12 @@
 //! The unit comes from the client's pid, not our scope name: flatpak moves the
 //! app into its own scope and ours is collected empty.
 
-use sc_config::Resources;
+use sc_config::{AppPolicy, Resources};
+use std::collections::{HashMap, HashSet};
 use std::process::{Child, Command};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,9 +203,357 @@ fn spawn(args: Vec<String>, unit: &str) -> Option<Child> {
     }
 }
 
+/// Category default, overridden per app in `[resources.apps]`. Media and
+/// terminals keep running, browsers keep their downloads, chat wakes up for
+/// notifications, the rest freezes. An app with no catalog entry can't be
+/// classified and is only throttled.
+pub fn policy_for(categories: Option<&[String]>, res: &Resources, app_id: &str) -> AppPolicy {
+    if let Some(p) = res.apps.get(app_id) {
+        return *p;
+    }
+    let Some(cats) = categories else {
+        return AppPolicy::Throttle;
+    };
+    let has = |names: &[&str]| cats.iter().any(|c| names.contains(&c.as_str()));
+    if has(&["InstantMessaging", "Chat", "Email"]) {
+        AppPolicy::Messenger
+    } else if has(&[
+        "AudioVideo",
+        "Audio",
+        "Video",
+        "Player",
+        "Music",
+        "TerminalEmulator",
+        "WebBrowser",
+    ]) {
+        AppPolicy::Throttle
+    } else {
+        AppPolicy::Freeze
+    }
+}
+
+fn cgroup_file(path: &str, name: &str) -> String {
+    format!("/sys/fs/cgroup{path}/{name}")
+}
+
+/// Delegated scopes are owned by the user, so this is a plain write.
+fn set_frozen(path: &str, frozen: bool) {
+    if let Err(e) = std::fs::write(
+        cgroup_file(path, "cgroup.freeze"),
+        if frozen { "1" } else { "0" },
+    ) {
+        warn!(%e, path, frozen, "cgroup.freeze write failed");
+    }
+}
+
+fn cgroup_pids(path: &str) -> HashSet<i32> {
+    std::fs::read_to_string(cgroup_file(path, "cgroup.procs"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect()
+}
+
+/// Pids with a running PipeWire stream (audio out, mic, camera). The pid is
+/// the client object's kernel credential, not the stream's self-reported one.
+pub fn active_stream_pids(dump: &[u8]) -> HashSet<i32> {
+    let Ok(serde_json::Value::Array(objs)) = serde_json::from_slice(dump) else {
+        return HashSet::new();
+    };
+    let client_pid: HashMap<i64, i32> = objs
+        .iter()
+        .filter(|o| o["type"] == "PipeWire:Interface:Client")
+        .filter_map(|o| {
+            let pid = o["info"]["props"]["pipewire.sec.pid"].as_i64()?;
+            Some((o["id"].as_i64()?, pid as i32))
+        })
+        .collect();
+    objs.iter()
+        .filter_map(|o| {
+            let info = &o["info"];
+            let props = &info["props"];
+            if !props["media.class"].as_str()?.starts_with("Stream/")
+                || info["state"].as_str()? != "running"
+            {
+                return None;
+            }
+            client_pid.get(&props["client.id"].as_i64()?).copied()
+        })
+        .collect()
+}
+
+fn spawn_probe() -> Receiver<HashSet<i32>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let pids = match Command::new("pw-dump").output() {
+            Ok(out) => active_stream_pids(&out.stdout),
+            Err(e) => {
+                debug!(%e, "pw-dump unavailable; freezing without an audio guard");
+                HashSet::new()
+            }
+        };
+        let _ = tx.send(pids);
+    });
+    rx
+}
+
+struct BgApp {
+    path: String,
+    policy: AppPolicy,
+    /// Earliest freeze; pushed back while the app streams audio.
+    due: Instant,
+    frozen: bool,
+    wake_at: Option<Instant>,
+}
+
+/// Background apps by scope unit. Driven once a second from the backend loop,
+/// since page-flips stop on a static screen.
+#[derive(Default)]
+pub struct Freezer {
+    bg: HashMap<String, BgApp>,
+    probe: Option<Receiver<HashSet<i32>>>,
+    next_tick: Option<Instant>,
+}
+
+impl Freezer {
+    pub fn due(&self, now: Instant) -> bool {
+        self.next_tick.is_none_or(|t| now >= t)
+    }
+
+    /// The next [`Self::tick`] runs at once: the foreground changed.
+    pub fn force(&mut self) {
+        self.next_tick = None;
+    }
+
+    pub fn is_frozen(&self, unit: &str) -> bool {
+        self.bg.get(unit).is_some_and(|e| e.frozen)
+    }
+
+    /// `bg` is every mapped background app with a freezable policy; anything
+    /// else (foreground, closed, policy changed) is thawed and forgotten.
+    /// `ready` is false while the app still owes a resize: frozen with a stale
+    /// buffer, its switcher card would stay the wrong size.
+    pub fn tick(
+        &mut self,
+        now: Instant,
+        res: &Resources,
+        bg: impl IntoIterator<Item = (AppCgroup, AppPolicy, bool)>,
+    ) {
+        if !self.due(now) {
+            return;
+        }
+        self.next_tick = Some(now + Duration::from_secs(1));
+        let delay = Duration::from_secs(res.freeze_delay_secs);
+
+        let mut keep = HashSet::new();
+        let mut ready_units = HashSet::new();
+        for (cg, policy, ready) in bg {
+            keep.insert(cg.unit.clone());
+            if ready {
+                ready_units.insert(cg.unit.clone());
+            }
+            let e = self.bg.entry(cg.unit).or_insert(BgApp {
+                path: cg.path,
+                policy,
+                due: now + delay,
+                frozen: false,
+                wake_at: None,
+            });
+            if e.policy != policy {
+                e.policy = policy;
+                e.wake_at = e
+                    .frozen
+                    .then(|| now + Duration::from_secs(res.freeze_wake_secs));
+            }
+        }
+        self.bg.retain(|unit, e| {
+            let stay = keep.contains(unit);
+            if !stay && e.frozen {
+                info!(unit, "thaw");
+                set_frozen(&e.path, false);
+            }
+            stay
+        });
+
+        for (unit, e) in &mut self.bg {
+            if e.frozen && e.wake_at.is_some_and(|t| now >= t) {
+                info!(unit, "wake");
+                set_frozen(&e.path, false);
+                e.frozen = false;
+                e.wake_at = None;
+                e.due = now + Duration::from_secs(res.freeze_wake_for_secs);
+            }
+        }
+
+        if let Some(rx) = &self.probe {
+            match rx.try_recv() {
+                Ok(active) => {
+                    self.probe = None;
+                    for (unit, e) in &mut self.bg {
+                        if e.frozen || now < e.due || !ready_units.contains(unit) {
+                            continue;
+                        }
+                        if cgroup_pids(&e.path).is_disjoint(&active) {
+                            info!(unit, "freeze");
+                            set_frozen(&e.path, true);
+                            e.frozen = true;
+                            e.wake_at = (e.policy == AppPolicy::Messenger)
+                                .then(|| now + Duration::from_secs(res.freeze_wake_secs));
+                        } else {
+                            info!(unit, "streaming, not freezing");
+                            e.due = now + delay;
+                        }
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => self.probe = None,
+            }
+        }
+        if self.probe.is_none()
+            && self
+                .bg
+                .iter()
+                .any(|(u, e)| !e.frozen && now >= e.due && ready_units.contains(u))
+        {
+            self.probe = Some(spawn_probe());
+        }
+    }
+
+    /// Before the app has to act: a close request, or an activation of a
+    /// single-instance app from a fresh launcher process.
+    pub fn thaw(&mut self, unit: &str, res: &Resources) {
+        if let Some(e) = self.bg.get_mut(unit) {
+            if e.frozen {
+                info!(unit, "thaw");
+                set_frozen(&e.path, false);
+                e.frozen = false;
+                e.wake_at = None;
+            }
+            // Give it the full delay again.
+            e.due = Instant::now() + Duration::from_secs(res.freeze_delay_secs);
+        }
+    }
+
+    pub fn thaw_all(&mut self) {
+        for (unit, e) in &mut self.bg {
+            if e.frozen {
+                info!(unit, "thaw");
+                set_frozen(&e.path, false);
+                e.frozen = false;
+            }
+        }
+    }
+}
+
+/// `user@N.service/app.slice`, where [`crate::launcher`] puts every scope.
+fn app_slice_from_cgroup(body: &str) -> Option<String> {
+    let path = body.lines().find_map(|l| l.strip_prefix("0::"))?;
+    let n = path
+        .split('/')
+        .position(|seg| seg.starts_with("user@") && seg.ends_with(".service"))?;
+    let root: Vec<&str> = path.split('/').take(n + 1).collect();
+    Some(format!("{}/{}", root.join("/"), crate::launcher::APP_SLICE))
+}
+
+/// A crashed predecessor leaves its apps frozen with a dead socket, and they
+/// can't notice until thawed.
+pub fn thaw_stale_scopes() {
+    let body = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    let Some(slice) = app_slice_from_cgroup(&body) else {
+        return;
+    };
+    let Ok(dir) = std::fs::read_dir(format!("/sys/fs/cgroup{slice}")) else {
+        return;
+    };
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("springchick-") || !name.ends_with(".scope") {
+            continue;
+        }
+        let path = format!("{slice}/{name}");
+        if std::fs::read_to_string(cgroup_file(&path, "cgroup.freeze"))
+            .is_ok_and(|v| v.trim() == "1")
+        {
+            info!(unit = %name, "thawing scope left frozen by a previous instance");
+            set_frozen(&path, false);
+        }
+    }
+}
+
+/// A compositor exit must not leave apps frozen with a dead socket.
+impl Drop for Freezer {
+    fn drop(&mut self) {
+        self.thaw_all();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cats(c: &[&str]) -> Vec<String> {
+        c.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn app_slice_from_the_user_manager_path() {
+        assert_eq!(
+            app_slice_from_cgroup(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/springchick.service\n"
+            )
+            .as_deref(),
+            Some("/user.slice/user-1000.slice/user@1000.service/app.slice")
+        );
+        assert_eq!(
+            app_slice_from_cgroup(
+                "0::/user.slice/user-1000.slice/user@1000.service/tmux-spawn-1.scope\n"
+            )
+            .as_deref(),
+            Some("/user.slice/user-1000.slice/user@1000.service/app.slice")
+        );
+        assert_eq!(app_slice_from_cgroup("0::/init.scope\n"), None);
+    }
+
+    #[test]
+    fn category_defaults() {
+        let res = Resources::default();
+        let p = |c: &[&str]| policy_for(Some(&cats(c)), &res, "x");
+        assert_eq!(
+            p(&["Network", "InstantMessaging", "Chat"]),
+            AppPolicy::Messenger
+        );
+        assert_eq!(p(&["Office", "Email"]), AppPolicy::Messenger);
+        assert_eq!(p(&["AudioVideo", "Player"]), AppPolicy::Throttle);
+        assert_eq!(p(&["System", "TerminalEmulator"]), AppPolicy::Throttle);
+        assert_eq!(p(&["Network", "WebBrowser"]), AppPolicy::Throttle);
+        assert_eq!(p(&["Office", "Viewer"]), AppPolicy::Freeze);
+        assert_eq!(p(&[]), AppPolicy::Freeze);
+        assert_eq!(policy_for(None, &res, "unknown_3"), AppPolicy::Throttle);
+    }
+
+    #[test]
+    fn app_override_beats_categories() {
+        let mut res = Resources::default();
+        res.apps.insert("mpv".into(), AppPolicy::Ignore);
+        assert_eq!(
+            policy_for(Some(&cats(&["AudioVideo"])), &res, "mpv"),
+            AppPolicy::Ignore
+        );
+    }
+
+    #[test]
+    fn running_streams_resolve_to_client_pids() {
+        let dump = br#"[
+          {"id": 88, "type": "PipeWire:Interface:Client", "info": {"props": {"pipewire.sec.pid": 4210}}},
+          {"id": 95, "type": "PipeWire:Interface:Client", "info": {"props": {"pipewire.sec.pid": 2860}}},
+          {"id": 89, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Stream/Output/Audio", "client.id": 88}}},
+          {"id": 97, "type": "PipeWire:Interface:Node", "info": {"state": "idle", "props": {"media.class": "Stream/Output/Audio", "client.id": 95}}},
+          {"id": 40, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Audio/Sink", "client.id": 95}}}
+        ]"#;
+        assert_eq!(active_stream_pids(dump), HashSet::from([4210]));
+        assert!(active_stream_pids(b"garbage").is_empty());
+    }
 
     const V2: &str =
         "0::/user.slice/user-1000.slice/user@1000.service/app.slice/springchick-42-0-foot.scope\n";
@@ -249,6 +600,7 @@ mod tests {
             bg_memory_high: "512M".into(),
             bg_cpu_quota: "30%".into(),
             bg_allowed_cpus: "auto".into(),
+            ..Resources::default()
         };
         let fg = args("a.scope", Tier::Foreground, &res);
         assert!(fg.contains(&"CPUWeight=100".to_string()));

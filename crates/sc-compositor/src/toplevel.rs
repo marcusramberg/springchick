@@ -165,6 +165,16 @@ impl State {
         let Some(entry) = self.app_catalog.get(app_id).cloned() else {
             return;
         };
+        // A single-instance app D-Bus-activates the running one, which must
+        // be awake to answer.
+        let units: Vec<_> = self
+            .instances(app_id)
+            .into_iter()
+            .filter_map(|t| self.toplevel_unit(t))
+            .collect();
+        for unit in units {
+            self.freezer.thaw(&unit.unit, &self.resources);
+        }
         let token = self.mint_activation_token(app_id);
         let scope = crate::launcher::next_scope(app_id);
         if let Some(child) = spawn_app(&entry, &self.wayland_socket, &token, scope.as_deref()) {
@@ -376,6 +386,10 @@ impl State {
     /// gone). The slot stays until `toplevel_destroyed`: dropping the surface
     /// now would destroy the resource before `close` is flushed.
     pub(crate) fn detach_toplevel(&mut self, id: ToplevelId) {
+        // A frozen app can't act on the close.
+        if let Some(unit) = self.toplevel_unit(id) {
+            self.freezer.thaw(&unit.unit, &self.resources);
+        }
         if let Some(Some(tl)) = self.toplevels.get(id) {
             tl.surface.send_close();
         }
@@ -567,9 +581,17 @@ impl State {
             (usable.h as f64 / self.dpi).round() as i32,
         );
         let turned = self.view_rotation().swaps_axes();
-        for slot in self.toplevels.iter_mut().flatten() {
+        // Only the app in front (and the one just left, so its card stays
+        // right) needs the OSK zone. The rest are sized on raise
+        // (`resize_if_stale`), and a frozen app couldn't ack anyway.
+        let follow = [self.ui.foreground_toplevel(), self.last_app_toplevel];
+        for (tid, slot) in self.toplevels.iter_mut().enumerate() {
+            let Some(slot) = slot else { continue };
             // Sized for the turned view; the upright usable area is the wrong width.
             if turned && slot.rotation.swaps_axes() {
+                continue;
+            }
+            if !follow.contains(&Some(tid)) || self.frozen_toplevels.contains(&tid) {
                 continue;
             }
             slot.surface.with_pending_state(|state| {
