@@ -230,6 +230,7 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
     Ok(cmd)
 }
 
+use smithay::backend::input::InputTime;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
@@ -437,7 +438,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
                 state,
                 keycode,
                 smithay::backend::input::KeyState::Pressed,
-                0,
+                InputTime::now(),
             );
             state.active_key = Some(ActiveKey {
                 keycode,
@@ -459,7 +460,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             } else {
                 smithay::backend::input::KeyState::Released
             };
-            crate::keybinds::on_key_event(state, keycode, key_state, 0);
+            crate::keybinds::on_key_event(state, keycode, key_state, InputTime::now());
             let _ = reply.send("ok\n".into());
         }
         DebugCmd::Drag { app_id, at } => {
@@ -477,7 +478,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
         DebugCmd::Touch(x, y) => {
             // Held ~120ms so clients register a tap.
             let slot = smithay::backend::input::TouchSlot::from(Some(0));
-            let time = state.clock.now().as_millis();
+            let time = InputTime::now();
             crate::touch::down(state, x, y, slot, time);
             // No libinput frame event behind synthetic input.
             crate::touch::frame(state);
@@ -575,7 +576,7 @@ fn advance_touch(state: &mut State) {
         state.active_touch = Some(t);
         return;
     }
-    let time = state.clock.now().as_millis();
+    let time = InputTime::now();
     crate::touch::up(state, t.slot, time);
     crate::touch::frame(state);
     let _ = t.reply.send("ok\n".into());
@@ -591,7 +592,7 @@ fn advance_key(state: &mut State) {
         state,
         key.keycode,
         smithay::backend::input::KeyState::Released,
-        0,
+        InputTime::now(),
     );
     let _ = key.reply.send("ok\n".into());
 }

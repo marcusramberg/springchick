@@ -269,19 +269,19 @@ fn handle_winit_input(state: &mut State, event: InputEvent<winit::WinitInput>) {
 
     match event {
         InputEvent::Keyboard { event } => {
-            keybinds::on_key_event(state, event.key_code(), event.state(), event.time_msec());
+            keybinds::on_key_event(state, event.key_code(), event.state(), event.time());
         }
         InputEvent::PointerButton { event } => {
             let pressed = event.state() == ButtonState::Pressed;
-            touch::pointer_button(state, pressed, event.button_code(), event.time_msec());
+            touch::pointer_button(state, pressed, event.button_code(), event.time());
         }
         InputEvent::PointerMotionAbsolute { event } => {
             let x = event.x_transformed(state.panel_size.0) as f32;
             let y = event.y_transformed(state.panel_size.1) as f32;
-            touch::pointer_motion(state, x, y, event.time_msec());
+            touch::pointer_motion(state, x, y, event.time());
         }
         InputEvent::PointerAxis { event } => {
-            let time = event.time_msec();
+            let time = event.time();
             touch::pointer_axis_event::<winit::WinitInput, _>(state, &event, time);
         }
         _ => {}

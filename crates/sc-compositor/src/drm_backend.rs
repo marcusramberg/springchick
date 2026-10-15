@@ -665,19 +665,19 @@ impl App {
                 let x = event.x_transformed(w) as f32;
                 let y = event.y_transformed(h) as f32;
                 let slot = event.slot();
-                crate::touch::down(&mut self.state, x, y, slot, event.time_msec());
+                crate::touch::down(&mut self.state, x, y, slot, event.time());
             }
             InputEvent::TouchMotion { event } => {
                 use smithay::backend::input::{Event as _, TouchEvent as _};
                 let x = event.x_transformed(w) as f32;
                 let y = event.y_transformed(h) as f32;
                 let slot = event.slot();
-                crate::touch::motion(&mut self.state, x, y, slot, event.time_msec());
+                crate::touch::motion(&mut self.state, x, y, slot, event.time());
             }
             InputEvent::TouchUp { event } => {
                 use smithay::backend::input::{Event as _, TouchEvent as _};
                 let slot = event.slot();
-                crate::touch::up(&mut self.state, slot, event.time_msec());
+                crate::touch::up(&mut self.state, slot, event.time());
             }
             // The client's `wl_touch.frame` follows libinput's frame event.
             InputEvent::TouchFrame { .. } => {
@@ -692,7 +692,7 @@ impl App {
                     &mut self.state,
                     event.key_code(),
                     event.state(),
-                    event.time_msec(),
+                    event.time(),
                 );
             }
             InputEvent::PointerButton { event } => {
@@ -707,25 +707,25 @@ impl App {
                     &mut self.state,
                     pressed,
                     event.button_code(),
-                    event.time_msec(),
+                    event.time(),
                 );
             }
             InputEvent::PointerMotionAbsolute { event } => {
                 let x = event.x_transformed(w) as f32;
                 let y = event.y_transformed(h) as f32;
                 debug!(target: "springchick::debug", "pointer motion: abs x={x} y={y}");
-                crate::touch::pointer_motion(&mut self.state, x, y, event.time_msec());
+                crate::touch::pointer_motion(&mut self.state, x, y, event.time());
             }
             InputEvent::PointerMotion { event } => {
                 let d = event.delta();
                 debug!(target: "springchick::debug", "pointer motion: dx={} dy={}", d.x, d.y);
-                crate::touch::pointer_motion_relative(&mut self.state, d.x, d.y, event.time_msec());
+                crate::touch::pointer_motion_relative(&mut self.state, d.x, d.y, event.time());
             }
             InputEvent::PointerAxis { event } => {
                 crate::touch::pointer_axis_event::<LibinputInputBackend, _>(
                     &mut self.state,
                     &event,
-                    event.time_msec(),
+                    event.time(),
                 );
             }
             InputEvent::DeviceAdded { device }

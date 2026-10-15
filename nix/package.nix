@@ -84,7 +84,7 @@ rustPlatform.buildRustPackage {
     lockFile = ../Cargo.lock;
     # Upstream smithay git (xkbcommon 0.9 fixes wvkbd keymaps).
     outputHashes = {
-      "smithay-0.7.0" = "sha256-FkybYhnZ6h5EQIROWzNTGD7zk9fH3WwNzomWr3ebbzA=";
+      "smithay-0.7.0" = "sha256-s5PFS0TQd+5ueI9AKRFloa3e5jir1GtwH+dckZ6e7yA=";
     };
   };
 
