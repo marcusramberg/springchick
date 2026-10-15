@@ -2756,6 +2756,7 @@ dependencies = [
  "sc-layout",
  "sc-shell-model",
  "sd-notify",
+ "serde_json",
  "skia-safe",
  "smithay",
  "tempfile",

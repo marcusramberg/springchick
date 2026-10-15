@@ -88,6 +88,28 @@ bg_allowed_cpus = "auto"
 # start on a 6-8GB phone.
 bg_memory_high = "infinity"
 
+# Freeze background apps (cgroup.freeze: no CPU at all, state kept in RAM)
+# once they have been in the background this long. Thawed the moment they
+# come back, are asked to close, or are re-launched. An app with a running
+# PipeWire stream (audio, mic, camera) is not frozen; it is rechecked after
+# another delay.
+freeze = true
+freeze_delay_secs = 60
+
+# Messengers wake for `freeze_wake_for_secs` every `freeze_wake_secs` so
+# notifications arrive; a call that starts during the window keeps them awake.
+freeze_wake_secs = 30
+freeze_wake_for_secs = 3
+
+# Policy by catalog id (the .desktop file stem). Without an entry the
+# .desktop Categories decide: InstantMessaging/Chat/Email are "messenger";
+# AudioVideo/Audio/Video/Player/Music, TerminalEmulator and WebBrowser are
+# "throttle"; everything else is "freeze". Apps with no catalog entry are
+# only throttled. "ignore" turns off throttling too.
+[resources.apps]
+# "org.gnome.Maps" = "throttle"
+# "Waydroid" = "ignore"
+
 [keybinds]
 # Hold time (ms) before a "long" binding fires instead of "short".
 long_press_ms = 800

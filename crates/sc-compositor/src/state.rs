@@ -324,6 +324,13 @@ pub(crate) struct State {
     pub bg_allowed_cpus: Option<String>,
     /// The app in the foreground tier, for demotion on focus change.
     pub tiered: Option<resources::AppCgroup>,
+    pub freezer: resources::Freezer,
+    /// Toplevels whose scope is frozen, as of the last freezer tick.
+    pub frozen_toplevels: HashSet<usize>,
+    pub last_fg_toplevel: Option<usize>,
+    /// Most recent app to have been in front; follows usable-area changes
+    /// along with the foreground so its card is right when it reappears.
+    pub last_app_toplevel: Option<usize>,
     pub gamma: gamma_control::GammaControl,
     pub output_power: output_power::OutputPower,
     pub idle_notify: idle_notify::IdleNotify,
@@ -429,6 +436,7 @@ impl State {
         let vrr = config.vrr;
         let resources = config.resources.clone();
         let bg_allowed_cpus = resources::resolve_allowed_cpus(&resources.bg_allowed_cpus);
+        resources::thaw_stale_scopes();
         let config_rotation_settle_ms = config.rotation_settle_ms;
         let config_rotation_fade_ms = config.rotation_fade_ms;
 
@@ -626,6 +634,10 @@ impl State {
             resources,
             bg_allowed_cpus,
             tiered: None,
+            freezer: resources::Freezer::default(),
+            frozen_toplevels: HashSet::new(),
+            last_fg_toplevel: None,
+            last_app_toplevel: None,
             gamma,
             output_power,
             idle_notify,
@@ -755,7 +767,13 @@ impl State {
             return;
         }
         let want = match &self.ui {
-            UiState::App { toplevel, .. } => self.toplevel_unit(*toplevel),
+            UiState::App { toplevel, app_id } => {
+                if self.policy_of(app_id) == sc_config::AppPolicy::Ignore {
+                    None
+                } else {
+                    self.toplevel_unit(*toplevel)
+                }
+            }
             UiState::Home { .. } => None,
             _ => return,
         };
@@ -784,7 +802,96 @@ impl State {
         self.tiered = want;
     }
 
-    fn toplevel_unit(&self, tid: usize) -> Option<resources::AppCgroup> {
+    pub(crate) fn policy_of(&self, app_id: &str) -> sc_config::AppPolicy {
+        let cats = self
+            .app_catalog
+            .get(app_id)
+            .map(|e| e.categories.as_slice());
+        resources::policy_for(cats, &self.resources, app_id)
+    }
+
+    /// Everything mapped except the foreground app's scope is a freeze
+    /// candidate. Polled from the backend loop: page-flips stop on a static
+    /// screen, which is exactly when this matters.
+    pub(crate) fn tick_freeze(&mut self, now: std::time::Instant) {
+        let fg_tid = self.ui.foreground_toplevel();
+        if fg_tid != self.last_fg_toplevel {
+            self.last_fg_toplevel = fg_tid;
+            if let Some(tid) = fg_tid {
+                self.last_app_toplevel = Some(tid);
+                self.resize_if_stale(tid);
+            }
+            self.freezer.force();
+        }
+        if !self.freezer.due(now) {
+            return;
+        }
+        let fg = fg_tid.and_then(|tid| self.toplevel_unit(tid));
+        let mut bg = Vec::new();
+        let mut units = Vec::new();
+        if self.resources.enable && self.resources.freeze {
+            for (tid, tl) in self.toplevels.iter().enumerate() {
+                let Some(tl) = tl else { continue };
+                let policy = self.policy_of(&tl.app_id);
+                if !matches!(
+                    policy,
+                    sc_config::AppPolicy::Freeze | sc_config::AppPolicy::Messenger
+                ) {
+                    continue;
+                }
+                let Some(unit) = self.toplevel_unit(tid) else {
+                    continue;
+                };
+                if fg.as_ref() == Some(&unit) {
+                    continue;
+                }
+                // Caught up with the last configure it was sent (not the current
+                // usable area: background apps don't follow the OSK).
+                let sent = tl
+                    .surface
+                    .with_pending_state(|st| st.size.map(|sz| (sz.w, sz.h)));
+                let ready = sent.is_some() && sent == tl.logged_size;
+                units.push((tid, unit.unit.clone()));
+                match bg.iter_mut().find(|(u, _, _)| *u == unit) {
+                    // One scope, several windows: all must be current.
+                    Some((_, _, r)) => *r &= ready,
+                    None => bg.push((unit, policy, ready)),
+                }
+            }
+        }
+        self.freezer.tick(now, &self.resources, bg);
+        self.frozen_toplevels = units
+            .into_iter()
+            .filter(|(_, u)| self.freezer.is_frozen(u))
+            .map(|(tid, _)| tid)
+            .collect();
+    }
+
+    /// Background apps don't follow usable-area changes (`reconfigure_toplevels`),
+    /// so one coming to the front may have been sized for a stale area.
+    fn resize_if_stale(&mut self, tid: usize) {
+        let Some(tl) = self.toplevels.get(tid).and_then(|t| t.as_ref()) else {
+            return;
+        };
+        let usable = self.layers.settled_usable();
+        let target = (
+            (usable.w as f64 / self.dpi).round() as i32,
+            (usable.h as f64 / self.dpi).round() as i32,
+        );
+        let (sent, fullscreen) = tl.surface.with_pending_state(|st| {
+            (
+                st.size.map(|sz| (sz.w, sz.h)),
+                st.states.contains(xdg_toplevel::State::Fullscreen),
+            )
+        });
+        if fullscreen || sent == Some(target) {
+            return;
+        }
+        let surface = tl.surface.clone();
+        self.configure_maximized(&surface);
+    }
+
+    pub(crate) fn toplevel_unit(&self, tid: usize) -> Option<resources::AppCgroup> {
         let tl = self.toplevels.get(tid)?.as_ref()?;
         let client = tl.surface.wl_surface().client()?;
         let pid = client.get_credentials(&self.dh).ok()?.pid;
