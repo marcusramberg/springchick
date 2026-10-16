@@ -8,11 +8,10 @@
 
 use std::error::Error;
 
-use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, GbmBufferedSurface};
-use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::{Bind, Color32F, Frame, ImportDma, Renderer};
 use smithay::reexports::drm::control::{
     connector, crtc, Device as ControlDevice, Mode, ModeTypeFlags,
@@ -70,14 +69,13 @@ impl MirrorOutput {
     pub fn render_into(
         &mut self,
         renderer: &mut GlesRenderer,
-        src: &Dmabuf,
+        src: &GlesTexture,
         src_size: Size<i32, Physical>,
         rotation: crate::rotation::Rotation,
     ) -> Result<(), Box<dyn Error>> {
         let full = Rectangle::from_size(self.size);
         let dst = dst_rect(src_size, self.size, rotation);
 
-        let texture = renderer.import_dmabuf(src, None)?;
         let (mut buffer, _age) = self.surface.next_buffer()?;
         let mut fb = renderer.bind(&mut buffer)?;
         {
@@ -85,7 +83,7 @@ impl MirrorOutput {
             let mut frame = renderer.render(&mut fb, self.size, Transform::Normal)?;
             frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[full])?;
             frame.render_texture_from_to(
-                &texture,
+                src,
                 Rectangle::from_size((src_size.w as f64, src_size.h as f64).into()),
                 dst,
                 &[full],
