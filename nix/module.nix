@@ -32,6 +32,25 @@ in
       '';
     };
 
+    panelTransform = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "normal"
+          "90"
+          "180"
+          "270"
+        ]
+      );
+      default = null;
+      example = "270";
+      description = ''
+        Turn a sideways-mounted panel upright (wl_output transform). Null
+        follows the kernel's `panel orientation` connector property, which
+        already covers the Steam Deck; set this when that quirk is missing
+        or wrong.
+      '';
+    };
+
     waybar.enable = lib.mkEnableOption "waybar with springchick's example config (extras/waybar)";
   };
 
@@ -78,6 +97,9 @@ in
         SPRINGCHICK_BACKEND = "drm";
         XDG_CURRENT_DESKTOP = "springchick";
         XDG_SESSION_TYPE = "wayland";
+      }
+      // lib.optionalAttrs (cfg.panelTransform != null) {
+        SPRINGCHICK_PANEL_TRANSFORM = cfg.panelTransform;
       };
       serviceConfig = {
         Type = "notify";

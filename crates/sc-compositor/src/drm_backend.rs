@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::{Fourcc, Modifier};
 use smithay::backend::drm::{
@@ -19,9 +20,9 @@ use smithay::backend::input::{
     PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
-use smithay::backend::renderer::gles::{Capability, GlesRenderer, GlesTexProgram};
+use smithay::backend::renderer::gles::{Capability, GlesRenderer, GlesTexProgram, GlesTexture};
 use smithay::backend::renderer::sync::SyncPoint;
-use smithay::backend::renderer::{Bind, ImportDma, Renderer, RendererSuper};
+use smithay::backend::renderer::{Bind, Frame, ImportDma, Renderer, RendererSuper};
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev;
@@ -35,7 +36,7 @@ use smithay::reexports::input::{Device, DeviceCapability, Libinput, SendEventsMo
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 use smithay::reexports::wayland_server::{Display, ListeningSocket};
-use smithay::utils::{Clock, DeviceFd, Monotonic, Physical, Rectangle, Size, Transform};
+use smithay::utils::{Clock, DeviceFd, Monotonic, Physical, Point, Rectangle, Size, Transform};
 use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::image_copy_capture::CaptureFailureReason;
 use smithay::wayland::presentation::PresentationFeedbackCallback;
@@ -62,8 +63,10 @@ struct Drm {
     /// extra work.
     mirrors: Vec<crate::mirror::MirrorOutput>,
     rounded_tex_shader: GlesTexProgram,
+    /// What the shell lays out in: the mode turned upright by `panel`.
     output_size: Size<i32, Physical>,
     transform: Transform,
+    panel: Option<PanelTurn>,
     /// False while VT-switched away.
     active: bool,
     pending_flip: bool,
@@ -80,6 +83,15 @@ struct Drm {
     /// Declared last so it drops after the DrmDevice releases master; closing
     /// the seat first can wedge the handoff.
     _session: LibSeatSession,
+}
+
+/// A panel mounted sideways (Steam Deck) scans out portrait but is held
+/// landscape. The scene is drawn upright into `scene`, then turned onto the
+/// scanout buffer.
+struct PanelTurn {
+    transform: Transform,
+    mode_size: Size<i32, Physical>,
+    scene: GlesTexture,
 }
 
 /// Per `drm_mode.h`.
@@ -127,6 +139,43 @@ pub fn find_dpms_prop(
             .get_property(*handle)
             .is_ok_and(|info| info.name().to_str() == Ok("DPMS"))
     })
+}
+
+/// The connector's `panel orientation`, mapped as wlroots does.
+/// `SPRINGCHICK_PANEL_TRANSFORM` (`90`/`180`/`270`/`normal`) overrides it.
+fn panel_transform(device: &DrmDeviceFd, connector: connector::Handle) -> Transform {
+    if let Ok(v) = std::env::var("SPRINGCHICK_PANEL_TRANSFORM") {
+        return match v.as_str() {
+            "90" => Transform::_90,
+            "180" => Transform::_180,
+            "270" => Transform::_270,
+            _ => Transform::Normal,
+        };
+    }
+    let Ok(props) = device.get_properties(connector) else {
+        return Transform::Normal;
+    };
+    let (handles, values) = props.as_props_and_values();
+    let value = handles.iter().zip(values).find_map(|(h, v)| {
+        device
+            .get_property(*h)
+            .is_ok_and(|info| info.name().to_str() == Ok("panel orientation"))
+            .then_some(*v)
+    });
+    match value {
+        Some(1) => Transform::_180,
+        Some(2) => Transform::_90,
+        Some(3) => Transform::_270,
+        _ => Transform::Normal,
+    }
+}
+
+/// Panel coordinates to the upright view: the inverse of the scanout turn.
+fn panel_to_view(turn: Transform, mode: Size<i32, Physical>, x: f64, y: f64) -> (f32, f32) {
+    let p = turn
+        .invert()
+        .transform_point_in(Point::<f64, Physical>::from((x, y)), &mode.to_f64());
+    (p.x as f32, p.y as f32)
 }
 
 pub fn run_drm() {
@@ -253,8 +302,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let (connector_handle, crtc_handle, mode) = find_output(&drm_device)?;
     let (mw, mh) = mode.size();
-    let output_size: Size<i32, Physical> = (mw as i32, mh as i32).into();
+    let mode_size: Size<i32, Physical> = (mw as i32, mh as i32).into();
     info!(w = mw, h = mh, "selected mode");
+    let turn = panel_transform(&device_fd, connector_handle);
+    let output_size = turn.transform_size(mode_size);
+    let panel = if turn == Transform::Normal {
+        None
+    } else {
+        info!(?turn, "panel mounted sideways; turning the scene onto it");
+        let size = (output_size.w, output_size.h).into();
+        let scene = crate::capture::offscreen(&mut renderer, Fourcc::Xrgb8888, size)
+            .ok_or("panel turn: offscreen alloc failed")?;
+        Some(PanelTurn {
+            transform: turn,
+            mode_size,
+            scene,
+        })
+    };
 
     let drm_surface = drm_device.create_surface(crtc_handle, mode, &[connector_handle])?;
     let allocator = GbmAllocator::new(
@@ -352,6 +416,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // The GBM scanout buffer is Y-flipped vs winit's framebuffer, so apps
         // composite with Normal while Skia gets flip_y.
         transform: Transform::Normal,
+        panel,
         active: true,
         pending_flip: false,
         pending_presentation: Vec::new(),
@@ -659,19 +724,26 @@ impl App {
         let now = Instant::now();
         self.state.idle.activity(now);
         self.state.idle_notify.activity(now);
-        let (w, h) = (self.drm.output_size.w, self.drm.output_size.h);
+        let (turn, mode) = self
+            .drm
+            .panel
+            .as_ref()
+            .map_or((Transform::Normal, self.drm.output_size), |p| {
+                (p.transform, p.mode_size)
+            });
+        let (w, h) = (mode.w, mode.h);
         match event {
             InputEvent::TouchDown { event } => {
                 use smithay::backend::input::{Event as _, TouchEvent as _};
-                let x = event.x_transformed(w) as f32;
-                let y = event.y_transformed(h) as f32;
+                let (x, y) =
+                    panel_to_view(turn, mode, event.x_transformed(w), event.y_transformed(h));
                 let slot = event.slot();
                 crate::touch::down(&mut self.state, x, y, slot, event.time());
             }
             InputEvent::TouchMotion { event } => {
                 use smithay::backend::input::{Event as _, TouchEvent as _};
-                let x = event.x_transformed(w) as f32;
-                let y = event.y_transformed(h) as f32;
+                let (x, y) =
+                    panel_to_view(turn, mode, event.x_transformed(w), event.y_transformed(h));
                 let slot = event.slot();
                 crate::touch::motion(&mut self.state, x, y, slot, event.time());
             }
@@ -712,8 +784,8 @@ impl App {
                 );
             }
             InputEvent::PointerMotionAbsolute { event } => {
-                let x = event.x_transformed(w) as f32;
-                let y = event.y_transformed(h) as f32;
+                let (x, y) =
+                    panel_to_view(turn, mode, event.x_transformed(w), event.y_transformed(h));
                 debug!(target: "springchick::debug", "pointer motion: abs x={x} y={y}");
                 crate::touch::pointer_motion(&mut self.state, x, y, event.time());
             }
@@ -861,7 +933,10 @@ impl App {
         let prep = self.state.advance_frame(dt);
 
         // `draw_scene` narrows only when nothing but the app surface was drawn.
-        let report_partial = prep.scene.window_covers_screen() && prep.app_surface.is_some();
+        // ponytail: a turned panel always flips full damage.
+        let report_partial = self.drm.panel.is_none()
+            && prep.scene.window_covers_screen()
+            && prep.app_surface.is_some();
 
         let (mut dmabuf, _age) = match self.drm.gbm_surface.next_buffer() {
             Ok(b) => b,
@@ -870,20 +945,35 @@ impl App {
                 return;
             }
         };
-        let mut framebuffer = match self.drm.renderer.bind(&mut dmabuf) {
-            Ok(fb) => fb,
-            Err(e) => {
-                warn!("renderer.bind failed: {e}");
+        // GlesTexture is a refcounted handle; the clone frees `self` for the draw.
+        let scene = self.drm.panel.as_ref().map(|p| p.scene.clone());
+        let mut target = scene.clone();
+        let drawn = {
+            let framebuffer = match &mut target {
+                Some(tex) => self.drm.renderer.bind(tex),
+                None => self.drm.renderer.bind(&mut dmabuf),
+            };
+            let mut framebuffer = match framebuffer {
+                Ok(fb) => fb,
+                Err(e) => {
+                    warn!("renderer.bind failed: {e}");
+                    return;
+                }
+            };
+            self.draw_scene_into(&mut framebuffer, &prep, report_partial)
+        };
+        let Some((mut flip_damage, presented)) = drawn else {
+            return;
+        };
+        if let (Some(panel), Some(tex)) = (&self.drm.panel, &scene) {
+            let (turn, mode) = (panel.transform, panel.mode_size);
+            if let Err(e) = turn_onto_panel(&mut self.drm.renderer, &mut dmabuf, tex, turn, mode) {
+                warn!("panel turn failed: {e}");
+                crate::presentation::discard(presented);
                 return;
             }
-        };
-
-        let (flip_damage, presented) =
-            match self.draw_scene_into(&mut framebuffer, &prep, report_partial) {
-                Some(drawn) => drawn,
-                None => return,
-            };
-        drop(framebuffer);
+            flip_damage = vec![Rectangle::from_size(mode)];
+        }
 
         // An exportable fence goes to the atomic commit as IN_FENCE_FD so the
         // display controller waits; glFinish is the fallback and stalls the CPU.
@@ -920,7 +1010,7 @@ impl App {
         }
 
         // After the primary flip is queued, so a mirror can't delay the phone.
-        self.present_mirrors(&dmabuf);
+        self.present_mirrors(&dmabuf, scene.as_ref());
 
         self.state.record_and_log_frame(frame_start);
 
@@ -962,10 +1052,25 @@ impl App {
 
     /// All mirrors draw, fence once, then flip; one still waiting skips the
     /// frame. The app rotation is undone for the external panel.
-    fn present_mirrors(&mut self, src: &smithay::backend::allocator::dmabuf::Dmabuf) {
+    /// `scene` is the upright frame when the panel is turned.
+    fn present_mirrors(&mut self, scanout: &Dmabuf, scene: Option<&GlesTexture>) {
         if self.drm.mirrors.is_empty() {
             return;
         }
+        let imported;
+        let src = match scene {
+            Some(tex) => tex,
+            None => match self.drm.renderer.import_dmabuf(scanout, None) {
+                Ok(tex) => {
+                    imported = tex;
+                    &imported
+                }
+                Err(e) => {
+                    warn!("mirror import failed: {e}");
+                    return;
+                }
+            },
+        };
         let size = self.drm.output_size;
         let rotation = self.state.view_rotation();
         let mut drawn = false;
@@ -1175,6 +1280,31 @@ impl App {
     }
 }
 
+fn turn_onto_panel(
+    renderer: &mut GlesRenderer,
+    scanout: &mut Dmabuf,
+    scene: &GlesTexture,
+    turn: Transform,
+    mode: Size<i32, Physical>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let view = Rectangle::from_size(turn.transform_size(mode));
+    let mut fb = renderer.bind(scanout)?;
+    let mut frame = renderer.render(&mut fb, mode, turn)?;
+    frame.render_texture_from_to(
+        scene,
+        Rectangle::from_size((view.size.w as f64, view.size.h as f64).into()),
+        view,
+        &[view],
+        &[],
+        Transform::Normal,
+        1.0,
+        None,
+        &[],
+    )?;
+    let _sync = frame.finish()?;
+    Ok(())
+}
+
 fn group_formats(
     formats: smithay::backend::allocator::format::FormatSet,
 ) -> Vec<(Fourcc, Vec<Modifier>)> {
@@ -1266,5 +1396,23 @@ mod tick_tests {
     fn lit_panel_follows_the_animation() {
         assert!(active_tick(false, false, true));
         assert!(!active_tick(false, false, false));
+    }
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::*;
+
+    #[test]
+    fn touch_lands_where_the_turned_scene_drew() {
+        let mode: Size<i32, Physical> = (800, 1280).into();
+        for turn in [Transform::_90, Transform::_180, Transform::_270] {
+            let view = turn.transform_size(mode);
+            let p = Point::<i32, Physical>::from((100, 30));
+            // Where the renderer puts a view point on the panel.
+            let on_panel = turn.transform_point_in(p, &view);
+            let back = panel_to_view(turn, mode, on_panel.x as f64, on_panel.y as f64);
+            assert_eq!(back, (100.0, 30.0), "{turn:?}");
+        }
     }
 }
