@@ -449,6 +449,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         last_frame: Instant::now(),
         clock: Clock::new(),
         touch_devices: Vec::new(),
+        keyboards: Vec::new(),
     };
 
     // calloop sources
@@ -702,6 +703,27 @@ struct App {
     last_frame: Instant,
     clock: Clock<Monotonic>,
     touch_devices: Vec<Device>,
+    keyboards: Vec<Device>,
+}
+
+/// Bluetooth, or USB on a port firmware doesn't call `fixed` (the Deck's
+/// built-in controller is on a fixed one).
+fn is_external(device: &Device) -> bool {
+    let Ok(dev) = std::fs::canonicalize(format!("/sys/class/input/{}/device", device.sysname()))
+    else {
+        return false;
+    };
+    match std::fs::read_to_string(dev.join("id/bustype"))
+        .as_deref()
+        .map(str::trim)
+    {
+        Ok("0005") => true,
+        Ok("0003") => dev
+            .ancestors()
+            .find_map(|p| std::fs::read_to_string(p.join("removable")).ok())
+            .is_some_and(|r| r.trim() != "fixed"),
+        _ => false,
+    }
 }
 
 impl App {
@@ -732,6 +754,7 @@ impl App {
                 (p.transform, p.mode_size)
             });
         let (w, h) = (mode.w, mode.h);
+        self.track_keyboards(&event);
         match event {
             InputEvent::TouchDown { event } => {
                 use smithay::backend::input::{Event as _, TouchEvent as _};
@@ -816,6 +839,32 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Built-in controllers and virtual devices (Steam Deck: i8042, lizard
+    /// mode, uinput) claim full keymaps, so only external ones count on sight;
+    /// anything else once it types a letter.
+    fn track_keyboards(&mut self, event: &InputEvent<LibinputInputBackend>) {
+        const KEY_A: u32 = 30;
+        let is_letter = |evdev: u32| matches!(evdev, 16..=25 | 30..=38 | 44..=50);
+        match event {
+            InputEvent::DeviceAdded { device }
+                if is_external(device)
+                    && device.has_capability(DeviceCapability::Keyboard)
+                    && device.keyboard_has_key(KEY_A) == Ok(true) =>
+            {
+                self.keyboards.push(device.clone());
+            }
+            InputEvent::Keyboard { event }
+                if is_letter(event.key_code().raw() - 8)
+                    && !self.keyboards.contains(&event.device()) =>
+            {
+                self.keyboards.push(event.device());
+            }
+            InputEvent::DeviceRemoved { device } => self.keyboards.retain(|d| d != device),
+            _ => return,
+        }
+        self.state.set_hw_keyboard(!self.keyboards.is_empty());
     }
 
     /// DPMS off/on; without DPMS we can only stop flipping.
