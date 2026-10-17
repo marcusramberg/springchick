@@ -8,6 +8,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::SERIAL_COUNTER;
 use smithay::wayland::shell::xdg::dialog::ToplevelDialogHint;
+use smithay::wayland::text_input::TextInputSeat;
 use smithay::wayland::shell::xdg::{SurfaceCachedState, ToplevelSurface, XdgToplevelSurfaceData};
 use smithay::wayland::xdg_activation::{XdgActivationToken, XdgActivationTokenData};
 
@@ -613,6 +614,7 @@ impl State {
                 self.focused_surface = want.clone();
                 let keyboard = self.keyboard.clone();
                 keyboard.set_focus(self, want, SERIAL_COUNTER.next_serial());
+                self.hide_text_input_from_ime();
             }
             return;
         }
@@ -636,7 +638,32 @@ impl State {
         self.focused_surface = want.clone();
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, want, SERIAL_COUNTER.next_serial());
+        self.hide_text_input_from_ime();
         self.refresh_landscape_hint();
+    }
+
+    pub(crate) fn set_hw_keyboard(&mut self, present: bool) {
+        if self.hw_keyboard == present {
+            return;
+        }
+        info!(present, "physical keyboard");
+        self.hw_keyboard = present;
+        // Bounce focus: smithay's leave deactivates an IME already up, and the
+        // re-enter applies (or lifts) the suppression.
+        let keyboard = self.keyboard.clone();
+        keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+        self.focused_surface = None;
+        self.sync_keyboard_focus();
+    }
+
+    /// With no text-input focus, smithay discards the client's enable, so the
+    /// IME is never activated.
+    fn hide_text_input_from_ime(&self) {
+        if self.hw_keyboard {
+            let ti = self.seat.text_input();
+            ti.leave();
+            ti.set_focus(None);
+        }
     }
 
     /// A fullscreen app picked from the deck may be configured for the other
