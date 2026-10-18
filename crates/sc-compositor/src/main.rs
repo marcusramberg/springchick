@@ -11,6 +11,7 @@ mod catalog_watch;
 mod content_type;
 mod debug_input;
 mod drm_backend;
+mod foreign_toplevel;
 mod frame;
 mod frame_stats;
 mod gamma_control;

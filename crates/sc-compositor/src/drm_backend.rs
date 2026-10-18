@@ -652,6 +652,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         app.state.tick_freeze(Instant::now());
         app.state.drain_sensor();
         app.state.sync_keyboard_focus();
+        app.state.refresh_foreign_toplevels();
         // An idle inhibitor (video) keeps the screen on and holds off client idle.
         let inhibited = app.state.is_idle_inhibited();
         if inhibited {
