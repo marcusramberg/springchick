@@ -7,7 +7,7 @@
 #
 # Unknown keys are ignored; a bad entry is dropped with a warning and the rest
 # still applies. `springchick ipc reload` applies changes live, except `dpi`,
-# `uclamp_min` and `vrr` (restart needed) and `prefer_no_csd` (new windows only).
+# `uclamp_min`, `gpu_min_mhz` and `vrr` (restart needed) and `prefer_no_csd` (new windows only).
 [main]
 # Shell commands run via `sh -c` once the Wayland socket exists.
 # startup = [
@@ -52,6 +52,14 @@ prefer_no_csd = true
 #   "off"   no floor (same as 0)
 #   <n>     explicit, e.g. 450 on the FP5 (little cluster is 382)
 uclamp_min = "auto"
+
+# GPU devfreq min_freq while drawing, so a gesture's first frames don't wait
+# for the governor. Thermal limits still cap it. min_freq must be writable
+# (the NixOS module adds a udev rule for the video group).
+#   "auto"  the lowest clock at or above half the top one
+#   "off"   no floor (same as 0)
+#   <n>     MHz
+gpu_min_mhz = "auto"
 
 # Variable refresh rate, so a static screen lets the panel slow down. Only
 # applies when the log shows "connector supports VRR" at startup.

@@ -14,6 +14,7 @@ mod drm_backend;
 mod frame;
 mod frame_stats;
 mod gamma_control;
+mod gpu_boost;
 mod handlers;
 mod icon_menu;
 mod idle_inhibit;

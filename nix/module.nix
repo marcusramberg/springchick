@@ -159,6 +159,12 @@ in
       "${cfg.package}/share/springchick/config.example.toml";
 
     hardware.graphics.enable = lib.mkDefault true;
+
+    # `gpu_min_mhz`: the compositor (in `video`) raises the GPU clock floor while drawing.
+    services.udev.extraRules = ''
+      ACTION=="add|change", SUBSYSTEM=="devfreq", KERNEL=="*gpu*", RUN+="${pkgs.coreutils}/bin/chgrp video /sys%p/min_freq", RUN+="${pkgs.coreutils}/bin/chmod g+w /sys%p/min_freq"
+    '';
+
     security.polkit.enable = lib.mkDefault true;
 
     # Matched by XDG_CURRENT_DESKTOP=springchick. Mirrors niri.nix.
