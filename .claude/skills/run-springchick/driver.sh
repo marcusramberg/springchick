@@ -55,7 +55,9 @@ cmd_up() {
   echo "launching compositor (host WAYLAND_DISPLAY=${HOST_WL})…"
   ( cd "$root" && \
     WAYLAND_DISPLAY="$HOST_WL" SPRINGCHICK_DEBUG_SOCK="$SOCK" SPRINGCHICK_BACKEND=winit \
-    nix develop --command cargo run -p sc-compositor >"$LOG" 2>&1 ) &
+    nix develop --command cargo run -p sc-compositor >"$LOG" 2>&1 ) </dev/null >/dev/null 2>&1 &
+  # ^ The subshell must not keep the caller's stdout open: `up | tail` would
+  #   wait for the compositor to exit.
   echo $! > "${STATE}/launcher.pid"
   # Wait for the frame loop.
   for _ in $(seq 1 180); do
