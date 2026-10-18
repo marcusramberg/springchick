@@ -4,7 +4,8 @@ use skia_safe::{
     surfaces, AlphaType, Color, ColorType, Font, FontMgr, FontStyle, ImageInfo, Paint, RRect, Rect,
 };
 
-use crate::grid::{Clip, Key, Placed};
+use crate::emoji::Picker;
+use crate::grid::{Clip, Key, Page, Placed};
 use crate::osk::{Latch, Osk, POPUP_CELL};
 
 const BG: Color = Color::from_rgb(0x1c, 0x1c, 0x1e);
@@ -16,18 +17,77 @@ const INK: Color = Color::WHITE;
 const INK_ON_LATCHED: Color = Color::BLACK;
 const SELECTED: Color = Color::from_rgb(0x0a, 0x84, 0xff);
 
-pub fn font() -> Font {
+pub struct Fonts {
+    text: Font,
+    /// A colour emoji font; emoji show as boxes without one.
+    emoji: Option<Font>,
+    /// The same font for shaping: ZWJ sequences and flags are ligatures,
+    /// which `draw_str` leaves as separate glyphs.
+    shaper: Option<rustybuzz::Face<'static>>,
+}
+
+pub fn fonts() -> Fonts {
     let mgr = FontMgr::default();
     let typeface = mgr
         .match_family_style("sans-serif", FontStyle::normal())
         .or_else(|| mgr.legacy_make_typeface(None, FontStyle::normal()))
         .expect("a font");
-    let mut font = Font::from_typeface(typeface, 16.0);
-    font.set_subpixel(true);
-    font
+    let mut text = Font::from_typeface(typeface, 16.0);
+    text.set_subpixel(true);
+    // By name first: skia's bundled fontconfig rejects newer configs' `emoji`
+    // alias, and matching by character then finds DejaVu's few mono emoji.
+    let emoji = ["Noto Color Emoji", "Twemoji", "emoji"]
+        .iter()
+        .find_map(|f| mgr.match_family_style(f, FontStyle::normal()))
+        .or_else(|| mgr.match_family_style_character("", FontStyle::normal(), &[], '😀' as i32))
+        .map(|t| Font::from_typeface(t, 16.0));
+    let shaper = emoji.as_ref().and_then(|f| {
+        let (data, index) = f.typeface().to_font_data()?;
+        // Read once for the process; the face borrows it.
+        let data: &'static [u8] = Box::leak(data.into_boxed_slice());
+        rustybuzz::Face::from_slice(data, index as u32)
+    });
+    Fonts {
+        text,
+        emoji,
+        shaper,
+    }
+}
+
+/// `text` shaped as one cluster, centred on `center`.
+fn draw_shaped(
+    canvas: &skia_safe::Canvas,
+    text: &str,
+    center: (f32, f32),
+    font: &Font,
+    face: &rustybuzz::Face,
+    paint: &Paint,
+) {
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(text);
+    let shaped = rustybuzz::shape(face, &[], buffer);
+    let scale = font.size() / face.units_per_em() as f32;
+    let (mut x, mut glyphs, mut positions) = (0.0, Vec::new(), Vec::new());
+    for (info, p) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
+        glyphs.push(info.glyph_id as u16);
+        positions.push(skia_safe::Point::new(
+            x + p.x_offset as f32 * scale,
+            -p.y_offset as f32 * scale,
+        ));
+        x += p.x_advance as f32 * scale;
+    }
+    let cap = font.metrics().1.cap_height;
+    canvas.draw_glyphs_at(
+        &glyphs,
+        positions.as_slice(),
+        (center.0 - x / 2.0, center.1 + cap / 2.0),
+        font,
+        paint,
+    );
 }
 
 /// `pixels`: ARGB8888 (little-endian BGRA), `w`×`h` buffer px at `scale`.
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     pixels: &mut [u8],
     w: i32,
@@ -35,7 +95,8 @@ pub fn draw(
     scale: f32,
     grid: &[Placed],
     osk: &Osk,
-    font: &mut Font,
+    picker: Option<&Picker>,
+    fonts: &mut Fonts,
 ) {
     let info = ImageInfo::new((w, h), ColorType::BGRA8888, AlphaType::Premul, None);
     let Some(mut surface) = surfaces::wrap_pixels(&info, pixels, None, None) else {
@@ -71,20 +132,34 @@ pub fn draw(
             p.rect.w - 6.0,
             p.rect.h - 8.0,
         );
-        paint.set_color(fill);
-        canvas.draw_rrect(RRect::new_rect_xy(r, 6.0, 6.0), &paint);
+        let is_emoji = matches!(p.key, Key::Category(_));
+        // Categories sit on the background, as on iOS, unless current.
+        let current = picker.map(|pk| pk.current());
+        let shown = match p.key {
+            Key::Category(i) => current == Some(i as usize) || fill == PRESSED,
+            _ => true,
+        };
+        if shown {
+            paint.set_color(fill);
+            canvas.draw_rrect(RRect::new_rect_xy(r, 6.0, 6.0), &paint);
+        }
 
-        if let Key::Clip(clip) = p.key {
-            clip_icon(canvas, clip, r, fill);
+        if icon(canvas, p.key, r, fill) {
             continue;
         }
-        let single = p.label.chars().count() == 1;
+        let font = match (&mut fonts.emoji, is_emoji) {
+            (Some(emoji), true) => emoji,
+            _ => &mut fonts.text,
+        };
+        let single = is_emoji || p.label.chars().count() == 1;
         font.set_size(r.height() * if single { 0.5 } else { 0.32 });
         paint.set_color(if latch.on() { INK_ON_LATCHED } else { INK });
-        let (width, _) = font.measure_str(&p.label, Some(&paint));
+        // A variation selector (❤️) measures as width but draws nothing.
+        let label = p.label.trim_end_matches('\u{fe0f}');
+        let (width, _) = font.measure_str(label, Some(&paint));
         let cap = font.metrics().1.cap_height;
         canvas.draw_str(
-            &p.label,
+            label,
             (r.center_x() - width / 2.0, r.center_y() + cap / 2.0),
             font,
             &paint,
@@ -95,6 +170,30 @@ pub fn draw(
         }
     }
 
+    if let (Some(picker), Some(emoji)) = (picker, &mut fonts.emoji) {
+        let a = picker.area();
+        canvas.save();
+        canvas.clip_rect(Rect::from_xywh(a.x, a.y, a.w, a.h), None, true);
+        for (cell, e) in picker.visible() {
+            emoji.set_size(cell.h * 0.62);
+            if let Some(face) = &fonts.shaper {
+                let center = (cell.center_x(), cell.center_y());
+                draw_shaped(canvas, e, center, emoji, face, &paint);
+                continue;
+            }
+            let e = e.trim_end_matches('\u{fe0f}');
+            let (width, _) = emoji.measure_str(e, Some(&paint));
+            let cap = emoji.metrics().1.cap_height;
+            canvas.draw_str(
+                e,
+                (cell.center_x() - width / 2.0, cell.center_y() + cap / 2.0),
+                emoji,
+                &paint,
+            );
+        }
+        canvas.restore();
+    }
+
     let Some(popup) = &osk.popup else { return };
     let Some(key) = grid.iter().find(|p| p.key == popup.key) else {
         return;
@@ -102,8 +201,15 @@ pub fn draw(
     let h = key.rect.h - 8.0;
     let y = (key.rect.y - h - 4.0).max(0.0);
     let panel = Rect::from_xywh(popup.x0, y, popup.options.len() as f32 * POPUP_CELL, h);
-    paint.set_color(LATCHED);
+    // Key-coloured like the keys under it; a shadow lifts it off them.
+    paint.set_color(Color::from_argb(140, 0, 0, 0));
+    canvas.draw_rrect(
+        RRect::new_rect_xy(panel.with_offset((0.0, 2.0)), 8.0, 8.0),
+        &paint,
+    );
+    paint.set_color(CHAR);
     canvas.draw_rrect(RRect::new_rect_xy(panel, 8.0, 8.0), &paint);
+    let font = &mut fonts.text;
     font.set_size(h * 0.5);
     let cap = font.metrics().1.cap_height;
     for (i, option) in popup.options.iter().enumerate() {
@@ -115,11 +221,7 @@ pub fn draw(
                 &paint,
             );
         }
-        paint.set_color(if i == popup.selected {
-            INK
-        } else {
-            INK_ON_LATCHED
-        });
+        paint.set_color(INK);
         let (width, _) = font.measure_str(option, Some(&paint));
         canvas.draw_str(
             option,
@@ -131,7 +233,8 @@ pub fn draw(
 }
 
 /// Scissors, two sheets, a clipboard: narrower than the words.
-fn clip_icon(canvas: &skia_safe::Canvas, clip: Clip, r: Rect, fill: Color) {
+/// Draws `key` as an icon, if it has one.
+fn icon(canvas: &skia_safe::Canvas, key: Key, r: Rect, fill: Color) -> bool {
     let s = r.width().min(r.height()) * 0.5;
     let (cx, cy) = (r.center_x(), r.center_y());
     let mut stroke = Paint::default();
@@ -140,8 +243,32 @@ fn clip_icon(canvas: &skia_safe::Canvas, clip: Clip, r: Rect, fill: Color) {
     stroke.set_style(skia_safe::paint::Style::Stroke);
     stroke.set_stroke_width((s * 0.09).max(1.2));
     stroke.set_stroke_cap(skia_safe::paint::Cap::Round);
-    match clip {
-        Clip::Cut => {
+    match key {
+        // A plain smiley: the colour one shouts among grey keys.
+        Key::Page(Page::Emoji) => {
+            canvas.draw_circle((cx, cy), s * 0.45, &stroke);
+            let mut dot = stroke.clone();
+            dot.set_style(skia_safe::paint::Style::Fill);
+            for side in [-1.0, 1.0] {
+                canvas.draw_circle((cx + side * s * 0.16, cy - s * 0.1), s * 0.06, &dot);
+            }
+            let smile = Rect::from_xywh(cx - s * 0.24, cy - s * 0.12, s * 0.48, s * 0.4);
+            canvas.draw_arc(smile, 20.0, 140.0, false, &stroke);
+        }
+        // A move cross: one arrow per direction the swipe steps.
+        Key::Cursor => {
+            let a = s * 0.5;
+            let head = s * 0.16;
+            canvas.draw_line((cx - a, cy), (cx + a, cy), &stroke);
+            canvas.draw_line((cx, cy - a), (cx, cy + a), &stroke);
+            for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                let tip = (cx + dx * a, cy + dy * a);
+                let back = (tip.0 - dx * head, tip.1 - dy * head);
+                canvas.draw_line(tip, (back.0 - dy * head, back.1 - dx * head), &stroke);
+                canvas.draw_line(tip, (back.0 + dy * head, back.1 + dx * head), &stroke);
+            }
+        }
+        Key::Clip(Clip::Cut) => {
             for side in [-1.0, 1.0] {
                 let ring = (cx + side * s * 0.24, cy + s * 0.3);
                 canvas.draw_circle(ring, s * 0.15, &stroke);
@@ -152,7 +279,7 @@ fn clip_icon(canvas: &skia_safe::Canvas, clip: Clip, r: Rect, fill: Color) {
                 );
             }
         }
-        Clip::Copy => {
+        Key::Clip(Clip::Copy) => {
             let back = Rect::from_xywh(cx - s * 0.42, cy - s * 0.48, s * 0.6, s * 0.72);
             let front = back.with_offset((s * 0.24, s * 0.24));
             canvas.draw_rrect(RRect::new_rect_xy(back, s * 0.1, s * 0.1), &stroke);
@@ -162,7 +289,7 @@ fn clip_icon(canvas: &skia_safe::Canvas, clip: Clip, r: Rect, fill: Color) {
             canvas.draw_rrect(RRect::new_rect_xy(front, s * 0.1, s * 0.1), &cover);
             canvas.draw_rrect(RRect::new_rect_xy(front, s * 0.1, s * 0.1), &stroke);
         }
-        Clip::Paste => {
+        Key::Clip(Clip::Paste) => {
             let board = Rect::from_xywh(cx - s * 0.36, cy - s * 0.4, s * 0.72, s * 0.9);
             canvas.draw_rrect(RRect::new_rect_xy(board, s * 0.1, s * 0.1), &stroke);
             let mut tab = Paint::default();
@@ -171,5 +298,7 @@ fn clip_icon(canvas: &skia_safe::Canvas, clip: Clip, r: Rect, fill: Color) {
             let clip = Rect::from_xywh(cx - s * 0.2, cy - s * 0.52, s * 0.4, s * 0.2);
             canvas.draw_rrect(RRect::new_rect_xy(clip, s * 0.06, s * 0.06), &tab);
         }
+        _ => return false,
     }
+    true
 }
