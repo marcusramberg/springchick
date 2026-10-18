@@ -9,14 +9,9 @@ pub const SWITCHER_REVEAL_PROGRESS: f32 = 0.12;
 pub const HOME_MIN_PROGRESS: f32 = 0.35;
 /// Upward velocity (screens/s, negative = up) above which a release goes home
 /// regardless of distance.
-///
-/// Compared against the low-passed velocity, which under-reports short flicks
-/// badly (a real 1.7/s flick reads ~1.0), so this sits near the reported figure.
 pub const HOME_FLICK_VELOCITY: f32 = -0.9;
 pub const QUICK_SWITCH_PROGRESS: f32 = 0.15;
 pub const QUICK_SWITCH_VELOCITY: f32 = 1.5;
-/// Velocity low-pass factor (0..1, higher = snappier/noisier).
-pub const VELOCITY_SMOOTHING: f32 = 0.6;
 
 // Home screen / switcher deck
 
