@@ -10,6 +10,8 @@ pub mod code {
     pub const ENTER: u16 = 28;
     pub const LEFTCTRL: u16 = 29;
     pub const LEFTSHIFT: u16 = 42;
+    pub const X: u16 = 45;
+    pub const C: u16 = 46;
     pub const V: u16 = 47;
     pub const LEFTALT: u16 = 56;
     pub const SPACE: u16 = 57;
@@ -48,19 +50,29 @@ impl Mod {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clip {
+    Cut,
+    Copy,
+    Paste,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
-    /// A character key; `shift` types it shifted (the symbols page).
+    /// A character key; `shift` types it shifted.
     Char {
         code: u16,
         shift: bool,
     },
+    /// A character the keymap can't type, committed as text.
+    Text(char),
     /// Space, return, backspace, tab, arrows: modifiers apply, shift doesn't.
     Plain(u16),
     Shift,
     Page(Page),
     NextLayout,
     Mod(Mod),
-    Paste,
+    /// The app's own shortcut: Ctrl+X/C/V, Ctrl+Shift in terminals.
+    Clip(Clip),
     /// Swiped like a trackpad: arrow presses in the direction of travel.
     Cursor,
 }
@@ -85,6 +97,8 @@ pub struct Placed {
 pub struct Labels<'a> {
     /// `(evdev code, shifted)` → text, `None` for keys that type nothing.
     pub key: &'a dyn Fn(u16, bool) -> Option<String>,
+    /// The key and shift state that type a character, if any.
+    pub find: &'a dyn Fn(char) -> Option<(u16, bool)>,
     /// Shown on the space bar.
     pub layout_name: &'a str,
     pub layouts: usize,
@@ -92,9 +106,9 @@ pub struct Labels<'a> {
 
 /// Letter rows: these ranges, keeping keys whose label is a letter.
 const LETTER_ROWS: [std::ops::RangeInclusive<u16>; 3] = [16..=27, 30..=40, 44..=53];
-const NUMBER_ROW: std::ops::RangeInclusive<u16> = 2..=11;
-const PUNCT_ROW: [u16; 9] = [12, 13, 26, 27, 39, 40, 41, 43, 86];
-const PUNCT_ROW_3: [u16; 3] = [51, 52, 53];
+/// As iOS lays them out; each types through the keymap where it can.
+const NUMBERS: [&str; 3] = ["1234567890", "-/:;()$&@\"", ".,?!'"];
+const SYMBOLS: [&str; 3] = ["[]{}#%^*+=", "_\\|~<>€$£•", ".,?!'"];
 
 /// Bar height as a fraction of a key row.
 const BAR_ROW: f32 = 0.8;
@@ -116,6 +130,7 @@ pub fn layout(
     let label = |key: Key| -> String {
         match key {
             Key::Char { code, shift } => (labels.key)(code, shift).unwrap_or_default(),
+            Key::Text(c) => c.to_string(),
             Key::Plain(code::SPACE) => labels.layout_name.to_string(),
             Key::Plain(code::ENTER) => "return".into(),
             Key::Plain(code::BACKSPACE) => "⌫".into(),
@@ -130,40 +145,31 @@ pub fn layout(
             Key::Mod(Mod::Ctrl) => "ctrl".into(),
             Key::Mod(Mod::Alt) => "alt".into(),
             Key::Mod(Mod::Super) => "super".into(),
-            Key::Paste => "paste".into(),
+            Key::Clip(Clip::Cut) => "cut".into(),
+            Key::Clip(Clip::Copy) => "copy".into(),
+            Key::Clip(Clip::Paste) => "paste".into(),
             Key::Cursor => "← ↑↓ →".into(),
         }
     };
-    let chars = |codes: &mut dyn Iterator<Item = u16>, shift: bool, letters: bool| -> Vec<Key> {
+    let letters = |codes: std::ops::RangeInclusive<u16>| -> Vec<Key> {
         codes
-            .filter(|&c| {
-                let l = (labels.key)(c, shift).unwrap_or_default();
-                if letters {
-                    is_letter(&l)
-                } else {
-                    !l.is_empty()
-                }
+            .filter(|&c| is_letter(&(labels.key)(c, false).unwrap_or_default()))
+            .map(|code| Key::Char { code, shift: false })
+            .collect()
+    };
+    let symbols = |row: &str| -> Vec<Key> {
+        row.chars()
+            .map(|c| match (labels.find)(c) {
+                Some((code, shift)) => Key::Char { code, shift },
+                None => Key::Text(c),
             })
-            .map(|code| Key::Char { code, shift })
             .collect()
     };
 
     let (rows, row3_left): ([Vec<Key>; 3], Key) = match page {
-        Page::Letters => (
-            LETTER_ROWS.map(|r| chars(&mut r.clone(), false, true)),
-            Key::Shift,
-        ),
-        Page::Numbers | Page::Symbols => {
-            let shift = page == Page::Symbols;
-            (
-                [
-                    chars(&mut NUMBER_ROW.clone(), shift, false),
-                    chars(&mut PUNCT_ROW.into_iter(), shift, false),
-                    chars(&mut PUNCT_ROW_3.into_iter(), shift, false),
-                ],
-                Key::Page(if shift { Page::Numbers } else { Page::Symbols }),
-            )
-        }
+        Page::Letters => (LETTER_ROWS.map(letters), Key::Shift),
+        Page::Numbers => (NUMBERS.map(symbols), Key::Page(Page::Symbols)),
+        Page::Symbols => (SYMBOLS.map(symbols), Key::Page(Page::Numbers)),
     };
 
     let avail = width - 2.0 * PAD;
@@ -192,9 +198,17 @@ pub fn layout(
             Key::Mod(Mod::Alt),
             Key::Mod(Mod::Super),
             Key::Cursor,
-            Key::Paste,
+            Key::Clip(Clip::Copy),
+            Key::Clip(Clip::Paste),
         ],
-        Bar::Default => &[Key::Plain(code::TAB), Key::Cursor, Key::Paste],
+        Bar::Default => &[
+            Key::Plain(code::TAB),
+            Key::Mod(Mod::Ctrl),
+            Key::Cursor,
+            Key::Clip(Clip::Cut),
+            Key::Clip(Clip::Copy),
+            Key::Clip(Clip::Paste),
+        ],
     };
     // The cursor key is a swipe target: twice the width.
     let weight = |k: Key| if k == Key::Cursor { 2.0 } else { 1.0 };
@@ -207,7 +221,13 @@ pub fn layout(
 
     let mut y = bar_h;
     for (i, row) in rows.iter().enumerate() {
-        let x0 = PAD + (avail - row.len() as f32 * unit) / 2.0;
+        // iOS stretches the few punctuation keys between #+= and backspace.
+        let w = if i == 2 && page != Page::Letters {
+            (avail - unit * 3.5) / row.len() as f32
+        } else {
+            unit
+        };
+        let x0 = PAD + (avail - row.len() as f32 * w) / 2.0;
         if i == 2 {
             put(row3_left, PAD, y, unit * 1.5, row_h);
             put(
@@ -219,7 +239,7 @@ pub fn layout(
             );
         }
         for (j, &k) in row.iter().enumerate() {
-            put(k, x0 + j as f32 * unit, y, unit, row_h);
+            put(k, x0 + j as f32 * w, y, w, row_h);
         }
         y += row_h;
     }
@@ -289,8 +309,14 @@ mod tests {
 
     fn grid(page: Page, de: bool, layouts: usize) -> Vec<Placed> {
         let k = keymap(de);
+        let find = |c: char| {
+            (1..60u16)
+                .flat_map(|code| [(code, false), (code, true)])
+                .find(|&(code, shift)| k(code, shift) == Some(c.to_string()))
+        };
         let labels = Labels {
             key: &k,
+            find: &find,
             layout_name: "English (US)",
             layouts,
         };
@@ -328,17 +354,30 @@ mod tests {
     }
 
     #[test]
-    fn symbols_are_the_shifted_number_keys() {
-        let g = grid(Page::Symbols, false, 1);
+    fn numbers_page_is_ios_with_keymap_keys_where_possible() {
+        let g = grid(Page::Numbers, false, 1);
+        let row_h = 260.0 / 4.8;
+        let labels = |y: f32| -> String {
+            g.iter()
+                .filter(|p| {
+                    matches!(p.key, Key::Char { .. } | Key::Text(_))
+                        && p.rect.y <= y
+                        && y < p.rect.y + p.rect.h
+                })
+                .map(|p| p.label.as_str())
+                .collect()
+        };
+        assert_eq!(labels(0.8 * row_h + 0.5 * row_h), "1234567890");
+        assert_eq!(labels(0.8 * row_h + 1.5 * row_h), "-/:;()$&@\"");
+        assert_eq!(labels(0.8 * row_h + 2.5 * row_h), ".,?!'");
+        // The test keymap types '-' but has no shifted symbols, so no '('.
         assert!(g.iter().any(|p| p.key
             == Key::Char {
-                code: 2,
-                shift: true
+                code: 12,
+                shift: false
             }));
-        assert!(!g
-            .iter()
-            .any(|p| matches!(p.key, Key::Char { shift: false, .. })));
-        assert!(g.iter().any(|p| p.key == Key::Page(Page::Numbers)));
+        assert!(g.iter().any(|p| p.key == Key::Text('(')));
+        assert!(g.iter().any(|p| p.key == Key::Page(Page::Symbols)));
     }
 
     #[test]
