@@ -40,7 +40,6 @@ impl FingerDrag {
     pub fn update(&mut self, p: Pt) {
         let now = std::time::Instant::now();
         let dt = now.duration_since(self.last_t).as_secs_f32();
-        self.tracker.decay(dt);
         self.tracker.update(p, dt);
         self.last_t = now;
     }
@@ -77,6 +76,8 @@ impl State {
 }
 
 #[derive(Clone, Copy, Debug)]
+// One per drag; boxing would cost `Copy`.
+#[allow(clippy::large_enum_variant)]
 pub enum SwitcherDrag {
     /// A dominant vertical drag rides `toplevel` on the close axis; otherwise
     /// it scrolls. `vertical` tracks the y velocity for spotting a close flick.
