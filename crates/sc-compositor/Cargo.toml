@@ -16,6 +16,7 @@ sc-shell-model = { path = "../sc-shell-model" }
 sc-catalog = { path = "../sc-catalog" }
 sc-layout = { path = "../sc-layout" }
 sc-panel = { path = "../sc-panel" }
+sc-fonts = { path = "../sc-fonts" }
 sc-icons = { path = "../sc-icons" }
 sc-keys = { path = "../sc-keys" }
 png = "0.17"

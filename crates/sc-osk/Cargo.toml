@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 sc-layout = { path = "../sc-layout" }
+sc-fonts = { path = "../sc-fonts" }
 libc = "0.2"
 rustybuzz = "0.18"
 rustix = { version = "1", features = ["event"] }

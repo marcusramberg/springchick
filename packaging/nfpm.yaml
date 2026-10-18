@@ -76,6 +76,9 @@ contents:
     dst: /usr/share/wayland-sessions/springchick.desktop
   - src: config.example.toml
     dst: /usr/share/springchick/config.example.toml
+  # Inter is built into the binaries; the OFL travels with it.
+  - src: crates/sc-fonts/Inter-LICENSE.txt
+    dst: /usr/share/licenses/springchick/Inter-LICENSE.txt
   - src: packaging/files/springchick-portals.conf
     dst: /usr/share/xdg-desktop-portal/springchick-portals.conf
 

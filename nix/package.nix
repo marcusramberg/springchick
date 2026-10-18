@@ -148,6 +148,10 @@ rustPlatform.buildRustPackage {
 
     install -Dm444 ${../config.example.toml} \
       $out/share/springchick/config.example.toml
+
+    # Inter is built into the binaries; the OFL travels with it.
+    install -Dm444 ${../crates/sc-fonts/Inter-LICENSE.txt} \
+      $out/share/licenses/springchick/Inter-LICENSE.txt
   '';
 
   # Must match the desktop file's DesktopNames.

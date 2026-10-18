@@ -29,7 +29,8 @@ pub struct Fonts {
 pub fn fonts() -> Fonts {
     let mgr = FontMgr::default();
     let typeface = mgr
-        .match_family_style("sans-serif", FontStyle::normal())
+        .new_from_data(sc_fonts::INTER, None)
+        .or_else(|| mgr.match_family_style("sans-serif", FontStyle::normal()))
         .or_else(|| mgr.legacy_make_typeface(None, FontStyle::normal()))
         .expect("a font");
     let mut text = Font::from_typeface(typeface, 16.0);
