@@ -1,0 +1,3 @@
+# The on-screen keyboard types through uinput; uaccess hands /dev/uinput to the
+# seat's active session. Before 73-seat-late.rules, which applies the ACL.
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

@@ -845,7 +845,7 @@ impl App {
 
     /// Built-in controllers and virtual devices (Steam Deck: i8042, lizard
     /// mode, uinput) claim full keymaps, so only external ones count on sight;
-    /// anything else once it types a letter.
+    /// anything else once it types a letter, except our own on-screen keyboard.
     fn track_keyboards(&mut self, event: &InputEvent<LibinputInputBackend>) {
         const KEY_A: u32 = 30;
         let is_letter = |evdev: u32| matches!(evdev, 16..=25 | 30..=38 | 44..=50);
@@ -859,6 +859,7 @@ impl App {
             }
             InputEvent::Keyboard { event }
                 if is_letter(event.key_code().raw() - 8)
+                    && event.device().name() != sc_config::OSK_DEVICE_NAME
                     && !self.keyboards.contains(&event.device()) =>
             {
                 self.keyboards.push(event.device());
