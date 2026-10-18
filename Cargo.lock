@@ -2802,6 +2802,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sc-osk"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "sc-layout",
+ "skia-safe",
+ "smithay-client-toolkit 0.21.1",
+ "wayland-client",
+ "wayland-protocols-misc",
+ "wayland-protocols-wlr",
+ "xkbcommon",
+]
+
+[[package]]
 name = "sc-panel"
 version = "0.1.0"
 dependencies = [

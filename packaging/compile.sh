@@ -60,10 +60,10 @@ case "$DISTRO" in
     ;;
 esac
 
-cargo build --release --locked -p sc-compositor -p sc-search
+cargo build --release --locked -p sc-compositor -p sc-search -p sc-osk
 
 mkdir -p "$OUT"
 bin=${CARGO_TARGET_DIR:-target}/release
-install -m755 "$bin/springchick" "$bin/sc-search" "$OUT/"
+install -m755 "$bin/springchick" "$bin/sc-search" "$bin/sc-osk" "$OUT/"
 sed 's|@springchick@|/usr/bin/springchick|' nix/springchick-session > "$OUT/springchick-session"
 chmod 755 "$OUT/springchick-session"

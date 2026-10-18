@@ -40,11 +40,11 @@ Build the check matching `builtins.currentSystem`. Cross-building runs the relea
 
 Use the `run-springchick` skill (`.claude/skills/run-springchick/SKILL.md`). It covers the nested-winit driver (`driver.sh`: build/up/client/send/shot/down), the interactive VM driver, and a long list of gotchas. Never `pkill foot`: the user's own terminal is a foot window, so kill by recorded PID only.
 
-A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`, `down/move/up`, `settle [MS]`, `launch APP_ID [new]`, `action NAME`, `reload`, `layers`, `quit`). Works nested, in the VM, and on-device.
+A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`, `down/move/up`, `settle [MS]`, `launch APP_ID [new]`, `action NAME`, `reload`, `layers`, `layout [N]`, `quit`). Works nested, in the VM, and on-device.
 
 `springchick ipc layers` dumps every layer surface and layer-rooted popup being composited (namespace, layer, logical geometry, the physical rect, buffer size, pending-map/slide state, anchor and exclusive zone), plus the usable area and regrow-guard state. Run it first when the screen shows something no client admits to, e.g. two on-screen keyboards from one wvkbd process.
 
-`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `save_screenshots`, `prefer_no_csd` (next window to negotiate decorations), `natural_scroll` (next touchpad added), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn). `dpi`, `uclamp_min`, `gpu_min_mhz` and `vrr` are ignored on reload and need a restart.
+`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `save_screenshots`, `prefer_no_csd` (next window to negotiate decorations), `natural_scroll` (next touchpad added), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn), `[xkb]` (the seat keymap). `dpi`, `uclamp_min`, `gpu_min_mhz` and `vrr` are ignored on reload and need a restart.
 
 `reload` also rescans the app catalog (`.desktop` files + icons): newly installed apps land on Home, uninstalled ones leave pages/dock/hidden and lose their frecency stats, and the renderer's uploaded icon textures are dropped so re-themed icons repaint. The catalog rescans itself too: `catalog_watch.rs` inotify-watches every XDG `applications/` dir, so a package-manager install/remove lands without an explicit reload. The watch has a 750 ms debounce, and the rescan runs on the compositor thread at the next event-loop wake, so a blanked screen costs nothing.
 
@@ -65,11 +65,12 @@ crates/
   sc-keys/         Short/long key-press timing rules (types live in sc-config)
   sc-layout/       Pure geometry: (size, page, model) → icon rects, dock, dots, bar zone, icon-menu panel; + hit-testing
   sc-panel/        Display shape (corner radius, camera cutouts) from bundled gmobile data, by device-tree compatible
+  sc-osk/          Standalone on-screen keyboard: layer-shell client typing through uinput, labels from the seat keymap, per-app bar
   sc-search/       Standalone pull-down search app (eframe/winit client, not part of the compositor)
   sc-shell-model/  Grid/dock data model (4x6 pages, dock) + persist (state.toml)
 ```
 
-Every crate except `sc-compositor` and `sc-search` is `#![forbid(unsafe_code)]`.
+Every crate except `sc-compositor`, `sc-search` and `sc-osk` (its `uinput.rs`) is `#![forbid(unsafe_code)]`.
 
 ### sc-compositor module map
 
