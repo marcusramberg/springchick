@@ -369,6 +369,8 @@ pub(crate) struct State {
     /// take a sequence over ([`State::lift_from_search`]).
     pub last_touch_pos: Option<(f32, f32)>,
     pub pointer_down: bool,
+    /// A client got touch events since the last libinput frame.
+    pub touch_frame_due: bool,
     pub page_drag: Option<input_common::FingerDrag>,
     /// Feeds the tracker real elapsed time. Seeded on press.
     pub last_motion: Option<std::time::Instant>,
@@ -665,6 +667,7 @@ impl State {
             last_pointer_pos: None,
             last_touch_pos: None,
             pointer_down: false,
+            touch_frame_due: false,
             page_drag: None,
             last_motion: None,
             bar_drag_start: None,

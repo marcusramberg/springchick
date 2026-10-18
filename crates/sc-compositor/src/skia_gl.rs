@@ -15,7 +15,7 @@ use skia_safe::gpu::{
 use skia_safe::image_filters;
 use skia_safe::PathOp;
 use skia_safe::{
-    images, BlurStyle, ClipOp, Color, ColorType, Font, FontMgr, FontStyle, Image, ImageInfo,
+    images, BlurStyle, ClipOp, Color, ColorType, Font, FontMgr, FontStyle, IRect, Image, ImageInfo,
     MaskFilter, Matrix, Paint, PathBuilder, RRect, Rect, Surface, TextBlob, TileMode,
 };
 
@@ -843,7 +843,16 @@ impl SkiaGl {
         };
 
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
-        let snapshot = surface.image_snapshot();
+        // A full-surface snapshot copies the whole frame; the blur only reads
+        // 3 sigma around the clip.
+        let bounds: IRect =
+            skia_safe::RoundOut::round_out(&clip.bounds().with_outset((3.0 * sigma, 3.0 * sigma)));
+        let Some(bounds) = IRect::intersect(&bounds, &IRect::from_wh(pw, ph)) else {
+            return;
+        };
+        let Some(snapshot) = surface.image_snapshot_with_bounds(bounds) else {
+            return;
+        };
         let canvas = surface.canvas();
 
         let mut paint = Paint::default();
@@ -856,7 +865,7 @@ impl SkiaGl {
 
         canvas.save();
         canvas.clip_path(&clip, None, true);
-        canvas.draw_image(&snapshot, (0.0, 0.0), Some(&paint));
+        canvas.draw_image(&snapshot, (bounds.left, bounds.top), Some(&paint));
         canvas.restore();
 
         if let Some(ctx) = self.context.as_mut() {

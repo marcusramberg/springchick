@@ -1135,12 +1135,15 @@ impl App {
         if !drawn {
             return;
         }
-        self.state.skia.finish_gpu();
+        let sync = self.frame_fence();
+        if sync.is_none() {
+            self.state.skia.finish_gpu();
+        }
         for m in &mut self.drm.mirrors {
             if m.pending_flip {
                 continue;
             }
-            if let Err(e) = m.queue() {
+            if let Err(e) = m.queue(sync.clone()) {
                 warn!("mirror queue_buffer failed: {e}");
             }
         }

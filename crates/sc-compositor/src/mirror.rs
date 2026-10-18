@@ -12,6 +12,7 @@ use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, GbmBufferedSurface};
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
+use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::renderer::{Bind, Color32F, Frame, ImportDma, Renderer};
 use smithay::reexports::drm::control::{
     connector, crtc, Device as ControlDevice, Mode, ModeTypeFlags,
@@ -99,9 +100,9 @@ impl MirrorOutput {
         Ok(())
     }
 
-    pub fn queue(&mut self) -> Result<(), Box<dyn Error>> {
+    pub fn queue(&mut self, sync: Option<SyncPoint>) -> Result<(), Box<dyn Error>> {
         let full = Rectangle::from_size(self.size);
-        self.surface.queue_buffer(None, Some(vec![full]), ())?;
+        self.surface.queue_buffer(sync, Some(vec![full]), ())?;
         self.pending_flip = true;
         Ok(())
     }
