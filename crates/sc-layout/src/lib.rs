@@ -22,6 +22,10 @@ impl Rect {
         px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
     }
 
+    pub fn intersects(&self, o: &Rect) -> bool {
+        self.x < o.x + o.w && o.x < self.x + self.w && self.y < o.y + o.h && o.y < self.y + self.h
+    }
+
     pub fn center_x(&self) -> f32 {
         self.x + self.w / 2.0
     }
@@ -320,6 +324,21 @@ pub fn slot_at_center(app_id: String, cx: f32, cy: f32, width: f32, height: f32)
 
 /// `page == model.pages.len()` is the library page: no grid, but the same
 /// dock, dots and bar.
+impl Layout {
+    /// Slides the arrange buttons sideways off camera cutouts (a corner
+    /// punch-hole sits right where "Add" goes).
+    pub fn avoid_cutouts(&mut self, cutouts: &[Rect]) {
+        for c in cutouts {
+            if self.add_button.intersects(c) {
+                self.add_button.x = c.x + c.w + BUTTON_INSET;
+            }
+            if self.done_button.intersects(c) {
+                self.done_button.x = c.x - BUTTON_INSET - self.done_button.w;
+            }
+        }
+    }
+}
+
 pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layout {
     // +1 for the library page, which the model never stores.
     let page_count = model.pages.len().max(1) + 1;
@@ -780,6 +799,37 @@ mod tests {
             hit_test_arrange(&l, l.add_button.center_x(), l.add_button.center_y()),
             Hit::AddButton
         );
+    }
+
+    #[test]
+    fn arrange_buttons_slide_off_a_corner_camera() {
+        let m = sample_model();
+        let mut l = compute(1080.0, 2412.0, 0, &m);
+        // FuriLabs FLX1's punch-hole, and a mirrored one.
+        let left = Rect {
+            x: 61.0,
+            y: 27.0,
+            w: 84.0,
+            h: 84.0,
+        };
+        let right = Rect {
+            x: 1080.0 - 145.0,
+            ..left
+        };
+        assert!(l.add_button.intersects(&left));
+        l.avoid_cutouts(&[left, right]);
+        assert!(!l.add_button.intersects(&left) && !l.done_button.intersects(&right));
+        assert!(l.add_button.x + l.add_button.w < l.done_button.x);
+        let before = compute(1224.0, 2700.0, 0, &m);
+        let mut fp5 = before.clone();
+        fp5.avoid_cutouts(&[Rect {
+            x: 570.0,
+            y: 16.0,
+            w: 84.0,
+            h: 84.0,
+        }]);
+        assert_eq!(fp5.add_button, before.add_button);
+        assert_eq!(fp5.done_button, before.done_button);
     }
 
     #[test]

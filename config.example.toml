@@ -21,8 +21,10 @@ dpi = 3
 # Seconds without input before the panel blanks. 0 disables.
 idle_blank_secs = 600
 
-# Corner radius (logical px) of shrunken app cards; other radii scale from it.
-card_radius = 120.0
+# Corner radius (physical px) of shrunken app cards; other radii scale from
+# it. "auto" uses the panel's own corner radius from gmobile's device database
+# (see `GMOBILE_DT_COMPATIBLES`), else 120.
+card_radius = "auto"
 
 # How long (ms) the accelerometer must hold an orientation before a fullscreen
 # app turns, so a wobble past the diagonal doesn't flip it. 0 turns at once.

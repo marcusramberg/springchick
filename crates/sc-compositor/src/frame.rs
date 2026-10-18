@@ -489,7 +489,10 @@ impl State {
             &self.ui,
             self.output_size(),
             self.app_origin(),
-            self.card_radius,
+            crate::scene::Corners {
+                card: self.card_radius,
+                screen: self.panel.as_ref().map_or(0.0, |p| p.corner_radius),
+            },
         );
         self.switcher_cards = scene.cards.clone();
         // A commit from a toplevel absent here gets no frame (`commit_affects_frame`).
@@ -684,6 +687,11 @@ impl State {
             let (w, h) = self.output_size_f();
             sc_layout::compute(w, h, self.current_home_page(), &self.model).dock_zone
         });
+        // Not `shell_cutouts()`: `skia` and `last_present` below need disjoint borrows.
+        let cutouts: &[sc_layout::Rect] = match &self.panel {
+            Some(p) if !rotation.swaps_axes() => &p.cutouts,
+            _ => &[],
+        };
         let arrange = self.arrange.as_ref().map(|a| {
             let drag = a.drag.as_ref();
             // Dock→dock is a no-op; only highlight drags that can pin.
@@ -695,6 +703,7 @@ impl State {
                 drag_app: drag.map(|d| d.app_id.as_str()),
                 drag_pos: drag.map(|d| d.cur),
                 over_dock,
+                cutouts,
             }
         });
         let pressed_app = self.pending_launch.as_ref().map(|p| p.app_id.as_str());

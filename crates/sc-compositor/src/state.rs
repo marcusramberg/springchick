@@ -39,7 +39,7 @@ use sc_catalog::AppEntry;
 use sc_icons::IconPixels;
 use sc_shell_model::{persist, unix_now, ShellModel};
 
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::app_history::AppHistory;
 use crate::arrange::ArrangeState;
@@ -314,6 +314,8 @@ pub(crate) struct State {
     /// May be fractional. Client buffers are `logical * dpi`.
     pub dpi: f64,
     pub card_radius: f32,
+    /// Fitted to `panel_size`; `None` off the database or on another display.
+    pub panel: Option<sc_panel::Panel>,
     /// Dialogs always keep CSD so their action buttons survive.
     pub prefer_no_csd: bool,
     pub natural_scroll: bool,
@@ -432,7 +434,15 @@ impl State {
         let config = sc_config::load();
         let dpi = config.dpi.max(1.0);
         let idle_blank_secs = config.idle_blank_secs;
-        let card_radius = config.card_radius;
+        let panel = sc_panel::detect().and_then(|p| {
+            let fitted = p.fit(out_w, out_h);
+            match &fitted {
+                Some(f) => info!(name = %f.name, radius = f.corner_radius, cutouts = ?f.cutouts, "display panel"),
+                None => info!(name = %p.name, "display panel doesn't match the output; ignoring its shape"),
+            }
+            fitted
+        });
+        let card_radius = resolve_card_radius(config.card_radius, panel.as_ref());
         let show_touches = config.show_touches;
         let save_screenshots = config.save_screenshots;
         let prefer_no_csd = config.prefer_no_csd;
@@ -634,6 +644,7 @@ impl State {
             output,
             dpi,
             card_radius,
+            panel,
             prefer_no_csd,
             natural_scroll,
             uclamp_min,
@@ -750,7 +761,7 @@ impl State {
     /// `prefer_no_csd` applies to the next window that negotiates.
     pub(crate) fn reload_config(&mut self) {
         let config = sc_config::load();
-        self.card_radius = config.card_radius;
+        self.card_radius = resolve_card_radius(config.card_radius, self.panel.as_ref());
         self.prefer_no_csd = config.prefer_no_csd;
         self.natural_scroll = config.natural_scroll;
         self.show_touches = config.show_touches;
@@ -942,6 +953,14 @@ impl State {
         self.view_rotation().app_size(self.panel_size)
     }
 
+    /// Empty while turned: cutouts are in upright panel px.
+    pub(crate) fn shell_cutouts(&self) -> &[sc_layout::Rect] {
+        match &self.panel {
+            Some(p) if !self.view_rotation().swaps_axes() => &p.cutouts,
+            _ => &[],
+        }
+    }
+
     pub(crate) fn output_size_f(&self) -> (f32, f32) {
         let (w, h) = self.output_size();
         (w as f32, h as f32)
@@ -1007,4 +1026,9 @@ impl State {
             self.last_perf_log = std::time::Instant::now();
         }
     }
+}
+
+fn resolve_card_radius(cfg: Option<f32>, panel: Option<&sc_panel::Panel>) -> f32 {
+    cfg.or(panel.map(|p| p.corner_radius).filter(|r| *r > 0.0))
+        .unwrap_or(sc_config::DEFAULT_CARD_RADIUS)
 }
