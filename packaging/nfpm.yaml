@@ -90,3 +90,5 @@ contents:
     dst: /usr/lib/systemd/system/user@.service.d/50-springchick-cpuset.conf
   - src: packaging/files/70-springchick-gpu-boost.rules
     dst: /usr/lib/udev/rules.d/70-springchick-gpu-boost.rules
+  - src: packaging/files/70-springchick-uinput.rules
+    dst: /usr/lib/udev/rules.d/70-springchick-uinput.rules

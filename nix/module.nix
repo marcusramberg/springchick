@@ -164,6 +164,12 @@ in
     services.udev.extraRules = ''
       ACTION=="add|change", SUBSYSTEM=="devfreq", KERNEL=="*gpu*", RUN+="${pkgs.coreutils}/bin/chgrp video /sys%p/min_freq", RUN+="${pkgs.coreutils}/bin/chmod g+w /sys%p/min_freq"
     '';
+    # Not extraRules: that is 99-local.rules, after the uaccess ACL is applied.
+    services.udev.packages = [
+      (pkgs.writeTextDir "lib/udev/rules.d/70-springchick-uinput.rules" (
+        builtins.readFile ../packaging/files/70-springchick-uinput.rules
+      ))
+    ];
 
     security.polkit.enable = lib.mkDefault true;
 
