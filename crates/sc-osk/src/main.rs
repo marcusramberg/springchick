@@ -4,6 +4,7 @@
 //! follows the app in front (wlr-foreign-toplevel). Standalone: any other
 //! keyboard can replace it.
 
+mod accents;
 mod draw;
 mod grid;
 mod labels;
@@ -103,6 +104,8 @@ struct App {
     im: Option<ZwpInputMethodV2>,
     pending_active: bool,
     pending_purpose: u32,
+    /// `done` events so far; `commit` must echo it.
+    im_serial: u32,
     toplevels: HashMap<ObjectId, Toplevel>,
     epoch: Instant,
 }
@@ -137,6 +140,7 @@ fn main() {
         im: None,
         pending_active: false,
         pending_purpose: 0,
+        im_serial: 0,
         toplevels: HashMap::new(),
         epoch: Instant::now(),
     };
@@ -148,8 +152,40 @@ fn main() {
         app.show(&qh);
     }
 
+    // Not blocking_dispatch: a long press needs to wake without an event.
     loop {
-        queue.blocking_dispatch(&mut app).expect("wayland dispatch");
+        queue.dispatch_pending(&mut app).expect("wayland dispatch");
+        queue.flush().expect("wayland flush");
+        let Some(guard) = queue.prepare_read() else {
+            continue;
+        };
+        let timeout = app.osk.deadline().map(|d| {
+            let s = (d - app.now()).max(0.0);
+            rustix::event::Timespec {
+                tv_sec: s as i64,
+                tv_nsec: (s.fract() * 1e9) as i64,
+            }
+        });
+        let ready = {
+            let fd = guard.connection_fd();
+            let mut fds = [rustix::event::PollFd::new(
+                &fd,
+                rustix::event::PollFlags::IN,
+            )];
+            rustix::event::poll(&mut fds, timeout.as_ref())
+        };
+        match ready {
+            Ok(n) if n > 0 => {
+                if let Err(e) = guard.read() {
+                    if !matches!(e, wayland_client::backend::WaylandError::Io(ref io) if io.kind() == std::io::ErrorKind::WouldBlock)
+                    {
+                        panic!("wayland read: {e}");
+                    }
+                }
+            }
+            _ => drop(guard),
+        }
+        app.tick();
     }
 }
 
@@ -234,9 +270,12 @@ impl App {
         };
         let layout = self.active_layout;
         let key = |code: u16, shift: bool| keymap.label(code, shift, layout);
+        let reverse = keymap.reverse(layout);
+        let find = |c: char| reverse.get(&c).copied();
         let name = self.layouts.get(layout as usize).map_or("", String::as_str);
         let labels = Labels {
             key: &key,
+            find: &find,
             layout_name: name,
             layouts: self.layouts.len(),
         };
@@ -281,14 +320,36 @@ impl App {
         layer.commit();
     }
 
+    fn tick(&mut self) {
+        let Some(keymap) = &self.keymap else { return };
+        let layout = self.active_layout;
+        let variants = |key, shifted| match key {
+            grid::Key::Char { code, .. } => keymap
+                .label(code, shifted, layout)
+                .map(|l| accents::variants(&l))
+                .unwrap_or_default(),
+            grid::Key::Text(c) => accents::variants(&c.to_string()),
+            _ => Vec::new(),
+        };
+        if self.osk.tick(self.now(), self.width as f32, variants) {
+            self.draw();
+        }
+    }
+
     fn apply(&mut self, outs: &[Out]) {
-        for &out in outs {
+        for out in outs {
             match out {
-                Out::Press(code) | Out::Release(code) => {
+                &Out::Press(code) | &Out::Release(code) => {
                     if let Some(u) = &mut self.uinput {
                         if let Err(e) = u.key(code, matches!(out, Out::Press(_))) {
                             eprintln!("sc-osk: uinput write: {e}");
                         }
+                    }
+                }
+                Out::Text(text) => {
+                    if let Some(im) = &self.im {
+                        im.commit_string(text.clone());
+                        im.commit(self.im_serial);
                     }
                 }
                 Out::NextLayout => {
@@ -620,6 +681,7 @@ impl Dispatch2<ZwpInputMethodV2, App> for ImData {
                 };
             }
             Event::Done => {
+                app.im_serial += 1;
                 let shown = app.layer.is_some();
                 if app.pending_active && !shown {
                     app.osk.page = if NUMERIC_PURPOSES.contains(&app.pending_purpose) {

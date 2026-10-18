@@ -1,6 +1,8 @@
 //! Key labels from the seat's keymap, as the compositor sends it on
 //! `wl_keyboard`.
 
+use std::collections::HashMap;
+
 use xkbcommon::xkb;
 
 pub struct Keymap(xkb::Keymap);
@@ -45,6 +47,28 @@ impl Keymap {
     }
 }
 
+impl Keymap {
+    /// Which key types each character in `layout`, unshifted preferred.
+    pub fn reverse(&self, layout: u32) -> HashMap<char, (u16, bool)> {
+        let mut map = HashMap::new();
+        for shift in [false, true] {
+            for code in 1..=LAST_TYPING_KEY {
+                let Some(label) = self.label(code, shift, layout) else {
+                    continue;
+                };
+                let mut chars = label.chars();
+                if let (Some(c), None) = (chars.next(), chars.next()) {
+                    map.entry(c).or_insert((code, shift));
+                }
+            }
+        }
+        map
+    }
+}
+
+/// Past this are keypad and media keys, which type the same characters.
+const LAST_TYPING_KEY: u16 = 88;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,5 +84,17 @@ mod tests {
         assert_eq!(k.label(26, false, 1).as_deref(), Some("ü"));
         assert_eq!(k.label(3, true, 1).as_deref(), Some("\""));
         assert_eq!(k.label(1, false, 0), None, "escape types nothing");
+    }
+
+    #[test]
+    fn reverse_finds_shifted_symbols_per_layout() {
+        let k = Keymap::from_names("us,de", "").expect("xkeyboard-config");
+        let us = k.reverse(0);
+        assert_eq!(us[&'('], (10, true));
+        assert_eq!(us[&'-'], (12, false));
+        assert_eq!(us.get(&'€'), None);
+        let de = k.reverse(1);
+        assert_eq!(de[&'('], (9, true));
+        assert_eq!(de[&'z'], (21, false));
     }
 }
