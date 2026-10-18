@@ -68,6 +68,8 @@ contents:
     dst: /usr/bin/springchick
   - src: ${PKG_BIN}/sc-search
     dst: /usr/bin/sc-search
+  - src: ${PKG_BIN}/sc-osk
+    dst: /usr/bin/sc-osk
   - src: ${PKG_BIN}/springchick-session
     dst: /usr/bin/springchick-session
   - src: nix/springchick.desktop

@@ -119,6 +119,8 @@ rustPlatform.buildRustPackage {
     "sc-compositor"
     "-p"
     "sc-search"
+    "-p"
+    "sc-osk"
   ];
 
   cargoTestFlags = [ "--workspace" ];
@@ -130,6 +132,9 @@ rustPlatform.buildRustPackage {
       --prefix PATH : "${lib.makeBinPath [ xwayland ]}:$out/bin"
 
     wrapProgram $out/bin/sc-search \
+      --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}"
+
+    wrapProgram $out/bin/sc-osk \
       --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}"
 
     # Starts springchick.service (Type=notify) instead of exec'ing the
