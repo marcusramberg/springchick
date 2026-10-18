@@ -33,16 +33,56 @@ impl Spring {
         self.target = target;
     }
 
-    /// Semi-implicit Euler. Returns true while still moving.
+    /// Solved in closed form (unit mass), so the curve is the same at any frame
+    /// rate or with dropped frames. Returns true while still moving.
     pub fn step(&mut self, dt: f32) -> bool {
-        let force = -self.stiffness * (self.value - self.target) - self.damping * self.velocity;
-        self.velocity += force * dt;
-        self.value += self.velocity * dt;
+        let (d, v) = evaluate(
+            self.stiffness,
+            self.damping,
+            self.value - self.target,
+            self.velocity,
+            dt,
+        );
+        self.value = self.target + d;
+        self.velocity = v;
         !self.is_settled()
     }
 
     pub fn is_settled(&self) -> bool {
         (self.value - self.target).abs() < 0.001 && self.velocity.abs() < 0.001
+    }
+}
+
+/// Displacement `d0` and velocity `v0` of `x'' = -k x - c x'` after `t` seconds.
+fn evaluate(k: f32, c: f32, d0: f32, v0: f32, t: f32) -> (f32, f32) {
+    let w0 = k.max(0.0).sqrt();
+    if w0 == 0.0 {
+        return (d0, v0);
+    }
+    let zeta = c / (2.0 * w0);
+    if (zeta - 1.0).abs() < 1e-4 {
+        let b = v0 + w0 * d0;
+        let e = (-w0 * t).exp();
+        let d = e * (d0 + b * t);
+        (d, e * b - w0 * d)
+    } else if zeta < 1.0 {
+        let a = zeta * w0;
+        let wd = w0 * (1.0 - zeta * zeta).sqrt();
+        let b = (v0 + a * d0) / wd;
+        let e = (-a * t).exp();
+        let (sin, cos) = (wd * t).sin_cos();
+        (
+            e * (d0 * cos + b * sin),
+            e * (v0 * cos - (a * b + d0 * wd) * sin),
+        )
+    } else {
+        let root = (zeta * zeta - 1.0).sqrt();
+        let r1 = -w0 * (zeta - root);
+        let r2 = -w0 * (zeta + root);
+        let c2 = (v0 - r1 * d0) / (r2 - r1);
+        let c1 = d0 - c2;
+        let (e1, e2) = ((r1 * t).exp(), (r2 * t).exp());
+        (c1 * e1 + c2 * e2, r1 * c1 * e1 + r2 * c2 * e2)
     }
 }
 
@@ -103,6 +143,28 @@ mod tests {
             }
         }
         assert!(peak <= 100.0 * 1.05, "overshoot too large: peak={}", peak);
+    }
+
+    #[test]
+    fn frame_rate_does_not_change_the_curve() {
+        for (k, c) in [(220.0, 30.0), (320.0, 26.0), (2000.0, 90.0), (400.0, 40.0)] {
+            let run = |dt: f32, n: usize| {
+                let mut s = Spring::new(0.0);
+                s.stiffness = k;
+                s.damping = c;
+                s.retarget(1.0);
+                for _ in 0..n {
+                    s.step(dt);
+                }
+                (s.value, s.velocity)
+            };
+            let (a, b, one) = (run(1.0 / 120.0, 24), run(1.0 / 30.0, 6), run(0.2, 1));
+            assert!(
+                (a.0 - b.0).abs() < 1e-4 && (a.0 - one.0).abs() < 1e-4,
+                "k={k}: {a:?} {b:?} {one:?}"
+            );
+            assert!((a.1 - b.1).abs() < 1e-3, "k={k}: {a:?} {b:?}");
+        }
     }
 
     #[test]
