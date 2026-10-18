@@ -708,6 +708,9 @@ fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan)
     if !(plan.app_blurred || (scene.show_home && !plan.app_fills_screen)) {
         return;
     }
+    if backdrop_key(size, ctx).is_some_and(|k| ctx.skia.backdrop_cached(k)) {
+        return;
+    }
     let view = HomeView {
         page: scene.home_page,
         model: ctx.model,
@@ -924,9 +927,16 @@ fn pass_app_card(
 fn pass_backdrop_blur(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan) {
     let strength = ctx.scene.backdrop_blur.clamp(0.0, 1.0);
     if strength <= 0.0 || plan.app_fills_screen {
+        ctx.skia.drop_backdrop();
         return;
     }
     let v = ctx.view(size);
+    if let Some(key) = backdrop_key(size, ctx) {
+        let sigma = BACKDROP_BLUR_SIGMA_LOGICAL * ctx.app_scale as f32;
+        ctx.skia.blur_backdrop_cached(v.w, v.h, key, sigma);
+        return;
+    }
+    ctx.skia.drop_backdrop();
     let full = [crate::background_effect::BlurRect {
         x: 0.0,
         y: 0.0,
@@ -941,6 +951,29 @@ fn pass_backdrop_blur(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &S
         BACKDROP_BLUR_SIGMA_LOGICAL * ctx.app_scale as f32 * strength,
         ctx.skia_flip_y,
     );
+}
+
+/// `Some` while the deck sits on a fully frosted, static Home, the frames
+/// the cached backdrop can serve.
+fn backdrop_key(
+    size: Size<i32, Physical>,
+    ctx: &DrawCtx<'_>,
+) -> Option<crate::skia_gl::BackdropKey> {
+    let scene = ctx.scene;
+    let frozen = scene.backdrop_blur >= 1.0
+        && scene.home_lift == 0.0
+        && scene.home_shift == 0.0
+        && ctx.pressed_app.is_none()
+        && ctx.launch_pulses.is_empty()
+        && ctx.arrange.is_none();
+    frozen.then(|| crate::skia_gl::BackdropKey {
+        page: scene.home_page,
+        catalog_gen: ctx.catalog_gen,
+        running: ctx.running_apps.len(),
+        size: (size.w, size.h),
+        view: ctx.rotation,
+        library: ctx.library.is_some(),
+    })
 }
 
 /// A deck card with its elements collected and placement solved.
