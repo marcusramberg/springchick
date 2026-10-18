@@ -462,6 +462,7 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: InputTime)
         };
         let focus = target.focus();
         touch.down(state, Some((target.surface, focus)), &event);
+        state.touch_frame_due = true;
         return;
     }
     // Locked: no gestures, or a swipe could open Home behind the lock.
@@ -490,6 +491,7 @@ pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: InputTim
             time,
         };
         touch.motion(state, None, &event);
+        state.touch_frame_due = true;
         return;
     }
     if state.gesture_slot == Some(slot) {
@@ -501,8 +503,11 @@ pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: InputTim
 /// updates atomic for toolkit pinch/scroll recognition. Safe with nothing
 /// pending.
 pub fn frame(state: &mut State) {
-    let touch = state.touch.clone();
-    touch.frame(state);
+    // Shell-consumed gestures forward nothing; smithay warns on an empty frame.
+    if std::mem::take(&mut state.touch_frame_due) {
+        let touch = state.touch.clone();
+        touch.frame(state);
+    }
 }
 
 /// libinput `TOUCH_CANCEL`. Without this `gesture_slot` stays claimed and
@@ -542,6 +547,7 @@ pub fn up(state: &mut State, slot: TouchSlot, time: InputTime) {
             time,
         };
         touch.up(state, &event);
+        state.touch_frame_due = true;
         return;
     }
     if state.gesture_slot == Some(slot) {

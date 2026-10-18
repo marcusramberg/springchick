@@ -311,6 +311,8 @@ impl LayerShell {
     pub fn usable_changed(&mut self, dpi: f64) -> Option<Rect> {
         let now = self.usable(dpi);
         if now == self.last_usable {
+            // Nothing to grow into; a held `pending` would pin the frame loop.
+            self.regrow.resolved();
             return None;
         }
         if now.h > self.last_usable.h && !self.regrow.allow_grow() {
