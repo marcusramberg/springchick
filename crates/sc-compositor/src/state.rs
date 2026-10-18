@@ -214,6 +214,8 @@ pub(crate) struct State {
     pub keyboard: smithay::input::keyboard::KeyboardHandle<Self>,
     /// The virtual keyboard keymap the seat is switched to; `None` is the default.
     pub vk_keymap: Option<std::sync::Arc<str>>,
+    /// The seat's default keymap; see [`crate::keybinds::set_xkb`].
+    pub xkb: sc_config::Xkb,
     /// A physical keyboard is attached: text-input never reaches the IME, so the OSK stays down.
     pub hw_keyboard: bool,
     /// To avoid re-sending focus.
@@ -488,9 +490,20 @@ impl State {
             });
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&dh, "springchick");
-        let keyboard = seat
-            .add_keyboard(XkbConfig::default(), 200, 25)
-            .expect("add keyboard");
+        let mut xkb = config.xkb.clone();
+        let keyboard = match seat.add_keyboard(crate::keybinds::xkb_config(&xkb), 200, 25) {
+            Ok(k) => k,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    ?xkb,
+                    "keymap doesn't compile; using xkbcommon's default"
+                );
+                xkb = sc_config::Xkb::default();
+                seat.add_keyboard(XkbConfig::default(), 200, 25)
+                    .expect("add keyboard")
+            }
+        };
         seat.add_pointer();
         let touch = seat.add_touch();
 
@@ -589,6 +602,7 @@ impl State {
             keyboard,
             focused_surface: None,
             vk_keymap: None,
+            xkb,
             hw_keyboard: false,
             keys: keybinds::Keys::from_config(config),
             blank: blank::Blank::new(),
@@ -770,6 +784,7 @@ impl State {
         self.orientation_settle.set_hold(config.rotation_settle_ms);
         // A fade in flight keeps its duration.
         self.rotation_fade.set_duration(config.rotation_fade_ms);
+        crate::keybinds::set_xkb(self, config.xkb.clone());
         self.resources = config.resources.clone();
         self.bg_allowed_cpus = resources::resolve_allowed_cpus(&self.resources.bg_allowed_cpus);
         // `children` stays on the existing `Keys`.

@@ -159,6 +159,35 @@ pub fn on_virtual_keyboard_event(state: &mut State, event: InputEvent<VirtualKey
     }
 }
 
+/// Empty fields are xkbcommon's defaults (`XKB_DEFAULT_*`).
+pub fn xkb_config(x: &sc_config::Xkb) -> XkbConfig<'_> {
+    XkbConfig {
+        rules: "",
+        model: &x.model,
+        layout: &x.layout,
+        variant: &x.variant,
+        options: (!x.options.is_empty()).then(|| x.options.clone()),
+    }
+}
+
+/// Applies a changed `[xkb]` now, unless wvkbd's keymap is in use; the next
+/// physical key switches back to it then.
+pub fn set_xkb(state: &mut State, xkb: sc_config::Xkb) {
+    if state.xkb == xkb {
+        return;
+    }
+    let old = std::mem::replace(&mut state.xkb, xkb);
+    if state.vk_keymap.is_some() {
+        return;
+    }
+    let keyboard = state.keyboard.clone();
+    let x = state.xkb.clone();
+    if let Err(e) = keyboard.set_xkb_config(state, xkb_config(&x)) {
+        warn!(?e, xkb = ?x, "keymap doesn't compile; keeping the previous one");
+        state.xkb = old;
+    }
+}
+
 /// `None` is the seat's default keymap.
 fn use_keymap(state: &mut State, keymap: Option<Arc<str>>) {
     if state.vk_keymap == keymap {
@@ -167,7 +196,10 @@ fn use_keymap(state: &mut State, keymap: Option<Arc<str>>) {
     let keyboard = state.keyboard.clone();
     let res = match &keymap {
         Some(k) => keyboard.set_keymap_from_string(state, k.to_string()),
-        None => keyboard.set_xkb_config(state, XkbConfig::default()),
+        None => {
+            let xkb = state.xkb.clone();
+            keyboard.set_xkb_config(state, xkb_config(&xkb))
+        }
     };
     if let Err(e) = res {
         warn!(?e, "failed to switch keymap");

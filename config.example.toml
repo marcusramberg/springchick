@@ -67,6 +67,15 @@ gpu_min_mhz = "auto"
 # applies when the log shows "connector supports VRR" at startup.
 vrr = true
 
+# Seat keymap, applied live on reload. Empty fields fall back to the
+# XKB_DEFAULT_* environment, then "us". Several layouts switch with a grp:
+# option, which the on-screen keyboard also uses.
+[xkb]
+model = ""
+layout = ""      # e.g. "us,de"
+variant = ""
+options = ""     # e.g. "grp:win_space_toggle"
+
 # Per-app resource limits, set on each app's systemd scope on focus change.
 # Needs the cpu (and memory) controllers delegated to user@.service:
 #   cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers

@@ -118,7 +118,23 @@ pub struct Config {
     /// systemd user units. Ignored on reload.
     pub startup: Vec<String>,
     pub resources: Resources,
+    pub xkb: Xkb,
     pub bindings: Vec<Binding>,
+}
+
+/// The uinput device name of springchick's on-screen keyboard. It types
+/// letters like hardware, but must not count as one and hide itself.
+pub const OSK_DEVICE_NAME: &str = "springchick osk";
+
+/// The seat keymap, as xkbcommon names it. Empty fields fall back to
+/// `XKB_DEFAULT_*`, then xkbcommon's own defaults (`us`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Xkb {
+    pub model: String,
+    /// Comma-separated; switch between them with a `grp:` option.
+    pub layout: String,
+    pub variant: String,
+    pub options: String,
 }
 
 /// Focused app vs. background resource limits, applied as properties on each
@@ -496,6 +512,15 @@ struct RawConfigFile {
     main: Option<RawMain>,
     keybinds: Option<RawConfig>,
     resources: Option<RawResources>,
+    xkb: Option<RawXkb>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawXkb {
+    model: Option<String>,
+    layout: Option<String>,
+    variant: Option<String>,
+    options: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -572,6 +597,7 @@ impl Config {
                     rotation_fade_ms: DEFAULT_ROTATION_FADE_MS,
                     startup: Vec::new(),
                     resources: Resources::default(),
+                    xkb: Xkb::default(),
                     bindings: Vec::new(),
                 };
             }
@@ -593,6 +619,12 @@ impl Config {
         let rotation_fade_ms = main.rotation_fade_ms.unwrap_or(DEFAULT_ROTATION_FADE_MS);
         let startup = main.startup;
         let resources = parse_resources(file.resources);
+        let xkb = file.xkb.map_or_else(Xkb::default, |x| Xkb {
+            model: x.model.unwrap_or_default(),
+            layout: x.layout.unwrap_or_default(),
+            variant: x.variant.unwrap_or_default(),
+            options: x.options.unwrap_or_default(),
+        });
         let raw = file.keybinds.unwrap_or_default();
 
         let bindings = raw.binding.into_iter().filter_map(convert).collect();
@@ -612,6 +644,7 @@ impl Config {
             rotation_fade_ms,
             startup,
             resources,
+            xkb,
             bindings,
         }
     }
@@ -960,6 +993,16 @@ mod tests {
         let cfg = Config::parse("[main]\nrotation_settle_ms = 250\nrotation_fade_ms = 0\n");
         assert_eq!(cfg.rotation_settle_ms, 250);
         assert_eq!(cfg.rotation_fade_ms, 0);
+    }
+
+    #[test]
+    fn xkb_section_is_optional_and_partial() {
+        assert_eq!(Config::parse("").xkb, Xkb::default());
+        let x =
+            Config::parse("[xkb]\nlayout = \"us,de\"\noptions = \"grp:win_space_toggle\"\n").xkb;
+        assert_eq!(x.layout, "us,de");
+        assert_eq!(x.options, "grp:win_space_toggle");
+        assert_eq!(x.variant, "");
     }
 
     #[test]
