@@ -41,7 +41,7 @@ use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::image_copy_capture::CaptureFailureReason;
 use smithay::wayland::presentation::PresentationFeedbackCallback;
 
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{accept_client, create_display, State};
 
@@ -809,12 +809,12 @@ impl App {
             InputEvent::PointerMotionAbsolute { event } => {
                 let (x, y) =
                     panel_to_view(turn, mode, event.x_transformed(w), event.y_transformed(h));
-                debug!(target: "springchick::debug", "pointer motion: abs x={x} y={y}");
+                trace!(target: "springchick::debug", "pointer motion: abs x={x} y={y}");
                 crate::touch::pointer_motion(&mut self.state, x, y, event.time());
             }
             InputEvent::PointerMotion { event } => {
                 let d = event.delta();
-                debug!(target: "springchick::debug", "pointer motion: dx={} dy={}", d.x, d.y);
+                trace!(target: "springchick::debug", "pointer motion: dx={} dy={}", d.x, d.y);
                 crate::touch::pointer_motion_relative(&mut self.state, d.x, d.y, event.time());
             }
             InputEvent::PointerAxis { event } => {
