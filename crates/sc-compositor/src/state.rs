@@ -340,6 +340,7 @@ pub(crate) struct State {
     pub last_app_toplevel: Option<usize>,
     pub gamma: gamma_control::GammaControl,
     pub output_power: output_power::OutputPower,
+    pub foreign_toplevels: crate::foreign_toplevel::ForeignToplevels,
     pub idle_notify: idle_notify::IdleNotify,
     pub idle_inhibit: idle_inhibit::IdleInhibit,
     #[allow(dead_code)]
@@ -535,6 +536,7 @@ impl State {
         let gamma = gamma_control::GammaControl::new(&dh, 256);
 
         let output_power = output_power::OutputPower::new(&dh);
+        let foreign_toplevels = crate::foreign_toplevel::ForeignToplevels::new(&dh);
 
         // Gamma and output-power managers must come before wl_output: dms binds its
         // per-output controls from its wl_output callback and reports "no outputs"
@@ -673,6 +675,7 @@ impl State {
             last_app_toplevel: None,
             gamma,
             output_power,
+            foreign_toplevels,
             idle_notify,
             idle_inhibit,
             content_type,

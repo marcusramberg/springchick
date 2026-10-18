@@ -304,6 +304,7 @@ fn render_frame(
     state.tick_freeze(std::time::Instant::now());
     state.drain_sensor();
     state.sync_keyboard_focus();
+    state.refresh_foreign_toplevels();
 
     let (renderer, mut framebuffer) = backend.bind()?;
     let mut sinks = render::FrameSinks::default();
