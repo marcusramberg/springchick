@@ -418,7 +418,8 @@ impl SkiaGl {
         if self.font.is_none() {
             let mgr = FontMgr::default();
             let typeface = mgr
-                .match_family_style("sans-serif", FontStyle::normal())
+                .new_from_data(sc_fonts::INTER, None)
+                .or_else(|| mgr.match_family_style("sans-serif", FontStyle::normal()))
                 .unwrap_or_else(|| mgr.legacy_make_typeface(None, FontStyle::normal()).unwrap());
             let mut font = Font::from_typeface(typeface, 28.0);
             font.set_subpixel(true);

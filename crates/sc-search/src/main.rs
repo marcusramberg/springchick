@@ -53,6 +53,17 @@ struct SearchApp {
 
 impl SearchApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Inter first; egui's own fonts stay behind it for what Inter lacks.
+        let mut fonts = egui::FontDefinitions::default();
+        fonts
+            .font_data
+            .insert("Inter".into(), egui::FontData::from_static(sc_fonts::INTER));
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "Inter".into());
+        cc.egui_ctx.set_fonts(fonts);
         let mut app = Self {
             catalog: HashMap::new(),
             frecency: FrecencyStore::default(),

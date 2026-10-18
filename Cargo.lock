@@ -2750,6 +2750,7 @@ dependencies = [
  "sc-anim",
  "sc-catalog",
  "sc-config",
+ "sc-fonts",
  "sc-icons",
  "sc-input",
  "sc-keys",
@@ -2773,6 +2774,10 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
 ]
+
+[[package]]
+name = "sc-fonts"
+version = "0.1.0"
 
 [[package]]
 name = "sc-icons"
@@ -2808,6 +2813,7 @@ dependencies = [
  "libc",
  "rustix 1.1.4",
  "rustybuzz",
+ "sc-fonts",
  "sc-layout",
  "skia-safe",
  "smithay-client-toolkit 0.21.1",
@@ -2835,6 +2841,7 @@ dependencies = [
  "egui",
  "raw-window-handle",
  "sc-catalog",
+ "sc-fonts",
  "sc-icons",
  "sc-shell-model",
  "wayland-client",
