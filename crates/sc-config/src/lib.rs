@@ -105,6 +105,7 @@ pub struct Config {
     /// so GTK file choosers still get their Open/Cancel header bar.
     pub prefer_no_csd: bool,
     pub uclamp_min: UclampMin,
+    pub gpu_min_mhz: GpuMinMhz,
     /// Only where the connector reports `vrr_capable`.
     pub vrr: bool,
     /// How long an accelerometer reading must hold before turning. `0` turns
@@ -190,6 +191,16 @@ pub enum UclampMin {
     Fixed(u32),
 }
 
+/// GPU devfreq `min_freq` held while drawing, for the same ramp-up reason as
+/// [`UclampMin`]. Needs `min_freq` writable (the NixOS module's udev rule).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuMinMhz {
+    /// The lowest OPP at or above half the GPU's top clock.
+    Auto,
+    Off,
+    Fixed(u32),
+}
+
 /// 800ms so a volume nudge doesn't cross into the long press.
 pub const DEFAULT_LONG_PRESS_MS: u64 = 800;
 
@@ -210,6 +221,8 @@ pub const DEFAULT_NATURAL_SCROLL: bool = true;
 pub const DEFAULT_PREFER_NO_CSD: bool = true;
 
 pub const DEFAULT_UCLAMP_MIN: UclampMin = UclampMin::Auto;
+
+pub const DEFAULT_GPU_MIN_MHZ: GpuMinMhz = GpuMinMhz::Auto;
 
 /// Still a no-op unless the connector reports `vrr_capable`.
 pub const DEFAULT_VRR: bool = true;
@@ -338,6 +351,29 @@ fn is_memory_size(s: &str) -> bool {
             suffix,
             "" | "%" | "K" | "M" | "G" | "T" | "Ki" | "Mi" | "Gi" | "Ti"
         )
+}
+
+/// `"auto"`, `"off"`, or MHz (`0` = off).
+fn parse_gpu_min_mhz(v: Option<&toml::Value>) -> GpuMinMhz {
+    let Some(v) = v else {
+        return DEFAULT_GPU_MIN_MHZ;
+    };
+    match v {
+        toml::Value::String(s) => match s.to_ascii_lowercase().as_str() {
+            "auto" => GpuMinMhz::Auto,
+            "off" | "false" | "none" => GpuMinMhz::Off,
+            _ => {
+                warn!(value = %s, "gpu_min_mhz must be \"auto\", \"off\", or MHz");
+                DEFAULT_GPU_MIN_MHZ
+            }
+        },
+        toml::Value::Integer(0) => GpuMinMhz::Off,
+        toml::Value::Integer(n) if (1..=100_000).contains(n) => GpuMinMhz::Fixed(*n as u32),
+        other => {
+            warn!(value = %other, "gpu_min_mhz must be \"auto\", \"off\", or MHz");
+            DEFAULT_GPU_MIN_MHZ
+        }
+    }
 }
 
 /// `"auto"`, `"off"`, or 0..=1024 (`0` = off).
@@ -473,6 +509,7 @@ struct RawMain {
     natural_scroll: Option<bool>,
     prefer_no_csd: Option<bool>,
     uclamp_min: Option<toml::Value>,
+    gpu_min_mhz: Option<toml::Value>,
     vrr: Option<bool>,
     rotation_settle_ms: Option<u64>,
     rotation_fade_ms: Option<u64>,
@@ -514,6 +551,7 @@ impl Config {
                     natural_scroll: DEFAULT_NATURAL_SCROLL,
                     prefer_no_csd: DEFAULT_PREFER_NO_CSD,
                     uclamp_min: DEFAULT_UCLAMP_MIN,
+                    gpu_min_mhz: DEFAULT_GPU_MIN_MHZ,
                     vrr: DEFAULT_VRR,
                     rotation_settle_ms: DEFAULT_ROTATION_SETTLE_MS,
                     rotation_fade_ms: DEFAULT_ROTATION_FADE_MS,
@@ -532,6 +570,7 @@ impl Config {
         let natural_scroll = main.natural_scroll.unwrap_or(DEFAULT_NATURAL_SCROLL);
         let prefer_no_csd = main.prefer_no_csd.unwrap_or(DEFAULT_PREFER_NO_CSD);
         let uclamp_min = parse_uclamp_min(main.uclamp_min.as_ref());
+        let gpu_min_mhz = parse_gpu_min_mhz(main.gpu_min_mhz.as_ref());
         let vrr = main.vrr.unwrap_or(DEFAULT_VRR);
         let rotation_settle_ms = main
             .rotation_settle_ms
@@ -552,6 +591,7 @@ impl Config {
             natural_scroll,
             prefer_no_csd,
             uclamp_min,
+            gpu_min_mhz,
             vrr,
             rotation_settle_ms,
             rotation_fade_ms,
@@ -963,6 +1003,17 @@ mod tests {
         assert_eq!(p("[main]\nuclamp_min = -5\n"), UclampMin::Auto);
         assert_eq!(p("[main]\nuclamp_min = \"fast\"\n"), UclampMin::Auto);
         assert_eq!(p("[main]\nuclamp_min = 1.5\n"), UclampMin::Auto);
+    }
+
+    #[test]
+    fn gpu_min_mhz_parses_auto_off_and_numbers() {
+        let p = |s: &str| Config::parse(s).gpu_min_mhz;
+        assert_eq!(p("[main]\n"), GpuMinMhz::Auto);
+        assert_eq!(p("[main]\ngpu_min_mhz = \"off\"\n"), GpuMinMhz::Off);
+        assert_eq!(p("[main]\ngpu_min_mhz = 0\n"), GpuMinMhz::Off);
+        assert_eq!(p("[main]\ngpu_min_mhz = 450\n"), GpuMinMhz::Fixed(450));
+        assert_eq!(p("[main]\ngpu_min_mhz = -1\n"), GpuMinMhz::Auto);
+        assert_eq!(p("[main]\ngpu_min_mhz = \"fast\"\n"), GpuMinMhz::Auto);
     }
 
     #[test]

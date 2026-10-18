@@ -44,7 +44,7 @@ A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; 
 
 `springchick ipc layers` dumps every layer surface and layer-rooted popup being composited (namespace, layer, logical geometry, the physical rect, buffer size, pending-map/slide state, anchor and exclusive zone), plus the usable area and regrow-guard state. Run it first when the screen shows something no client admits to, e.g. two on-screen keyboards from one wvkbd process.
 
-`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `save_screenshots`, `prefer_no_csd` (next window to negotiate decorations), `natural_scroll` (next touchpad added), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn). `dpi`, `uclamp_min` and `vrr` are ignored on reload and need a restart.
+`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `save_screenshots`, `prefer_no_csd` (next window to negotiate decorations), `natural_scroll` (next touchpad added), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn). `dpi`, `uclamp_min`, `gpu_min_mhz` and `vrr` are ignored on reload and need a restart.
 
 `reload` also rescans the app catalog (`.desktop` files + icons): newly installed apps land on Home, uninstalled ones leave pages/dock/hidden and lose their frecency stats, and the renderer's uploaded icon textures are dropped so re-themed icons repaint. The catalog rescans itself too: `catalog_watch.rs` inotify-watches every XDG `applications/` dir, so a package-manager install/remove lands without an explicit reload. The watch has a 750 ms debounce, and the rescan runs on the compositor thread at the next event-loop wake, so a blanked screen costs nothing.
 
@@ -89,7 +89,7 @@ Every crate except `sc-compositor` and `sc-search` is `#![forbid(unsafe_code)]`.
 - `winit_backend.rs` / `drm_backend.rs`: the two ways to present. `session.rs` is the Wayland display/socket plumbing they share, and `mirror.rs` is external-display mirroring on DRM.
 - `debug_input.rs` + `ipc.rs`: synthetic-input socket and its CLI client.
 - Protocol extras: `layer_shell.rs`, `popups.rs`, `idle_notify.rs`, `idle_inhibit.rs`, `gamma_control.rs`, `output_power.rs`, `background_effect.rs`, `content_type.rs`, `session_lock.rs`, `wlr_screencopy.rs`.
-- Shell and device bits: `switcher.rs`, `bar_hint.rs`, `osd.rs`, `touch_viz.rs`, `app_history.rs`, `rotation.rs` + `sensor.rs` (iio-sensor-proxy), `blank.rs`, `sleep.rs` (blank before suspend), `screenshot.rs`, `capture.rs`, `catalog_watch.rs`, `uclamp.rs`, `frame_stats.rs`.
+- Shell and device bits: `switcher.rs`, `bar_hint.rs`, `osd.rs`, `touch_viz.rs`, `app_history.rs`, `rotation.rs` + `sensor.rs` (iio-sensor-proxy), `blank.rs`, `sleep.rs` (blank before suspend), `screenshot.rs`, `capture.rs`, `catalog_watch.rs`, `uclamp.rs`, `gpu_boost.rs`, `frame_stats.rs`.
 - Client pacing: `presentation.rs` (wp_presentation, with feedback answered from the DRM vblank, or after the swap on winit) and `pacing.rs` (wp_fifo + wp_commit_timing). Both are driven from `render.rs`'s frame-callback walk and hand the backend a `FrameSinks`. Its two halves are obligations: unanswered feedback hangs a client, and a signalled blocker still needs `pacing::clear_blockers` to apply the commit waiting on it.
 
 ### Render pipeline (`render.rs`)
@@ -130,6 +130,7 @@ Notable options:
 - `rotation_fade_ms` (default 130): half the dip-to-black that covers a turn.
 - `vrr` (default `true`): asks the panel for variable refresh. DRM backend only, no-op unless the connector reports `vrr_capable`, startup-only.
 - `uclamp_min` (default `"auto"`): scheduler `util_min` floor held on the render thread while drawing, derived from CPU topology. See `uclamp.rs`.
+- `gpu_min_mhz` (default `"auto"`): GPU devfreq `min_freq` held while drawing, the lowest OPP at or above half the top clock (FP5: 450 MHz). Needs the module's udev rule. See `gpu_boost.rs`.
 
 Env vars: `SPRINGCHICK_BACKEND`, `SPRINGCHICK_CONFIG`, `SPRINGCHICK_IPC_SOCK`, `SPRINGCHICK_DEBUG_SOCK` (legacy), `SPRINGCHICK_WINIT_SIZE` (`WxH`). `SPRINGCHICK_PANEL_TRANSFORM` (`90`/`180`/`270`/`normal`, module option `panelTransform`) overrides the DRM connector's `panel orientation`, which otherwise turns a sideways-mounted panel (Steam Deck) upright. `SPRINGCHICK_OUTPUT` is read only by `scripts/screenshot.sh` and `scripts/record.sh`.
 

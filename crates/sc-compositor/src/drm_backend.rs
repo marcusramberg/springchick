@@ -622,6 +622,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // This is the render thread.
     let mut uclamp = crate::uclamp::Uclamp::new(app.state.uclamp_min);
+    let mut gpu_boost = crate::gpu_boost::GpuBoost::new(app.state.gpu_min_mhz);
 
     while running.load(Ordering::Relaxed) && app.state.running {
         let timeout = if active_tick(
@@ -669,11 +670,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             app.state.session_lock.confirm_dark();
         }
         app.apply_gamma();
-        // Frames no vblank is priming. Raise the uclamp floor before rendering so
-        // the first frame of a touch benefits.
+        // Frames no vblank is priming. Raise the uclamp and GPU floors before
+        // rendering so the first frame of a touch benefits.
         let now = Instant::now();
         let drawing = app.state.is_animating(now);
         uclamp.update(drawing, now);
+        gpu_boost.update(drawing, now);
         if drawing {
             app.render();
         }

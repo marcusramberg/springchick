@@ -11,7 +11,7 @@ use sc_config::UclampMin;
 use tracing::{debug, info, warn};
 
 /// Interactions come in bursts; dropping between them pays the ramp again.
-const RELEASE_AFTER: Duration = Duration::from_millis(400);
+pub(crate) const RELEASE_AFTER: Duration = Duration::from_millis(400);
 
 const CPU_DIR: &str = "/sys/devices/system/cpu";
 

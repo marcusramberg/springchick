@@ -319,6 +319,7 @@ pub(crate) struct State {
     pub natural_scroll: bool,
     /// Startup only.
     pub uclamp_min: sc_config::UclampMin,
+    pub gpu_min_mhz: sc_config::GpuMinMhz,
     /// DRM only, startup only.
     pub vrr: bool,
     pub resources: sc_config::Resources,
@@ -437,6 +438,7 @@ impl State {
         let prefer_no_csd = config.prefer_no_csd;
         let natural_scroll = config.natural_scroll;
         let uclamp_min = config.uclamp_min;
+        let gpu_min_mhz = config.gpu_min_mhz;
         let vrr = config.vrr;
         let resources = config.resources.clone();
         let bg_allowed_cpus = resources::resolve_allowed_cpus(&resources.bg_allowed_cpus);
@@ -635,6 +637,7 @@ impl State {
             prefer_no_csd,
             natural_scroll,
             uclamp_min,
+            gpu_min_mhz,
             vrr,
             resources,
             bg_allowed_cpus,
