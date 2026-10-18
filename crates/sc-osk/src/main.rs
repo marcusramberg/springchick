@@ -6,6 +6,7 @@
 
 mod accents;
 mod draw;
+mod emoji;
 mod grid;
 mod labels;
 mod osk;
@@ -96,7 +97,7 @@ struct App {
     scale: i32,
     osk: Osk,
     grid: Vec<Placed>,
-    font: skia_safe::Font,
+    fonts: draw::Fonts,
     keymap: Option<Keymap>,
     layouts: Vec<String>,
     active_layout: u32,
@@ -108,6 +109,9 @@ struct App {
     im_serial: u32,
     toplevels: HashMap<ObjectId, Toplevel>,
     epoch: Instant,
+    picker: emoji::Picker,
+    recent_path: std::path::PathBuf,
+    last_tick: f64,
 }
 
 fn main() {
@@ -115,6 +119,11 @@ fn main() {
     let (globals, mut queue) = registry_queue_init(&conn).expect("registry");
     let qh = queue.handle();
 
+    let recent_path = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".local/state")))
+        .unwrap_or_default()
+        .join("springchick/osk-recent");
     let uinput = uinput::Uinput::new(DEVICE_NAME)
         .map_err(|e| eprintln!("sc-osk: no /dev/uinput ({e}); keys won't type"))
         .ok();
@@ -132,7 +141,7 @@ fn main() {
         scale: 1,
         osk: Osk::default(),
         grid: Vec::new(),
-        font: draw::font(),
+        fonts: draw::fonts(),
         keymap: Keymap::from_names("", ""),
         layouts: Vec::new(),
         active_layout: 0,
@@ -143,6 +152,9 @@ fn main() {
         im_serial: 0,
         toplevels: HashMap::new(),
         epoch: Instant::now(),
+        picker: emoji::Picker::new(emoji::load_recent(&recent_path)),
+        recent_path,
+        last_tick: 0.0,
     };
     let _ = globals.bind::<ZwlrForeignToplevelManagerV1, _, _>(&qh, 1..=3, ToplevelsData);
     queue.roundtrip(&mut app).expect("roundtrip");
@@ -159,13 +171,20 @@ fn main() {
         let Some(guard) = queue.prepare_read() else {
             continue;
         };
-        let timeout = app.osk.deadline().map(|d| {
-            let s = (d - app.now()).max(0.0);
-            rustix::event::Timespec {
-                tv_sec: s as i64,
-                tv_nsec: (s.fract() * 1e9) as i64,
-            }
-        });
+        let frame = app.picker.animating().then(|| app.now() + 1.0 / 60.0);
+        let timeout = app
+            .osk
+            .deadline()
+            .into_iter()
+            .chain(frame)
+            .reduce(f64::min)
+            .map(|d| {
+                let s = (d - app.now()).max(0.0);
+                rustix::event::Timespec {
+                    tv_sec: s as i64,
+                    tv_nsec: (s.fract() * 1e9) as i64,
+                }
+            });
         let ready = {
             let fd = guard.connection_fd();
             let mut fds = [rustix::event::PollFd::new(
@@ -279,6 +298,8 @@ impl App {
             layout_name: name,
             layouts: self.layouts.len(),
         };
+        self.picker
+            .set_area(grid::emoji_area(self.width as f32, self.height as f32));
         self.grid = grid::layout(
             self.osk.page,
             self.osk.bar,
@@ -311,7 +332,8 @@ impl App {
             self.scale as f32,
             &self.grid,
             &self.osk,
-            &mut self.font,
+            (self.osk.page == Page::Emoji).then_some(&self.picker),
+            &mut self.fonts,
         );
         let surface = layer.wl_surface();
         surface.set_buffer_scale(self.scale);
@@ -321,6 +343,13 @@ impl App {
     }
 
     fn tick(&mut self) {
+        let now = self.now();
+        let dt = (now - self.last_tick).min(0.05) as f32;
+        self.last_tick = now;
+        if self.picker.animating() {
+            self.picker.tick(dt);
+            self.draw();
+        }
         let Some(keymap) = &self.keymap else { return };
         let layout = self.active_layout;
         let variants = |key, shifted| match key {
@@ -366,26 +395,53 @@ impl App {
     }
 
     fn touch_down(&mut self, id: i32, (x, y): (f64, f64)) {
-        let Some(key) = grid::hit(&self.grid, x as f32, y as f32) else {
+        let at = (x as f32, y as f32);
+        if self.osk.page == Page::Emoji && self.picker.area().contains(at.0, at.1) {
+            self.picker.down(id, at, self.now());
+            return;
+        }
+        let Some(key) = grid::hit(&self.grid, at.0, at.1) else {
             return;
         };
-        let outs = self.osk.down(id, key, (x as f32, y as f32), self.now());
+        let outs = self.osk.down(id, key, at, self.now());
         self.apply(&outs);
+        match key {
+            grid::Key::Page(Page::Emoji) => self.picker.reset(),
+            grid::Key::Category(i) => self.picker.jump(i as usize),
+            _ => {}
+        }
         self.relayout();
         self.draw();
     }
 
     fn touch_motion(&mut self, id: i32, (x, y): (f64, f64)) {
+        if self.picker.owns(id) {
+            self.picker.motion(id, (x as f32, y as f32), self.now());
+            self.draw();
+            return;
+        }
+        let selected = self.osk.popup.as_ref().map(|p| p.selected);
         let outs = self.osk.motion(id, (x as f32, y as f32));
         if !outs.is_empty() {
             self.apply(&outs);
             // A shift latch used up by the swipe changes the labels.
             self.relayout();
             self.draw();
+        } else if self.osk.popup.as_ref().map(|p| p.selected) != selected {
+            self.draw();
         }
     }
 
     fn touch_up(&mut self, id: i32) {
+        if self.picker.owns(id) {
+            if let Some(e) = self.picker.up(id, self.now()) {
+                self.apply(&[Out::Text(e)]);
+                emoji::save_recent(&self.recent_path, &self.picker.recent);
+            }
+            self.last_tick = self.now();
+            self.draw();
+            return;
+        }
         let outs = self.osk.up(id);
         self.apply(&outs);
         self.relayout();

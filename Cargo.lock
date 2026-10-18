@@ -2807,6 +2807,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "rustix 1.1.4",
+ "rustybuzz",
  "sc-layout",
  "skia-safe",
  "smithay-client-toolkit 0.21.1",

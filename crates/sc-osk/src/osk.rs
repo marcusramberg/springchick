@@ -205,6 +205,7 @@ impl Osk {
                 // Tapped, not held: a held paste would repeat.
                 chord(&mut out, &wrap, letter);
             }
+            Key::Category(_) => {}
             Key::Cursor => {
                 self.cursor = Some(CursorDrag {
                     touch,

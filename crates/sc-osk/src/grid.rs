@@ -28,6 +28,7 @@ pub enum Page {
     Letters,
     Numbers,
     Symbols,
+    Emoji,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +66,8 @@ pub enum Key {
     },
     /// A character the keymap can't type, committed as text.
     Text(char),
+    /// Scrolls the emoji picker to a category ([`crate::emoji::ICONS`]).
+    Category(u8),
     /// Space, return, backspace, tab, arrows: modifiers apply, shift doesn't.
     Plain(u16),
     Shift,
@@ -131,6 +134,8 @@ pub fn layout(
         match key {
             Key::Char { code, shift } => (labels.key)(code, shift).unwrap_or_default(),
             Key::Text(c) => c.to_string(),
+            Key::Category(i) => crate::emoji::ICONS[i as usize].to_string(),
+            Key::Page(Page::Emoji) => "😀".into(),
             Key::Plain(code::SPACE) => labels.layout_name.to_string(),
             Key::Plain(code::ENTER) => "return".into(),
             Key::Plain(code::BACKSPACE) => "⌫".into(),
@@ -170,6 +175,8 @@ pub fn layout(
         Page::Letters => (LETTER_ROWS.map(letters), Key::Shift),
         Page::Numbers => (NUMBERS.map(symbols), Key::Page(Page::Symbols)),
         Page::Symbols => (SYMBOLS.map(symbols), Key::Page(Page::Numbers)),
+        // The picker draws over the key rows; see `emoji_area`.
+        Page::Emoji => (Default::default(), Key::Page(Page::Numbers)),
     };
 
     let avail = width - 2.0 * PAD;
@@ -219,6 +226,31 @@ pub fn layout(
         x += bw * weight(k);
     }
 
+    if page == Page::Emoji {
+        let y = bar_h + 3.0 * row_h;
+        let side = unit * 1.5;
+        put(Key::Page(Page::Letters), PAD, y, side, row_h);
+        let n = crate::emoji::ICONS.len();
+        let cw = (avail - 2.0 * side) / n as f32;
+        for i in 0..n {
+            put(
+                Key::Category(i as u8),
+                PAD + side + i as f32 * cw,
+                y,
+                cw,
+                row_h,
+            );
+        }
+        put(
+            Key::Plain(code::BACKSPACE),
+            PAD + avail - side,
+            y,
+            side,
+            row_h,
+        );
+        return out;
+    }
+
     let mut y = bar_h;
     for (i, row) in rows.iter().enumerate() {
         // iOS stretches the few punctuation keys between #+= and backspace.
@@ -253,6 +285,10 @@ pub fn layout(
     let mut x = PAD;
     put(page_key, x, y, side, row_h);
     x += side;
+    if page != Page::Emoji {
+        put(Key::Page(Page::Emoji), x, y, side, row_h);
+        x += side;
+    }
     if labels.layouts > 1 {
         put(Key::NextLayout, x, y, side, row_h);
         x += side;
@@ -269,6 +305,17 @@ pub fn layout(
         }
     }
     out
+}
+
+/// Where the emoji picker goes: the three key rows.
+pub fn emoji_area(width: f32, height: f32) -> Rect {
+    let row_h = height / (4.0 + BAR_ROW);
+    Rect {
+        x: PAD,
+        y: row_h * BAR_ROW,
+        w: width - 2.0 * PAD,
+        h: 3.0 * row_h,
+    }
 }
 
 pub fn hit(grid: &[Placed], x: f32, y: f32) -> Option<Key> {
@@ -392,6 +439,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn emoji_page_and_its_key() {
+        assert!(grid(Page::Letters, false, 1)
+            .iter()
+            .any(|p| p.key == Key::Page(Page::Emoji)));
+        let g = grid(Page::Emoji, false, 1);
+        let cats = g
+            .iter()
+            .filter(|p| matches!(p.key, Key::Category(_)))
+            .count();
+        assert_eq!(cats, crate::emoji::ICONS.len());
+        assert!(g.iter().any(|p| p.key == Key::Page(Page::Letters)));
+        assert!(g.iter().any(|p| p.key == Key::Plain(code::BACKSPACE)));
+        let area = emoji_area(400.0, 260.0);
+        assert!(
+            !g.iter().any(|p| p.rect.intersects(&area)),
+            "keys clear the picker"
+        );
     }
 
     #[test]
