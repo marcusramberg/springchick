@@ -1,0 +1,2 @@
+# gpu_min_mhz: lets the compositor (in video) raise the GPU clock floor while drawing.
+ACTION=="add|change", SUBSYSTEM=="devfreq", KERNEL=="*gpu*", RUN+="/bin/chgrp video /sys%p/min_freq", RUN+="/bin/chmod g+w /sys%p/min_freq"

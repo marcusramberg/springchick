@@ -88,3 +88,5 @@ contents:
   # Delegate= list is replaced, not extended, so its four defaults repeat.
   - src: packaging/files/50-springchick-cpuset.conf
     dst: /usr/lib/systemd/system/user@.service.d/50-springchick-cpuset.conf
+  - src: packaging/files/70-springchick-gpu-boost.rules
+    dst: /usr/lib/udev/rules.d/70-springchick-gpu-boost.rules
