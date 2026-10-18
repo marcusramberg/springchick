@@ -92,9 +92,10 @@ pub struct Config {
     pub dpi: f64,
     /// `0` disables idle blanking.
     pub idle_blank_secs: u64,
-    /// Logical px, for the switcher deck and drag-lift card; other radii scale
-    /// from it.
-    pub card_radius: f32,
+    /// Physical px, for the switcher deck and drag-lift card; other radii scale
+    /// from it. `None` (`"auto"`): the panel's corner radius, else
+    /// [`DEFAULT_CARD_RADIUS`].
+    pub card_radius: Option<f32>,
     /// For demo recordings.
     pub show_touches: bool,
     /// Also write each screenshot to `$XDG_PICTURES_DIR/Screenshots/`.
@@ -210,6 +211,7 @@ pub const DEFAULT_DPI: f64 = 3.0;
 /// 10 minutes.
 pub const DEFAULT_IDLE_BLANK_SECS: u64 = 600;
 
+/// Without a known panel shape.
 pub const DEFAULT_CARD_RADIUS: f32 = 120.0;
 
 pub const DEFAULT_SHOW_TOUCHES: bool = false;
@@ -351,6 +353,19 @@ fn is_memory_size(s: &str) -> bool {
             suffix,
             "" | "%" | "K" | "M" | "G" | "T" | "Ki" | "Mi" | "Gi" | "Ti"
         )
+}
+
+/// `"auto"` or px; negative clamps to 0.
+fn parse_card_radius(v: Option<&toml::Value>) -> Option<f32> {
+    match v? {
+        toml::Value::Float(f) => Some((*f as f32).max(0.0)),
+        toml::Value::Integer(n) => Some((*n as f32).max(0.0)),
+        toml::Value::String(s) if s.eq_ignore_ascii_case("auto") => None,
+        other => {
+            warn!(value = %other, "card_radius must be \"auto\" or px");
+            None
+        }
+    }
 }
 
 /// `"auto"`, `"off"`, or MHz (`0` = off).
@@ -503,7 +518,7 @@ struct RawResources {
 struct RawMain {
     dpi: Option<f64>,
     idle_blank_secs: Option<u64>,
-    card_radius: Option<f32>,
+    card_radius: Option<toml::Value>,
     show_touches: Option<bool>,
     save_screenshots: Option<bool>,
     natural_scroll: Option<bool>,
@@ -545,7 +560,7 @@ impl Config {
                     long_press_ms: DEFAULT_LONG_PRESS_MS,
                     dpi: DEFAULT_DPI,
                     idle_blank_secs: DEFAULT_IDLE_BLANK_SECS,
-                    card_radius: DEFAULT_CARD_RADIUS,
+                    card_radius: None,
                     show_touches: DEFAULT_SHOW_TOUCHES,
                     save_screenshots: DEFAULT_SAVE_SCREENSHOTS,
                     natural_scroll: DEFAULT_NATURAL_SCROLL,
@@ -564,7 +579,7 @@ impl Config {
         let main = file.main.unwrap_or_default();
         let dpi = main.dpi.unwrap_or(DEFAULT_DPI);
         let idle_blank_secs = main.idle_blank_secs.unwrap_or(DEFAULT_IDLE_BLANK_SECS);
-        let card_radius = main.card_radius.unwrap_or(DEFAULT_CARD_RADIUS).max(0.0);
+        let card_radius = parse_card_radius(main.card_radius.as_ref());
         let show_touches = main.show_touches.unwrap_or(DEFAULT_SHOW_TOUCHES);
         let save_screenshots = main.save_screenshots.unwrap_or(DEFAULT_SAVE_SCREENSHOTS);
         let natural_scroll = main.natural_scroll.unwrap_or(DEFAULT_NATURAL_SCROLL);
@@ -950,19 +965,22 @@ mod tests {
     #[test]
     fn card_radius_defaults_when_main_section_absent() {
         let cfg = Config::parse("[keybinds]\nlong_press_ms = 800\n");
-        assert_eq!(cfg.card_radius, DEFAULT_CARD_RADIUS);
+        assert_eq!(cfg.card_radius, None);
     }
 
     #[test]
     fn card_radius_is_read_from_main_section() {
-        let cfg = Config::parse("[main]\ncard_radius = 12.5\n");
-        assert_eq!(cfg.card_radius, 12.5);
+        let p = |s: &str| Config::parse(s).card_radius;
+        assert_eq!(p("[main]\ncard_radius = 12.5\n"), Some(12.5));
+        assert_eq!(p("[main]\ncard_radius = 90\n"), Some(90.0));
+        assert_eq!(p("[main]\ncard_radius = \"auto\"\n"), None);
+        assert_eq!(p("[main]\ncard_radius = \"round\"\n"), None);
     }
 
     #[test]
     fn negative_card_radius_clamped_to_zero() {
         let cfg = Config::parse("[main]\ncard_radius = -4.0\n");
-        assert_eq!(cfg.card_radius, 0.0);
+        assert_eq!(cfg.card_radius, Some(0.0));
     }
 
     #[test]
@@ -1020,7 +1038,7 @@ mod tests {
     fn a_bad_uclamp_min_does_not_break_the_rest_of_main() {
         let cfg = Config::parse("[main]\nuclamp_min = \"nope\"\ncard_radius = 42.0\n");
         assert_eq!(cfg.uclamp_min, UclampMin::Auto);
-        assert_eq!(cfg.card_radius, 42.0);
+        assert_eq!(cfg.card_radius, Some(42.0));
     }
 
     #[test]

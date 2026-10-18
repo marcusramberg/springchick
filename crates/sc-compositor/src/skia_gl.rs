@@ -648,7 +648,7 @@ impl SkiaGl {
             canvas.restore();
         }
 
-        let current_layout = sc_layout::compute(width as f32, height as f32, page, model);
+        let mut current_layout = sc_layout::compute(width as f32, height as f32, page, model);
 
         draw_dock_frame(canvas, &current_layout);
         let dock_slots = visible_dock_slots(&current_layout, dock_positions);
@@ -664,6 +664,7 @@ impl SkiaGl {
             for slot in anim_slots.iter().chain(dock_slots.iter()) {
                 draw_remove_badge(canvas, slot);
             }
+            current_layout.avoid_cutouts(view.cutouts);
             draw_arrange_buttons(canvas, &current_layout, &self.font);
 
             if view.over_dock {

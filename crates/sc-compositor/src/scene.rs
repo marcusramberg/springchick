@@ -4,6 +4,20 @@ use crate::switcher;
 use crate::ui_state::{ToplevelId, UiState};
 use sc_input::Tracker;
 
+/// Physical px.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Corners {
+    /// Shrunken cards (deck, lift).
+    pub card: f32,
+    /// The panel's own corners, where a card leaves fullscreen. 0 = square or
+    /// unknown.
+    pub screen: f32,
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct WindowTransform {
     /// 1.0 = fullscreen.
@@ -31,7 +45,7 @@ impl WindowTransform {
         origin: crate::ui_state::ZoomOrigin,
         width: f32,
         height: f32,
-        card_radius: f32,
+        corners: Corners,
     ) -> Self {
         let screen_cx = width / 2.0;
         let screen_cy = height / 2.0;
@@ -40,7 +54,7 @@ impl WindowTransform {
         let scale = origin.scale + p * (1.0 - origin.scale);
         let cx = origin.center.0 + (screen_cx - origin.center.0) * p;
         let cy = origin.center.1 + (screen_cy - origin.center.1) * p;
-        let corner_radius = card_radius * 0.6 * (1.0 - p);
+        let corner_radius = lerp(corners.card * 0.6, corners.screen, p);
 
         Self {
             scale,
@@ -52,32 +66,32 @@ impl WindowTransform {
 
     /// `progress` 0 = below the screen, 1 = centered. Held just under fullscreen
     /// scale so the renderer keeps it on the card path until the state settles.
-    pub fn slide_up(progress: f32, width: f32, height: f32, card_radius: f32) -> Self {
+    pub fn slide_up(progress: f32, width: f32, height: f32, corners: Corners) -> Self {
         let p = progress.clamp(0.0, 1.0);
         let ease = sc_anim::ease_out_cubic(p);
         Self {
             scale: 0.98,
             center_x: width / 2.0,
             center_y: height * 0.5 + (1.0 - ease) * height,
-            corner_radius: card_radius * (1.0 - ease),
+            corner_radius: lerp(corners.card, corners.screen, ease),
         }
     }
 
     /// Slides in from the left as Home is pushed right, paired with
     /// [`home_slide_out`] so they move as one sheet. Held under fullscreen scale
     /// like [`Self::slide_up`].
-    pub fn slide_in_from_left(progress: f32, width: f32, height: f32, card_radius: f32) -> Self {
+    pub fn slide_in_from_left(progress: f32, width: f32, height: f32, corners: Corners) -> Self {
         let ease = sc_anim::ease_out_cubic(progress);
         Self {
             scale: 0.98,
             center_x: width * 0.5 - (1.0 - ease) * width,
             center_y: height / 2.0,
-            corner_radius: card_radius * (1.0 - ease),
+            corner_radius: lerp(corners.card, corners.screen, ease),
         }
     }
 
     /// The window follows the finger, which stays at its bottom edge.
-    pub fn from_tracker(tracker: &Tracker, width: f32, height: f32, card_radius: f32) -> Self {
+    pub fn from_tracker(tracker: &Tracker, width: f32, height: f32, corners: Corners) -> Self {
         let up = tracker.up_progress().clamp(0.0, 1.0);
 
         // 1.0 → 0.20, fast enough that the top edge doesn't reach the screen top.
@@ -90,9 +104,15 @@ impl WindowTransform {
         let center_x = finger_x;
         let center_y = finger_y - card_h / 2.0;
 
-        // Rounded from lift-off, approaching the deck's radius at full travel so
-        // the hand-off is seamless.
-        let corner_radius = card_radius * 0.6 + (1.0 - scale) * card_radius * 0.7;
+        // From the screen's own corners (or rounded from lift-off on a square
+        // one), approaching the deck's radius at full travel so the hand-off is
+        // seamless.
+        let lift = if corners.screen > 0.0 {
+            corners.screen
+        } else {
+            corners.card * 0.6
+        };
+        let corner_radius = lift + (1.0 - scale) * corners.card * 0.7;
 
         Self {
             scale,
@@ -146,8 +166,9 @@ pub fn compute_scene(
     state: &UiState,
     output_size: (i32, i32),
     usable_origin: (f32, f32),
-    card_radius: f32,
+    corners: Corners,
 ) -> Scene {
+    let card_radius = corners.card;
     let (w, h) = (output_size.0 as f32, output_size.1 as f32);
     match state {
         UiState::Home { page, bounce, .. } => Scene {
@@ -177,14 +198,12 @@ pub fn compute_scene(
         } => {
             let p = progress.value.clamp(0.0, 1.0);
             let transform = match open_mode {
-                crate::ui_state::OpenMode::SlideUp => {
-                    WindowTransform::slide_up(p, w, h, card_radius)
-                }
+                crate::ui_state::OpenMode::SlideUp => WindowTransform::slide_up(p, w, h, corners),
                 crate::ui_state::OpenMode::SlideFromLeft => {
-                    WindowTransform::slide_in_from_left(p, w, h, card_radius)
+                    WindowTransform::slide_in_from_left(p, w, h, corners)
                 }
                 crate::ui_state::OpenMode::Zoom => {
-                    WindowTransform::from_zoom_progress(p, *origin, w, h, card_radius)
+                    WindowTransform::from_zoom_progress(p, *origin, w, h, corners)
                 }
             };
             // Only the sideways slide moves Home.
@@ -210,7 +229,7 @@ pub fn compute_scene(
         } => Scene {
             window: Some((
                 *toplevel,
-                WindowTransform::from_zoom_progress(progress.value, *origin, w, h, card_radius),
+                WindowTransform::from_zoom_progress(progress.value, *origin, w, h, corners),
             )),
             show_home: true,
             home_lift: 0.0,
@@ -226,7 +245,7 @@ pub fn compute_scene(
             ..
         } => {
             let up = tracker.up_progress();
-            let t = WindowTransform::from_tracker(tracker, w, h, card_radius);
+            let t = WindowTransform::from_tracker(tracker, w, h, corners);
             let blur = grab_backdrop_blur(up);
             // Between reveal and mid: the live fan. Otherwise just the window.
             let preview = matches!(
@@ -298,7 +317,7 @@ pub fn compute_scene(
                         scale,
                         center_x: w / 2.0,
                         center_y: h / 2.0 - p * h * 0.1,
-                        corner_radius: p * card_radius * 1.2,
+                        corner_radius: lerp(corners.screen, card_radius * 1.2, p),
                     }
                 }
                 NavTarget::Switcher => {
@@ -309,7 +328,7 @@ pub fn compute_scene(
                         *origin,
                         w,
                         h,
-                        card_radius,
+                        corners,
                     );
                     t.corner_radius = card_radius;
                     t
@@ -319,7 +338,7 @@ pub fn compute_scene(
                     *origin,
                     w,
                     h,
-                    card_radius,
+                    corners,
                 ),
             };
             // Keep the fan while settling so it ends exactly at the switcher layout
@@ -468,7 +487,10 @@ mod tests {
     use crate::ui_state::UiState;
 
     const TEST_SIZE: (i32, i32) = (1224, 2700);
-    const TEST_RADIUS: f32 = 40.0;
+    const TEST_RADIUS: Corners = Corners {
+        card: 40.0,
+        screen: 0.0,
+    };
 
     #[test]
     fn home_state_no_window() {
@@ -725,6 +747,31 @@ mod tests {
         let tracker = Tracker::begin(sc_input::Pt { x: 0.5, y: 0.95 });
         let t = WindowTransform::from_tracker(&tracker, w, h, TEST_RADIUS);
         assert!((t.scale - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_known_panel_leaves_and_reaches_fullscreen_at_its_own_corners() {
+        let (w, h) = (TEST_SIZE.0 as f32, TEST_SIZE.1 as f32);
+        let c = Corners {
+            card: 40.0,
+            screen: 100.0,
+        };
+        let still = Tracker::begin(sc_input::Pt { x: 0.5, y: 0.95 });
+        assert_eq!(
+            WindowTransform::from_tracker(&still, w, h, c).corner_radius,
+            100.0
+        );
+        let origin = crate::ui_state::ZoomOrigin::icon((100.0, 100.0));
+        assert_eq!(
+            WindowTransform::from_zoom_progress(1.0, origin, w, h, c).corner_radius,
+            100.0
+        );
+        assert_eq!(WindowTransform::slide_up(1.0, w, h, c).corner_radius, 100.0);
+        // Square panel: unchanged curves.
+        assert_eq!(
+            WindowTransform::from_zoom_progress(1.0, origin, w, h, TEST_RADIUS).corner_radius,
+            0.0
+        );
     }
 
     #[test]

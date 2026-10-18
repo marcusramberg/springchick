@@ -64,6 +64,7 @@ crates/
   sc-input/        Gesture recognizer (Tracker/Pt) + nav state machine (NavTarget)
   sc-keys/         Short/long key-press timing rules (types live in sc-config)
   sc-layout/       Pure geometry: (size, page, model) → icon rects, dock, dots, bar zone, icon-menu panel; + hit-testing
+  sc-panel/        Display shape (corner radius, camera cutouts) from bundled gmobile data, by device-tree compatible
   sc-search/       Standalone pull-down search app (eframe/winit client, not part of the compositor)
   sc-shell-model/  Grid/dock data model (4x6 pages, dock) + persist (state.toml)
 ```
@@ -125,7 +126,8 @@ libinput/DRM/GBM/session types are used via `smithay::reexports::*` to avoid ver
 Notable options:
 
 - `dpi` (default 3): advertised via `wp_fractional_scale`. The FP5 panel is illegible at 1:1.
-- `idle_blank_secs`, `card_radius`, `show_touches`, `save_screenshots`, `prefer_no_csd`, `natural_scroll`.
+- `card_radius` (default `"auto"`): the panel's corner radius from `sc-panel`, else 120. Grabbed apps also leave fullscreen at the panel's own corners. `GMOBILE_DT_COMPATIBLES=fairphone,fp5` fakes a device.
+- `idle_blank_secs`, `show_touches`, `save_screenshots`, `prefer_no_csd`, `natural_scroll`.
 - `rotation_settle_ms` (default 400): accelerometer debounce.
 - `rotation_fade_ms` (default 130): half the dip-to-black that covers a turn.
 - `vrr` (default `true`): asks the panel for variable refresh. DRM backend only, no-op unless the connector reports `vrr_capable`, startup-only.

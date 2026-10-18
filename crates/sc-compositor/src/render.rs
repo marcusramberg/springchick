@@ -122,6 +122,8 @@ pub struct ArrangeView<'a> {
     /// Output pixels.
     pub drag_pos: Option<(f32, f32)>,
     pub over_dock: bool,
+    /// Upright panel px.
+    pub cutouts: &'a [sc_layout::Rect],
 }
 
 /// Everything the Skia home pass draws from, assembled by [`pass_home`].

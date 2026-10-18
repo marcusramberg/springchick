@@ -499,7 +499,8 @@ fn press_arrange(state: &mut State, x: f32, y: f32) -> Stage {
     }
     let (w, h) = state.output_size_f();
     let page = state.current_home_page();
-    let layout = sc_layout::compute(w, h, page, &state.model);
+    let mut layout = sc_layout::compute(w, h, page, &state.model);
+    layout.avoid_cutouts(state.shell_cutouts());
     match sc_layout::hit_test_arrange(&layout, x, y) {
         sc_layout::Hit::RemoveBadge { app_id } => {
             state.model.delete(&app_id);
