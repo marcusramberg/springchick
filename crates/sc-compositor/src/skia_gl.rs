@@ -10,13 +10,14 @@ use sc_shell_model::ShellModel;
 
 use skia_safe::gpu::gl::{Format, FramebufferInfo, Interface};
 use skia_safe::gpu::{
-    backend_render_targets, direct_contexts, surfaces, DirectContext, SurfaceOrigin,
+    backend_render_targets, direct_contexts, surfaces, Budgeted, DirectContext, SurfaceOrigin,
 };
 use skia_safe::image_filters;
 use skia_safe::PathOp;
 use skia_safe::{
-    images, BlurStyle, ClipOp, Color, ColorType, Font, FontMgr, FontStyle, IRect, Image, ImageInfo,
-    MaskFilter, Matrix, Paint, PathBuilder, RRect, Rect, Surface, TextBlob, TileMode,
+    images, BlurStyle, ClipOp, Color, ColorType, FilterMode, Font, FontMgr, FontStyle, IRect,
+    Image, ImageInfo, MaskFilter, Matrix, MipmapMode, Paint, PathBuilder, RRect, Rect,
+    SamplingOptions, Surface, TextBlob, TileMode,
 };
 
 use std::collections::HashMap;
@@ -30,6 +31,17 @@ type GlGetIntegerv = unsafe extern "system" fn(pname: u32, params: *mut c_int);
 type GlFinish = unsafe extern "system" fn();
 type GlFlush = unsafe extern "system" fn();
 
+/// What the cached deck backdrop was built from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackdropKey {
+    pub page: usize,
+    pub catalog_gen: u64,
+    pub running: usize,
+    pub size: (i32, i32),
+    pub view: Rotation,
+    pub library: bool,
+}
+
 pub struct SkiaGl {
     context: Option<DirectContext>,
     gl_get_integerv: Option<GlGetIntegerv>,
@@ -41,6 +53,8 @@ pub struct SkiaGl {
     icon_gen: u64,
     font: Option<Font>,
     draws: u64,
+    /// The deck's frosted Home at quarter size; see `blur_backdrop_cached`.
+    backdrop: Option<(BackdropKey, Image)>,
     /// Every draw takes view-space sizes; set per frame by [`Self::set_view`].
     view: Rotation,
 }
@@ -305,6 +319,7 @@ impl SkiaGl {
             icon_gen: 0,
             font: None,
             draws: 0,
+            backdrop: None,
             view: Rotation::None,
         }
     }
@@ -868,6 +883,66 @@ impl SkiaGl {
         canvas.draw_image(&snapshot, (bounds.left, bounds.top), Some(&paint));
         canvas.restore();
 
+        if let Some(ctx) = self.context.as_mut() {
+            ctx.flush(None);
+        }
+    }
+
+    pub fn backdrop_cached(&self, key: BackdropKey) -> bool {
+        self.backdrop.as_ref().is_some_and(|(k, _)| *k == key)
+    }
+
+    pub fn drop_backdrop(&mut self) {
+        self.backdrop = None;
+    }
+
+    /// Full-strength deck blur. Home is static behind the deck, so it is
+    /// frosted once at quarter size (blur cost scales with pixels) and the
+    /// cached image is painted over the wallpaper on later frames; the
+    /// caller skips drawing Home while `backdrop_cached`.
+    pub fn blur_backdrop_cached(&mut self, width: i32, height: i32, key: BackdropKey, sigma: f32) {
+        if !self.ensure_surface(width, height) {
+            return;
+        }
+        let (pw, ph) = self.view.app_size((width, height));
+        if !self.backdrop_cached(key) {
+            let (sw, sh) = ((pw / 4).max(1), (ph / 4).max(1));
+            let surface = &mut self.cached_surface.as_mut().unwrap().surface;
+            let sharp = surface.image_snapshot();
+            let Some(ctx) = self.context.as_mut() else {
+                return;
+            };
+            let info = ImageInfo::new_n32_premul((sw, sh), None);
+            let Some(mut small) =
+                surfaces::render_target(ctx, Budgeted::Yes, &info, None, None, None, None, None)
+            else {
+                return;
+            };
+            let mut paint = Paint::default();
+            paint.set_image_filter(image_filters::blur(
+                (sigma / 4.0, sigma / 4.0),
+                TileMode::Clamp,
+                None,
+                None,
+            ));
+            small.canvas().draw_image_rect_with_sampling_options(
+                &sharp,
+                None,
+                Rect::from_wh(sw as f32, sh as f32),
+                SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
+                &paint,
+            );
+            self.backdrop = Some((key, small.image_snapshot()));
+        }
+        let image = self.backdrop.as_ref().unwrap().1.clone();
+        let surface = &mut self.cached_surface.as_mut().unwrap().surface;
+        surface.canvas().draw_image_rect_with_sampling_options(
+            &image,
+            None,
+            Rect::from_wh(pw as f32, ph as f32),
+            SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
+            &Paint::default(),
+        );
         if let Some(ctx) = self.context.as_mut() {
             ctx.flush(None);
         }
