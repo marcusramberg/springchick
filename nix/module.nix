@@ -52,6 +52,11 @@ in
     };
 
     waybar.enable = lib.mkEnableOption "waybar with springchick's example config (extras/waybar)";
+
+    osk.enable = lib.mkEnableOption ''
+      sc-osk, springchick's uinput on-screen keyboard. It takes the seat's
+      input method, so turn off other keyboards (wvkbd --auto) or it stays
+      hidden'';
   };
 
   config = lib.mkIf cfg.enable {
@@ -144,6 +149,18 @@ in
       enableDefaultPath = false;
       serviceConfig = {
         ExecStart = "${lib.getExe pkgs.waybar} -c ${../extras/waybar}/springchick.jsonc -s ${../extras/waybar}/springchick.css";
+        Restart = "on-failure";
+      };
+    };
+
+    # Like waybar: WantedBy the compositor so other sessions don't get it.
+    systemd.user.services.sc-osk = lib.mkIf cfg.osk.enable {
+      description = "springchick on-screen keyboard";
+      wantedBy = [ "springchick.service" ];
+      partOf = [ "graphical-session.target" ];
+      after = [ "springchick.service" ];
+      serviceConfig = {
+        ExecStart = "${cfg.package}/bin/sc-osk";
         Restart = "on-failure";
       };
     };
