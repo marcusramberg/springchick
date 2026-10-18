@@ -47,6 +47,9 @@ pub enum DebugCmd {
     Quit,
     /// A query; see [`State::layers_dump`].
     Layers,
+    /// Locks xkb layout `N`, if given. Answers `ok ACTIVE NAME|NAME|…`, for the
+    /// on-screen keyboard's labels.
+    Layout(Option<u32>),
     Home,
     /// Open an app as an icon tap would (raise, else launch); `new_window`
     /// forces a new instance. The search app uses this for attribution and
@@ -138,6 +141,14 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
         "home" => {
             done(tok)?;
             DebugCmd::Home
+        }
+        "layout" => {
+            let n = match tok.next() {
+                None => None,
+                Some(t) => Some(t.parse::<u32>().map_err(|_| "parse: not an integer")?),
+            };
+            done(tok)?;
+            DebugCmd::Layout(n)
         }
         "quit" => {
             done(tok)?;
@@ -499,6 +510,25 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
         DebugCmd::Home => {
             let _ = reply.send(format!("ok {}\n", state.home_dump()));
         }
+        DebugCmd::Layout(n) => {
+            let keyboard = state.keyboard.clone();
+            let answer = keyboard.with_xkb_state(state, |mut ctx| {
+                let names: Vec<String> = {
+                    let xkb = ctx.xkb().lock().unwrap();
+                    xkb.layouts()
+                        .map(|l| xkb.layout_name(l).to_string())
+                        .collect()
+                };
+                match n {
+                    Some(n) if n as usize >= names.len() => return Err("err range\n".to_string()),
+                    Some(n) => ctx.set_layout(smithay::input::keyboard::Layout(n)),
+                    None => {}
+                }
+                let active = ctx.xkb().lock().unwrap().active_layout().0;
+                Ok(format!("ok {active} {}\n", names.join("|")))
+            });
+            let _ = reply.send(answer.unwrap_or_else(|e| e));
+        }
         DebugCmd::Quit => {
             // Answer first: nothing drains the channel once the loop exits.
             let _ = reply.send("ok\n".into());
@@ -830,6 +860,9 @@ mod tests {
     #[test]
     fn parses_layers() {
         assert_eq!(parse_line("layers", W, H), Ok(DebugCmd::Layers));
+        assert_eq!(parse_line("layout", W, H), Ok(DebugCmd::Layout(None)));
+        assert_eq!(parse_line("layout 1", W, H), Ok(DebugCmd::Layout(Some(1))));
+        assert!(parse_line("layout x", W, H).is_err());
         assert_eq!(parse_line("home", W, H), Ok(DebugCmd::Home));
         assert!(parse_line("home now", W, H).is_err());
         assert!(parse_line("layers all", W, H).is_err());
