@@ -317,7 +317,7 @@ impl App {
         }
         self.grid_key = Some(self.grid_key());
         let layout = self.active_layout;
-        let key = |code: u16, shift: bool| keymap.label(code, shift, layout);
+        let key = |code: u16, level: u8| keymap.label(code, level, layout);
         let reverse = keymap.reverse(layout);
         let find = |c: char| reverse.get(&c).copied();
         let name = self.layouts.get(layout as usize).map_or("", String::as_str);
@@ -382,8 +382,8 @@ impl App {
         let Some(keymap) = &self.keymap else { return };
         let layout = self.active_layout;
         let variants = |key, shifted| match key {
-            grid::Key::Char { code, .. } => keymap
-                .label(code, shifted, layout)
+            grid::Key::Char { code, level } => keymap
+                .label(code, (level & labels::ALTGR) | shifted as u8, layout)
                 .map(|l| accents::variants(&l))
                 .unwrap_or_default(),
             grid::Key::Text(c) => accents::variants(&c.to_string()),

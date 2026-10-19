@@ -115,7 +115,7 @@ impl Osk {
 
     /// Whether a character key types shifted right now.
     pub fn shifted(&self, key: Key) -> bool {
-        matches!(key, Key::Char { shift: true, .. })
+        matches!(key, Key::Char { level, .. } if level & crate::labels::SHIFT != 0)
             || (self.page == Page::Letters && self.shift.on())
     }
 
@@ -275,10 +275,13 @@ impl Osk {
                 .map(|p| p.options[p.selected].clone());
             match (variant, tap.key) {
                 (Some(text), _) => out.push(Out::Text(text)),
-                (None, Key::Char { code, .. }) => {
+                (None, Key::Char { code, level }) => {
                     let mut wrap = self.mod_codes();
                     if self.shifted(tap.key) {
                         wrap.push(code::LEFTSHIFT);
+                    }
+                    if level & crate::labels::ALTGR != 0 {
+                        wrap.push(code::RIGHTALT);
                     }
                     chord(&mut out, &wrap, code);
                 }
@@ -324,10 +327,7 @@ mod tests {
     use super::*;
     use Out::{Press, Release, Text};
 
-    const A: Key = Key::Char {
-        code: 30,
-        shift: false,
-    };
+    const A: Key = Key::Char { code: 30, level: 0 };
     const O: (f32, f32) = (0.0, 0.0);
 
     fn ab(key: Key, _shifted: bool) -> Vec<String> {
@@ -393,10 +393,7 @@ mod tests {
     #[test]
     fn long_press_without_variants_still_types_the_key() {
         let mut k = Osk::default();
-        let q = Key::Char {
-            code: 16,
-            shift: false,
-        };
+        let q = Key::Char { code: 16, level: 0 };
         k.down(0, q, O, 0.0);
         assert!(!k.tick(1.0, 400.0, ab));
         assert_eq!(k.deadline(), None);
@@ -470,20 +467,12 @@ mod tests {
         assert_eq!(k.down(1, Key::Plain(code::SPACE), O, 1.0), [Press(57)]);
         assert_eq!(k.shift, Latch::Once);
         k.page = Page::Numbers;
-        k.down(
-            2,
-            Key::Char {
-                code: 2,
-                shift: false,
-            },
-            O,
-            1.5,
-        );
+        k.down(2, Key::Char { code: 2, level: 0 }, O, 1.5);
         assert_eq!(k.up(2), [Press(2), Release(2)]);
     }
 
     #[test]
-    fn symbols_carry_their_own_shift() {
+    fn symbols_carry_their_own_level() {
         let mut k = Osk {
             page: Page::Symbols,
             ..Default::default()
@@ -492,12 +481,27 @@ mod tests {
             0,
             Key::Char {
                 code: 2,
-                shift: true,
+                level: crate::labels::SHIFT,
             },
             O,
             0.0,
         );
         assert_eq!(k.up(0), [Press(42), Press(2), Release(2), Release(42)]);
+        // AltGr is how a Norwegian layout reaches @ $ [ ] { }.
+        k.down(
+            1,
+            Key::Char {
+                code: 3,
+                level: crate::labels::ALTGR,
+            },
+            O,
+            1.0,
+        );
+        assert_eq!(
+            k.up(1),
+            [Press(100), Press(3), Release(3), Release(100)],
+            "AltGr wraps the press"
+        );
     }
 
     #[test]
