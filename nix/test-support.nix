@@ -87,10 +87,7 @@ let
           ];
 
           programs.springchick.enable = true;
-          programs.springchick.config = ''
-            [main]
-            dpi = ${toString resolution.dpi}
-          '';
+          programs.springchick.settings.main.dpi = resolution.dpi;
 
           # virtio-gpu with an EDID advertising the phone mode, which find_output()
           # picks. mkBefore matters: on aarch64 the driver prepends its own

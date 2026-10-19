@@ -42,8 +42,8 @@ exists and is readable but fails to parse as TOML uses the compiled-in defaults 
 without trying further tiers. Nothing is written to disk. Loaded once at startup — edits need
 a restart.
 
-On NixOS, `programs.springchick.config` writes `/etc/springchick/config.toml` from a raw TOML
-string (`null` by default — leaves it unmanaged).
+On NixOS, `programs.springchick.settings` writes `/etc/springchick/config.toml` from a Nix
+attrset (`{ }` by default — leaves it unmanaged).
 
 ### Main
 

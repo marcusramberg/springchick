@@ -8,6 +8,7 @@
 
 let
   cfg = config.programs.springchick;
+  toml = pkgs.formats.toml { };
 in
 {
   options.programs.springchick = {
@@ -20,15 +21,26 @@ in
       description = "The springchick package to install.";
     };
 
-    # Not to be confused with this module's own `config = lib.mkIf ...` output.
-    config = lib.mkOption {
-      type = lib.types.nullOr lib.types.lines;
-      default = null;
+    settings = lib.mkOption {
+      inherit (toml) type;
+      default = { };
+      example = {
+        main.dpi = 2.8;
+        xkb.layout = "no,us";
+        keybinds.binding = [
+          {
+            key = "XF86PowerOff";
+            press = "long";
+            command = "systemctl suspend";
+          }
+        ];
+      };
       description = ''
-        Raw TOML written to /etc/springchick/config.toml. See
-        crates/sc-keys/src/config.rs for the [keybinds] table schema.
-        Null (default) leaves the compositor's built-in defaults in
-        place and does not touch /etc.
+        Written to /etc/springchick/config.toml as TOML. Empty (the
+        default) leaves the compositor's built-in defaults in place and
+        does not touch /etc. config.example.toml documents every option;
+        a `keybinds.binding` list replaces the built-in bindings rather
+        than merging into them.
       '';
     };
 
@@ -167,8 +179,8 @@ in
 
     fonts.packages = lib.mkIf cfg.waybar.enable [ pkgs.nerd-fonts.jetbrains-mono ];
 
-    environment.etc."springchick/config.toml" = lib.mkIf (cfg.config != null) {
-      text = cfg.config;
+    environment.etc."springchick/config.toml" = lib.mkIf (cfg.settings != { }) {
+      source = toml.generate "springchick-config.toml" cfg.settings;
     };
 
     # .example so it never shadows the defaults or a user's config.toml.
