@@ -87,6 +87,12 @@ mod tests {
     }
 
     #[test]
+    fn xkb_caps_a_keymap_at_four_groups() {
+        let k = Keymap::from_names("no,us,de,fr,se,ru,gr", "").expect("xkeyboard-config");
+        assert_eq!(k.layout_names().len(), 4);
+    }
+
+    #[test]
     fn reverse_finds_shifted_symbols_per_layout() {
         let k = Keymap::from_names("us,de", "").expect("xkeyboard-config");
         let us = k.reverse(0);

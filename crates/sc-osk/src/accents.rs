@@ -2,9 +2,10 @@
 //! by what the key types, so it follows the active keymap.
 
 const TABLE: &[(&str, &str)] = &[
-    ("a", "à á â ä æ ã å ā"),
+    ("a", "à á â ä æ ã å ā ą"),
     ("c", "ç ć č"),
     ("e", "è é ê ë ē ė ę"),
+    ("g", "ğ ġ ģ ґ"),
     ("i", "î ï í ī į ì"),
     ("l", "ł"),
     ("n", "ñ ń"),
@@ -13,6 +14,16 @@ const TABLE: &[(&str, &str)] = &[
     ("u", "û ü ù ú ū"),
     ("y", "ÿ ý"),
     ("z", "ž ź ż"),
+    // Cyrillic and Greek: letters xkb puts out of reach of the three rows, or
+    // only behind a dead key.
+    ("е", "ё"),
+    ("α", "ά"),
+    ("ε", "έ"),
+    ("η", "ή"),
+    ("ι", "ί ϊ ΐ"),
+    ("ο", "ό"),
+    ("υ", "ύ ϋ ΰ"),
+    ("ω", "ώ"),
     ("-", "– — •"),
     ("$", "€ £ ¥ ¢ ₽ ₩"),
     ("&", "§"),

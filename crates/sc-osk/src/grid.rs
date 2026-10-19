@@ -461,6 +461,42 @@ mod tests {
         );
     }
 
+    /// Real xkeyboard-config data: one grid has to serve every layout.
+    #[test]
+    fn real_layouts_lay_themselves_out() {
+        let row_h = 260.0 / 4.8;
+        let y = |i: f32| 0.8 * row_h + (i + 0.5) * row_h;
+        for (name, want) in [
+            ("no", ["qwertyuiopå", "asdfghjkløæ", "zxcvbnm"]),
+            ("us", ["qwertyuiop", "asdfghjkl", "zxcvbnm"]),
+            ("de", ["qwertzuiopü", "asdfghjklöä", "yxcvbnm"]),
+            ("fr", ["azertyuiop", "qsdfghjklmù", "wxcvbn"]),
+            ("se", ["qwertyuiopå", "asdfghjklöä", "zxcvbnm"]),
+            ("ru", ["йцукенгшщзхъ", "фывапролджэ", "ячсмитьбю"]),
+            ("gr", ["ςερτυθιοπ", "ασδφγηξκλ", "ζχψωβνμ"]),
+        ] {
+            let km = crate::labels::Keymap::from_names(name, "").expect("xkeyboard-config");
+            let key = |c: u16, shift: bool| km.label(c, shift, 0);
+            let reverse = km.reverse(0);
+            let find = |c: char| reverse.get(&c).copied();
+            let labels = Labels {
+                key: &key,
+                find: &find,
+                layout_name: name,
+                layouts: 1,
+            };
+            let g = layout(Page::Letters, Bar::Default, false, 400.0, 260.0, &labels);
+            let got: Vec<String> = (0..3).map(|r| row(&g, y(r as f32))).collect();
+            assert_eq!(got, want, "layout {name}");
+            for a in &g {
+                assert!(
+                    a.rect.x >= 0.0 && a.rect.x + a.rect.w <= 400.01,
+                    "{name}: {a:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn hit_finds_the_cell() {
         let g = grid(Page::Letters, false, 1);

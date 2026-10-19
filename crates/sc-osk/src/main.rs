@@ -264,6 +264,9 @@ impl App {
         if self.layer.is_some() {
             return;
         }
+        // A grp: hotkey switches the seat behind our back; we never get the
+        // `modifiers` event, having no keyboard focus.
+        self.refresh_layouts();
         let out_w = self
             .output_state
             .outputs()
