@@ -119,12 +119,23 @@ pub struct Config {
     pub startup: Vec<String>,
     pub resources: Resources,
     pub xkb: Xkb,
+    pub predict: Predict,
     pub bindings: Vec<Binding>,
 }
 
 /// The uinput device name of springchick's on-screen keyboard. It types
 /// letters like hardware, but must not count as one and hide itself.
 pub const OSK_DEVICE_NAME: &str = "springchick osk";
+
+/// Word completion on the on-screen keyboard. It always completes words you
+/// have typed before; `dictionaries` adds cold-start suggestions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Predict {
+    /// Hunspell dictionary names, as the files are called without `.dic`
+    /// (`"nb_NO"`, `"en_US"`). Several make the keyboard bilingual. Looked up
+    /// in the XDG data dirs under `hunspell/` and `myspell/dicts/`.
+    pub dictionaries: Vec<String>,
+}
 
 /// The seat keymap, as xkbcommon names it. Empty fields fall back to
 /// `XKB_DEFAULT_*`, then xkbcommon's own defaults (`us`).
@@ -513,6 +524,12 @@ struct RawConfigFile {
     keybinds: Option<RawConfig>,
     resources: Option<RawResources>,
     xkb: Option<RawXkb>,
+    predict: Option<RawPredict>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawPredict {
+    dictionaries: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -598,6 +615,7 @@ impl Config {
                     startup: Vec::new(),
                     resources: Resources::default(),
                     xkb: Xkb::default(),
+                    predict: Predict::default(),
                     bindings: Vec::new(),
                 };
             }
@@ -625,6 +643,9 @@ impl Config {
             variant: x.variant.unwrap_or_default(),
             options: x.options.unwrap_or_default(),
         });
+        let predict = file.predict.map_or_else(Predict::default, |p| Predict {
+            dictionaries: p.dictionaries.unwrap_or_default(),
+        });
         let raw = file.keybinds.unwrap_or_default();
 
         let bindings = raw.binding.into_iter().filter_map(convert).collect();
@@ -645,6 +666,7 @@ impl Config {
             startup,
             resources,
             xkb,
+            predict,
             bindings,
         }
     }
@@ -993,6 +1015,17 @@ mod tests {
         let cfg = Config::parse("[main]\nrotation_settle_ms = 250\nrotation_fade_ms = 0\n");
         assert_eq!(cfg.rotation_settle_ms, 250);
         assert_eq!(cfg.rotation_fade_ms, 0);
+    }
+
+    #[test]
+    fn predict_section_is_optional() {
+        assert!(Config::parse("").predict.dictionaries.is_empty());
+        assert_eq!(
+            Config::parse("[predict]\ndictionaries = [\"nb_NO\", \"en_US\"]\n")
+                .predict
+                .dictionaries,
+            ["nb_NO", "en_US"]
+        );
     }
 
     #[test]

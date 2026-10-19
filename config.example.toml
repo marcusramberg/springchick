@@ -78,6 +78,14 @@ layout = ""      # e.g. "no,us"
 variant = ""
 options = ""     # e.g. "grp:win_space_toggle"
 
+# Word completion on the on-screen keyboard. It always completes words you
+# have typed before, learning them as you go. Dictionaries only add cold-start
+# suggestions before enough words are learned: hunspell dictionary names, found
+# in the XDG data dirs. Several make the keyboard bilingual, which is one
+# layout completing either language, as a phone does.
+[predict]
+dictionaries = []   # e.g. ["nb_NO", "en_US"]
+
 # Per-app resource limits, set on each app's systemd scope on focus change.
 # Needs the cpu (and memory) controllers delegated to user@.service:
 #   cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers

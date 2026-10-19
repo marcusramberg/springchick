@@ -11,6 +11,7 @@ mod emoji;
 mod grid;
 mod labels;
 mod osk;
+mod suggest;
 mod uinput;
 
 use std::collections::HashMap;
@@ -76,6 +77,10 @@ const TERMINALS: &[&str] = &[
 /// text-input-v3 purposes that open on the numbers page: digits, number, phone.
 const NUMERIC_PURPOSES: [u32; 3] = [2, 3, 4];
 
+/// `zwp_text_input_v3` content purposes that hold words: normal, alpha, name.
+/// A whitelist, so a purpose we have not thought about gets no completion.
+const PROSE_PURPOSES: [u32; 3] = [0, 1, 7];
+
 /// Every input to [`grid::layout`] but the keymap itself, which invalidates
 /// the grid by hand.
 type GridKey = (Page, Bar, bool, u32, u32, u32, usize);
@@ -115,6 +120,11 @@ struct App {
     epoch: Instant,
     picker: emoji::Picker,
     recent_path: std::path::PathBuf,
+    predict: sc_predict::Predict,
+    tracker: suggest::Tracker,
+    /// The strip over the bar: empty when there is nothing to offer.
+    strip: Vec<(String, sc_layout::Rect)>,
+    learned_path: std::path::PathBuf,
     last_tick: f64,
 }
 
@@ -128,6 +138,19 @@ fn main() {
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".local/state")))
         .unwrap_or_default()
         .join("springchick/osk-recent");
+    let learned_path = recent_path.with_file_name("osk-learned");
+    let config = sc_config::load();
+    let mut predict = sc_predict::Predict::default();
+    predict.load_learned(&learned_path);
+    for name in &config.predict.dictionaries {
+        match find_dic(name) {
+            Some(path) => match std::fs::read(&path) {
+                Ok(bytes) => predict.add_dic(&bytes),
+                Err(e) => eprintln!("sc-osk: {}: {e}", path.display()),
+            },
+            None => eprintln!("sc-osk: no {name}.dic in the XDG data dirs"),
+        }
+    }
     let uinput = uinput::Uinput::new(sc_config::OSK_DEVICE_NAME)
         .map_err(|e| eprintln!("sc-osk: no /dev/uinput ({e}); keys won't type"))
         .ok();
@@ -158,6 +181,10 @@ fn main() {
         toplevels: HashMap::new(),
         epoch: Instant::now(),
         picker: emoji::Picker::new(emoji::load_recent(&recent_path)),
+        predict,
+        tracker: suggest::Tracker::default(),
+        strip: Vec::new(),
+        learned_path,
         recent_path,
         last_tick: 0.0,
     };
@@ -242,6 +269,24 @@ fn ipc(line: &str) -> Option<String> {
     reply.strip_prefix("ok ").map(|r| r.trim_end().to_string())
 }
 
+/// A hunspell dictionary by name, in the XDG data dirs. Distributions split
+/// between `hunspell/` and myspell's older path.
+fn find_dic(name: &str) -> Option<std::path::PathBuf> {
+    let dirs =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    std::env::var("XDG_DATA_HOME")
+        .into_iter()
+        .chain(dirs.split(':').map(str::to_string))
+        .flat_map(|d| {
+            ["hunspell", "myspell/dicts"].map(|sub| {
+                std::path::Path::new(&d)
+                    .join(sub)
+                    .join(format!("{name}.dic"))
+            })
+        })
+        .find(|p| p.is_file())
+}
+
 impl App {
     fn now(&self) -> f64 {
         self.epoch.elapsed().as_secs_f64()
@@ -291,6 +336,9 @@ impl App {
     fn hide(&mut self) {
         let outs = self.osk.release_all();
         self.apply(&outs);
+        // A new text field is a new word, and the old one's text is gone.
+        self.tracker.clear();
+        self.strip.clear();
         self.layer = None;
         self.width = 0;
     }
@@ -337,6 +385,7 @@ impl App {
             self.height as f32,
             &labels,
         );
+        self.refresh_strip();
     }
 
     fn draw(&mut self) {
@@ -362,6 +411,7 @@ impl App {
             &self.grid,
             &self.osk,
             (self.osk.page == Page::Emoji).then_some(&self.picker),
+            &self.strip,
             &mut self.fonts,
         );
         let surface = layer.wl_surface();
@@ -421,12 +471,52 @@ impl App {
                 }
             }
         }
+        self.track(outs);
+    }
+
+    /// Follows what we just typed, learns finished words, and rebuilds the
+    /// strip.
+    fn track(&mut self, outs: &[Out]) {
+        let Some(keymap) = &self.keymap else { return };
+        let layout = self.active_layout;
+        let label = |code: u16, level: u8| keymap.label(code, level, layout);
+        if let Some(done) = self.tracker.feed(outs, &label) {
+            self.predict.learn(&done);
+            self.predict.save(&self.learned_path);
+        }
+        self.refresh_strip();
+    }
+
+    fn refresh_strip(&mut self) {
+        self.strip.clear();
+        if !self.completing() {
+            return;
+        }
+        let words = self.predict.complete(self.tracker.word(), suggest::SLOTS);
+        if words.is_empty() {
+            return;
+        }
+        let area = grid::bar_area(self.width as f32, self.height as f32);
+        self.strip = suggest::strip(&words, area);
+    }
+
+    /// Words are only wanted where prose is. A password must never be
+    /// completed, and a terminal or a URL is not prose either.
+    fn completing(&self) -> bool {
+        self.osk.page == Page::Letters
+            && self.osk.bar != grid::Bar::Terminal
+            && PROSE_PURPOSES.contains(&self.pending_purpose)
     }
 
     fn touch_down(&mut self, id: i32, (x, y): (f64, f64)) {
         let at = (x as f32, y as f32);
         if self.osk.page == Page::Emoji && self.picker.area().contains(at.0, at.1) {
             self.picker.down(id, at, self.now());
+            return;
+        }
+        // The strip covers the bar keys, so it answers first.
+        if let Some(i) = suggest::hit(&self.strip, at.0, at.1) {
+            self.take_suggestion(i);
             return;
         }
         let Some(key) = grid::hit(&self.grid, at.0, at.1) else {
@@ -459,6 +549,22 @@ impl App {
         } else if self.osk.popup.as_ref().map(|p| p.selected) != selected {
             self.draw();
         }
+    }
+
+    /// Types suggestion `i` in place of the word in progress.
+    fn take_suggestion(&mut self, i: usize) {
+        let Some(keymap) = &self.keymap else { return };
+        let Some((word, _)) = self.strip.get(i).cloned() else {
+            return;
+        };
+        let reverse = keymap.reverse(self.active_layout);
+        let outs = suggest::accept(self.tracker.word(), &word, &|c| reverse.get(&c).copied());
+        self.tracker.clear();
+        self.apply(&outs);
+        self.predict.learn(&word);
+        self.predict.save(&self.learned_path);
+        self.refresh_strip();
+        self.draw();
     }
 
     fn touch_up(&mut self, id: i32) {
