@@ -2835,6 +2835,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sc-predict"
+version = "0.1.0"
+
+[[package]]
 name = "sc-search"
 version = "0.1.0"
 dependencies = [
