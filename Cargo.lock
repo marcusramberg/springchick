@@ -2813,6 +2813,7 @@ dependencies = [
  "libc",
  "rustix 1.1.4",
  "rustybuzz",
+ "sc-config",
  "sc-fonts",
  "sc-layout",
  "skia-safe",

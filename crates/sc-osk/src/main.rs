@@ -1,6 +1,7 @@
 //! springchick's on-screen keyboard. It types through uinput, so every client
-//! sees a real keyboard; input-method-v2 only says when to show and what the
-//! field wants. Keys are labelled from the seat keymap, and the bar above them
+//! sees a real keyboard; input-method-v2 says when to show and what the field
+//! wants, and commits what the keymap can't type (emoji, accents, €), which
+//! needs the client to speak text-input-v3. Keys are labelled from the seat keymap, and the bar above them
 //! follows the app in front (wlr-foreign-toplevel). Standalone: any other
 //! keyboard can replace it.
 
@@ -58,8 +59,6 @@ use grid::{Bar, Labels, Page, Placed};
 use labels::Keymap;
 use osk::{Osk, Out};
 
-/// Must match springchick's `OSK_DEVICE_NAME`, or it counts us as hardware.
-const DEVICE_NAME: &str = "springchick osk";
 /// Apps that get Esc/Ctrl/Alt/Super and terminal paste (Ctrl+Shift+V).
 const TERMINALS: &[&str] = &[
     "foot",
@@ -124,7 +123,7 @@ fn main() {
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".local/state")))
         .unwrap_or_default()
         .join("springchick/osk-recent");
-    let uinput = uinput::Uinput::new(DEVICE_NAME)
+    let uinput = uinput::Uinput::new(sc_config::OSK_DEVICE_NAME)
         .map_err(|e| eprintln!("sc-osk: no /dev/uinput ({e}); keys won't type"))
         .ok();
     let mut app = App {
@@ -227,6 +226,10 @@ fn ipc(line: &str) -> Option<String> {
                 .map(|d| std::path::PathBuf::from(d).join("springchick-ipc.sock"))
         })?;
     let mut stream = UnixStream::connect(path).ok()?;
+    // The event loop waits on this: a wedged compositor must not hang the keys.
+    let timeout = Some(std::time::Duration::from_millis(500));
+    stream.set_read_timeout(timeout).ok()?;
+    stream.set_write_timeout(timeout).ok()?;
     writeln!(stream, "{line}").ok()?;
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply).ok()?;

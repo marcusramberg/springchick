@@ -168,6 +168,11 @@ impl Osk {
     pub fn down(&mut self, touch: i32, key: Key, at: (f32, f32), now: f64) -> Vec<Out> {
         let mut out = Vec::new();
         let mut held = Vec::new();
+        // A second down without an up: what the last one holds would stick,
+        // and a stuck uinput key repeats forever.
+        if let Some((_, codes)) = self.held.remove(&touch) {
+            out.extend(codes.into_iter().map(Out::Release));
+        }
         match key {
             Key::Char { .. } | Key::Text(_) => {
                 self.taps.insert(
@@ -261,17 +266,24 @@ impl Osk {
             self.use_mods();
         }
         if let Some(tap) = self.taps.remove(&touch) {
-            if self.popup.as_ref().is_some_and(|p| p.touch == touch) {
-                let p = self.popup.take().expect("checked");
-                out.push(Out::Text(p.options[p.selected].clone()));
-            } else if let Key::Char { code, .. } = tap.key {
-                let mut wrap = self.mod_codes();
-                if self.shifted(tap.key) {
-                    wrap.push(code::LEFTSHIFT);
+            // Option 0 is the key itself, so it types through the keymap:
+            // committed text needs an input method, which a terminal has not.
+            let variant = self
+                .popup
+                .take_if(|p| p.touch == touch)
+                .filter(|p| p.selected > 0)
+                .map(|p| p.options[p.selected].clone());
+            match (variant, tap.key) {
+                (Some(text), _) => out.push(Out::Text(text)),
+                (None, Key::Char { code, .. }) => {
+                    let mut wrap = self.mod_codes();
+                    if self.shifted(tap.key) {
+                        wrap.push(code::LEFTSHIFT);
+                    }
+                    chord(&mut out, &wrap, code);
                 }
-                chord(&mut out, &wrap, code);
-            } else if let Key::Text(c) = tap.key {
-                out.push(Out::Text(c.to_string()));
+                (None, Key::Text(c)) => out.push(Out::Text(c.to_string())),
+                _ => {}
             }
             self.shift.used();
             self.use_mods();
@@ -355,6 +367,27 @@ mod tests {
         assert_eq!(k.popup.as_ref().unwrap().selected, 2);
         assert_eq!(k.up(0), [Text("å".into())]);
         assert!(k.popup.is_none());
+    }
+
+    #[test]
+    fn the_base_option_types_through_the_keymap() {
+        let mut k = Osk::default();
+        k.down(0, A, (100.0, 50.0), 0.0);
+        assert!(k.tick(0.5, 400.0, ab));
+        assert_eq!(k.popup.as_ref().unwrap().selected, 0);
+        assert_eq!(k.up(0), [Press(30), Release(30)]);
+        assert!(k.popup.is_none());
+    }
+
+    #[test]
+    fn a_second_down_releases_what_the_first_holds() {
+        let mut k = Osk::default();
+        assert_eq!(k.down(0, Key::Plain(code::BACKSPACE), O, 0.0), [Press(14)]);
+        assert_eq!(
+            k.down(0, Key::Plain(code::SPACE), O, 0.1),
+            [Release(14), Press(57)]
+        );
+        assert_eq!(k.up(0), [Release(57)]);
     }
 
     #[test]
