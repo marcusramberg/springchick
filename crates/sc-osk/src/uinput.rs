@@ -5,7 +5,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
 
 const UI_SET_EVBIT: libc::Ioctl = 0x4004_5564;
 const UI_SET_KEYBIT: libc::Ioctl = 0x4004_5565;
@@ -39,10 +38,9 @@ fn check(r: libc::c_int) -> io::Result<()> {
 
 impl Uinput {
     pub fn new(name: &str) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open("/dev/uinput")?;
+        // Blocking: a short write would drop a keystroke, and one event
+        // never fills the kernel's buffer.
+        let file = OpenOptions::new().write(true).open("/dev/uinput")?;
         let fd = file.as_raw_fd();
         let mut setup = UinputSetup {
             bustype: BUS_VIRTUAL,

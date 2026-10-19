@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+sc-config = { path = "../sc-config" }
 sc-layout = { path = "../sc-layout" }
 sc-fonts = { path = "../sc-fonts" }
 libc = "0.2"
