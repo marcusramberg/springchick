@@ -15,6 +15,7 @@ pub mod code {
     pub const V: u16 = 47;
     pub const LEFTALT: u16 = 56;
     pub const SPACE: u16 = 57;
+    pub const RIGHTALT: u16 = 100;
     pub const UP: u16 = 103;
     pub const LEFT: u16 = 105;
     pub const RIGHT: u16 = 106;
@@ -59,10 +60,11 @@ pub enum Clip {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
-    /// A character key; `shift` types it shifted.
+    /// A character key, typed at keymap `level` ([`crate::labels::SHIFT`],
+    /// [`crate::labels::ALTGR`]).
     Char {
         code: u16,
-        shift: bool,
+        level: u8,
     },
     /// A character the keymap can't type, committed as text.
     Text(char),
@@ -98,10 +100,10 @@ pub struct Placed {
 
 /// What the grid needs from the keymap and the shell.
 pub struct Labels<'a> {
-    /// `(evdev code, shifted)` → text, `None` for keys that type nothing.
-    pub key: &'a dyn Fn(u16, bool) -> Option<String>,
-    /// The key and shift state that type a character, if any.
-    pub find: &'a dyn Fn(char) -> Option<(u16, bool)>,
+    /// `(evdev code, level)` → text, `None` for keys that type nothing.
+    pub key: &'a dyn Fn(u16, u8) -> Option<String>,
+    /// The key and level that type a character, if any.
+    pub find: &'a dyn Fn(char) -> Option<(u16, u8)>,
     /// Shown on the space bar.
     pub layout_name: &'a str,
     pub layouts: usize,
@@ -132,7 +134,7 @@ pub fn layout(
 ) -> Vec<Placed> {
     let label = |key: Key| -> String {
         match key {
-            Key::Char { code, shift } => (labels.key)(code, shift).unwrap_or_default(),
+            Key::Char { code, level } => (labels.key)(code, level).unwrap_or_default(),
             Key::Text(c) => c.to_string(),
             Key::Category(i) => crate::emoji::ICONS[i as usize].to_string(),
             Key::Page(Page::Emoji) => "😀".into(),
@@ -158,14 +160,14 @@ pub fn layout(
     };
     let letters = |codes: std::ops::RangeInclusive<u16>| -> Vec<Key> {
         codes
-            .filter(|&c| is_letter(&(labels.key)(c, false).unwrap_or_default()))
-            .map(|code| Key::Char { code, shift: false })
+            .filter(|&c| is_letter(&(labels.key)(c, 0).unwrap_or_default()))
+            .map(|code| Key::Char { code, level: 0 })
             .collect()
     };
     let symbols = |row: &str| -> Vec<Key> {
         row.chars()
             .map(|c| match (labels.find)(c) {
-                Some((code, shift)) => Key::Char { code, shift },
+                Some((code, level)) => Key::Char { code, level },
                 None => Key::Text(c),
             })
             .collect()
@@ -300,7 +302,7 @@ pub fn layout(
     if upper && page == Page::Letters {
         for p in &mut out {
             if let Key::Char { code, .. } = p.key {
-                p.label = (labels.key)(code, true).unwrap_or_default();
+                p.label = (labels.key)(code, crate::labels::SHIFT).unwrap_or_default();
             }
         }
     }
@@ -327,8 +329,9 @@ mod tests {
     use super::*;
 
     /// A small US (and with `de`, German) keymap stand-in.
-    fn keymap(de: bool) -> impl Fn(u16, bool) -> Option<String> {
-        move |c, shift| {
+    fn keymap(de: bool) -> impl Fn(u16, u8) -> Option<String> {
+        move |c, level: u8| {
+            let shift = level & crate::labels::SHIFT != 0;
             let us = "  1234567890-=  qwertyuiop[]  asdfghjkl;'` \\zxcvbnm,./";
             let ch = if de {
                 match c {
@@ -358,8 +361,8 @@ mod tests {
         let k = keymap(de);
         let find = |c: char| {
             (1..60u16)
-                .flat_map(|code| [(code, false), (code, true)])
-                .find(|&(code, shift)| k(code, shift) == Some(c.to_string()))
+                .flat_map(|code| [(code, 0u8), (code, crate::labels::SHIFT)])
+                .find(|&(code, level)| k(code, level) == Some(c.to_string()))
         };
         let labels = Labels {
             key: &k,
@@ -418,11 +421,7 @@ mod tests {
         assert_eq!(labels(0.8 * row_h + 1.5 * row_h), "-/:;()$&@\"");
         assert_eq!(labels(0.8 * row_h + 2.5 * row_h), ".,?!'");
         // The test keymap types '-' but has no shifted symbols, so no '('.
-        assert!(g.iter().any(|p| p.key
-            == Key::Char {
-                code: 12,
-                shift: false
-            }));
+        assert!(g.iter().any(|p| p.key == Key::Char { code: 12, level: 0 }));
         assert!(g.iter().any(|p| p.key == Key::Text('(')));
         assert!(g.iter().any(|p| p.key == Key::Page(Page::Symbols)));
     }
@@ -476,7 +475,7 @@ mod tests {
             ("gr", ["ςερτυθιοπ", "ασδφγηξκλ", "ζχψωβνμ"]),
         ] {
             let km = crate::labels::Keymap::from_names(name, "").expect("xkeyboard-config");
-            let key = |c: u16, shift: bool| km.label(c, shift, 0);
+            let key = |c: u16, level: u8| km.label(c, level, 0);
             let reverse = km.reverse(0);
             let find = |c: char| reverse.get(&c).copied();
             let labels = Labels {
@@ -503,10 +502,7 @@ mod tests {
         let q = g.iter().find(|p| p.label == "q").unwrap();
         assert_eq!(
             hit(&g, q.rect.center_x(), q.rect.center_y()),
-            Some(Key::Char {
-                code: 16,
-                shift: false
-            })
+            Some(Key::Char { code: 16, level: 0 })
         );
     }
 }
