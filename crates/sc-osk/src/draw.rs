@@ -22,8 +22,25 @@ pub struct Fonts {
     /// A colour emoji font; emoji show as boxes without one.
     emoji: Option<Font>,
     /// The same font for shaping: ZWJ sequences and flags are ligatures,
-    /// which `draw_str` leaves as separate glyphs.
+    /// which `draw_str` leaves as separate glyphs. Built on the first emoji
+    /// drawn: `to_font_data` copies the whole colour font, tens of megabytes
+    /// a keyboard that never opens the picker shouldn't hold.
     shaper: Option<rustybuzz::Face<'static>>,
+    shaper_built: bool,
+}
+
+impl Fonts {
+    fn build_shaper(&mut self) {
+        if std::mem::replace(&mut self.shaper_built, true) {
+            return;
+        }
+        self.shaper = self.emoji.as_ref().and_then(|f| {
+            let (data, index) = f.typeface().to_font_data()?;
+            // Read once for the process; the face borrows it.
+            let data: &'static [u8] = Box::leak(data.into_boxed_slice());
+            rustybuzz::Face::from_slice(data, index as u32)
+        });
+    }
 }
 
 pub fn fonts() -> Fonts {
@@ -42,16 +59,11 @@ pub fn fonts() -> Fonts {
         .find_map(|f| mgr.match_family_style(f, FontStyle::normal()))
         .or_else(|| mgr.match_family_style_character("", FontStyle::normal(), &[], '😀' as i32))
         .map(|t| Font::from_typeface(t, 16.0));
-    let shaper = emoji.as_ref().and_then(|f| {
-        let (data, index) = f.typeface().to_font_data()?;
-        // Read once for the process; the face borrows it.
-        let data: &'static [u8] = Box::leak(data.into_boxed_slice());
-        rustybuzz::Face::from_slice(data, index as u32)
-    });
     Fonts {
         text,
         emoji,
-        shaper,
+        shaper: None,
+        shaper_built: false,
     }
 }
 
@@ -171,6 +183,9 @@ pub fn draw(
         }
     }
 
+    if picker.is_some() {
+        fonts.build_shaper();
+    }
     if let (Some(picker), Some(emoji)) = (picker, &mut fonts.emoji) {
         let a = picker.area();
         canvas.save();
