@@ -309,6 +309,18 @@ pub fn layout(
     out
 }
 
+/// The bar above the keys, which the completion strip covers when it has
+/// something to offer.
+pub fn bar_area(width: f32, height: f32) -> Rect {
+    let row_h = height / (4.0 + BAR_ROW);
+    Rect {
+        x: PAD,
+        y: 0.0,
+        w: width - 2.0 * PAD,
+        h: row_h * BAR_ROW,
+    }
+}
+
 /// Where the emoji picker goes: the three key rows.
 pub fn emoji_area(width: f32, height: f32) -> Rect {
     let row_h = height / (4.0 + BAR_ROW);
@@ -493,6 +505,20 @@ mod tests {
                     "{name}: {a:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn bar_area_covers_the_bar_keys_and_nothing_else() {
+        let g = grid(Page::Letters, false, 1);
+        let bar = bar_area(400.0, 260.0);
+        let is_bar = |p: &Placed| p.rect.y < bar.y + bar.h;
+        assert!(g.iter().filter(|p| is_bar(p)).count() >= 4);
+        for p in g.iter().filter(|p| is_bar(p)) {
+            assert!(bar.contains(p.rect.center_x(), p.rect.center_y()), "{p:?}");
+        }
+        for p in g.iter().filter(|p| !is_bar(p)) {
+            assert!(!bar.intersects(&p.rect), "{p:?}");
         }
     }
 

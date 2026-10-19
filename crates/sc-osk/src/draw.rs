@@ -109,6 +109,7 @@ pub fn draw(
     grid: &[Placed],
     osk: &Osk,
     picker: Option<&Picker>,
+    strip: &[(String, sc_layout::Rect)],
     fonts: &mut Fonts,
 ) {
     let info = ImageInfo::new((w, h), ColorType::BGRA8888, AlphaType::Premul, None);
@@ -122,7 +123,9 @@ pub fn draw(
     let pressed: Vec<Key> = osk.pressed().collect();
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    for p in grid {
+    // The strip sits where the bar keys are, so they are not drawn under it.
+    let bar_h = strip.first().map_or(0.0, |(_, r)| r.y + r.h);
+    for p in grid.iter().filter(|p| p.rect.y >= bar_h) {
         let latch = match p.key {
             Key::Shift => osk.shift,
             Key::Mod(m) => osk.mod_latch(m),
@@ -181,6 +184,28 @@ pub fn draw(
             let bar = Rect::from_xywh(r.center_x() - 6.0, r.bottom() - 6.0, 12.0, 2.0);
             canvas.draw_rect(bar, &paint);
         }
+    }
+
+    for (i, (word, r)) in strip.iter().enumerate() {
+        let r = Rect::from_xywh(r.x, r.y, r.w, r.h);
+        if i > 0 {
+            // Hairline separators, as iOS has: no boxes, just divided space.
+            paint.set_color(FUNCTION);
+            canvas.draw_rect(
+                Rect::from_xywh(r.left(), r.top() + r.height() * 0.2, 1.0, r.height() * 0.6),
+                &paint,
+            );
+        }
+        fonts.text.set_size(r.height() * 0.42);
+        paint.set_color(INK);
+        let (width, _) = fonts.text.measure_str(word, Some(&paint));
+        let cap = fonts.text.metrics().1.cap_height;
+        canvas.draw_str(
+            word,
+            (r.center_x() - width / 2.0, r.center_y() + cap / 2.0),
+            &fonts.text,
+            &paint,
+        );
     }
 
     if picker.is_some() {

@@ -2816,6 +2816,7 @@ dependencies = [
  "sc-config",
  "sc-fonts",
  "sc-layout",
+ "sc-predict",
  "skia-safe",
  "smithay-client-toolkit 0.21.1",
  "wayland-client",
