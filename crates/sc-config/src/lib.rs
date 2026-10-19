@@ -515,6 +515,8 @@ struct RawConfig {
     long_press_ms: Option<u64>,
     #[serde(default)]
     binding: Vec<RawBinding>,
+    #[serde(flatten)]
+    unknown: toml::Table,
 }
 
 /// Unknown top-level keys are ignored.
@@ -525,11 +527,15 @@ struct RawConfigFile {
     resources: Option<RawResources>,
     xkb: Option<RawXkb>,
     predict: Option<RawPredict>,
+    #[serde(flatten)]
+    unknown: toml::Table,
 }
 
 #[derive(Deserialize, Default)]
 struct RawPredict {
     dictionaries: Option<Vec<String>>,
+    #[serde(flatten)]
+    unknown: toml::Table,
 }
 
 #[derive(Deserialize, Default)]
@@ -538,6 +544,8 @@ struct RawXkb {
     layout: Option<String>,
     variant: Option<String>,
     options: Option<String>,
+    #[serde(flatten)]
+    unknown: toml::Table,
 }
 
 #[derive(Deserialize, Default)]
@@ -554,6 +562,8 @@ struct RawResources {
     freeze_wake_for_secs: Option<u64>,
     #[serde(default)]
     apps: BTreeMap<String, String>,
+    #[serde(flatten)]
+    unknown: toml::Table,
 }
 
 #[derive(Deserialize, Default)]
@@ -572,6 +582,8 @@ struct RawMain {
     rotation_fade_ms: Option<u64>,
     #[serde(default)]
     startup: Vec<String>,
+    #[serde(flatten)]
+    unknown: toml::Table,
 }
 
 #[derive(Deserialize)]
@@ -584,6 +596,37 @@ struct RawBinding {
     press: Option<String>,
     command: Option<String>,
     action: Option<String>,
+    #[serde(flatten)]
+    unknown: toml::Table,
+}
+
+/// Keys serde ignored, dotted. Returned rather than logged so the test can see
+/// them; `[xkbd]` instead of `[xkb]` is silent otherwise.
+fn unknown_keys(file: &RawConfigFile) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut add = |prefix: &str, table: &toml::Table| {
+        out.extend(table.keys().map(|k| format!("{prefix}{k}")));
+    };
+    add("", &file.unknown);
+    if let Some(main) = &file.main {
+        add("main.", &main.unknown);
+    }
+    if let Some(xkb) = &file.xkb {
+        add("xkb.", &xkb.unknown);
+    }
+    if let Some(predict) = &file.predict {
+        add("predict.", &predict.unknown);
+    }
+    if let Some(resources) = &file.resources {
+        add("resources.", &resources.unknown);
+    }
+    if let Some(keybinds) = &file.keybinds {
+        add("keybinds.", &keybinds.unknown);
+        for (i, b) in keybinds.binding.iter().enumerate() {
+            add(&format!("keybinds.binding[{i}]."), &b.unknown);
+        }
+    }
+    out
 }
 
 impl Config {
@@ -620,6 +663,9 @@ impl Config {
                 };
             }
         };
+        for key in unknown_keys(&file) {
+            warn!(%key, "unknown config key, ignored");
+        }
         let main = file.main.unwrap_or_default();
         let dpi = main.dpi.unwrap_or(DEFAULT_DPI);
         let idle_blank_secs = main.idle_blank_secs.unwrap_or(DEFAULT_IDLE_BLANK_SECS);
@@ -1025,6 +1071,18 @@ mod tests {
                 .predict
                 .dictionaries,
             ["nb_NO", "en_US"]
+        );
+    }
+
+    #[test]
+    fn unknown_keys_are_collected_for_the_warning() {
+        let keys = |t: &str| unknown_keys(&toml::from_str(t).unwrap());
+        assert!(keys("[xkb]\nlayout = \"no\"\n").is_empty());
+        assert_eq!(keys("[xkbd]\nlayout = \"no\"\n"), ["xkbd"]);
+        assert_eq!(keys("[main]\ndpy = 3\n"), ["main.dpy"]);
+        assert_eq!(
+            keys("[keybinds]\n[[keybinds.binding]]\nkey = \"a\"\nmod = [\"Super\"]\n"),
+            ["keybinds.binding[0].mod"]
         );
     }
 
