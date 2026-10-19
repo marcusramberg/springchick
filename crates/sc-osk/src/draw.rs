@@ -309,6 +309,16 @@ fn icon(canvas: &skia_safe::Canvas, key: Key, r: Rect, fill: Color) -> bool {
                 canvas.draw_line(tip, (back.0 + dy * head, back.1 + dx * head), &stroke);
             }
         }
+        // A globe: equator, one meridian, as the lang key everywhere else.
+        Key::NextLayout => {
+            let rr = s * 0.45;
+            canvas.draw_circle((cx, cy), rr, &stroke);
+            canvas.draw_line((cx - rr, cy), (cx + rr, cy), &stroke);
+            canvas.draw_oval(
+                Rect::from_xywh(cx - rr * 0.5, cy - rr, rr, rr * 2.0),
+                &stroke,
+            );
+        }
         Key::Clip(Clip::Cut) => {
             for side in [-1.0, 1.0] {
                 let ring = (cx + side * s * 0.24, cy + s * 0.3);
