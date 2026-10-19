@@ -69,10 +69,12 @@ vrr = true
 
 # Seat keymap, applied live on reload. Empty fields fall back to the
 # XKB_DEFAULT_* environment, then "us". Several layouts switch with a grp:
-# option, which the on-screen keyboard also uses.
+# option, and the on-screen keyboard grows a "lang" key that cycles the same
+# groups; its labels and long-press accents come from the active one.
+# xkb drops anything past the fourth layout.
 [xkb]
 model = ""
-layout = ""      # e.g. "us,de"
+layout = ""      # e.g. "no,us"
 variant = ""
 options = ""     # e.g. "grp:win_space_toggle"
 
