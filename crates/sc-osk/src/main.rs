@@ -76,6 +76,10 @@ const TERMINALS: &[&str] = &[
 /// text-input-v3 purposes that open on the numbers page: digits, number, phone.
 const NUMERIC_PURPOSES: [u32; 3] = [2, 3, 4];
 
+/// Every input to [`grid::layout`] but the keymap itself, which invalidates
+/// the grid by hand.
+type GridKey = (Page, Bar, bool, u32, u32, u32, usize);
+
 struct Toplevel {
     app_id: String,
     activated: bool,
@@ -96,6 +100,7 @@ struct App {
     scale: i32,
     osk: Osk,
     grid: Vec<Placed>,
+    grid_key: Option<GridKey>,
     fonts: draw::Fonts,
     keymap: Option<Keymap>,
     layouts: Vec<String>,
@@ -140,6 +145,7 @@ fn main() {
         scale: 1,
         osk: Osk::default(),
         grid: Vec::new(),
+        grid_key: None,
         fonts: draw::fonts(),
         keymap: Keymap::from_names("", ""),
         layouts: Vec::new(),
@@ -286,10 +292,27 @@ impl App {
         self.width = 0;
     }
 
+    /// What the grid is built from. Unchanged, and the old one still fits.
+    fn grid_key(&self) -> GridKey {
+        (
+            self.osk.page,
+            self.osk.bar,
+            self.osk.shift.on(),
+            self.width,
+            self.height,
+            self.active_layout,
+            self.layouts.len(),
+        )
+    }
+
     fn relayout(&mut self) {
         let Some(keymap) = &self.keymap else {
             return;
         };
+        if self.grid_key == Some(self.grid_key()) {
+            return;
+        }
+        self.grid_key = Some(self.grid_key());
         let layout = self.active_layout;
         let key = |code: u16, shift: bool| keymap.label(code, shift, layout);
         let reverse = keymap.reverse(layout);
@@ -699,6 +722,7 @@ impl Dispatch2<wl_keyboard::WlKeyboard, App> for KeymapData {
         if let Some(k) = Keymap::from_string(text) {
             app.keymap = Some(k);
             app.refresh_layouts();
+            app.grid_key = None;
             app.relayout();
             app.draw();
         }
