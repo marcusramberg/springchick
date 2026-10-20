@@ -40,7 +40,7 @@ Build the check matching `builtins.currentSystem`. Cross-building runs the relea
 
 Use the `run-springchick` skill (`.claude/skills/run-springchick/SKILL.md`). It covers the nested-winit driver (`driver.sh`: build/up/client/send/shot/down), the interactive VM driver, and a long list of gotchas. Never `pkill foot`: the user's own terminal is a foot window, so kill by recorded PID only.
 
-A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`, `down/move/up`, `settle [MS]`, `launch APP_ID [new]`, `action NAME`, `reload`, `layers`, `layout [N]`, `quit`). Works nested, in the VM, and on-device.
+A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y` (a real contact: routed to the client under it, else the shell), `swipe X1 Y1 X2 Y2 [MS]` (shell gestures only), `key NAME [MS]`, `down/move/up`, `settle [MS]`, `launch APP_ID [new]`, `action NAME`, `reload`, `layers`, `layout [N]`, `quit`). Works nested, in the VM, and on-device.
 
 `springchick ipc layers` dumps every layer surface and layer-rooted popup being composited (namespace, layer, logical geometry, the physical rect, buffer size, pending-map/slide state, anchor and exclusive zone), plus the usable area and regrow-guard state. Run it first when the screen shows something no client admits to, e.g. two on-screen keyboards from one wvkbd process.
 

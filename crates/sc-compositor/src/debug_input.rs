@@ -10,7 +10,6 @@ pub enum DebugCmd {
     Down(f32, f32),
     Move(f32, f32),
     Up,
-    Tap(f32, f32),
     Swipe {
         from: (f32, f32),
         to: (f32, f32),
@@ -30,7 +29,8 @@ pub enum DebugCmd {
         name: String,
         down: bool,
     },
-    /// A real tap through `touch::down`/`up`.
+    /// A real tap through `touch::down`/`up`: routed to the client surface
+    /// under it, falling back to the gesture funnel. Spelled `tap` too.
     Touch(f32, f32),
     /// Take over a drag from the search app with the finger still down. `at`
     /// (output pixels) is for driving it by hand; a real handoff uses the live
@@ -92,7 +92,7 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
     }
 
     let cmd = match verb {
-        "down" | "move" | "tap" => {
+        "down" | "move" => {
             let x = num(&mut tok)?;
             let y = num(&mut tok)?;
             done(tok)?;
@@ -101,11 +101,10 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
             }
             match verb {
                 "down" => DebugCmd::Down(x, y),
-                "move" => DebugCmd::Move(x, y),
-                _ => DebugCmd::Tap(x, y),
+                _ => DebugCmd::Move(x, y),
             }
         }
-        "touch" => {
+        "tap" | "touch" => {
             let x = num(&mut tok)?;
             let y = num(&mut tok)?;
             done(tok)?;
@@ -388,7 +387,6 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             DebugCmd::Down(..)
                 | DebugCmd::Move(..)
                 | DebugCmd::Up
-                | DebugCmd::Tap(..)
                 | DebugCmd::Swipe { .. }
                 | DebugCmd::Launch { .. }
                 | DebugCmd::Drag { .. }
@@ -398,11 +396,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
         return;
     }
     // Synthetic contacts hide the cursor like a real touch-down.
-    if matches!(
-        cmd,
-        DebugCmd::Down(..) | DebugCmd::Tap(..) | DebugCmd::Swipe { .. }
-    ) && state.cursor_visible
-    {
+    if matches!(cmd, DebugCmd::Down(..) | DebugCmd::Swipe { .. }) && state.cursor_visible {
         state.cursor_visible = false;
         state.needs_render = true;
     }
@@ -417,12 +411,6 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             let _ = reply.send("ok\n".into());
         }
         DebugCmd::Up => {
-            input_common::on_release(state);
-            let _ = reply.send("ok\n".into());
-        }
-        DebugCmd::Tap(x, y) => {
-            input_common::on_motion(state, x, y);
-            input_common::on_press(state);
             input_common::on_release(state);
             let _ = reply.send("ok\n".into());
         }
@@ -737,9 +725,10 @@ mod tests {
     fn parses_move_up_tap() {
         assert_eq!(parse_line("move 5 6", W, H), Ok(DebugCmd::Move(5.0, 6.0)));
         assert_eq!(parse_line("up", W, H), Ok(DebugCmd::Up));
+        // `tap` is `touch`: a client-routed contact, not a funnel-only press.
         assert_eq!(
             parse_line("tap 100 200", W, H),
-            Ok(DebugCmd::Tap(100.0, 200.0))
+            Ok(DebugCmd::Touch(100.0, 200.0))
         );
     }
 
