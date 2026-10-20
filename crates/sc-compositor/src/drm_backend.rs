@@ -295,6 +295,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let render_node = DrmNode::from_file(&render_gbm).ok();
+    // Scanout BOs from the render GPU: writeback into the KMS device's linear
+    // write-combine dumb buffers runs ~3x slower.
+    let scanout_gbm = render_gbm.clone();
     let egl_display = unsafe { EGLDisplay::new(render_gbm)? };
     let egl_context = EGLContext::new(&egl_display)?;
     let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
@@ -321,17 +324,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let drm_surface = drm_device.create_surface(crtc_handle, mode, &[connector_handle])?;
-    let allocator = GbmAllocator::new(
-        gbm.clone(),
-        GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
-    );
     let render_formats = renderer.dmabuf_formats();
-    let gbm_surface = GbmBufferedSurface::new(
+    let flags = GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT;
+    // Not every display imports the render GPU's buffers; fall back rather than
+    // leave a console-less phone dark.
+    let gbm_surface = match GbmBufferedSurface::new(
         drm_surface,
-        allocator,
+        GbmAllocator::new(scanout_gbm, flags),
         &[Fourcc::Argb8888, Fourcc::Xrgb8888],
-        render_formats,
-    )?;
+        render_formats.clone(),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("render-GPU scanout buffers rejected ({e}); falling back to the KMS device");
+            let drm_surface = drm_device.create_surface(crtc_handle, mode, &[connector_handle])?;
+            GbmBufferedSurface::new(
+                drm_surface,
+                GbmAllocator::new(gbm.clone(), flags),
+                &[Fourcc::Argb8888, Fourcc::Xrgb8888],
+                render_formats,
+            )?
+        }
+    };
 
     let (display, listener, socket_name) = create_display()?;
     // Publish to systemd/dbus so user services (wvkbd) find our socket.
