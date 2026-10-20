@@ -163,11 +163,14 @@ springchick ipc settle 1000
 springchick ipc action screenshot
 ```
 
-Verbs: `tap`, `swipe`, `key`, `down`/`move`/`up`, `settle`, `launch APP_ID
+Verbs: `tap` (alias `touch`), `swipe`, `key`, `down`/`move`/`up`, `settle`, `launch APP_ID
 [new]`, `action` (run a built-in keybinding action by its `config.toml` name, no
 key needed), `reload` (re-read `config.toml` and rescan the app catalog),
 `layers` (dump the composited layer surfaces) and `quit`. They work nested, in
-the VM, and on-device. Coordinates are in the actual output size, and a nested
+the VM, and on-device. `tap` is a real touch contact: it goes to the client
+surface under it and falls back to the shell gesture funnel, while
+`swipe`/`down`/`move`/`up` only drive shell gestures. Coordinates are in the
+actual output size, and a nested
 host compositor may clamp the window well below the FP5 constants.
 
 Nested iteration is wrapped by `.claude/skills/run-springchick/driver.sh`
