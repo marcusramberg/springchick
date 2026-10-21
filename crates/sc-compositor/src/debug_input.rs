@@ -41,6 +41,9 @@ pub enum DebugCmd {
     },
     /// Fakes an accelerometer report.
     Orientation(crate::rotation::DeviceOrientation),
+    /// Whole-UI rotation (`rotate_ui`): `Some` sets it, `None` just queries.
+    /// Answers `ok enabled|disabled ROTATION`.
+    Rotation(Option<bool>),
     /// Re-read `config.toml` (live settings only) and rescan the catalog.
     Reload,
     /// As SIGTERM. The shell's logout goes through this.
@@ -124,6 +127,16 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
                 return Err(format!("parse: unknown orientation {name}"));
             }
             DebugCmd::Orientation(o)
+        }
+        "rotation" => {
+            let on = match tok.next() {
+                None => None,
+                Some("enable") | Some("on") => Some(true),
+                Some("disable") | Some("off") => Some(false),
+                Some(other) => return Err(format!("parse: unknown rotation arg {other}")),
+            };
+            done(tok)?;
+            DebugCmd::Rotation(on)
         }
         "up" => {
             done(tok)?;
@@ -373,6 +386,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             | DebugCmd::Reload
             | DebugCmd::Layers
             | DebugCmd::Home
+            | DebugCmd::Rotation(_)
             | DebugCmd::Quit
     ) {
         let now = Instant::now();
@@ -486,6 +500,17 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
                 release_at: Instant::now() + std::time::Duration::from_millis(120),
                 reply,
             });
+        }
+        DebugCmd::Rotation(on) => {
+            if let Some(on) = on {
+                state.set_rotate_ui(on);
+            }
+            let flag = if state.rotate_ui {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            let _ = reply.send(format!("ok {flag} {:?}\n", state.view_rotation()));
         }
         DebugCmd::Reload => {
             state.reload_config();
@@ -866,6 +891,16 @@ mod tests {
     #[test]
     fn parses_reload() {
         assert_eq!(parse_line("reload", W, H), Ok(DebugCmd::Reload));
+        assert_eq!(parse_line("rotation", W, H), Ok(DebugCmd::Rotation(None)));
+        assert_eq!(
+            parse_line("rotation enable", W, H),
+            Ok(DebugCmd::Rotation(Some(true)))
+        );
+        assert_eq!(
+            parse_line("rotation off", W, H),
+            Ok(DebugCmd::Rotation(Some(false)))
+        );
+        assert!(parse_line("rotation sideways", W, H).is_err());
         assert!(parse_line("reload now", W, H).is_err());
     }
 

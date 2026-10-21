@@ -1090,27 +1090,16 @@ impl App {
         if !std::mem::take(&mut self.state.screenshot_pending) {
             return;
         }
-        let size: smithay::utils::Size<i32, smithay::utils::Buffer> =
-            (self.drm.output_size.w, self.drm.output_size.h).into();
-        let Some(mut tex) = crate::capture::offscreen(
-            &mut self.drm.renderer,
-            smithay::backend::allocator::Fourcc::Xrgb8888,
-            size,
-        ) else {
+        let fourcc = smithay::backend::allocator::Fourcc::Xrgb8888;
+        let Some((mut tex, size)) = self.capture_scene(prep, fourcc) else {
             return;
         };
-        let pixels = {
-            let mut fb = match self.drm.renderer.bind(&mut tex) {
-                Ok(fb) => fb,
-                Err(e) => {
-                    warn!("screenshot: offscreen bind failed: {e}");
-                    return;
-                }
-            };
-            if self.draw_scene_into(&mut fb, prep, false).is_none() {
+        let pixels = match self.drm.renderer.bind(&mut tex) {
+            Ok(fb) => crate::capture::readback_rgba(&mut self.drm.renderer, &fb, size),
+            Err(e) => {
+                warn!("screenshot: readback bind failed: {e}");
                 return;
             }
-            crate::capture::readback_rgba(&mut self.drm.renderer, &fb, size)
         };
         if let Some(pixels) = pixels {
             crate::screenshot::to_clipboard(&mut self.state, &pixels, size);
@@ -1276,6 +1265,7 @@ impl App {
                     continue;
                 }
             };
+            let fourcc = smithay::backend::allocator::Buffer::format(&dmabuf).code;
             let mut fb = match self.drm.renderer.bind(&mut dmabuf) {
                 Ok(fb) => fb,
                 Err(e) => {
@@ -1284,7 +1274,7 @@ impl App {
                     continue;
                 }
             };
-            let drawn = self.draw_scene_into(&mut fb, prep, false).is_some();
+            let drawn = self.draw_scene_upright(&mut fb, prep, fourcc).is_some();
             drop(fb);
             if drawn {
                 self.state.skia.finish_gpu();
@@ -1313,21 +1303,81 @@ impl App {
         target: &crate::capture::ShmTarget,
         src: Rectangle<i32, smithay::utils::Buffer>,
     ) -> Option<bool> {
-        let scene_size = (self.drm.output_size.w, self.drm.output_size.h).into();
-        let mut tex = crate::capture::offscreen(&mut self.drm.renderer, target.fourcc, scene_size)?;
-        let mut fb = match self.drm.renderer.bind(&mut tex) {
+        let (mut tex, _) = self.capture_scene(prep, target.fourcc)?;
+        let fb = match self.drm.renderer.bind(&mut tex) {
             Ok(fb) => fb,
             Err(e) => {
-                warn!("screencopy: offscreen bind failed: {e}");
+                warn!("screencopy: readback bind failed: {e}");
                 return Some(false);
             }
         };
-        if self.draw_scene_into(&mut fb, prep, false).is_none() {
-            return Some(false);
-        }
         let ok =
             crate::capture::readback_into_shm(&mut self.drm.renderer, &fb, buffer, target, src);
         Some(ok)
+    }
+
+    /// Draws into `fb`, which is sized like the output clients are told about:
+    /// a turned view goes through a panel-sized offscreen and is blitted
+    /// upright, so clients get the landscape image their landscape buffer was
+    /// sized for. `fourcc` must match `fb`.
+    fn draw_scene_upright(
+        &mut self,
+        fb: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+        prep: &crate::FramePrep,
+        fourcc: smithay::backend::allocator::Fourcc,
+    ) -> Option<()> {
+        let panel = self.drm.output_size;
+        let rotation = self.state.view_rotation();
+        if !rotation.swaps_axes() {
+            self.draw_scene_into(fb, prep, false)?;
+            return Some(());
+        }
+        let view: smithay::utils::Size<i32, smithay::utils::Physical> =
+            rotation.app_size((panel.w, panel.h)).into();
+        let mut scene =
+            crate::capture::offscreen(&mut self.drm.renderer, fourcc, (panel.w, panel.h).into())?;
+        {
+            let mut scene_fb = match self.drm.renderer.bind(&mut scene) {
+                Ok(fb) => fb,
+                Err(e) => {
+                    warn!("capture: offscreen bind failed: {e}");
+                    return None;
+                }
+            };
+            self.draw_scene_into(&mut scene_fb, prep, false)?;
+        }
+        if let Err(e) =
+            crate::capture::blit_upright(&mut self.drm.renderer, fb, view, &scene, panel, rotation)
+        {
+            warn!("capture: upright blit failed: {e}");
+            return None;
+        }
+        Some(())
+    }
+
+    /// The scene in an offscreen texture, for the readback paths.
+    fn capture_scene(
+        &mut self,
+        prep: &crate::FramePrep,
+        fourcc: smithay::backend::allocator::Fourcc,
+    ) -> Option<(
+        GlesTexture,
+        smithay::utils::Size<i32, smithay::utils::Buffer>,
+    )> {
+        let panel = self.drm.output_size;
+        let (vw, vh) = self.state.view_rotation().app_size((panel.w, panel.h));
+        let mut out = crate::capture::offscreen(&mut self.drm.renderer, fourcc, (vw, vh).into())?;
+        {
+            let mut fb = match self.drm.renderer.bind(&mut out) {
+                Ok(fb) => fb,
+                Err(e) => {
+                    warn!("capture: offscreen bind failed: {e}");
+                    return None;
+                }
+            };
+            self.draw_scene_upright(&mut fb, prep, fourcc)?;
+        }
+        Some((out, (vw, vh).into()))
     }
 
     fn wlr_capture_pending_frames(&mut self, prep: &crate::FramePrep) {

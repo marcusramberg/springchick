@@ -353,8 +353,11 @@ impl ImageCopyCaptureHandler for State {
             .get::<smithay::output::WeakOutput>()?
             .upgrade()?;
         let mode = output.current_mode()?;
-        let size = mode
-            .size
+        // The output's transform is the view rotation, and capture hands out
+        // view-space pixels, so the constraint has to be the turned size.
+        let size = output
+            .current_transform()
+            .transform_size(mode.size)
             .to_logical(1)
             .to_buffer(1, smithay::utils::Transform::Normal);
         // dmabuf when the DRM backend supplied formats, shm always.

@@ -33,6 +33,12 @@ rotation_settle_ms = 400
 # Half-duration (ms) of the fade to black around a rotation. 0 swaps instantly.
 rotation_fade_ms = 130
 
+# Turn Home and ordinary windows with the device too, not just fullscreen apps.
+# Costs an accelerometer claim whenever the screen is lit, not just in
+# fullscreen apps. `springchick ipc rotation enable|disable` overrides this
+# until the next reload.
+rotate_ui = false
+
 # Draw a marker under each touch/pointer contact, for demo recordings.
 show_touches = false
 

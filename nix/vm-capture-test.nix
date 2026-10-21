@@ -117,8 +117,9 @@ mkTest {
     machine.fail(
         "journalctl -b | grep -iE 'panicked at|SIGSEGV|SIGABRT|stack backtrace|segfault'"
     )
+    # Both prefixes: the shared offscreen/blit path logs as "capture:".
     machine.fail(
-        "journalctl -b _SYSTEMD_USER_UNIT=springchick.service | grep -F 'screencopy:'"
+        "journalctl -b _SYSTEMD_USER_UNIT=springchick.service | grep -E 'screencopy:|capture:'"
     )
   '';
 }

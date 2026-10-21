@@ -1,6 +1,7 @@
 # Rotation: a fullscreen app turns with the device and returns to portrait
 # when the device is upright again or it leaves fullscreen. A fullscreen app
-# on an upright phone stays portrait. Layer chrome is hidden while turned.
+# on an upright phone stays portrait. With `rotate_ui` (the `rotation` verb)
+# Home turns too, and taps still land on the icon they look like they hit.
 #
 # No accelerometer in the VM; the `orientation` ipc verb feeds the same
 # `set_device_orientation` path.
@@ -209,12 +210,13 @@ mkTest {
             "(Rotation::transform), not that rotation failed."
         )
 
-    # The strip that was keyboard is now app content.
+    # The keyboard went with the view: it anchors to the turned view's bottom,
+    # which is a screen side edge, so this strip is app content now.
     rotated_px = pixel("02-landscape", *KEYBOARD_PROBE)
     assert rotated_px == COLOURS["red"], (
         f"expected app content (red) at {KEYBOARD_PROBE} while rotated, "
-        f"found {rotated_px} — the layer surface is still being drawn over the "
-        "rotated app"
+        f"found {rotated_px} — the layer surface is being drawn in the upright "
+        "space, over the rotated app"
     )
 
     # right-up must be 180° from left-up, not the same transform.
@@ -291,6 +293,49 @@ mkTest {
     machine.succeed("systemctl --user -M tester@.host stop imv")
     machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation None'", timeout=30)
     machine.screenshot("03-back-to-portrait")
+
+    # rotate_ui: Home and ordinary windows turn too. The device is still
+    # left-up, so enabling it is enough to turn the view.
+    assert "enabled" in ipc("rotation enable"), "the rotation verb did not take"
+    before = count("rotation None")
+    seen = count("rotation LeftUp")
+    machine.wait_until_succeeds(
+        f"[ $({JOURNAL} | grep -cF 'rotation LeftUp') -gt {seen} ]", timeout=30
+    )
+    machine.sleep(2)
+    machine.screenshot("10-home-landscape")
+    assert "rotated=LeftUp" in ipc("layers"), "the view is not turned"
+
+    # A tap on a landscape Home icon must reach that icon: the grid is laid out
+    # in the turned space and the contact is mapped back through the rotation.
+    # `ipc home` reports icon centres in that same view space.
+    dump = ipc("home")
+    field = next(f for f in dump.split(" | ") if f.startswith("icons="))
+    icons = {}
+    for part in field[len("icons="):].split():
+        app_id, _, centre = part.partition("@")
+        if centre:
+            x, y = centre.split(",")
+            icons[app_id] = (int(x), int(y))
+    assert "foot" in icons, f"foot is not on the home grid: {dump}"
+    vx, vy = icons["foot"]
+    # left-up maps physical (x, y) to view (H - y, x); invert it.
+    ipc(f"tap {vy} {H - vx}")
+    machine.wait_until_succeeds(
+        f"SPRINGCHICK_IPC_SOCK={IPC_SOCK} springchick ipc home | grep -q 'ui=App'",
+        timeout=30,
+    )
+    machine.sleep(3)
+    machine.screenshot("11-landscape-app")
+    # An ordinary (non-fullscreen) window holds the turn with rotate_ui on.
+    assert count("rotation None") == before, "launching a window dropped to portrait"
+
+    # Off again, and the view returns upright with the window still open.
+    ipc("rotation disable")
+    machine.wait_until_succeeds(
+        f"[ $({JOURNAL} | grep -cF 'rotation None') -gt {before} ]", timeout=30
+    )
+    machine.screenshot("12-rotate-ui-off")
 
     machine.fail(
         "journalctl -b | grep -iE 'panicked at|SIGSEGV|SIGABRT|stack backtrace|segfault'"

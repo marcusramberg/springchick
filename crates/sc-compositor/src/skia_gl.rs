@@ -665,7 +665,7 @@ impl SkiaGl {
             for slot in anim_slots.iter().chain(dock_slots.iter()) {
                 draw_remove_badge(canvas, slot);
             }
-            current_layout.avoid_cutouts(view.cutouts);
+            current_layout.avoid_cutouts(&view.cutouts);
             draw_arrange_buttons(canvas, &current_layout, &self.font);
 
             if view.over_dock {

@@ -167,11 +167,11 @@ impl State {
         }
     }
 
-    /// `(origin, size)` in view px: the usable area, or the whole view while
-    /// turned or fullscreen. Clamp, unconstrain, hit-test and draw must all
-    /// agree on this.
+    /// `(origin, size)` in view px: the usable area, or the whole view when
+    /// fullscreen. Clamp, unconstrain, hit-test and draw must all agree on
+    /// this.
     pub(crate) fn app_popup_space(&self) -> ((i32, i32), (i32, i32)) {
-        if self.view_rotation().swaps_axes() || self.foreground_is_fullscreen() {
+        if self.foreground_is_fullscreen() {
             return ((0, 0), self.output_size());
         }
         let u = self.layers.usable(self.dpi);
@@ -256,6 +256,23 @@ impl State {
                 .collect::<Vec<_>>()
                 .join(" ")
         ));
+        // View px, so a test can map a tap back through the rotation.
+        let (vw, vh) = self.output_size_f();
+        let layout = sc_layout::compute(vw, vh, page, &self.model);
+        parts.push(format!(
+            "icons={}",
+            layout
+                .grid
+                .iter()
+                .map(|s| format!(
+                    "{}@{:.0},{:.0}",
+                    s.app_id,
+                    s.icon_rect.center_x(),
+                    s.icon_rect.center_y()
+                ))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
         for (i, p) in self.model.pages.iter().enumerate() {
             parts.push(format!(
                 "page{i}={}",
@@ -273,10 +290,9 @@ impl State {
     pub(crate) fn layers_dump(&self) -> String {
         let infos = self.layers.dump(self.dpi);
         let popups = self.active_popups();
-        let rotated = if self.view_rotation().swaps_axes() {
-            " rotated=yes(layers-not-drawn)"
-        } else {
-            ""
+        let rotated = match self.view_rotation() {
+            crate::rotation::Rotation::None => String::new(),
+            r => format!(" rotated={r:?}"),
         };
         let mut parts = vec![format!(
             "out={}x{} dpi={} {}{} layers={} popups={}",
@@ -310,13 +326,10 @@ impl State {
     }
 
     /// On-screen popups, app-rooted first. Every hit popup takes the tap; only
-    /// grabbing ones swallow outside taps (`touch::popup_press`). Layer popups
-    /// are left out while turned, since layers aren't drawn.
+    /// grabbing ones swallow outside taps (`touch::popup_press`).
     pub(crate) fn active_popups(&self) -> Vec<PopupRect> {
         let mut v = self.app_popups();
-        if !self.view_rotation().swaps_axes() {
-            v.extend(self.layer_popups());
-        }
+        v.extend(self.layer_popups());
         v
     }
 
@@ -327,9 +340,6 @@ impl State {
     /// 0 when a Top/Overlay surface covers the pill. The OSK is lifted above it
     /// and doesn't count.
     fn bar_alpha_target(&self) -> f32 {
-        if self.view_rotation().swaps_axes() {
-            return 1.0;
-        }
         let (w, h) = self.output_size_f();
         let pill = sc_layout::pill_rect(w, h);
         if self.layers.top_overlaps(pill, self.dpi) {
@@ -687,12 +697,12 @@ impl State {
             let (w, h) = self.output_size_f();
             sc_layout::compute(w, h, self.current_home_page(), &self.model).dock_zone
         });
-        // Not `shell_cutouts()`: `skia` and `last_present` below need disjoint borrows.
-        let cutouts: &[sc_layout::Rect] = match &self.panel {
-            Some(p) if !rotation.swaps_axes() => &p.cutouts,
-            _ => &[],
+        // Only arrange mode reads them, and `skia` borrows `self` mutably below.
+        let cutouts = match self.arrange {
+            Some(_) => self.shell_cutouts(),
+            None => Vec::new(),
         };
-        let arrange = self.arrange.as_ref().map(|a| {
+        let arrange = self.arrange.as_ref().map(move |a| {
             let drag = a.drag.as_ref();
             // Dock→dock is a no-op; only highlight drags that can pin.
             let over_dock = drag.is_some_and(|d| {

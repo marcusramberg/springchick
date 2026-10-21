@@ -230,6 +230,21 @@ impl LayerShell {
         }
     }
 
+    /// Follows a view rotation. The layer map arranges against the output's
+    /// transform, so only the height this tracks separately has to be told.
+    /// Returns true if it changed; the caller must reconfigure toplevels.
+    pub fn set_view_height(&mut self, h: f32, dpi: f64) -> bool {
+        if self.output_h == h {
+            return false;
+        }
+        self.output_h = h;
+        layer_map_for_output(&self.output).arrange();
+        // Past the regrow guard: a turn is not a flapping client.
+        self.regrow.resolved();
+        self.last_usable = self.usable(dpi);
+        true
+    }
+
     /// Returns true while anything is moving. Dropping a finished `closing`
     /// releases its buffer to the client.
     pub fn tick_slides(&mut self, dt: f32) -> bool {

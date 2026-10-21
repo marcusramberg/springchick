@@ -123,7 +123,7 @@ pub struct ArrangeView<'a> {
     pub drag_pos: Option<(f32, f32)>,
     pub over_dock: bool,
     /// Upright panel px.
-    pub cutouts: &'a [sc_layout::Rect],
+    pub cutouts: Vec<sc_layout::Rect>,
 }
 
 /// Everything the Skia home pass draws from, assembled by [`pass_home`].
@@ -210,8 +210,8 @@ pub struct DrawCtx<'a> {
     pub app_origin: (i32, i32),
     /// winit = Flipped180; DRM = connector transform.
     pub transform: Transform,
-    /// Composed on `transform` for everything but the upright layers; Skia gets
-    /// it via [`SkiaGl::set_view`].
+    /// Composed on `transform` for every pass; Skia gets it via
+    /// [`SkiaGl::set_view`].
     pub rotation: crate::rotation::Rotation,
     /// DRM scanout is Y-flipped vs Skia's BottomLeft surface; winit is not.
     pub skia_flip_y: bool,
@@ -311,7 +311,6 @@ fn draw_layer(
     ctx: &DrawCtx<'_>,
     surface: &WlSurface,
     origin: (i32, i32),
-    in_view: bool,
 ) -> Result<(), SwapBuffersError> {
     // Layer clients render at `dpi`, so their buffers land 1:1 like apps.
     let scale = ctx.app_scale;
@@ -320,15 +319,10 @@ fn draw_layer(
     if elements.is_empty() {
         return Ok(());
     }
-    // App popups live in the view; layers are always panel-upright.
-    let (transform, damage) = if in_view {
-        (ctx.base(), Rectangle::from_size(ctx.view(size)))
-    } else {
-        (ctx.transform, Rectangle::from_size(size))
-    };
     let mut frame = renderer
-        .render(framebuffer, size, transform)
+        .render(framebuffer, size, ctx.base())
         .map_err(SwapBuffersError::from)?;
+    let damage = Rectangle::from_size(ctx.view(size));
     if let Err(e) = draw_render_elements(&mut frame, scale, &elements, &[damage]) {
         warn!(?e, "failed to draw layer surface");
     }
@@ -546,7 +540,6 @@ struct ScenePlan {
     /// `None` when fullscreen or absent.
     window_transform: Option<crate::scene::WindowTransform>,
     is_fullscreen: bool,
-    rotated: bool,
     /// A fullscreen-scaled window with no content yet must still show Home.
     app_fills_screen: bool,
     app_blur: Vec<crate::background_effect::BlurRect>,
@@ -557,7 +550,6 @@ struct ScenePlan {
 fn plan_scene(renderer: &mut GlesRenderer, ctx: &DrawCtx<'_>) -> ScenePlan {
     let scene = ctx.scene;
     let is_fullscreen = scene.window_covers_screen();
-    let rotated = ctx.rotation.swaps_axes();
 
     let app_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
         if let Some(wl_surface) = ctx.app_surface {
@@ -605,7 +597,6 @@ fn plan_scene(renderer: &mut GlesRenderer, ctx: &DrawCtx<'_>) -> ScenePlan {
         below_elements,
         window_transform: scene.window.as_ref().map(|(_, t)| *t),
         is_fullscreen,
-        rotated,
         app_fills_screen,
         app_blur,
     }
@@ -676,9 +667,11 @@ fn pass_background(
     ctx: &DrawCtx<'_>,
     plan: &ScenePlan,
 ) -> Result<(), SwapBuffersError> {
-    let damage = Rectangle::from_size(size);
+    // Everything here is in the view: layers are arranged there and the app
+    // is drawn there.
+    let damage = Rectangle::from_size(ctx.view(size));
     let mut frame = renderer
-        .render(framebuffer, size, ctx.transform)
+        .render(framebuffer, size, ctx.base())
         .map_err(SwapBuffersError::from)?;
     frame
         .clear(CLEAR_COLOR, &[damage])
@@ -690,7 +683,7 @@ fn pass_background(
         }
     }
 
-    if plan.app_fills_screen && !plan.app_blurred && !plan.rotated {
+    if plan.app_fills_screen && !plan.app_blurred {
         if let Err(e) =
             draw_render_elements(&mut frame, ctx.app_scale, &plan.app_elements, &[damage])
         {
@@ -757,40 +750,6 @@ fn pass_folder(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePla
         .draw_folder_panel(v.w, v.h, folder, icon_cache, app_catalog, ctx.skia_flip_y);
 }
 
-/// `pass_background` draws panel-upright for the layers, so a turned app
-/// needs its own pass.
-fn pass_rotated_app(
-    renderer: &mut GlesRenderer,
-    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
-    size: Size<i32, Physical>,
-    ctx: &DrawCtx<'_>,
-    plan: &ScenePlan,
-) -> Result<(), SwapBuffersError> {
-    // Blurred apps are drawn by `pass_blurred_app`; the three fullscreen-app
-    // passes must stay exclusive or a rotated ghost appears.
-    if !(plan.app_fills_screen && plan.rotated) || plan.app_blurred {
-        return Ok(());
-    }
-    let (transform, app_damage) = app_pass_geometry(size, ctx);
-    let mut frame = renderer
-        .render(framebuffer, size, transform)
-        .map_err(SwapBuffersError::from)?;
-    if let Err(e) =
-        draw_render_elements(&mut frame, ctx.app_scale, &plan.app_elements, &[app_damage])
-    {
-        warn!(?e, "failed to draw rotated app elements");
-    }
-    let _sync = frame.finish().map_err(SwapBuffersError::from)?;
-    Ok(())
-}
-
-fn app_pass_geometry(
-    size: Size<i32, Physical>,
-    ctx: &DrawCtx<'_>,
-) -> (Transform, Rectangle<i32, Physical>) {
-    (ctx.base(), Rectangle::from_size(ctx.view(size)))
-}
-
 fn pass_blurred_app(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -809,9 +768,9 @@ fn pass_blurred_app(
         BLUR_SIGMA_LOGICAL * ctx.app_scale as f32,
         ctx.skia_flip_y,
     );
-    let (transform, damage) = app_pass_geometry(size, ctx);
+    let damage = Rectangle::from_size(ctx.view(size));
     let mut frame = renderer
-        .render(framebuffer, size, transform)
+        .render(framebuffer, size, ctx.base())
         .map_err(SwapBuffersError::from)?;
     if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &plan.app_elements, &[damage]) {
         warn!(?e, "failed to draw blurred app elements");
@@ -1109,25 +1068,21 @@ fn pass_overlays(
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
     size: Size<i32, Physical>,
     ctx: &mut DrawCtx<'_>,
-    rotated: bool,
 ) -> Result<(), SwapBuffersError> {
     let (app_popups, layers_above, layer_popups) =
         (ctx.app_popups, ctx.layers_above, ctx.layer_popups);
     for (surface, origin) in app_popups {
-        draw_overlay(renderer, framebuffer, size, ctx, surface, *origin, true)?;
-    }
-    if rotated {
-        return Ok(());
+        draw_overlay(renderer, framebuffer, size, ctx, surface, *origin)?;
     }
     for (surface, origin) in layers_above {
-        draw_overlay(renderer, framebuffer, size, ctx, surface, *origin, false)?;
+        draw_overlay(renderer, framebuffer, size, ctx, surface, *origin)?;
     }
     // The hidden OSK is gone from the render lists; draw its held buffer.
     if let Some((buffer, rect)) = ctx.closing {
         draw_closing(renderer, framebuffer, size, ctx, buffer, rect)?;
     }
     for (surface, origin) in layer_popups {
-        draw_overlay(renderer, framebuffer, size, ctx, surface, *origin, false)?;
+        draw_overlay(renderer, framebuffer, size, ctx, surface, *origin)?;
     }
     Ok(())
 }
@@ -1139,7 +1094,6 @@ fn draw_overlay(
     ctx: &mut DrawCtx<'_>,
     surface: &WlSurface,
     origin: (i32, i32),
-    in_view: bool,
 ) -> Result<(), SwapBuffersError> {
     blur_behind(
         ctx.skia,
@@ -1149,7 +1103,7 @@ fn draw_overlay(
         ctx.app_scale,
         ctx.skia_flip_y,
     );
-    draw_layer(renderer, framebuffer, size, ctx, surface, origin, in_view)
+    draw_layer(renderer, framebuffer, size, ctx, surface, origin)
 }
 
 /// A full upload every frame (the buffer may belong to a destroyed surface,
@@ -1186,9 +1140,9 @@ fn draw_closing(
         Kind::Unspecified,
     )];
     let mut frame = renderer
-        .render(framebuffer, size, ctx.transform)
+        .render(framebuffer, size, ctx.base())
         .map_err(SwapBuffersError::from)?;
-    let damage = [Rectangle::from_size(size)];
+    let damage = [Rectangle::from_size(ctx.view(size))];
     if let Err(e) = draw_render_elements::<
         GlesRenderer,
         f64,
@@ -1291,11 +1245,10 @@ pub fn draw_scene(
     pass_icon_menu(size, ctx, &plan);
     // Before any card pass, or a dragged card gets blurred too.
     pass_backdrop_blur(size, ctx, &plan);
-    pass_rotated_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_blurred_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_app_card(renderer, &mut *framebuffer, size, ctx, &mut plan)?;
     pass_switcher_cards(renderer, &mut *framebuffer, size, ctx)?;
-    pass_overlays(renderer, &mut *framebuffer, size, ctx, plan.rotated)?;
+    pass_overlays(renderer, &mut *framebuffer, size, ctx)?;
     pass_chrome(size, ctx);
     let v = ctx.view(size);
     ctx.skia.draw_screen_dim(v.w, v.h, ctx.dim, ctx.skia_flip_y);

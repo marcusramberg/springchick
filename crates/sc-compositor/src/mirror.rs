@@ -3,8 +3,9 @@
 //! each frame the primary's scanout dmabuf is blitted in, letterboxed.
 //!
 //! The blit undoes the fullscreen-app rotation: the external panel isn't
-//! being held sideways. Mirrors render when the primary does, except while
-//! the phone panel is blanked, when the mirror's vblank drives the frame.
+//! being held sideways. It is [`crate::capture::blit_upright`], shared with
+//! screen capture. Mirrors render when the primary does, except while the
+//! phone panel is blanked, when the mirror's vblank drives the frame.
 
 use std::error::Error;
 
@@ -13,11 +14,11 @@ use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, GbmBufferedSurface};
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::sync::SyncPoint;
-use smithay::backend::renderer::{Bind, Color32F, Frame, ImportDma, Renderer};
+use smithay::backend::renderer::{Bind, ImportDma};
 use smithay::reexports::drm::control::{
     connector, crtc, Device as ControlDevice, Mode, ModeTypeFlags,
 };
-use smithay::utils::{Physical, Point, Rectangle, Size, Transform};
+use smithay::utils::{Physical, Rectangle, Size};
 use tracing::{info, warn};
 
 pub struct MirrorOutput {
@@ -74,29 +75,10 @@ impl MirrorOutput {
         src_size: Size<i32, Physical>,
         rotation: crate::rotation::Rotation,
     ) -> Result<(), Box<dyn Error>> {
-        let full = Rectangle::from_size(self.size);
-        let dst = dst_rect(src_size, self.size, rotation);
-
         let (mut buffer, _age) = self.surface.next_buffer()?;
         let mut fb = renderer.bind(&mut buffer)?;
-        {
-            // Both sides are GBM scanout buffers, so the Y-origin conventions cancel.
-            let mut frame = renderer.render(&mut fb, self.size, Transform::Normal)?;
-            frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[full])?;
-            frame.render_texture_from_to(
-                src,
-                Rectangle::from_size((src_size.w as f64, src_size.h as f64).into()),
-                dst,
-                &[full],
-                &[],
-                src_transform(rotation),
-                1.0,
-                None,
-                &[],
-            )?;
-            let _sync = frame.finish()?;
-        }
-        drop(fb);
+        // Both sides are GBM scanout buffers, so the Y-origin conventions cancel.
+        crate::capture::blit_upright(renderer, &mut fb, self.size, src, src_size, rotation)?;
         Ok(())
     }
 
@@ -106,41 +88,6 @@ impl MirrorOutput {
         self.pending_flip = true;
         Ok(())
     }
-}
-
-/// Inverse of the primary's transform: that one is a frame transform, this is
-/// a source transform that gets inverted again. The same value in both places
-/// turns the image 180°.
-fn src_transform(rotation: crate::rotation::Rotation) -> Transform {
-    rotation.transform().invert()
-}
-
-/// A rotated app in a portrait buffer reads as landscape once un-rotated, and
-/// that is what gets aspect-fit.
-fn dst_rect(
-    src: Size<i32, Physical>,
-    dst: Size<i32, Physical>,
-    rotation: crate::rotation::Rotation,
-) -> Rectangle<i32, Physical> {
-    let shown: Size<i32, Physical> = rotation.app_size((src.w, src.h)).into();
-    fit(shown, dst)
-}
-
-/// Degenerate sizes give an empty rect.
-fn fit(src: Size<i32, Physical>, dst: Size<i32, Physical>) -> Rectangle<i32, Physical> {
-    if src.w <= 0 || src.h <= 0 || dst.w <= 0 || dst.h <= 0 {
-        return Rectangle::new(Point::from((0, 0)), Size::from((0, 0)));
-    }
-    let scale = f64::min(
-        f64::from(dst.w) / f64::from(src.w),
-        f64::from(dst.h) / f64::from(src.h),
-    );
-    let w = (f64::from(src.w) * scale).round() as i32;
-    let h = (f64::from(src.h) * scale).round() as i32;
-    Rectangle::new(
-        Point::from(((dst.w - w) / 2, (dst.h - h) / 2)),
-        Size::from((w, h)),
-    )
 }
 
 pub struct Candidate {
@@ -244,75 +191,5 @@ pub fn refresh(
             }
             Err(e) => warn!(connector = ?cand.connector, "mirror setup failed: {e}"),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn r(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Physical> {
-        Rectangle::new(Point::from((x, y)), Size::from((w, h)))
-    }
-
-    #[test]
-    fn same_aspect_fills() {
-        assert_eq!(
-            fit((1080, 2160).into(), (1080, 2160).into()),
-            r(0, 0, 1080, 2160)
-        );
-        assert_eq!(
-            fit((1080, 2160).into(), (540, 1080).into()),
-            r(0, 0, 540, 1080)
-        );
-    }
-
-    #[test]
-    fn portrait_into_landscape_pillarboxes() {
-        let got = fit((1080, 2160).into(), (1920, 1080).into());
-        assert_eq!(got, r(690, 0, 540, 1080));
-    }
-
-    #[test]
-    fn landscape_into_portrait_letterboxes() {
-        let got = fit((1920, 1080).into(), (1080, 1920).into());
-        assert_eq!(got, r(0, 656, 1080, 608));
-    }
-
-    #[test]
-    fn unrotated_phone_pillarboxes_on_a_tv() {
-        use crate::rotation::Rotation;
-        assert_eq!(
-            dst_rect((1080, 2160).into(), (1920, 1080).into(), Rotation::None),
-            r(690, 0, 540, 1080)
-        );
-    }
-
-    #[test]
-    fn rotated_app_fills_a_landscape_tv() {
-        use crate::rotation::Rotation;
-        for rot in [Rotation::LeftUp, Rotation::RightUp] {
-            assert_eq!(
-                dst_rect((1080, 2160).into(), (1920, 1080).into(), rot),
-                r(0, 60, 1920, 960)
-            );
-        }
-    }
-
-    #[test]
-    fn the_blit_undoes_the_primarys_turn() {
-        use crate::rotation::Rotation;
-        for rot in [Rotation::None, Rotation::LeftUp, Rotation::RightUp] {
-            assert_eq!(src_transform(rot), rot.transform().invert());
-        }
-        assert_eq!(src_transform(Rotation::None), Transform::Normal);
-        assert_eq!(src_transform(Rotation::LeftUp), Transform::_90);
-        assert_eq!(src_transform(Rotation::RightUp), Transform::_270);
-    }
-
-    #[test]
-    fn degenerate_sizes_are_empty() {
-        assert_eq!(fit((0, 0).into(), (1920, 1080).into()), r(0, 0, 0, 0));
-        assert_eq!(fit((1080, 2160).into(), (0, 1080).into()), r(0, 0, 0, 0));
     }
 }

@@ -1,10 +1,15 @@
-//! Landscape rotation for fullscreen apps, following the accelerometer.
-//! Wayland has no orientation request, so this is compositor policy.
+//! Landscape rotation following the accelerometer: fullscreen apps always,
+//! the whole shell with `rotate_ui`. Wayland has no orientation request, so
+//! this is compositor policy.
 //!
 //! The whole view turns and stays turned between apps (grab, switcher, quick
-//! switch) until the shell lands on Home or a non-fullscreen app. Layer
-//! surfaces are laid out upright, so they're hidden while turned. Input is
+//! switch) until the shell lands on something that doesn't turn. Input is
 //! mapped through the inverse once, where it enters.
+//!
+//! The smithay output carries the view rotation
+//! ([`crate::State::sync_output_transform`]), so smithay's layer map arranges
+//! layer surfaces in the turned space and they are drawn and hit-tested
+//! there like everything else. Only the panel cutouts stay upright-only.
 //!
 //! [`Settle`] debounces the sensor; [`Fade`] dips to black around the swap
 //! because the client keeps drawing its wrongly-shaped buffer until it
@@ -40,9 +45,10 @@ impl DeviceOrientation {
     }
 }
 
-/// Only fullscreen apps rotate. Flat/unknown and upside-down never do.
-pub fn desired_rotation(device: DeviceOrientation, fullscreen: bool) -> Rotation {
-    if !fullscreen {
+/// `rotatable` is the caller's policy (a fullscreen app, or `rotate_ui` for
+/// the whole shell). Flat/unknown and upside-down never turn.
+pub fn desired_rotation(device: DeviceOrientation, rotatable: bool) -> Rotation {
+    if !rotatable {
         return Rotation::None;
     }
     match device {
@@ -57,8 +63,8 @@ pub fn desired_rotation(device: DeviceOrientation, fullscreen: bool) -> Rotation
 /// Panel dark, external display showing: the sensor is moot and the mirror
 /// un-rotates the blit, so a fullscreen app is always landscape. Keeps the
 /// turn it already has.
-pub fn mirror_only_rotation(current: Rotation, fullscreen: bool) -> Rotation {
-    match (fullscreen, current) {
+pub fn mirror_only_rotation(current: Rotation, rotatable: bool) -> Rotation {
+    match (rotatable, current) {
         (false, _) => Rotation::None,
         (true, Rotation::None) => Rotation::LeftUp,
         (true, turned) => turned,
@@ -109,6 +115,19 @@ impl Rotation {
             Rotation::LeftUp => (output.1 as f32 - y, x),
             // Origin at the screen's top-right.
             Rotation::RightUp => (y, output.0 as f32 - x),
+        }
+    }
+
+    /// An upright screen rect (a panel cutout) in view space. Maps both
+    /// corners with [`Self::map_input`], so change them as a pair too.
+    pub fn map_rect(self, r: sc_layout::Rect, output: (i32, i32)) -> sc_layout::Rect {
+        let (x0, y0) = self.map_input(r.x, r.y, output);
+        let (x1, y1) = self.map_input(r.x + r.w, r.y + r.h, output);
+        sc_layout::Rect {
+            x: x0.min(x1),
+            y: y0.min(y1),
+            w: (x1 - x0).abs(),
+            h: (y1 - y0).abs(),
         }
     }
 }
@@ -290,6 +309,33 @@ mod tests {
     use super::*;
 
     const OUTPUT: (i32, i32) = (1000, 2000);
+
+    #[test]
+    fn map_rect_follows_map_input() {
+        // A top-centre camera hole.
+        let hole = sc_layout::Rect {
+            x: 470.0,
+            y: 16.0,
+            w: 60.0,
+            h: 30.0,
+        };
+        for r in [Rotation::None, Rotation::LeftUp, Rotation::RightUp] {
+            let m = r.map_rect(hole, OUTPUT);
+            let (cx, cy) = r.map_input(hole.x + hole.w / 2.0, hole.y + hole.h / 2.0, OUTPUT);
+            assert!(m.contains(cx, cy), "{r:?}: {m:?} misses ({cx}, {cy})");
+            let (vw, vh) = r.app_size(OUTPUT);
+            assert!(m.x >= 0.0 && m.y >= 0.0 && m.x + m.w <= vw as f32 && m.y + m.h <= vh as f32);
+            let want = if r.swaps_axes() {
+                (30.0, 60.0)
+            } else {
+                (60.0, 30.0)
+            };
+            assert_eq!((m.w, m.h), want, "{r:?}");
+        }
+        // Turned, the top-centre hole sits mid-edge on the screen's left/right.
+        assert_eq!(Rotation::LeftUp.map_rect(hole, OUTPUT).x, 1954.0);
+        assert_eq!(Rotation::RightUp.map_rect(hole, OUTPUT).x, 16.0);
+    }
 
     #[test]
     fn portrait_is_identity() {

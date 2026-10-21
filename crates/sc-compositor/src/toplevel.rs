@@ -577,19 +577,20 @@ impl State {
     }
 
     fn reconfigure_toplevels(&mut self, usable: sc_layout::Rect) {
-        let size = (
-            (usable.w as f64 / self.dpi).round() as i32,
-            (usable.h as f64 / self.dpi).round() as i32,
-        );
-        let turned = self.view_rotation().swaps_axes();
+        let size = self.maximized_logical(usable);
+        // What the geometry followed: the layer map arranges against the view,
+        // which is upright while locked however `rotation` reads.
+        let orientation = self.view_rotation();
         // Only the app in front (and the one just left, so its card stays
         // right) needs the OSK zone. The rest are sized on raise
         // (`resize_if_stale`), and a frozen app couldn't ack anyway.
         let follow = [self.ui.foreground_toplevel(), self.last_app_toplevel];
         for (tid, slot) in self.toplevels.iter_mut().enumerate() {
             let Some(slot) = slot else { continue };
-            // Sized for the turned view; the upright usable area is the wrong width.
-            if turned && slot.rotation.swaps_axes() {
+            // A fullscreen app owns the whole view; the usable area is not its
+            // size, turned or not. `configure_fullscreen` sizes it instead.
+            // Committed state: one mid-negotiation is still sized here.
+            if surface_is_fullscreen(&slot.surface) {
                 continue;
             }
             if !follow.contains(&Some(tid)) || self.frozen_toplevels.contains(&tid) {
@@ -599,9 +600,9 @@ impl State {
                 state.size = Some(size.into());
             });
             slot.surface.send_configure();
-            // A stale landscape record would make `sync_anchor_orientation` skip the
-            // resize later.
-            slot.rotation = rotation::Rotation::None;
+            // A stale record would make `sync_anchor_orientation` skip the resize
+            // later.
+            slot.rotation = orientation;
         }
     }
 
@@ -666,11 +667,11 @@ impl State {
         }
     }
 
-    /// A fullscreen app picked from the deck may be configured for the other
+    /// An app picked from the deck may be configured for the other
     /// orientation. Same axes just needs the record fixed; swapped needs a new
     /// size.
     fn sync_anchor_orientation(&mut self) {
-        let Some(tid) = self.anchor_fullscreen() else {
+        let Some(tid) = self.rotation_anchor().flatten() else {
             return;
         };
         let Some(tl) = self.toplevels.get_mut(tid).and_then(|s| s.as_mut()) else {
@@ -682,9 +683,18 @@ impl State {
         if tl.rotation.swaps_axes() == self.rotation.swaps_axes() {
             tl.rotation = self.rotation;
         } else {
-            let surface = tl.surface.clone();
-            self.configure_fullscreen(&surface);
+            self.reconfigure_anchor(tid);
         }
+    }
+
+    /// Re-sends the size for `tid` in whichever mode it is in.
+    fn reconfigure_anchor(&mut self, tid: ToplevelId) -> Option<(i32, i32)> {
+        let surface = self.toplevels.get(tid)?.as_ref()?.surface.clone();
+        Some(if self.is_fullscreen(tid) {
+            self.configure_fullscreen(&surface)
+        } else {
+            self.configure_maximized(&surface)
+        })
     }
 
     pub(crate) fn app_focus_surface(&self) -> Option<WlSurface> {
@@ -724,8 +734,9 @@ impl State {
     /// is fullscreen and the panel is lit. Idempotent.
     pub(crate) fn sync_sensor_claim(&mut self) {
         // A turned view outlives the app and still needs the sensor to turn back.
-        let wanted = (self.foreground_is_fullscreen() || self.rotation.swaps_axes())
-            && !self.blank.is_blanked();
+        let wanted =
+            (self.rotate_ui || self.foreground_is_fullscreen() || self.rotation.swaps_axes())
+                && !self.blank.is_blanked();
         if let Some(sensor) = &mut self.sensor {
             sensor.set_wanted(wanted);
         }
@@ -740,11 +751,7 @@ impl State {
         self.toplevels
             .get(tid)
             .and_then(|slot| slot.as_ref())
-            .is_some_and(|tl| {
-                tl.surface.with_committed_state(|state| {
-                    state.is_some_and(|s| s.states.contains(xdg_toplevel::State::Fullscreen))
-                })
-            })
+            .is_some_and(|tl| surface_is_fullscreen(&tl.surface))
     }
 
     /// `Some(Some(_))` for an app, `Some(None)` for Home, `None` in between
@@ -760,22 +767,53 @@ impl State {
         }
     }
 
-    fn anchor_fullscreen(&self) -> Option<ToplevelId> {
-        self.rotation_anchor()
-            .flatten()
-            .filter(|&tid| self.is_fullscreen(tid))
-    }
-
     fn desired_view_rotation(&self) -> rotation::Rotation {
-        let fullscreen = match self.rotation_anchor() {
-            Some(Some(tid)) => self.is_fullscreen(tid),
-            Some(None) => false,
+        let rotatable = match self.rotation_anchor() {
+            Some(Some(tid)) => self.rotate_ui || self.is_fullscreen(tid),
+            Some(None) => self.rotate_ui,
             None => self.rotation.swaps_axes(),
         };
         if self.blank.is_blanked() && self.external_display {
-            return rotation::mirror_only_rotation(self.rotation, fullscreen);
+            return rotation::mirror_only_rotation(self.rotation, rotatable);
         }
-        rotation::desired_rotation(self.device_orientation, fullscreen)
+        rotation::desired_rotation(self.device_orientation, rotatable)
+    }
+
+    /// `rotate_ui` at runtime; the next tick turns the view.
+    pub(crate) fn set_rotate_ui(&mut self, on: bool) {
+        if self.rotate_ui == on {
+            return;
+        }
+        self.rotate_ui = on;
+        self.sync_sensor_claim();
+        self.needs_render = true;
+    }
+
+    /// The smithay output carries the view rotation, so smithay's layer map
+    /// arranges layer surfaces in the turned space — which is the only space
+    /// we can draw and hit-test them in.
+    pub(crate) fn sync_output_transform(&mut self) {
+        let want = self.view_rotation().transform();
+        if self.output.current_transform() == want {
+            return;
+        }
+        self.output
+            .change_current_state(None, Some(want), None, None);
+        let (_, vh) = self.output_size();
+        // False for a LeftUp->RightUp swap: same height, so the layer map and
+        // every window size are already right.
+        if self.layers.set_view_height(vh as f32, self.dpi) {
+            self.reconfigure_toplevels(self.layers.settled_usable());
+            self.reconstrain_popups();
+        }
+        // Capture hands out view-space pixels, so a turn changes the buffer
+        // size a live session was told to allocate.
+        use smithay::wayland::image_copy_capture::ImageCopyCaptureHandler;
+        for session in self.image_copy_capture.sessions().to_vec() {
+            if let Some(c) = self.capture_constraints(&session.source()) {
+                session.update_constraints(c);
+            }
+        }
     }
 
     /// Derived, not latched, so it's only on while a client really draws at the
@@ -786,6 +824,7 @@ impl State {
             return false;
         }
         self.rotation = want;
+        self.sync_output_transform();
         self.needs_render = true;
         info!(target: "springchick::debug", "rotation {want:?}");
         true
@@ -803,6 +842,8 @@ impl State {
     }
 
     pub(crate) fn tick_rotation(&mut self, now: std::time::Instant) {
+        // A session lock turns the view back without touching `rotation`.
+        self.sync_output_transform();
         if let Some(orientation) = self.orientation_settle.poll(now) {
             self.apply_device_orientation(orientation, now);
         }
@@ -848,16 +889,16 @@ impl State {
     fn swap_rotation(&mut self, now: std::time::Instant) {
         let changed = self.refresh_rotation();
         self.sync_sensor_claim();
+        if changed {
+            // The grid springs hold targets for the old view. Clearing makes
+            // `advance_frame` re-seed them snapped, not fly across the screen.
+            self.grid_anim.clear();
+            self.dock_anim.clear();
+        }
         let configured = changed
-            .then(|| self.anchor_fullscreen())
+            .then(|| self.rotation_anchor().flatten())
             .flatten()
-            .and_then(|tid| {
-                self.toplevels
-                    .get(tid)?
-                    .as_ref()
-                    .map(|tl| tl.surface.clone())
-            })
-            .map(|surface| self.configure_fullscreen(&surface));
+            .and_then(|tid| self.reconfigure_anchor(tid));
         self.rotation_await_size = configured;
         if configured.is_none() {
             // Nothing to wait for; don't sit out `Fade::MAX_WAIT` on black.
@@ -953,10 +994,10 @@ impl State {
 
     /// Maximized to the usable area (logical size). Maximized, not
     /// Fullscreen, so dialogs keep their header bar.
-    pub(crate) fn configure_maximized(&mut self, surface: &ToplevelSurface) {
-        let usable = self.layers.usable(self.dpi);
-        let w = (usable.w as f64 / self.dpi).round() as i32;
-        let h = (usable.h as f64 / self.dpi).round() as i32;
+    /// Returns the logical size requested, which the rotation fade waits for.
+    pub(crate) fn configure_maximized(&mut self, surface: &ToplevelSurface) -> (i32, i32) {
+        let (w, h) = self.maximized_logical(self.layers.settled_usable());
+        let orientation = self.view_rotation();
         let deco = self.decoration_for(surface, None);
         // The VM xdg-dialog test asserts this line.
         info!(
@@ -973,7 +1014,8 @@ impl State {
             state.states.set(xdg_toplevel::State::Activated);
         });
         surface.send_configure();
-        self.record_toplevel_rotation(surface, rotation::Rotation::None);
+        self.record_toplevel_rotation(surface, orientation);
+        (w, h)
     }
 
     /// Logs committed geometry against the configured size, on change. GTK's file
@@ -1057,6 +1099,13 @@ impl State {
             tl.rotation = rotation;
         }
     }
+}
+
+/// Committed, not just requested.
+fn surface_is_fullscreen(surface: &ToplevelSurface) -> bool {
+    surface.with_committed_state(|state| {
+        state.is_some_and(|s| s.states.contains(xdg_toplevel::State::Fullscreen))
+    })
 }
 
 fn commit_needs_frame(owner: Option<ToplevelId>, drawn: &[ToplevelId]) -> bool {
