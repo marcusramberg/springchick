@@ -174,7 +174,7 @@ action = "volume-down"
 [[keybinds.binding]]
 key = "XF86AudioLowerVolume"
 press = "long"
-command = "pkill -SIGRTMIN -f wvkbd-mobintl"
+command = "pkill -SIGRTMIN sc-osk"
 
 [[keybinds.binding]]
 key = "XF86PowerOff"

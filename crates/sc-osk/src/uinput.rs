@@ -1,6 +1,6 @@
 //! A keyboard through `/dev/uinput`, so every client (terminals, XWayland, the
-//! VT) sees real key events. The crate's only unsafe code. Closing the fd
-//! removes the device.
+//! VT) sees real key events. Unsafe, like main's SIGRTMIN handler. Closing the
+//! fd removes the device.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
