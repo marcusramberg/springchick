@@ -114,6 +114,9 @@ pub struct Config {
     pub rotation_settle_ms: u64,
     /// Each half of the rotation dip-to-black. `0` swaps instantly.
     pub rotation_fade_ms: u64,
+    /// Turn Home and ordinary windows too, not just fullscreen apps. The
+    /// `rotation` ipc verb overrides it for the session.
+    pub rotate_ui: bool,
     /// Run via `sh -c` once the Wayland socket exists, for setups without
     /// systemd user units. Ignored on reload.
     pub startup: Vec<String>,
@@ -259,6 +262,8 @@ pub const DEFAULT_VRR: bool = true;
 pub const DEFAULT_ROTATION_SETTLE_MS: u64 = 400;
 
 pub const DEFAULT_ROTATION_FADE_MS: u64 = 130;
+/// Off: only fullscreen apps turn.
+pub const DEFAULT_ROTATE_UI: bool = false;
 
 impl Default for Resources {
     /// 10:1 CPU weights; the compositor sits above both at 200 (`nix/module.nix`).
@@ -580,6 +585,7 @@ struct RawMain {
     vrr: Option<bool>,
     rotation_settle_ms: Option<u64>,
     rotation_fade_ms: Option<u64>,
+    rotate_ui: Option<bool>,
     #[serde(default)]
     startup: Vec<String>,
     #[serde(flatten)]
@@ -655,6 +661,7 @@ impl Config {
                     vrr: DEFAULT_VRR,
                     rotation_settle_ms: DEFAULT_ROTATION_SETTLE_MS,
                     rotation_fade_ms: DEFAULT_ROTATION_FADE_MS,
+                    rotate_ui: DEFAULT_ROTATE_UI,
                     startup: Vec::new(),
                     resources: Resources::default(),
                     xkb: Xkb::default(),
@@ -681,6 +688,7 @@ impl Config {
             .rotation_settle_ms
             .unwrap_or(DEFAULT_ROTATION_SETTLE_MS);
         let rotation_fade_ms = main.rotation_fade_ms.unwrap_or(DEFAULT_ROTATION_FADE_MS);
+        let rotate_ui = main.rotate_ui.unwrap_or(DEFAULT_ROTATE_UI);
         let startup = main.startup;
         let resources = parse_resources(file.resources);
         let xkb = file.xkb.map_or_else(Xkb::default, |x| Xkb {
@@ -709,6 +717,7 @@ impl Config {
             vrr,
             rotation_settle_ms,
             rotation_fade_ms,
+            rotate_ui,
             startup,
             resources,
             xkb,
@@ -1054,6 +1063,7 @@ mod tests {
         let cfg = Config::parse("[keybinds]\nlong_press_ms = 800\n");
         assert_eq!(cfg.rotation_settle_ms, DEFAULT_ROTATION_SETTLE_MS);
         assert_eq!(cfg.rotation_fade_ms, DEFAULT_ROTATION_FADE_MS);
+        assert_eq!(cfg.rotate_ui, DEFAULT_ROTATE_UI);
     }
 
     #[test]
@@ -1061,6 +1071,7 @@ mod tests {
         let cfg = Config::parse("[main]\nrotation_settle_ms = 250\nrotation_fade_ms = 0\n");
         assert_eq!(cfg.rotation_settle_ms, 250);
         assert_eq!(cfg.rotation_fade_ms, 0);
+        assert!(Config::parse("[main]\nrotate_ui = true\n").rotate_ui);
     }
 
     #[test]

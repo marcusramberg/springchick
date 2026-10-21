@@ -4,12 +4,13 @@
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
-use smithay::backend::renderer::{ExportMem, Offscreen, RendererSuper};
+use smithay::backend::renderer::{Color32F, ExportMem, Frame, Offscreen, Renderer, RendererSuper};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_shm;
-use smithay::utils::{Rectangle, Size};
+use smithay::utils::{Physical, Point, Rectangle, Size, Transform};
 use smithay::wayland::shm;
 
+use crate::rotation::Rotation;
 use tracing::warn;
 
 pub struct ShmTarget {
@@ -50,6 +51,73 @@ pub fn offscreen(
             None
         }
     }
+}
+
+/// Blit a panel-space scene into `fb`, undoing the view rotation and
+/// aspect-fitting into `dst_size`. Shared by external mirroring (where the
+/// external panel is not being held sideways) and screen capture (where
+/// clients are owed pixels in the space the output advertises). An exact
+/// aspect match fills; anything else letterboxes on black.
+pub fn blit_upright(
+    renderer: &mut GlesRenderer,
+    fb: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    dst_size: Size<i32, Physical>,
+    src: &GlesTexture,
+    src_size: Size<i32, Physical>,
+    rotation: Rotation,
+) -> Result<(), smithay::backend::renderer::gles::GlesError> {
+    let full = Rectangle::from_size(dst_size);
+    let dst = dst_rect(src_size, dst_size, rotation);
+    let mut frame = renderer.render(fb, dst_size, Transform::Normal)?;
+    frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[full])?;
+    frame.render_texture_from_to(
+        src,
+        Rectangle::from_size((src_size.w as f64, src_size.h as f64).into()),
+        dst,
+        &[full],
+        &[],
+        src_transform(rotation),
+        1.0,
+        None,
+        &[],
+    )?;
+    let _sync = frame.finish()?;
+    Ok(())
+}
+
+/// Inverse of the primary's transform: that one is a frame transform, this is
+/// a source transform that gets inverted again. The same value in both places
+/// turns the image 180°.
+fn src_transform(rotation: Rotation) -> Transform {
+    rotation.transform().invert()
+}
+
+/// A rotated scene in a portrait buffer reads as landscape once un-rotated,
+/// and that is what gets aspect-fit.
+pub fn dst_rect(
+    src: Size<i32, Physical>,
+    dst: Size<i32, Physical>,
+    rotation: Rotation,
+) -> Rectangle<i32, Physical> {
+    let shown: Size<i32, Physical> = rotation.app_size((src.w, src.h)).into();
+    fit(shown, dst)
+}
+
+/// Degenerate sizes give an empty rect.
+fn fit(src: Size<i32, Physical>, dst: Size<i32, Physical>) -> Rectangle<i32, Physical> {
+    if src.w <= 0 || src.h <= 0 || dst.w <= 0 || dst.h <= 0 {
+        return Rectangle::new(Point::from((0, 0)), Size::from((0, 0)));
+    }
+    let scale = f64::min(
+        f64::from(dst.w) / f64::from(src.w),
+        f64::from(dst.h) / f64::from(src.h),
+    );
+    let w = (f64::from(src.w) * scale).round() as i32;
+    let h = (f64::from(src.h) * scale).round() as i32;
+    Rectangle::new(
+        Point::from(((dst.w - w) / 2, (dst.h - h) / 2)),
+        Size::from((w, h)),
+    )
 }
 
 pub fn readback_rgba(
@@ -135,5 +203,88 @@ pub fn readback_into_shm(
             warn!("screencopy: shm access failed: {e}");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Physical> {
+        Rectangle::new(Point::from((x, y)), Size::from((w, h)))
+    }
+
+    #[test]
+    fn same_aspect_fills() {
+        assert_eq!(
+            fit((1080, 2160).into(), (1080, 2160).into()),
+            r(0, 0, 1080, 2160)
+        );
+        assert_eq!(
+            fit((1080, 2160).into(), (540, 1080).into()),
+            r(0, 0, 540, 1080)
+        );
+    }
+
+    #[test]
+    fn portrait_into_landscape_pillarboxes() {
+        let got = fit((1080, 2160).into(), (1920, 1080).into());
+        assert_eq!(got, r(690, 0, 540, 1080));
+    }
+
+    #[test]
+    fn landscape_into_portrait_letterboxes() {
+        let got = fit((1920, 1080).into(), (1080, 1920).into());
+        assert_eq!(got, r(0, 656, 1080, 608));
+    }
+
+    #[test]
+    fn unrotated_phone_pillarboxes_on_a_tv() {
+        assert_eq!(
+            dst_rect((1080, 2160).into(), (1920, 1080).into(), Rotation::None),
+            r(690, 0, 540, 1080)
+        );
+    }
+
+    #[test]
+    fn rotated_app_fills_a_landscape_tv() {
+        for rot in [Rotation::LeftUp, Rotation::RightUp] {
+            assert_eq!(
+                dst_rect((1080, 2160).into(), (1920, 1080).into(), rot),
+                r(0, 60, 1920, 960)
+            );
+        }
+    }
+
+    #[test]
+    fn the_blit_undoes_the_primarys_turn() {
+        for rot in [Rotation::None, Rotation::LeftUp, Rotation::RightUp] {
+            assert_eq!(src_transform(rot), rot.transform().invert());
+        }
+        assert_eq!(src_transform(Rotation::None), Transform::Normal);
+        assert_eq!(src_transform(Rotation::LeftUp), Transform::_90);
+        assert_eq!(src_transform(Rotation::RightUp), Transform::_270);
+    }
+
+    #[test]
+    fn a_turned_capture_fills_its_view_sized_target() {
+        // What `capture_scene` asks for: the view is the panel's own size
+        // swapped, so the upright blit must fill it with no letterbox.
+        for rot in [Rotation::LeftUp, Rotation::RightUp] {
+            assert_eq!(
+                dst_rect((1224, 2700).into(), (2700, 1224).into(), rot),
+                r(0, 0, 2700, 1224)
+            );
+        }
+        assert_eq!(
+            dst_rect((1224, 2700).into(), (1224, 2700).into(), Rotation::None),
+            r(0, 0, 1224, 2700)
+        );
+    }
+
+    #[test]
+    fn degenerate_sizes_are_empty() {
+        assert_eq!(fit((0, 0).into(), (1920, 1080).into()), r(0, 0, 0, 0));
+        assert_eq!(fit((1080, 2160).into(), (0, 1080).into()), r(0, 0, 0, 0));
     }
 }

@@ -178,17 +178,49 @@ fn capture_region_shm(
 ) -> Option<bool> {
     use smithay::backend::renderer::Bind;
 
-    let size = backend.window_size();
+    let (mut tex, _) = capture_scene(backend, state, prep, target.fourcc, rounded_tex_shader)?;
     let renderer = backend.renderer();
-    let mut tex = crate::capture::offscreen(renderer, target.fourcc, (size.w, size.h).into())?;
-    let mut fb = match renderer.bind(&mut tex) {
+    let fb = match renderer.bind(&mut tex) {
         Ok(fb) => fb,
         Err(e) => {
-            warn!("screencopy: offscreen bind failed: {e}");
+            warn!("screencopy: readback bind failed: {e}");
             return Some(false);
         }
     };
+    Some(crate::capture::readback_into_shm(
+        renderer, &fb, buffer, target, src,
+    ))
+}
+
+/// The scene drawn in the space the output advertises: a turned view is
+/// blitted upright, so clients get the landscape image their landscape buffer
+/// was sized for.
+fn capture_scene(
+    backend: &mut WinitGraphicsBackend<GlesRenderer>,
+    state: &mut State,
+    prep: &crate::FramePrep,
+    fourcc: smithay::backend::allocator::Fourcc,
+    rounded_tex_shader: &GlesTexProgram,
+) -> Option<(
+    smithay::backend::renderer::gles::GlesTexture,
+    smithay::utils::Size<i32, smithay::utils::Buffer>,
+)> {
+    use smithay::backend::renderer::Bind;
+
+    let panel = backend.window_size();
+    let rotation = state.view_rotation();
+    let view: smithay::utils::Size<i32, smithay::utils::Physical> =
+        rotation.app_size((panel.w, panel.h)).into();
+    let renderer = backend.renderer();
+    let mut scene = crate::capture::offscreen(renderer, fourcc, (panel.w, panel.h).into())?;
     {
+        let mut fb = match renderer.bind(&mut scene) {
+            Ok(fb) => fb,
+            Err(e) => {
+                warn!("capture: offscreen bind failed: {e}");
+                return None;
+            }
+        };
         // Our own FBO is Y-flipped relative to winit's surface: Skia takes the DRM
         // flip and the app pass drops Flipped180. Capture feedback is discarded.
         let mut sinks = render::FrameSinks::default();
@@ -200,17 +232,35 @@ fn capture_region_shm(
             rounded_tex_shader,
             &mut sinks,
         );
-        let draw = render::draw_scene(renderer, &mut fb, size, &mut ctx);
+        let draw = render::draw_scene(renderer, &mut fb, panel, &mut ctx);
         crate::presentation::discard(sinks.presented);
         crate::pacing::clear_blockers(state, sinks.unblocked);
         if let Err(e) = draw {
-            warn!("screencopy: draw_scene failed: {e}");
-            return Some(false);
+            warn!("capture: draw_scene failed: {e}");
+            return None;
         }
     }
-    Some(crate::capture::readback_into_shm(
-        renderer, &fb, buffer, target, src,
-    ))
+    if !rotation.swaps_axes() {
+        return Some((scene, (view.w, view.h).into()));
+    }
+    let renderer = backend.renderer();
+    let mut out = crate::capture::offscreen(renderer, fourcc, (view.w, view.h).into())?;
+    {
+        let mut fb = match renderer.bind(&mut out) {
+            Ok(fb) => fb,
+            Err(e) => {
+                warn!("capture: upright bind failed: {e}");
+                return None;
+            }
+        };
+        if let Err(e) =
+            crate::capture::blit_upright(renderer, &mut fb, view, &scene, panel, rotation)
+        {
+            warn!("capture: upright blit failed: {e}");
+            return None;
+        }
+    }
+    Some((out, (view.w, view.h).into()))
 }
 
 fn take_screenshot(
@@ -221,41 +271,18 @@ fn take_screenshot(
 ) {
     use smithay::backend::renderer::Bind;
 
-    let size = backend.window_size();
-    let buf_size: smithay::utils::Size<i32, smithay::utils::Buffer> = (size.w, size.h).into();
-    let renderer = backend.renderer();
-    let Some(mut tex) = crate::capture::offscreen(
-        renderer,
-        smithay::backend::allocator::Fourcc::Xrgb8888,
-        buf_size,
-    ) else {
+    let fourcc = smithay::backend::allocator::Fourcc::Xrgb8888;
+    let Some((mut tex, buf_size)) = capture_scene(backend, state, prep, fourcc, rounded_tex_shader)
+    else {
         return;
     };
-    let pixels = {
-        let mut fb = match renderer.bind(&mut tex) {
-            Ok(fb) => fb,
-            Err(e) => {
-                warn!("screenshot: offscreen bind failed: {e}");
-                return;
-            }
-        };
-        let mut sinks = render::FrameSinks::default();
-        let mut ctx = state.draw_ctx(
-            prep,
-            Transform::Normal,
-            true,
-            false,
-            rounded_tex_shader,
-            &mut sinks,
-        );
-        let draw = render::draw_scene(renderer, &mut fb, size, &mut ctx);
-        crate::presentation::discard(sinks.presented);
-        crate::pacing::clear_blockers(state, sinks.unblocked);
-        if let Err(e) = draw {
-            warn!("screenshot: draw_scene failed: {e}");
+    let renderer = backend.renderer();
+    let pixels = match renderer.bind(&mut tex) {
+        Ok(fb) => crate::capture::readback_rgba(renderer, &fb, buf_size),
+        Err(e) => {
+            warn!("screenshot: readback bind failed: {e}");
             return;
         }
-        crate::capture::readback_rgba(renderer, &fb, buf_size)
     };
     if let Some(pixels) = pixels {
         crate::screenshot::to_clipboard(state, &pixels, buf_size);

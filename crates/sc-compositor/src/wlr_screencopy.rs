@@ -32,6 +32,9 @@ pub struct FrameData {
 struct FrameInner {
     /// Physical pixels.
     region: Rectangle<i32, BufferCoord>,
+    /// View size `region` was cut from. A rotation between `capture_output`
+    /// and `copy` invalidates both it and the client's buffer.
+    view: Size<i32, BufferCoord>,
     /// A second copy is an `already_used` protocol error.
     used: bool,
 }
@@ -146,6 +149,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
                 FrameData {
                     inner: Mutex::new(FrameInner {
                         region: Rectangle::default(),
+                        view: state.output_rect().size,
                         used: true,
                     }),
                 },
@@ -159,6 +163,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
             FrameData {
                 inner: Mutex::new(FrameInner {
                     region,
+                    view: state.output_rect().size,
                     used: false,
                 }),
             },
@@ -201,6 +206,14 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for State {
             return;
         }
         let region = inner.region;
+        // wf-recorder makes a frame per video frame; a turn between the two
+        // leaves this one shaped for the old view.
+        if inner.view != state.output_rect().size {
+            inner.used = true;
+            drop(inner);
+            resource.failed();
+            return;
+        }
 
         if let Err(e) = check_buffer(&buffer, region.size) {
             warn!("wlr-screencopy: {e}");
@@ -235,7 +248,10 @@ fn check_buffer(buffer: &WlBuffer, size: Size<i32, BufferCoord>) -> Result<(), &
 }
 
 impl State {
+    /// View space, like the pixels [`crate::capture`] hands back and the
+    /// logical geometry xdg-output advertises.
     fn output_rect(&self) -> Rectangle<i32, BufferCoord> {
-        Rectangle::from_size((self.panel_size.0, self.panel_size.1).into())
+        let (w, h) = self.output_size();
+        Rectangle::from_size((w, h).into())
     }
 }

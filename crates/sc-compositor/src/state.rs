@@ -357,6 +357,9 @@ pub(crate) struct State {
     /// sensor.
     pub device_orientation: rotation::DeviceOrientation,
     pub orientation_settle: rotation::Settle,
+    /// Turn Home and ordinary windows too. From `rotate_ui`, overridden by the
+    /// `rotation` ipc verb.
+    pub rotate_ui: bool,
     pub rotation_fade: rotation::Fade,
     /// Size configured by the turn being faded through; the first commit at it
     /// ends the dark stretch early.
@@ -458,6 +461,7 @@ impl State {
         resources::thaw_stale_scopes();
         let config_rotation_settle_ms = config.rotation_settle_ms;
         let config_rotation_fade_ms = config.rotation_fade_ms;
+        let config_rotate_ui = config.rotate_ui;
 
         // They inherit `WAYLAND_DISPLAY` from our env.
         let mut children = Vec::new();
@@ -689,6 +693,7 @@ impl State {
                 config_rotation_settle_ms,
                 rotation::DeviceOrientation::Normal,
             ),
+            rotate_ui: config_rotate_ui,
             rotation_fade: rotation::Fade::new(config_rotation_fade_ms),
             rotation_await_size: None,
             sensor: sensor::spawn(),
@@ -787,6 +792,7 @@ impl State {
         self.orientation_settle.set_hold(config.rotation_settle_ms);
         // A fade in flight keeps its duration.
         self.rotation_fade.set_duration(config.rotation_fade_ms);
+        self.set_rotate_ui(config.rotate_ui);
         crate::keybinds::set_xkb(self, config.xkb.clone());
         self.resources = config.resources.clone();
         self.bg_allowed_cpus = resources::resolve_allowed_cpus(&self.resources.bg_allowed_cpus);
@@ -911,11 +917,7 @@ impl State {
         let Some(tl) = self.toplevels.get(tid).and_then(|t| t.as_ref()) else {
             return;
         };
-        let usable = self.layers.settled_usable();
-        let target = (
-            (usable.w as f64 / self.dpi).round() as i32,
-            (usable.h as f64 / self.dpi).round() as i32,
-        );
+        let target = self.maximized_logical(self.layers.settled_usable());
         let (sent, fullscreen) = tl.surface.with_pending_state(|st| {
             (
                 st.size.map(|sz| (sz.w, sz.h)),
@@ -971,11 +973,27 @@ impl State {
         self.view_rotation().app_size(self.panel_size)
     }
 
-    /// Empty while turned: cutouts are in upright panel px.
-    pub(crate) fn shell_cutouts(&self) -> &[sc_layout::Rect] {
+    /// Logical size a non-fullscreen window is configured to, from a usable
+    /// area in physical px (already in view space: the layer map arranges
+    /// against the turned output). Every caller passes `settled_usable()`
+    /// except the per-frame slide, which eases towards it.
+    pub(crate) fn maximized_logical(&self, usable: sc_layout::Rect) -> (i32, i32) {
+        (
+            (usable.w as f64 / self.dpi).round() as i32,
+            (usable.h as f64 / self.dpi).round() as i32,
+        )
+    }
+
+    /// Mapped into view space: the panel's own rects are upright panel px.
+    pub(crate) fn shell_cutouts(&self) -> Vec<sc_layout::Rect> {
+        let rotation = self.view_rotation();
         match &self.panel {
-            Some(p) if !self.view_rotation().swaps_axes() => &p.cutouts,
-            _ => &[],
+            Some(p) => p
+                .cutouts
+                .iter()
+                .map(|c| rotation.map_rect(*c, self.panel_size))
+                .collect(),
+            None => Vec::new(),
         }
     }
 
@@ -984,9 +1002,9 @@ impl State {
         (w as f32, h as f32)
     }
 
-    /// Below/right of exclusive zones, or the view origin while turned.
+    /// Below/right of exclusive zones.
     pub(crate) fn app_origin(&self) -> (f32, f32) {
-        if self.view_rotation().swaps_axes() || self.foreground_is_fullscreen() {
+        if self.foreground_is_fullscreen() {
             return (0.0, 0.0);
         }
         let u = self.layers.usable(self.dpi);
