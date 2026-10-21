@@ -17,6 +17,7 @@ mod uinput;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use smithay_client_toolkit::{
@@ -195,6 +196,14 @@ fn main() {
     if std::env::args().any(|a| a == "--show") {
         app.show(&qh);
     }
+    // SIGRTMIN toggles, as wvkbd's did: `pkill -SIGRTMIN sc-osk`. poll() is
+    // never restarted, so the handler's flag is seen on the next pass.
+    unsafe {
+        libc::signal(
+            libc::SIGRTMIN(),
+            on_toggle as *const () as libc::sighandler_t,
+        )
+    };
 
     // Not blocking_dispatch: a long press needs to wake without an event.
     loop {
@@ -236,8 +245,21 @@ fn main() {
             }
             _ => drop(guard),
         }
+        if TOGGLE.swap(false, Ordering::Relaxed) {
+            if app.layer.is_some() {
+                app.hide();
+            } else {
+                app.show(&qh);
+            }
+        }
         app.tick();
     }
+}
+
+static TOGGLE: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_toggle(_: libc::c_int) {
+    TOGGLE.store(true, Ordering::Relaxed);
 }
 
 fn bind_input_method(globals: &GlobalList, qh: &QueueHandle<App>, app: &mut App) {

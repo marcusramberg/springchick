@@ -65,10 +65,14 @@ in
 
     waybar.enable = lib.mkEnableOption "waybar with springchick's example config (extras/waybar)";
 
-    osk.enable = lib.mkEnableOption ''
-      sc-osk, springchick's uinput on-screen keyboard. It takes the seat's
-      input method, so turn off other keyboards (wvkbd --auto) or it stays
-      hidden'';
+    osk.enable =
+      lib.mkEnableOption ''
+        sc-osk, springchick's uinput on-screen keyboard. It takes the seat's
+        input method, so turn off other keyboards (wvkbd --auto) or it stays
+        hidden''
+      // {
+        default = true;
+      };
   };
 
   config = lib.mkIf cfg.enable {
