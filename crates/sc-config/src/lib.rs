@@ -123,6 +123,7 @@ pub struct Config {
     pub resources: Resources,
     pub xkb: Xkb,
     pub predict: Predict,
+    pub osk: OskColors,
     pub bindings: Vec<Binding>,
 }
 
@@ -138,6 +139,49 @@ pub struct Predict {
     /// (`"nb_NO"`, `"en_US"`). Several make the keyboard bilingual. Looked up
     /// in the XDG data dirs under `hunspell/` and `myspell/dicts/`.
     pub dictionaries: Vec<String>,
+}
+
+/// On-screen keyboard colours, `0xRRGGBB`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OskColors {
+    pub bg: u32,
+    pub key: u32,
+    pub function_key: u32,
+    pub pressed: u32,
+    pub latched: u32,
+    pub ink: u32,
+    pub ink_on_latched: u32,
+    pub selected: u32,
+}
+
+impl Default for OskColors {
+    fn default() -> Self {
+        OskColors {
+            bg: 0x1c1c1e,
+            key: 0x6b6b70,
+            function_key: 0x46464a,
+            pressed: 0x9a9aa0,
+            latched: 0xe5e5ea,
+            ink: 0xffffff,
+            ink_on_latched: 0x000000,
+            selected: 0x0a84ff,
+        }
+    }
+}
+
+/// `"#rrggbb"`; anything else keeps `default`.
+fn parse_color(key: &str, v: Option<&String>, default: u32) -> u32 {
+    let Some(v) = v else { return default };
+    match v.strip_prefix('#').filter(|h| h.len() == 6) {
+        Some(h) => u32::from_str_radix(h, 16).unwrap_or_else(|_| {
+            warn!(key, value = %v, "osk colour is not #rrggbb, using default");
+            default
+        }),
+        None => {
+            warn!(key, value = %v, "osk colour is not #rrggbb, using default");
+            default
+        }
+    }
 }
 
 /// The seat keymap, as xkbcommon names it. Empty fields fall back to
@@ -532,6 +576,21 @@ struct RawConfigFile {
     resources: Option<RawResources>,
     xkb: Option<RawXkb>,
     predict: Option<RawPredict>,
+    osk: Option<RawOsk>,
+    #[serde(flatten)]
+    unknown: toml::Table,
+}
+
+#[derive(Deserialize, Default)]
+struct RawOsk {
+    bg: Option<String>,
+    key: Option<String>,
+    function_key: Option<String>,
+    pressed: Option<String>,
+    latched: Option<String>,
+    ink: Option<String>,
+    ink_on_latched: Option<String>,
+    selected: Option<String>,
     #[serde(flatten)]
     unknown: toml::Table,
 }
@@ -623,6 +682,9 @@ fn unknown_keys(file: &RawConfigFile) -> Vec<String> {
     if let Some(predict) = &file.predict {
         add("predict.", &predict.unknown);
     }
+    if let Some(osk) = &file.osk {
+        add("osk.", &osk.unknown);
+    }
     if let Some(resources) = &file.resources {
         add("resources.", &resources.unknown);
     }
@@ -666,6 +728,7 @@ impl Config {
                     resources: Resources::default(),
                     xkb: Xkb::default(),
                     predict: Predict::default(),
+                    osk: OskColors::default(),
                     bindings: Vec::new(),
                 };
             }
@@ -700,6 +763,23 @@ impl Config {
         let predict = file.predict.map_or_else(Predict::default, |p| Predict {
             dictionaries: p.dictionaries.unwrap_or_default(),
         });
+        let osk = file.osk.map_or_else(OskColors::default, |o| {
+            let d = OskColors::default();
+            OskColors {
+                bg: parse_color("bg", o.bg.as_ref(), d.bg),
+                key: parse_color("key", o.key.as_ref(), d.key),
+                function_key: parse_color("function_key", o.function_key.as_ref(), d.function_key),
+                pressed: parse_color("pressed", o.pressed.as_ref(), d.pressed),
+                latched: parse_color("latched", o.latched.as_ref(), d.latched),
+                ink: parse_color("ink", o.ink.as_ref(), d.ink),
+                ink_on_latched: parse_color(
+                    "ink_on_latched",
+                    o.ink_on_latched.as_ref(),
+                    d.ink_on_latched,
+                ),
+                selected: parse_color("selected", o.selected.as_ref(), d.selected),
+            }
+        });
         let raw = file.keybinds.unwrap_or_default();
 
         let bindings = raw.binding.into_iter().filter_map(convert).collect();
@@ -722,6 +802,7 @@ impl Config {
             resources,
             xkb,
             predict,
+            osk,
             bindings,
         }
     }
@@ -1083,6 +1164,14 @@ mod tests {
                 .dictionaries,
             ["nb_NO", "en_US"]
         );
+    }
+
+    #[test]
+    fn osk_colors_parse_hex_and_drop_bad_values() {
+        let c = Config::parse("[osk]\nbg = \"#102030\"\nink = \"red\"\n").osk;
+        assert_eq!(c.bg, 0x102030);
+        assert_eq!(c.ink, OskColors::default().ink);
+        assert_eq!(c.key, OskColors::default().key);
     }
 
     #[test]
