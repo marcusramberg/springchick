@@ -47,8 +47,9 @@ const MAIN: &[(&str, &str)] = &[
 /// must be in [`FOLDERS`].
 const OVERRIDES: &[(&str, &str)] = &[("Music Assistant", "Media")];
 
-/// Empty folders are dropped; apps sort by name, then id.
-pub fn folders(entries: &[AppEntry]) -> Vec<Folder> {
+/// Empty folders are dropped; apps sort by name, then id. `recent` (newest
+/// first, ids must be in `entries`) leads as a "Recent" folder when non-empty.
+pub fn folders(entries: &[AppEntry], recent: &[String]) -> Vec<Folder> {
     let mut out: Vec<(&'static str, Vec<&AppEntry>)> =
         FOLDERS.iter().map(|n| (*n, Vec::new())).collect();
     for e in entries {
@@ -59,7 +60,12 @@ pub fn folders(entries: &[AppEntry]) -> Vec<Folder> {
             .expect("folder_for returns a FOLDERS name");
         slot.1.push(e);
     }
-    out.into_iter()
+    let recent = (!recent.is_empty()).then(|| Folder {
+        name: "Recent",
+        apps: recent.to_vec(),
+    });
+    let cats = out
+        .into_iter()
         .filter(|(_, apps)| !apps.is_empty())
         .map(|(name, mut apps)| {
             apps.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
@@ -67,8 +73,8 @@ pub fn folders(entries: &[AppEntry]) -> Vec<Folder> {
                 name,
                 apps: apps.into_iter().map(|e| e.id.clone()).collect(),
             }
-        })
-        .collect()
+        });
+    recent.into_iter().chain(cats).collect()
 }
 
 pub fn folder_for(entry: &AppEntry) -> &'static str {
@@ -140,11 +146,14 @@ mod tests {
 
     #[test]
     fn folders_drop_empties_and_sort_by_name() {
-        let f = folders(&[
-            app("z", "Zebra", &["Utility"]),
-            app("a", "Apple", &["Utility"]),
-            app("n", "Net", &["Network"]),
-        ]);
+        let f = folders(
+            &[
+                app("z", "Zebra", &["Utility"]),
+                app("a", "Apple", &["Utility"]),
+                app("n", "Net", &["Network"]),
+            ],
+            &[],
+        );
         assert_eq!(
             f,
             vec![
@@ -162,13 +171,27 @@ mod tests {
 
     #[test]
     fn folders_are_in_fixed_display_order() {
-        let f = folders(&[
-            app("s", "S", &["Settings"]),
-            app("m", "M", &["Audio"]),
-            app("o", "O", &[]),
-        ]);
+        let f = folders(
+            &[
+                app("s", "S", &["Settings"]),
+                app("m", "M", &["Audio"]),
+                app("o", "O", &[]),
+            ],
+            &[],
+        );
         let names: Vec<_> = f.iter().map(|f| f.name).collect();
         assert_eq!(names, ["Media", "Settings", "Other"]);
+    }
+
+    #[test]
+    fn recent_leads_in_given_order() {
+        let f = folders(
+            &[app("a", "A", &["Utility"]), app("b", "B", &["Utility"])],
+            &["b".into(), "a".into()],
+        );
+        assert_eq!(f[0].name, "Recent");
+        assert_eq!(f[0].apps, vec!["b".to_string(), "a".to_string()]);
+        assert_eq!(f[1].name, "Utility");
     }
 
     /// Dumps the installed catalog by folder, for writing OVERRIDES:
@@ -178,7 +201,7 @@ mod tests {
     fn dump_catalog() {
         let entries = crate::scan_apps();
         println!("{} apps installed", entries.len());
-        for folder in folders(&entries) {
+        for folder in folders(&entries, &[]) {
             println!("\n== {} ({})", folder.name, folder.apps.len());
             for id in &folder.apps {
                 let e = entries.iter().find(|e| &e.id == id).unwrap();
