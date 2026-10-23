@@ -158,13 +158,11 @@ impl ClientData for ClientState {
 fn scan_catalog() -> (
     HashMap<String, AppEntry>,
     HashMap<String, IconPixels>,
-    Vec<sc_catalog::Folder>,
+    Vec<AppEntry>,
 ) {
     let entries = sc_catalog::scan_apps();
-    // From the ordered scan, not the map, so the library doesn't reshuffle.
-    let folders = sc_catalog::folders(&entries);
     let app_catalog: HashMap<String, AppEntry> =
-        entries.into_iter().map(|e| (e.id.clone(), e)).collect();
+        entries.iter().map(|e| (e.id.clone(), e.clone())).collect();
     let icon_dirs = sc_icons::theme_dirs(&sc_catalog::xdg_data_dirs());
     let icon_cache = app_catalog
         .iter()
@@ -175,8 +173,15 @@ fn scan_catalog() -> (
             )
         })
         .collect();
-    (app_catalog, icon_cache, folders)
+    (app_catalog, icon_cache, entries)
 }
+
+/// After `reconcile`, so Recent only names installed apps.
+fn build_folders(entries: &[AppEntry], model: &ShellModel) -> Vec<sc_catalog::Folder> {
+    sc_catalog::folders(entries, &model.frecency.recent(RECENT_APPS))
+}
+
+const RECENT_APPS: usize = 20;
 
 fn reconcile_catalog(model: &mut ShellModel, catalog: &HashMap<String, AppEntry>, first_run: bool) {
     let mut catalog_ids: Vec<String> = catalog.keys().cloned().collect();
@@ -579,11 +584,12 @@ impl State {
         let session_lock = session_lock::SessionLock::new(&dh);
 
         let model = persist::load(&persist::state_path()).unwrap_or_default();
-        let (app_catalog, icon_cache, folders) = scan_catalog();
+        let (app_catalog, icon_cache, entries) = scan_catalog();
 
         let mut model = model;
         let first_run = model.frecency.apps.is_empty();
         reconcile_catalog(&mut model, &app_catalog, first_run);
+        let folders = build_folders(&entries, &model);
 
         // +1 for the library page.
         let page_count = model.pages.len().max(1) + 1;
@@ -940,14 +946,14 @@ impl State {
 
     /// `first_run` seeding is never re-triggered; new apps seed cold.
     pub(crate) fn reload_catalog(&mut self) {
-        let (app_catalog, icon_cache, folders) = scan_catalog();
+        let (app_catalog, icon_cache, entries) = scan_catalog();
         self.app_catalog = app_catalog;
         self.icon_cache = icon_cache;
-        self.folders = folders;
         // Folder indices refer to a list that just changed.
         self.folder = None;
         self.catalog_gen = self.catalog_gen.wrapping_add(1);
         reconcile_catalog(&mut self.model, &self.app_catalog, false);
+        self.folders = build_folders(&entries, &self.model);
         if let Err(e) = persist::save(&self.model, &persist::state_path()) {
             warn!(?e, "failed to persist shell model after catalog reload");
         }

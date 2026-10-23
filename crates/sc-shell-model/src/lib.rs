@@ -19,6 +19,9 @@ pub const HALF_LIFE_SECS: f64 = 30.0 * 24.0 * 60.0 * 60.0;
 pub struct AppStat {
     pub score: f64,
     pub last_launch: u64, // unix seconds; 0 = never launched
+    /// Unix seconds first seen in the catalog; 0 = present at bootstrap.
+    #[serde(default)]
+    pub added: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -58,14 +61,28 @@ impl FrecencyStore {
             AppStat {
                 score: 0.0,
                 last_launch: 0,
+                added: 0,
             }
         } else {
             AppStat {
                 score: 1.0,
                 last_launch: now,
+                added: now,
             }
         };
         self.apps.insert(app.to_owned(), stat);
+    }
+
+    /// Newest first; apps present at bootstrap never count.
+    pub fn recent(&self, n: usize) -> Vec<AppId> {
+        let mut v: Vec<(&AppId, u64)> = self
+            .apps
+            .iter()
+            .filter(|(_, s)| s.added > 0)
+            .map(|(id, s)| (id, s.added))
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        v.into_iter().take(n).map(|(id, _)| id.clone()).collect()
     }
 
     pub fn prune(&mut self, catalog_ids: &[AppId]) {
@@ -397,6 +414,7 @@ mod tests {
         let stat = AppStat {
             score: 8.0,
             last_launch: 0,
+            added: 0,
         };
         let now = HALF_LIFE_SECS as u64;
         assert!((eff(&stat, now) - 4.0).abs() < 1e-6);
@@ -427,7 +445,8 @@ mod tests {
             empty.apps["a"],
             AppStat {
                 score: 0.0,
-                last_launch: 0
+                last_launch: 0,
+                added: 0
             }
         );
 
@@ -438,7 +457,8 @@ mod tests {
             populated.apps["b"],
             AppStat {
                 score: 1.0,
-                last_launch: 5000
+                last_launch: 5000,
+                added: 5000
             }
         );
     }
@@ -455,7 +475,8 @@ mod tests {
                 s.apps[id],
                 AppStat {
                     score: 0.0,
-                    last_launch: 0
+                    last_launch: 0,
+                    added: 0
                 }
             );
         }
@@ -607,11 +628,14 @@ mod tests {
             AppStat {
                 score: 5.0,
                 last_launch: 0,
+                added: 0,
             },
         );
         m.reconcile(&["existing".into(), "new".into()], 100, false);
         assert_eq!(m.frecency.apps["new"].score, 1.0);
         assert_eq!(m.frecency.apps["new"].last_launch, 100);
+        assert_eq!(m.frecency.apps["new"].added, 100);
+        assert_eq!(m.frecency.recent(20), vec!["new".to_string()]);
     }
 
     #[test]
