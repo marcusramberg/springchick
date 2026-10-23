@@ -92,6 +92,17 @@ options = ""     # e.g. "grp:win_space_toggle"
 [predict]
 dictionaries = []   # e.g. ["nb_NO", "en_US"]
 
+# On-screen keyboard colours, "#rrggbb". A bad value keeps its default.
+[osk]
+bg = "#1c1c1e"             # behind the keys
+key = "#6b6b70"            # letters, space, popup panel
+function_key = "#46464a"   # shift, backspace, return, ...
+pressed = "#9a9aa0"
+latched = "#e5e5ea"        # shift / modifier held
+ink = "#ffffff"            # labels and icons
+ink_on_latched = "#000000"
+selected = "#0a84ff"       # the chosen accent in a long-press popup
+
 # Per-app resource limits, set on each app's systemd scope on focus change.
 # Needs the cpu (and memory) controllers delegated to user@.service:
 #   cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers

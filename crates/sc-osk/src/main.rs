@@ -108,6 +108,7 @@ struct App {
     grid: Vec<Placed>,
     grid_key: Option<GridKey>,
     fonts: draw::Fonts,
+    colors: sc_config::OskColors,
     keymap: Option<Keymap>,
     layouts: Vec<String>,
     active_layout: u32,
@@ -171,6 +172,7 @@ fn main() {
         grid: Vec::new(),
         grid_key: None,
         fonts: draw::fonts(),
+        colors: config.osk,
         keymap: Keymap::from_names("", ""),
         layouts: Vec::new(),
         active_layout: 0,
@@ -435,6 +437,7 @@ impl App {
             (self.osk.page == Page::Emoji).then_some(&self.picker),
             &self.strip,
             &mut self.fonts,
+            &self.colors,
         );
         let surface = layer.wl_surface();
         surface.set_buffer_scale(self.scale);
