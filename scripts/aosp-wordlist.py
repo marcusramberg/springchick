@@ -2,15 +2,17 @@
 """Turn an AOSP LatinIME `*.combined.gz` into sc-predict's `word\tf` list.
 
 `f` is AOSP's 0-255 log-scale frequency. Profanity (f=0, offensive) is
-dropped. `--extra FILE` merges a `word\tscore` file from score-words.py:
-words AOSP lacks get an `f` by mapping each LLM score to the median `f` of
-the words both lists know.
+dropped. `--extra FILE` merges a `word count` file on any scale (a corpus
+frequency list such as hermitdave/FrequencyWords, or score-words.py output):
+words AOSP lacks get an `f` by mapping their count, by log2 bucket, to the
+median `f` of the words both lists know.
 
-  scripts/aosp-wordlist.py nb_wordlist.combined.gz [--extra nb_NO.scores] > nb.txt
+  scripts/aosp-wordlist.py nb_wordlist.combined.gz [--extra no_full.txt] > nb.txt
 """
 
 import argparse
 import gzip
+import math
 import re
 import statistics
 import sys
@@ -33,23 +35,27 @@ def read_aosp(path):
 def read_scores(path):
     out = {}
     for line in open(path, encoding="utf-8"):
-        w, _, s = line.rstrip("\n").partition("\t")
-        if s.isdigit():
-            out[w] = int(s)
+        f = line.split()
+        if len(f) == 2 and f[1].isdigit() and int(f[1]) > 0:
+            out[f[0]] = int(f[1])
     return out
 
 
+def bucket(count):
+    return int(2 * math.log2(count))
+
+
 def calibrate(words, scores):
-    """LLM score -> f, by median over the overlap, made monotonic."""
+    """Count bucket -> f, by median over the overlap, made monotonic."""
     buckets = {}
     for w, s in scores.items():
         if w in words:
-            buckets.setdefault(s, []).append(words[w])
-    medians = {s: statistics.median(v) for s, v in buckets.items() if len(v) >= 5}
+            buckets.setdefault(bucket(s), []).append(words[w])
+    medians = {b: statistics.median(v) for b, v in buckets.items() if len(v) >= 5}
     table, best = {}, 0
-    for s in range(101):
-        best = max(best, medians.get(s, best))
-        table[s] = int(best)
+    for b in range(max(buckets, default=0) + 1):
+        best = max(best, medians.get(b, best))
+        table[b] = int(best)
     return table
 
 
@@ -65,8 +71,8 @@ def main():
         table = calibrate(words, scores)
         added = 0
         for w, s in scores.items():
-            if w not in words and s > 0 and table[s] > 0:
-                words[w] = table[s]
+            if w not in words and table[bucket(s)] > 0:
+                words[w] = table[bucket(s)]
                 added += 1
         print(f"{added} words added from {a.extra}", file=sys.stderr)
     for w in sorted(words):
@@ -74,6 +80,6 @@ def main():
 
 
 if __name__ == "__main__":
-    t = calibrate({f"w{i}": i for i in range(500)}, {f"w{i}": i // 10 for i in range(500)})
-    assert t[0] == 4 and t[10] == 104 and t[49] == 494 and t[100] == 494, t
+    t = calibrate({f"w{i}": i for i in range(1, 300)}, {f"w{i}": i for i in range(1, 300)})
+    assert t[bucket(1)] == 0 and 0 < t[bucket(32)] < t[bucket(64)] < t[bucket(256)], t
     main()

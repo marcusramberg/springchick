@@ -88,7 +88,7 @@ options = ""     # e.g. "grp:win_space_toggle"
 # have typed before, learning them and the pairs they come in as you go. Word
 # lists rank everything else by frequency: `springchick/predict/NAME.txt` in
 # the XDG data dirs (the package ships every AOSP LatinIME list, "nb",
-# "en_US", "de", "fr", "sv", ... via scripts/aosp-wordlist.py; a list of your own in
+# "en_US", "de", "fr", "sv", ... via scripts/predict-lists.sh; a list of your own in
 # ~/.local/share wins). Several make the keyboard bilingual, which is one
 # layout completing either language, as a phone does.
 [predict]
