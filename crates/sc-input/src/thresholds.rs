@@ -11,6 +11,10 @@ pub const HOME_MIN_PROGRESS: f32 = 0.35;
 /// regardless of distance.
 pub const HOME_FLICK_VELOCITY: f32 = -0.9;
 pub const QUICK_SWITCH_PROGRESS: f32 = 0.15;
+/// A grab that has risen past this is a swipe up, never a quick-switch. dx is
+/// in widths and rise in heights, so on a tall panel a thumb arc would
+/// otherwise read as horizontal.
+pub const QUICK_SWITCH_MAX_RISE: f32 = 0.04;
 pub const QUICK_SWITCH_VELOCITY: f32 = 1.5;
 
 // Home screen / switcher deck

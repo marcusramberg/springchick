@@ -19,11 +19,11 @@ pub enum NavTarget {
 
 /// Called each frame during a grab.
 pub fn live_state(t: &Tracker) -> NavState {
-    let horizontal = t.dx().abs() > t.up_progress();
+    let up = t.up_progress();
+    let horizontal = t.dx().abs() > up && up < th::QUICK_SWITCH_MAX_RISE;
     if horizontal && t.dx().abs() >= th::QUICK_SWITCH_PROGRESS {
         return NavState::QuickSwitching;
     }
-    let up = t.up_progress();
     // Past HOME_MIN the fan collapses back to the single card heading home.
     if (th::SWITCHER_REVEAL_PROGRESS..th::HOME_MIN_PROGRESS).contains(&up) {
         return NavState::SwitcherPreview;
@@ -177,6 +177,16 @@ mod tests {
             Pt { x: -2.0, y: 0.0 },
         );
         assert_eq!(classify_release(&t), NavTarget::QuickSwitch(-1));
+    }
+
+    #[test]
+    fn thumb_arc_that_drifts_sideways_stays_a_grab() {
+        let t = t_with(
+            Pt { x: 0.8, y: 0.95 },
+            Pt { x: 0.6, y: 0.87 },
+            Pt { x: -1.0, y: -0.5 },
+        );
+        assert_eq!(live_state(&t), NavState::Grabbing);
     }
 
     #[test]

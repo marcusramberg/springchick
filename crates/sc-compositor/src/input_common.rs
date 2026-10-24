@@ -277,11 +277,8 @@ fn motion_live_gesture(state: &mut State, x: f32, y: f32) {
     }
 
     // A grab turning horizontal while still low becomes a quick-switch slide.
-    // Past the reveal point it stays vertical.
     if let UiState::Grabbing { tracker, .. } = &state.ui {
-        if tracker.up_progress() < sc_input::thresholds::SWITCHER_REVEAL_PROGRESS
-            && sc_input::live_state(tracker) == sc_input::NavState::QuickSwitching
-        {
+        if sc_input::live_state(tracker) == sc_input::NavState::QuickSwitching {
             let (w, _) = state.output_size_f();
             let start_x = x - tracker.dx() * w;
             let origin = tracker.start;
