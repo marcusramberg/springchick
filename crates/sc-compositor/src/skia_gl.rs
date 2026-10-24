@@ -120,6 +120,17 @@ impl CardDecor {
 
 /// Clipped to outside the card: apps are often translucent, and an unclipped
 /// shadow shows through them as a dark wash.
+/// Launching icon: eased in over the ramp, then breathes at the rate (rad/s),
+/// shrinking and darkening by these fractions at the trough.
+const LAUNCH_RAMP_SECS: f32 = 0.25;
+const LAUNCH_BREATH_RATE: f32 = 3.6;
+const LAUNCH_SHRINK: f32 = 0.08;
+const LAUNCH_DIM: f32 = 0.45;
+
+/// Home grows this much and darkens this far behind a fully open window.
+const HOME_RECEDE_ZOOM: f32 = 0.15;
+const HOME_RECEDE_DIM: f32 = 0.6;
+
 fn draw_card_shadow_rrect(canvas: &skia_safe::Canvas, card: &CardDecor) {
     let sigma = (card.w * SHADOW_SIGMA_FRAC).max(1.0);
     let mut paint = Paint::default();
@@ -602,6 +613,7 @@ impl SkiaGl {
             library,
             lift,
             shift,
+            recede,
         } = view;
         self.ensure_font();
         self.upload_missing_icons(icon_cache);
@@ -621,6 +633,12 @@ impl SkiaGl {
         // The lift's sign follows the flip.
         if lift != 0.0 || shift != 0.0 {
             canvas.translate((shift, if flip_y { lift } else { -lift }));
+        }
+        if let Some(r) = recede {
+            let z = 1.0 + r.amount * HOME_RECEDE_ZOOM;
+            canvas.translate(r.pivot);
+            canvas.scale((z, z));
+            canvas.translate((-r.pivot.0, -r.pivot.1));
         }
 
         // Deterministic model order (see `visible_grid_slots`); reused for the
@@ -675,6 +693,23 @@ impl SkiaGl {
             if let (Some(app_id), Some(pos)) = (view.drag_app, view.drag_pos) {
                 draw_drag_ghost(canvas, app_id, pos, &current_layout, &self.icon_images);
             }
+        }
+
+        // Zoomed past the edges above, so the screen rect covers everything.
+        if let Some(r) = recede.filter(|r| r.amount > 0.0) {
+            let mut paint = Paint::default();
+            paint.set_color(Color::from_argb(
+                (r.amount * HOME_RECEDE_DIM * 255.0)
+                    .round()
+                    .clamp(0.0, 255.0) as u8,
+                0,
+                0,
+                0,
+            ));
+            canvas.draw_rect(
+                skia_safe::Rect::from_xywh(0.0, 0.0, width as f32, height as f32),
+                &paint,
+            );
         }
 
         canvas.restore();
@@ -1288,23 +1323,13 @@ fn draw_icon_slot(
         launching,
         running,
     } = cues;
-    let icon_scale = 1.0;
-    if let Some(elapsed) = launching {
-        let phase = sc_anim::pulse(elapsed, 4.4);
-        let alpha = (40.0 + 70.0 * phase) as u8;
-        let mut paint = Paint::default();
-        paint.set_anti_alias(true);
-        paint.set_color(Color::from_argb(alpha, 255, 255, 255));
-        let pad = slot.icon_rect.w * 0.1;
-        let rect = Rect::new(
-            slot.icon_rect.x - pad,
-            slot.icon_rect.y - pad,
-            slot.icon_rect.x + slot.icon_rect.w + pad,
-            slot.icon_rect.y + slot.icon_rect.h + pad,
-        );
-        let rrect = RRect::new_rect_xy(rect, 28.0, 28.0);
-        canvas.draw_rrect(rrect, &paint);
-    } else if pressed {
+    // Breathing: the icon itself dims and shrinks, so any icon shape works.
+    let breath = launching.map(|elapsed| {
+        let ramp = (elapsed / LAUNCH_RAMP_SECS).clamp(0.0, 1.0);
+        ramp * (1.0 - (elapsed * LAUNCH_BREATH_RATE).cos()) * 0.5
+    });
+    let icon_scale = 1.0 - breath.unwrap_or(0.0) * LAUNCH_SHRINK;
+    if pressed && launching.is_none() {
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         paint.set_color(Color::from_argb(60, 255, 255, 255));
@@ -1326,7 +1351,15 @@ fn draw_icon_slot(
     let icon_dst = Rect::new(cx - hw, cy - hh, cx + hw, cy + hh);
 
     if let Some(image) = icon_images.get(&slot.app_id) {
-        canvas.draw_image_rect(image, None, icon_dst, &Paint::default());
+        let mut paint = Paint::default();
+        if let Some(b) = breath {
+            let a = (b * LAUNCH_DIM * 255.0).round().clamp(0.0, 255.0) as u8;
+            paint.set_color_filter(skia_safe::color_filters::blend(
+                Color::from_argb(a, 0, 0, 0),
+                skia_safe::BlendMode::SrcATop,
+            ));
+        }
+        canvas.draw_image_rect(image, None, icon_dst, &paint);
     } else {
         let mut paint = Paint::default();
         paint.set_color(Color::from_argb(255, 80, 80, 100));

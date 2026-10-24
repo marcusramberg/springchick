@@ -101,11 +101,6 @@ pub fn slide_in_offset(p: f32, distance: f32) -> f32 {
     (1.0 - ease_out_cubic(p)) * distance
 }
 
-/// `sin(elapsed*rate)*0.5 + 0.5`, for the launching-icon halo.
-pub fn pulse(elapsed: f32, rate: f32) -> f32 {
-    (elapsed * rate).sin() * 0.5 + 0.5
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,15 +203,6 @@ mod tests {
             let v = slide_in_offset(i as f32 / 20.0, 800.0);
             assert!(v < prev);
             prev = v;
-        }
-    }
-
-    #[test]
-    fn pulse_stays_in_unit_range_and_starts_mid() {
-        assert!((pulse(0.0, 4.4) - 0.5).abs() < 1e-6);
-        for i in 0..100 {
-            let v = pulse(i as f32 * 0.1, 4.4);
-            assert!((0.0..=1.0).contains(&v), "pulse out of range: {v}");
         }
     }
 }

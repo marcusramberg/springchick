@@ -145,6 +145,7 @@ pub struct HomeView<'a> {
     /// Home bounce (up) and drag-out (sideways).
     pub lift: f32,
     pub shift: f32,
+    pub recede: Option<crate::scene::HomeRecede>,
 }
 
 /// Tiles are page-local; `x_offset` slides them with the pages.
@@ -720,6 +721,7 @@ fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan)
         library: ctx.library,
         lift: scene.home_lift,
         shift: scene.home_shift,
+        recede: scene.home_recede,
     };
     let v = ctx.view(size);
     ctx.skia.draw_home(v.w, v.h, ctx.skia_flip_y, &view);
@@ -924,6 +926,7 @@ fn backdrop_key(
     let frozen = scene.backdrop_blur >= 1.0
         && scene.home_lift == 0.0
         && scene.home_shift == 0.0
+        && scene.home_recede.is_none()
         && ctx.pressed_app.is_none()
         && ctx.launch_pulses.is_empty()
         && ctx.arrange.is_none();

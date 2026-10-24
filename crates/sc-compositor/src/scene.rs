@@ -136,6 +136,14 @@ fn grab_backdrop_blur(up: f32) -> f32 {
     ((SHARP_AT - up) / (SHARP_AT - th::HOME_MIN_PROGRESS)).clamp(0.0, 1.0)
 }
 
+/// Home zooming up and dimming behind a window growing out of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HomeRecede {
+    pub pivot: (f32, f32),
+    /// 0 = at rest, 1 = fully behind the window.
+    pub amount: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Scene {
     /// `None` = no app visible.
@@ -148,6 +156,8 @@ pub struct Scene {
     pub home_lift: f32,
     /// Pixels, positive = right. Only during a slide onto the top card.
     pub home_shift: f32,
+    /// Only while a window zooms from or back to its icon.
+    pub home_recede: Option<HomeRecede>,
     /// 0..1 blur of what's behind the deck; 0 skips the pass.
     pub backdrop_blur: f32,
 }
@@ -176,6 +186,7 @@ pub fn compute_scene(
             show_home: true,
             home_lift: bounce.value * h,
             home_shift: 0.0,
+            home_recede: None,
             home_page: *page,
             backdrop_blur: 0.0,
             cards: Vec::new(),
@@ -185,6 +196,7 @@ pub fn compute_scene(
             show_home: false,
             home_lift: 0.0,
             home_shift: 0.0,
+            home_recede: None,
             home_page: 0,
             backdrop_blur: 0.0,
             cards: Vec::new(),
@@ -216,6 +228,12 @@ pub fn compute_scene(
                 show_home: true,
                 home_lift: 0.0,
                 home_shift,
+                home_recede: matches!(open_mode, crate::ui_state::OpenMode::Zoom).then(|| {
+                    HomeRecede {
+                        pivot: origin.center,
+                        amount: p,
+                    }
+                }),
                 home_page: 0,
                 backdrop_blur: 0.0,
                 cards: Vec::new(),
@@ -234,6 +252,10 @@ pub fn compute_scene(
             show_home: true,
             home_lift: 0.0,
             home_shift: 0.0,
+            home_recede: Some(HomeRecede {
+                pivot: origin.center,
+                amount: progress.value.clamp(0.0, 1.0),
+            }),
             home_page: 0,
             backdrop_blur: 0.0,
             cards: Vec::new(),
@@ -284,6 +306,7 @@ pub fn compute_scene(
                     show_home: true,
                     home_lift: 0.0,
                     home_shift: 0.0,
+                    home_recede: None,
                     home_page: 0,
                     backdrop_blur: blur,
                     cards: card_rects,
@@ -294,6 +317,7 @@ pub fn compute_scene(
                     show_home: true,
                     home_lift: 0.0,
                     home_shift: 0.0,
+                    home_recede: None,
                     home_page: 0,
                     backdrop_blur: blur,
                     cards: Vec::new(),
@@ -369,6 +393,7 @@ pub fn compute_scene(
                     show_home: true,
                     home_lift: 0.0,
                     home_shift: 0.0,
+                    home_recede: None,
                     home_page: 0,
                     // Hold full blur so the hand-off doesn't flash a sharp Home.
                     backdrop_blur: 1.0,
@@ -380,6 +405,7 @@ pub fn compute_scene(
                 show_home: !matches!(target, NavTarget::BackToApp),
                 home_lift: 0.0,
                 home_shift: 0.0,
+                home_recede: None,
                 home_page: 0,
                 backdrop_blur: match target {
                     NavTarget::Home => grab_backdrop_blur(progress.value),
@@ -440,6 +466,7 @@ pub fn compute_scene(
                 show_home: true,
                 home_lift: 0.0,
                 home_shift: 0.0,
+                home_recede: None,
                 home_page: 0,
                 backdrop_blur: 0.0,
                 cards,
@@ -473,6 +500,7 @@ pub fn compute_scene(
                 show_home: true,
                 home_lift: 0.0,
                 home_shift: 0.0,
+                home_recede: None,
                 home_page: 0,
                 backdrop_blur: enter.value.clamp(0.0, 1.0),
                 cards: card_rects,
@@ -484,7 +512,8 @@ pub fn compute_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui_state::UiState;
+    use crate::ui_state::{OpenMode, UiState, ZoomOrigin};
+    use sc_anim::Spring;
 
     const TEST_SIZE: (i32, i32) = (1224, 2700);
     const TEST_RADIUS: Corners = Corners {
@@ -498,6 +527,47 @@ mod tests {
         let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert!(scene.window.is_none());
         assert!(scene.show_home);
+    }
+
+    #[test]
+    fn home_recedes_with_the_zoom_and_comes_back_on_close() {
+        let origin = ZoomOrigin::icon((100.0, 200.0));
+        let mut progress = Spring::zoom(0.0, 1.0);
+        progress.value = 0.4;
+        let opening = UiState::AppOpening {
+            toplevel: 0,
+            app_id: String::new(),
+            progress,
+            origin,
+            open_mode: OpenMode::Zoom,
+        };
+        let r = compute_scene(&opening, TEST_SIZE, (0.0, 0.0), TEST_RADIUS)
+            .home_recede
+            .unwrap();
+        assert_eq!(r.pivot, (100.0, 200.0));
+        assert!((r.amount - 0.4).abs() < 1e-6);
+
+        let slide = UiState::AppOpening {
+            toplevel: 0,
+            app_id: String::new(),
+            progress,
+            origin,
+            open_mode: OpenMode::SlideUp,
+        };
+        assert!(compute_scene(&slide, TEST_SIZE, (0.0, 0.0), TEST_RADIUS)
+            .home_recede
+            .is_none());
+
+        let closing = UiState::AppClosing {
+            toplevel: 0,
+            app_id: String::new(),
+            progress,
+            origin,
+        };
+        let r = compute_scene(&closing, TEST_SIZE, (0.0, 0.0), TEST_RADIUS)
+            .home_recede
+            .unwrap();
+        assert!((r.amount - 0.4).abs() < 1e-6);
     }
 
     #[test]
