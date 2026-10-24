@@ -16,6 +16,9 @@ pub const SLOTS: usize = 3;
 #[derive(Default)]
 pub struct Tracker {
     word: String,
+    /// The word before `word`, for predicting the next one. Gone whenever we
+    /// stop knowing where the cursor is.
+    prev: Option<String>,
     shift: bool,
     altgr: bool,
     /// Held ctrl/alt/super: what we type then is a shortcut, not a word.
@@ -27,8 +30,20 @@ impl Tracker {
         &self.word
     }
 
+    pub fn prev(&self) -> Option<&str> {
+        self.prev.as_deref()
+    }
+
     pub fn clear(&mut self) {
         self.word.clear();
+        self.prev = None;
+    }
+
+    /// A suggestion replaced the word in progress: it is the word before the
+    /// next one now.
+    pub fn accepted(&mut self, word: &str) {
+        self.word.clear();
+        self.prev = Some(word.to_string());
     }
 
     /// Follows `outs` and returns a word that just ended, for learning.
@@ -38,6 +53,7 @@ impl Tracker {
         label: &dyn Fn(u16, u8) -> Option<String>,
     ) -> Option<String> {
         let mut done = None;
+        let mut lost = false;
         let mut finish = |w: &mut String| {
             if !w.is_empty() {
                 done = Some(std::mem::take(w));
@@ -52,19 +68,20 @@ impl Tracker {
                 &Out::Press(c) if Mod::ALL.iter().any(|m| m.code() == c) => {
                     self.mods += 1;
                     self.word.clear();
+                    lost = true;
                 }
                 &Out::Release(c) if Mod::ALL.iter().any(|m| m.code() == c) => {
                     self.mods = self.mods.saturating_sub(1);
                 }
-                &Out::Press(c) if self.mods > 0 => {
-                    let _ = c;
+                &Out::Press(_) if self.mods > 0 => {
                     self.word.clear();
+                    lost = true;
                 }
                 &Out::Press(code::BACKSPACE) => {
                     // Backspacing into the previous word loses its text, so
                     // stop completing rather than complete the wrong stem.
                     if self.word.pop().is_none() {
-                        self.word.clear();
+                        lost = true;
                     }
                 }
                 &Out::Press(code::SPACE | code::ENTER | code::TAB) => finish(&mut self.word),
@@ -72,15 +89,25 @@ impl Tracker {
                     let level = (u8::from(self.shift) * SHIFT) | (u8::from(self.altgr) * ALTGR);
                     match label(c, level) {
                         Some(text) if is_word(&text) => self.word.push_str(&text),
-                        // A cursor key, or punctuation: either way the word
-                        // we were tracking is over.
-                        _ => finish(&mut self.word),
+                        // Punctuation ends the word; a cursor key also loses
+                        // where we are.
+                        Some(_) => finish(&mut self.word),
+                        None => {
+                            finish(&mut self.word);
+                            lost = true;
+                        }
                     }
                 }
                 Out::Text(text) if is_word(text) => self.word.push_str(text),
                 Out::Text(_) => finish(&mut self.word),
                 Out::Release(_) | Out::NextLayout => {}
             }
+        }
+        if lost {
+            self.prev = None;
+        }
+        if let Some(w) = &done {
+            self.prev = Some(w.clone());
         }
         done
     }
@@ -93,14 +120,14 @@ fn is_word(s: &str) -> bool {
 }
 
 /// Equal cells across `area`, one per word.
-pub fn strip(words: &[&str], area: Rect) -> Vec<(String, Rect)> {
+pub fn strip(words: Vec<String>, area: Rect) -> Vec<(String, Rect)> {
     let w = area.w / words.len().max(1) as f32;
     words
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(i, s)| {
             (
-                s.to_string(),
+                s,
                 Rect {
                     x: area.x + i as f32 * w,
                     y: area.y,
@@ -223,6 +250,24 @@ mod tests {
     }
 
     #[test]
+    fn the_finished_word_becomes_prev_until_we_lose_the_cursor() {
+        let mut t = Tracker::default();
+        t.feed(&tap(30), &label);
+        t.feed(&tap(code::SPACE), &label);
+        assert_eq!(t.prev(), Some("a"));
+        t.feed(&tap(31), &label);
+        assert_eq!(t.prev(), Some("a"), "still, while the next word is typed");
+        t.feed(&tap(52), &label);
+        assert_eq!(t.prev(), Some("s"), "punctuation keeps the sentence");
+        t.feed(&tap(code::LEFT), &label);
+        assert_eq!(t.prev(), None);
+        t.accepted("asd");
+        assert_eq!((t.prev(), t.word()), (Some("asd"), ""));
+        t.feed(&tap(code::BACKSPACE), &label);
+        assert_eq!(t.prev(), None, "backspaced into the app's text");
+    }
+
+    #[test]
     fn punctuation_ends_the_word_too() {
         let mut t = Tracker::default();
         t.feed(&tap(30), &label);
@@ -328,7 +373,7 @@ mod tests {
             w: 300.0,
             h: 40.0,
         };
-        let cells = strip(&["a", "b", "c"], area);
+        let cells = strip(["a", "b", "c"].map(String::from).to_vec(), area);
         assert_eq!(cells.len(), 3);
         assert_eq!(hit(&cells, 15.0, 20.0), Some(0));
         assert_eq!(hit(&cells, 215.0, 20.0), Some(2));

@@ -36,6 +36,44 @@ let
   skiaRepoHash = "a25a0fdb7d90429aa2d1";
   skiaFeatures = "gl-jpegd-jpege-pdf";
 
+  # AOSP LatinIME word lists with per-word frequencies, for sc-osk's
+  # completion. googlesource serves raw files base64-encoded.
+  aospRev = "127336e9f29d69607eab55982324b210279ae8c5";
+  aospList = name: hash:
+    fetchurl {
+      url = "https://android.googlesource.com/platform/packages/inputmethods/LatinIME/+/${aospRev}/dictionaries/${name}_wordlist.combined.gz?format=TEXT";
+      name = "${name}_wordlist.combined.gz.b64";
+      inherit hash;
+    };
+  predictLists = lib.mapAttrs aospList {
+    cs = "sha256-MU+0rWm0H+blXWpmnilY2j2VQDOGYsKyOy2D32Bopd8=";
+    da = "sha256-xVk4ariFdPb0NhJpARUPKX68pYunpsJr+mUbSKdIH34=";
+    de = "sha256-H33Q5SacURIL2UAxmpD9s791Ve34iszNAmmA+ewwVqA=";
+    el = "sha256-0/0JirVQ0RauliBnRgFGGZH96jb4UAXuZtSSxVQ0rl4=";
+    en_GB = "sha256-whDaZ64QeDaTDOHOKpS4D2QrS1AjvaOJ0rOBMEZv8Wg=";
+    en_US = "sha256-nrQdQh3sqR7XmrIr4pXQwqvlMohgOkmUxIja5l1ZMsw=";
+    en = "sha256-fRVlQ8+n2+eabRHi62XG1Jt68qyytee1q84dUL69hE4=";
+    es = "sha256-mBv2R4gGERQlC8jb4nvJFdeemhTTe9CR74Xe6NfWG24=";
+    fi = "sha256-AgJgaPpJyul0KHD+9DF3BSdnMuLaqd/pI4oewStw1RA=";
+    fr = "sha256-xcRtxYjOjD6pa2p7W8MTVLpIgzJ8dQVhztfNbPXaQao=";
+    hr = "sha256-UraCvZm82gRRvqHy4wssLIOUMS5wYdDRezzfDRAFMCU=";
+    it = "sha256-5XjtixsgISqpthfYGXzHNQN/00+X+giK7RYEmogaSgY=";
+    iw = "sha256-vlZtxg24m14R5/1ovbiPhwyo6ycwYJd9e3C87KQnT1g=";
+    lt = "sha256-f9NUH4Ut30PkRL8ilJTz70rGn4GHtKM7nzVpcpWEfF0=";
+    lv = "sha256-kJyW0tOEabfbttZSukskNtLOTrsn2vl0qaqlL5YpAsQ=";
+    nb = "sha256-IMyr0ruhA975w09FQxVbeIPPuGIuUiM3dRxe/l8WotA=";
+    nl = "sha256-UPMuUw7GQhH2lgxRYFKWVm0TwuDj/ReeoOuo1lyRN2Q=";
+    pl = "sha256-c0UXzw3L6QN+c6GipcOqOy0S2YFA9b6JNZloamRafTw=";
+    pt_BR = "sha256-tbwZx/4LGEZ3CS3zJjLjzGZTrFrp9Rmhw7cjQdJFg4U=";
+    pt_PT = "sha256-FGvjx50hInu2wUT7EFnGXXHSh/1G8RRGT/cL6WTMcJs=";
+    ro = "sha256-fIczPe5uhVtWG5c3fRrESdeVWcLR+YidDEHsJPYL1d0=";
+    ru = "sha256-EGoYKwPW4YLNF6h69frFkDt/pLY0se/Tei9+QFgyQdA=";
+    sl = "sha256-7gyGxqGyMFFmlRvI+Rq0zkojb/TUhU0zAO0R5XFZN+0=";
+    sr = "sha256-BimRUr5UdIb8jPvckOPtNRkHI+d/gvi1WhfIJXq631A=";
+    sv = "sha256-7d9RXP8jXKpqnWQDl95nO8S8sTYgv+Xmwe1IiLLZITU=";
+    tr = "sha256-pLY49Vxw5e8f4MFFDasOwWq1VAVlPnd0+9LyREQd5Wg=";
+  };
+
   skiaBinariesHashes = {
     "aarch64-unknown-linux-gnu" = "sha256-VzULtbs9SmgdNX4/2K+Q7aFxfFz49Rdc/Az5d34PZ6o=";
     "x86_64-unknown-linux-gnu" = "sha256-WJ8o/gHlqaxpfRhX1PvCzbw2TlaLyKlZI9EI5M7nu4w=";
@@ -135,7 +173,15 @@ rustPlatform.buildRustPackage {
       --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}"
 
     wrapProgram $out/bin/sc-osk \
-      --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}"
+      --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}" \
+      --prefix XDG_DATA_DIRS : "$out/share"
+
+    mkdir -p $out/share/springchick/predict
+    ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: b64: ''
+      base64 -d ${b64} > ${name}.combined.gz
+      python3 ${../scripts/aosp-wordlist.py} ${name}.combined.gz \
+        > $out/share/springchick/predict/${name}.txt
+    '') predictLists)}
 
     # Starts springchick.service (Type=notify) instead of exec'ing the
     # compositor, so the service's BindsTo can raise graphical-session.target.

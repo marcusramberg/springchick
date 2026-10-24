@@ -66,6 +66,7 @@ crates/
   sc-layout/       Pure geometry: (size, page, model) → icon rects, dock, dots, bar zone, icon-menu panel; + hit-testing
   sc-panel/        Display shape (corner radius, camera cutouts) from bundled gmobile data, by device-tree compatible
   sc-osk/          Standalone on-screen keyboard: layer-shell client typing through uinput, labels from the seat keymap, per-app bar
+  sc-predict/      OSK word completion + next-word: frequency word lists (AOSP LatinIME via scripts/aosp-wordlist.py) + learned words/pairs
   sc-search/       Standalone pull-down search app (eframe/winit client): app grid + pluggable result providers (`provider.rs`, dsearch when installed)
   sc-shell-model/  Grid/dock data model (4x6 pages, dock) + persist (state.toml)
 ```
@@ -129,6 +130,7 @@ Notable options:
 - `dpi` (default 3): advertised via `wp_fractional_scale`. The FP5 panel is illegible at 1:1.
 - `card_radius` (default `"auto"`): the panel's corner radius from `sc-panel`, else 120. Grabbed apps also leave fullscreen at the panel's own corners. `GMOBILE_DT_COMPATIBLES=fairphone,fp5` fakes a device.
 - `idle_blank_secs`, `show_touches`, `save_screenshots`, `prefer_no_csd`, `natural_scroll`.
+- `[predict] dictionaries` (default `[]`): word lists for OSK completion, `springchick/predict/NAME.txt` in the XDG data dirs (`word\tfreq`). The package ships all 26 AOSP lists (`nb`, `en_US`, `de`, `fr`, `sv`, ...). `scripts/score-words.py` scores any word list with a local LLM and `scripts/aosp-wordlist.py --extra` merges those into a list, for words AOSP lacks. `cargo run -p sc-predict --example bench -- LIST.txt CORPUS.txt` measures a change to the ranking.
 - `rotate_ui` (default `false`): turn Home and ordinary windows with the device, not just fullscreen apps. `springchick ipc rotation enable|disable` overrides it live until the next `reload` (no arg queries). It holds an accelerometer claim whenever the screen is lit. A turn sets the smithay output's transform, so the layer map arranges panels and the OSK in the turned space and they are drawn, hit-tested and captured there; only the panel cutouts stay upright-only.
 - `rotation_settle_ms` (default 400): accelerometer debounce.
 - `rotation_fade_ms` (default 130): half the dip-to-black that covers a turn.

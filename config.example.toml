@@ -85,12 +85,14 @@ variant = ""
 options = ""     # e.g. "grp:win_space_toggle"
 
 # Word completion on the on-screen keyboard. It always completes words you
-# have typed before, learning them as you go. Dictionaries only add cold-start
-# suggestions before enough words are learned: hunspell dictionary names, found
-# in the XDG data dirs. Several make the keyboard bilingual, which is one
+# have typed before, learning them and the pairs they come in as you go. Word
+# lists rank everything else by frequency: `springchick/predict/NAME.txt` in
+# the XDG data dirs (the package ships every AOSP LatinIME list, "nb",
+# "en_US", "de", "fr", "sv", ... via scripts/aosp-wordlist.py; a list of your own in
+# ~/.local/share wins). Several make the keyboard bilingual, which is one
 # layout completing either language, as a phone does.
 [predict]
-dictionaries = []   # e.g. ["nb_NO", "en_US"]
+dictionaries = []   # e.g. ["nb", "en_US"]
 
 # On-screen keyboard colours, "#rrggbb". A bad value keeps its default.
 [osk]

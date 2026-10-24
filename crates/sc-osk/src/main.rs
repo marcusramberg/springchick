@@ -145,12 +145,12 @@ fn main() {
     let mut predict = sc_predict::Predict::default();
     predict.load_learned(&learned_path);
     for name in &config.predict.dictionaries {
-        match find_dic(name) {
-            Some(path) => match std::fs::read(&path) {
-                Ok(bytes) => predict.add_dic(&bytes),
+        match find_list(name) {
+            Some(path) => match std::fs::read_to_string(&path) {
+                Ok(text) => predict.add_list(&text),
                 Err(e) => eprintln!("sc-osk: {}: {e}", path.display()),
             },
-            None => eprintln!("sc-osk: no {name}.dic in the XDG data dirs"),
+            None => eprintln!("sc-osk: no springchick/predict/{name}.txt in the XDG data dirs"),
         }
     }
     let uinput = uinput::Uinput::new(sc_config::OSK_DEVICE_NAME)
@@ -295,19 +295,17 @@ fn ipc(line: &str) -> Option<String> {
 
 /// A hunspell dictionary by name, in the XDG data dirs. Distributions split
 /// between `hunspell/` and myspell's older path.
-fn find_dic(name: &str) -> Option<std::path::PathBuf> {
+fn find_list(name: &str) -> Option<std::path::PathBuf> {
     let dirs =
         std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
-    std::env::var("XDG_DATA_HOME")
-        .into_iter()
+    let home = std::env::var("XDG_DATA_HOME").ok().or_else(|| {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| format!("{h}/.local/share"))
+    });
+    home.into_iter()
         .chain(dirs.split(':').map(str::to_string))
-        .flat_map(|d| {
-            ["hunspell", "myspell/dicts"].map(|sub| {
-                std::path::Path::new(&d)
-                    .join(sub)
-                    .join(format!("{name}.dic"))
-            })
-        })
+        .map(|d| std::path::Path::new(&d).join(format!("springchick/predict/{name}.txt")))
         .find(|p| p.is_file())
 }
 
@@ -505,8 +503,9 @@ impl App {
         let Some(keymap) = &self.keymap else { return };
         let layout = self.active_layout;
         let label = |code: u16, level: u8| keymap.label(code, level, layout);
+        let prev = self.tracker.prev().map(str::to_string);
         if let Some(done) = self.tracker.feed(outs, &label) {
-            self.predict.learn(&done);
+            self.predict.learn(prev.as_deref(), &done);
             self.predict.save(&self.learned_path);
         }
         self.refresh_strip();
@@ -517,12 +516,14 @@ impl App {
         if !self.completing() {
             return;
         }
-        let words = self.predict.complete(self.tracker.word(), suggest::SLOTS);
+        let words = self
+            .predict
+            .complete(self.tracker.prev(), self.tracker.word(), suggest::SLOTS);
         if words.is_empty() {
             return;
         }
         let area = grid::bar_area(self.width as f32, self.height as f32);
-        self.strip = suggest::strip(&words, area);
+        self.strip = suggest::strip(words, area);
     }
 
     /// Words are only wanted where prose is. A password must never be
@@ -584,9 +585,10 @@ impl App {
         };
         let reverse = keymap.reverse(self.active_layout);
         let outs = suggest::accept(self.tracker.word(), &word, &|c| reverse.get(&c).copied());
-        self.tracker.clear();
+        let prev = self.tracker.prev().map(str::to_string);
+        self.tracker.accepted(&word);
         self.apply(&outs);
-        self.predict.learn(&word);
+        self.predict.learn(prev.as_deref(), &word);
         self.predict.save(&self.learned_path);
         self.refresh_strip();
         self.draw();

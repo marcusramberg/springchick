@@ -135,9 +135,10 @@ pub const OSK_DEVICE_NAME: &str = "springchick osk";
 /// have typed before; `dictionaries` adds cold-start suggestions.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Predict {
-    /// Hunspell dictionary names, as the files are called without `.dic`
-    /// (`"nb_NO"`, `"en_US"`). Several make the keyboard bilingual. Looked up
-    /// in the XDG data dirs under `hunspell/` and `myspell/dicts/`.
+    /// Word list names (`"nb"`, `"en_US"`): `springchick/predict/NAME.txt`
+    /// in the XDG data dirs, `word\tfrequency` lines as
+    /// `scripts/aosp-wordlist.py` writes them. Several make the keyboard
+    /// bilingual.
     pub dictionaries: Vec<String>,
 }
 
