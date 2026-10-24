@@ -2850,6 +2850,7 @@ dependencies = [
  "sc-fonts",
  "sc-icons",
  "sc-shell-model",
+ "serde_json",
  "wayland-client",
  "wayland-protocols",
 ]
