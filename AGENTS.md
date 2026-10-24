@@ -66,7 +66,7 @@ crates/
   sc-layout/       Pure geometry: (size, page, model) → icon rects, dock, dots, bar zone, icon-menu panel; + hit-testing
   sc-panel/        Display shape (corner radius, camera cutouts) from bundled gmobile data, by device-tree compatible
   sc-osk/          Standalone on-screen keyboard: layer-shell client typing through uinput, labels from the seat keymap, per-app bar
-  sc-search/       Standalone pull-down search app (eframe/winit client, not part of the compositor)
+  sc-search/       Standalone pull-down search app (eframe/winit client): app grid + pluggable result providers (`provider.rs`, dsearch when installed)
   sc-shell-model/  Grid/dock data model (4x6 pages, dock) + persist (state.toml)
 ```
 

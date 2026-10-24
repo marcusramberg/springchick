@@ -15,6 +15,7 @@ sc-catalog = { path = "../sc-catalog" }
 sc-shell-model = { path = "../sc-shell-model" }
 sc-icons = { path = "../sc-icons" }
 sc-fonts = { path = "../sc-fonts" }
+serde_json = "1"
 
 # Frosted-glass backdrop: eframe/winit owns the wl_surface, so the
 # ext-background-effect request is made on a second connection wrapped around
