@@ -2810,6 +2810,7 @@ dependencies = [
 name = "sc-osk"
 version = "0.1.0"
 dependencies = [
+ "dbus",
  "libc",
  "rustix 1.1.4",
  "rustybuzz",

@@ -18,3 +18,5 @@ wayland-client = "0.31"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 xkbcommon = "0.9"
+# feedbackd haptics; libdbus, as sc-compositor uses.
+dbus = "0.9"

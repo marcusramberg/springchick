@@ -124,6 +124,8 @@ pub struct Config {
     pub xkb: Xkb,
     pub predict: Predict,
     pub osk: OskColors,
+    /// `[osk] haptics`: a feedbackd `button-pressed` on each key down.
+    pub osk_haptics: bool,
     pub bindings: Vec<Binding>,
 }
 
@@ -592,6 +594,7 @@ struct RawOsk {
     ink: Option<String>,
     ink_on_latched: Option<String>,
     selected: Option<String>,
+    haptics: Option<bool>,
     #[serde(flatten)]
     unknown: toml::Table,
 }
@@ -730,6 +733,7 @@ impl Config {
                     xkb: Xkb::default(),
                     predict: Predict::default(),
                     osk: OskColors::default(),
+                    osk_haptics: false,
                     bindings: Vec::new(),
                 };
             }
@@ -764,6 +768,7 @@ impl Config {
         let predict = file.predict.map_or_else(Predict::default, |p| Predict {
             dictionaries: p.dictionaries.unwrap_or_default(),
         });
+        let osk_haptics = file.osk.as_ref().and_then(|o| o.haptics).unwrap_or(false);
         let osk = file.osk.map_or_else(OskColors::default, |o| {
             let d = OskColors::default();
             OskColors {
@@ -804,6 +809,7 @@ impl Config {
             xkb,
             predict,
             osk,
+            osk_haptics,
             bindings,
         }
     }
@@ -1173,6 +1179,8 @@ mod tests {
         assert_eq!(c.bg, 0x102030);
         assert_eq!(c.ink, OskColors::default().ink);
         assert_eq!(c.key, OskColors::default().key);
+        assert!(!Config::parse("").osk_haptics);
+        assert!(Config::parse("[osk]\nhaptics = true\n").osk_haptics);
     }
 
     #[test]

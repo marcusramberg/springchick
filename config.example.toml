@@ -104,6 +104,7 @@ latched = "#e5e5ea"        # shift / modifier held
 ink = "#ffffff"            # labels and icons
 ink_on_latched = "#000000"
 selected = "#0a84ff"       # the chosen accent in a long-press popup
+haptics = false            # vibrate on key down, via feedbackd
 
 # Per-app resource limits, set on each app's systemd scope on focus change.
 # Needs the cpu (and memory) controllers delegated to user@.service:

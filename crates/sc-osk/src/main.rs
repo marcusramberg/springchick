@@ -9,6 +9,7 @@ mod accents;
 mod draw;
 mod emoji;
 mod grid;
+mod haptics;
 mod labels;
 mod osk;
 mod suggest;
@@ -113,6 +114,7 @@ struct App {
     layouts: Vec<String>,
     active_layout: u32,
     uinput: Option<uinput::Uinput>,
+    haptics: Option<haptics::Haptics>,
     im: Option<ZwpInputMethodV2>,
     pending_active: bool,
     pending_purpose: u32,
@@ -177,6 +179,7 @@ fn main() {
         layouts: Vec::new(),
         active_layout: 0,
         uinput,
+        haptics: config.osk_haptics.then(haptics::Haptics::new).flatten(),
         im: None,
         pending_active: false,
         pending_purpose: 0,
@@ -462,7 +465,11 @@ impl App {
             grid::Key::Text(c) => accents::variants(&c.to_string()),
             _ => Vec::new(),
         };
+        let had_popup = self.osk.popup.is_some();
         if self.osk.tick(self.now(), self.width as f32, variants) {
+            if !had_popup && self.osk.popup.is_some() {
+                self.buzz();
+            }
             self.draw();
         }
     }
@@ -542,12 +549,14 @@ impl App {
         }
         // The strip covers the bar keys, so it answers first.
         if let Some(i) = suggest::hit(&self.strip, at.0, at.1) {
+            self.buzz();
             self.take_suggestion(i);
             return;
         }
         let Some(key) = grid::hit(&self.grid, at.0, at.1) else {
             return;
         };
+        self.buzz();
         let outs = self.osk.down(id, key, at, self.now());
         self.apply(&outs);
         match key {
@@ -557,6 +566,12 @@ impl App {
         }
         self.relayout();
         self.draw();
+    }
+
+    fn buzz(&self) {
+        if let Some(h) = &self.haptics {
+            h.press();
+        }
     }
 
     fn touch_motion(&mut self, id: i32, (x, y): (f64, f64)) {
@@ -573,6 +588,7 @@ impl App {
             self.relayout();
             self.draw();
         } else if self.osk.popup.as_ref().map(|p| p.selected) != selected {
+            self.buzz();
             self.draw();
         }
     }
