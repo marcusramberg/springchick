@@ -33,8 +33,13 @@ pub fn spawn() -> Dirty {
         | inotify::WatchFlags::CLOSE_WRITE
         | inotify::WatchFlags::ONLYDIR;
     let mut watched = 0;
-    for dir in sc_catalog::xdg_data_dirs() {
+    for (i, dir) in sc_catalog::xdg_data_dirs().into_iter().enumerate() {
         let dir = dir.join("applications");
+        // inotify can't watch a missing dir, and a fresh account has no
+        // ~/.local/share/applications until the first user launcher lands.
+        if i == 0 {
+            let _ = std::fs::create_dir_all(&dir);
+        }
         match inotify::add_watch(&fd, &dir, flags) {
             Ok(_) => watched += 1,
             Err(e) => debug!(path = %dir.display(), %e, "not watching"),
@@ -84,7 +89,6 @@ mod tests {
     #[test]
     fn notices_a_new_desktop_file() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("applications")).unwrap();
         std::env::set_var("XDG_DATA_HOME", tmp.path());
         std::env::set_var("XDG_DATA_DIRS", " ");
 
