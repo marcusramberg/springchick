@@ -799,6 +799,10 @@ impl State {
         }
         self.output
             .change_current_state(None, Some(want), None, None);
+        // The grid springs hold targets for the old view. Clearing makes
+        // `advance_frame` re-seed them snapped, not fly across the screen.
+        self.grid_anim.clear();
+        self.dock_anim.clear();
         let (_, vh) = self.output_size();
         // False for a LeftUp->RightUp swap: same height, so the layer map and
         // every window size are already right.
@@ -889,12 +893,6 @@ impl State {
     fn swap_rotation(&mut self, now: std::time::Instant) {
         let changed = self.refresh_rotation();
         self.sync_sensor_claim();
-        if changed {
-            // The grid springs hold targets for the old view. Clearing makes
-            // `advance_frame` re-seed them snapped, not fly across the screen.
-            self.grid_anim.clear();
-            self.dock_anim.clear();
-        }
         let configured = changed
             .then(|| self.rotation_anchor().flatten())
             .flatten()
