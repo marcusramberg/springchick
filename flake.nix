@@ -99,7 +99,8 @@
             pkgs.freetype
             pkgs.clang
             pkgs.python3
-            pkgs.cargo-llvm-cov
+            # Upstream test suite fails on aarch64 (nixpkgs 2026-10).
+            (pkgs.cargo-llvm-cov.overrideAttrs { doCheck = false; })
             pkgs.just
             # packaging/build.sh: one manifest → apk/deb/pkg.tar.zst.
             pkgs.nfpm

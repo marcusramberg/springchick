@@ -141,7 +141,7 @@ pub fn readback_rgba(
         }
     };
     // Xrgb8888 is B,G,R,X in memory; PNG wants R,G,B,A.
-    for px in out.chunks_exact_mut(4) {
+    for px in out.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
         px[3] = 0xff;
     }

@@ -118,7 +118,7 @@ fn load_svg(path: &Path) -> Option<IconPixels> {
 
     // resvg is premultiplied; we return straight alpha.
     let mut pixels = pixmap.take();
-    for chunk in pixels.chunks_exact_mut(4) {
+    for chunk in pixels.as_chunks_mut::<4>().0 {
         let a = chunk[3] as f32 / 255.0;
         if a > 0.0 {
             chunk[0] = (chunk[0] as f32 / a).min(255.0) as u8;
@@ -148,7 +148,7 @@ fn load_png(path: &Path) -> Option<IconPixels> {
         png::ColorType::Rgba => buf,
         png::ColorType::Rgb => {
             let mut out = Vec::with_capacity((width * height * 4) as usize);
-            for chunk in buf.chunks_exact(3) {
+            for chunk in buf.as_chunks::<3>().0 {
                 out.extend_from_slice(chunk);
                 out.push(255);
             }
@@ -156,7 +156,7 @@ fn load_png(path: &Path) -> Option<IconPixels> {
         }
         png::ColorType::GrayscaleAlpha => {
             let mut out = Vec::with_capacity((width * height * 4) as usize);
-            for chunk in buf.chunks_exact(2) {
+            for chunk in buf.as_chunks::<2>().0 {
                 out.extend_from_slice(&[chunk[0], chunk[0], chunk[0], chunk[1]]);
             }
             out
@@ -188,7 +188,7 @@ pub fn placeholder(name: &str) -> IconPixels {
     let hue = (hash % 360) as f32;
     let (r, g, b) = hsl_to_rgb(hue, 0.5, 0.45);
 
-    for pixel in data.chunks_exact_mut(4) {
+    for pixel in data.as_chunks_mut::<4>().0 {
         pixel[0] = r;
         pixel[1] = g;
         pixel[2] = b;
@@ -444,7 +444,12 @@ mod tests {
         let p = resolve_with_dirs("red-icon", &dirs);
         assert_eq!(p.width, TARGET_SIZE);
         assert_eq!(p.height, TARGET_SIZE);
-        let has_red = p.data.chunks_exact(4).any(|px| px[0] > 200 && px[1] < 50);
+        let has_red = p
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|px| px[0] > 200 && px[1] < 50);
         assert!(has_red, "SVG rasterization should produce red pixels");
     }
 
@@ -461,7 +466,12 @@ mod tests {
 
         let dirs = [dir.path().to_str().unwrap()];
         let p = resolve_with_dirs("shadow", &dirs);
-        let has_red = p.data.chunks_exact(4).any(|px| px[0] > 200 && px[1] < 50);
+        let has_red = p
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|px| px[0] > 200 && px[1] < 50);
         assert!(
             has_red,
             "later SVG should be used when earlier PNG is corrupt"

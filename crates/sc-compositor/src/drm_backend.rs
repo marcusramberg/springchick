@@ -283,11 +283,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (mut drm_device, drm_notifier) = DrmDevice::new(device_fd.clone(), true)?;
     let gbm = GbmDevice::new(device_fd.clone())?;
 
+    let flags = GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT;
     let render_gbm = match pick_render_node(&seat_name, &device_fd) {
         Some(path) => {
-            info!(?path, "render GPU");
             let rfd = open_render_node(&path)?;
-            GbmDevice::new(DrmDeviceFd::new(DeviceFd::from(rfd)))?
+            let rgbm = GbmDevice::new(DrmDeviceFd::new(DeviceFd::from(rfd)))?;
+            // kms_swrast on a render node (a second virtio-gpu) can't make dumb
+            // BOs, and llvmpipe can't import another device's (mesa >= 26.2).
+            match rgbm.create_buffer_object::<()>(64, 64, Fourcc::Xrgb8888, flags) {
+                Ok(_) => {
+                    info!(?path, "render GPU");
+                    rgbm
+                }
+                Err(e) => {
+                    warn!(?path, "render node can't allocate scanout buffers ({e}); rendering on the scanout GPU");
+                    gbm.clone()
+                }
+            }
         }
         None => {
             info!("no separate render node; rendering on the scanout GPU");
@@ -325,7 +337,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let drm_surface = drm_device.create_surface(crtc_handle, mode, &[connector_handle])?;
     let render_formats = renderer.dmabuf_formats();
-    let flags = GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT;
     // Not every display imports the render GPU's buffers; fall back rather than
     // leave a console-less phone dark.
     let gbm_surface = match GbmBufferedSurface::new(

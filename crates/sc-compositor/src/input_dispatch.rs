@@ -189,9 +189,7 @@ mod tests {
 
         let action = on_press(&UiState::home(0, 1), cx, cy, &m, out);
         match action {
-            DownAction::PressIcon {
-                app_id, source: _, ..
-            } => assert_eq!(app_id, "app0"),
+            DownAction::PressIcon { app_id, .. } => assert_eq!(app_id, "app0"),
             other => panic!("expected PressIcon, got {other:?}"),
         }
     }

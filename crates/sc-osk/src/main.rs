@@ -979,8 +979,10 @@ impl Dispatch2<ZwlrForeignToplevelHandleV1, App> for ToplevelsData {
             Event::AppId { app_id } => entry.app_id = app_id,
             Event::State { state } => {
                 entry.activated = state
-                    .chunks_exact(4)
-                    .any(|s| u32::from_ne_bytes([s[0], s[1], s[2], s[3]]) == 2);
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|s| u32::from_ne_bytes(*s) == 2);
             }
             Event::Done => app.update_bar(),
             Event::Closed => {

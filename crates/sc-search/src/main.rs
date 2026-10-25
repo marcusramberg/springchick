@@ -420,10 +420,10 @@ fn search_field(ui: &mut egui::Ui, query: &mut String) -> egui::Response {
     let p = ui.painter();
     p.rect_filled(rect, Rounding::same(h / 2.0), FIELD);
     let c = Pos2::new(rect.left() + 26.0, rect.center().y - 1.0);
-    p.circle_stroke(c, 7.0, Stroke::new(2.0, DIM));
+    p.circle_stroke(c, 7.0, Stroke::new(2.0_f32, DIM));
     p.line_segment(
         [c + Vec2::new(5.0, 5.0), c + Vec2::new(10.5, 10.5)],
-        Stroke::new(2.0, DIM),
+        Stroke::new(2.0_f32, DIM),
     );
     let edit_rect = Rect::from_min_max(
         Pos2::new(rect.left() + 46.0, rect.top()),

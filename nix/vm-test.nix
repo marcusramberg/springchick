@@ -48,5 +48,7 @@ mkTest {
     machine.fail(
         "journalctl -b | grep -iE 'panicked at|SIGSEGV|SIGABRT|stack backtrace|segfault'"
     )
+    # A failing bind leaves the panel dark while everything above still passes.
+    machine.fail("journalctl -b | grep -F 'renderer.bind failed'")
   '';
 }
