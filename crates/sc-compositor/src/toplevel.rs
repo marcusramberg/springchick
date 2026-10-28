@@ -556,6 +556,7 @@ impl State {
         let followed = self.slide_size.take().is_some();
         if self.layers.usable_changed(self.dpi).is_some() || followed {
             self.reconfigure_toplevels(self.layers.settled_usable());
+            self.regrow_background(self.layers.settled_usable());
             // Re-solve popups so an open menu flips instead of being covered.
             self.reconstrain_popups();
         }
@@ -603,6 +604,41 @@ impl State {
             // A stale record would make `sync_anchor_orientation` skip the resize
             // later.
             slot.rotation = orientation;
+        }
+    }
+
+    /// An app that left the front while shrunk for the OSK (quick switch with
+    /// the keyboard up) would keep a short switcher card once the OSK goes.
+    /// Only growth: shrinking stays with the app in front.
+    fn regrow_background(&mut self, usable: sc_layout::Rect) {
+        let size = self.maximized_logical(usable);
+        let orientation = self.view_rotation();
+        let mut thaw = Vec::new();
+        for (tid, slot) in self.toplevels.iter_mut().enumerate() {
+            let Some(slot) = slot else { continue };
+            if surface_is_fullscreen(&slot.surface) {
+                continue;
+            }
+            let short = slot
+                .surface
+                .with_pending_state(|st| st.size.is_some_and(|sz| sz.h < size.1));
+            if !short {
+                continue;
+            }
+            if self.frozen_toplevels.contains(&tid) {
+                thaw.push(tid);
+            }
+            slot.surface
+                .with_pending_state(|st| st.size = Some(size.into()));
+            slot.surface.send_configure();
+            slot.rotation = orientation;
+        }
+        // The freezer re-freezes it once the resize is acked (`ready`).
+        for tid in thaw {
+            if let Some(unit) = self.toplevel_unit(tid) {
+                self.freezer.thaw(&unit.unit, &self.resources);
+            }
+            self.frozen_toplevels.remove(&tid);
         }
     }
 

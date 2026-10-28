@@ -32,7 +32,7 @@ Binary: `target/debug/springchick`. Backend chosen by `SPRINGCHICK_BACKEND` (`dr
 nix build .#checks.aarch64-linux.vm-boot -L
 ```
 
-The other checks are `vm-screenshots` (README images; `just screenshots` copies them to `assets/`), `vm-switcher`, `vm-dialog`, `vm-rotation`, `vm-arrange`, `vm-icon-menu`, `vm-library`, `vm-lock`, `vm-capture`, `vm-portal`, `vm-pointer` and `vm-card-mask` (listed in `flake.nix`).
+The other checks are `vm-screenshots` (README images; `just screenshots` copies them to `assets/`), `vm-switcher`, `vm-dialog`, `vm-rotation`, `vm-arrange`, `vm-icon-menu`, `vm-library`, `vm-lock`, `vm-capture`, `vm-portal`, `vm-pointer`, `vm-card-mask` and `vm-osk-card` (listed in `flake.nix`).
 
 Build the check matching `builtins.currentSystem`. Cross-building runs the release tree under qemu-user emulation, which SIGSEGVs rustc. `nix/package.nix` filters `src` to `Cargo.toml`/`Cargo.lock`/`crates/`, so edits under `nix/`, `tests/`, `docs/` don't rebuild the compositor.
 
