@@ -237,8 +237,8 @@ pub(crate) struct State {
     pub needs_render: bool,
     /// Logical app size last sent while following an OSK slide.
     pub slide_size: Option<(i32, i32)>,
-    /// Served by the backends, which own the renderer.
-    pub screenshot_pending: bool,
+    /// Served by the backends, which own the renderer. `Some(flash)`.
+    pub screenshot_pending: Option<bool>,
     pub screenshot_flash: Option<std::time::Instant>,
     /// See [`crate::render::DrawCtx::last_present`].
     pub last_present: Option<(WlSurface, smithay::backend::renderer::utils::CommitCounter)>,
@@ -622,7 +622,7 @@ impl State {
             external_display: false,
             needs_render: false,
             slide_size: None,
-            screenshot_pending: false,
+            screenshot_pending: None,
             screenshot_flash: None,
             last_present: None,
             osd: osd::Osd::new(),

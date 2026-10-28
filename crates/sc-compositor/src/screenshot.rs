@@ -94,7 +94,7 @@ pub fn encode_png(rgba: &[u8], size: Size<i32, Buffer>) -> Option<Vec<u8>> {
 }
 
 /// The bytes live in the seat's selection until a client sets its own.
-pub fn to_clipboard(state: &mut crate::State, rgba: &[u8], size: Size<i32, Buffer>) {
+pub fn to_clipboard(state: &mut crate::State, rgba: &[u8], size: Size<i32, Buffer>, flash: bool) {
     let Some(png) = encode_png(rgba, size) else {
         return;
     };
@@ -104,9 +104,11 @@ pub fn to_clipboard(state: &mut crate::State, rgba: &[u8], size: Size<i32, Buffe
         h = size.h,
         "screenshot copied"
     );
-    // Started after the capture, so it isn't in the shot.
-    state.screenshot_flash = Some(Instant::now());
-    state.needs_render = true;
+    if flash {
+        // Started after the capture, so it isn't in the shot.
+        state.screenshot_flash = Some(Instant::now());
+        state.needs_render = true;
+    }
     let png = Arc::new(png);
     if state.save_screenshots {
         save(png.clone());

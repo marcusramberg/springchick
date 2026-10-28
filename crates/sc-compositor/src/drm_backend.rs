@@ -1098,9 +1098,9 @@ impl App {
     }
 
     fn take_screenshot(&mut self, prep: &crate::FramePrep) {
-        if !std::mem::take(&mut self.state.screenshot_pending) {
+        let Some(flash) = self.state.screenshot_pending.take() else {
             return;
-        }
+        };
         let fourcc = smithay::backend::allocator::Fourcc::Xrgb8888;
         let Some((mut tex, size)) = self.capture_scene(prep, fourcc) else {
             return;
@@ -1113,7 +1113,7 @@ impl App {
             }
         };
         if let Some(pixels) = pixels {
-            crate::screenshot::to_clipboard(&mut self.state, &pixels, size);
+            crate::screenshot::to_clipboard(&mut self.state, &pixels, size, flash);
         }
     }
 

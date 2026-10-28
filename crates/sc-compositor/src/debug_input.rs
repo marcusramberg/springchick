@@ -549,8 +549,12 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             state.running = false;
         }
         DebugCmd::Action(action) => {
+            let shot = action == sc_config::Action::Screenshot;
             // `run_action` applies the lock policy itself.
             crate::keybinds::run_action(state, action);
+            if shot && state.screenshot_pending.is_some() {
+                state.screenshot_pending = Some(false);
+            }
             let _ = reply.send("ok\n".into());
         }
         DebugCmd::Launch { app_id, new_window } => {

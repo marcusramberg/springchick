@@ -355,7 +355,7 @@ pub fn run_action(state: &mut State, action: Action) {
         Action::SwitcherNext => state.switcher_step(1),
         Action::SwitcherPrev => state.switcher_step(-1),
         Action::Screenshot => {
-            state.screenshot_pending = true;
+            state.screenshot_pending = Some(true);
             state.needs_render = true;
         }
     }

@@ -268,6 +268,7 @@ fn take_screenshot(
     state: &mut State,
     prep: &crate::FramePrep,
     rounded_tex_shader: &GlesTexProgram,
+    flash: bool,
 ) {
     use smithay::backend::renderer::Bind;
 
@@ -285,7 +286,7 @@ fn take_screenshot(
         }
     };
     if let Some(pixels) = pixels {
-        crate::screenshot::to_clipboard(state, &pixels, buf_size);
+        crate::screenshot::to_clipboard(state, &pixels, buf_size, flash);
     }
 }
 
@@ -390,8 +391,8 @@ fn render_frame(
         }
     }
 
-    if std::mem::take(&mut state.screenshot_pending) {
-        take_screenshot(backend, state, &prep, rounded_tex_shader);
+    if let Some(flash) = state.screenshot_pending.take() {
+        take_screenshot(backend, state, &prep, rounded_tex_shader, flash);
     }
 
     if state.pending_captures.is_empty() {
