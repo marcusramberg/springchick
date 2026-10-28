@@ -95,8 +95,8 @@ pub enum SwitcherDrag {
 }
 
 /// Ordered chain. `-> Stage` steps can claim the movement; `-> ()` steps
-/// always run if reached. An empty-Home press arms both pull-down and page
-/// drag, and the pull-down falls through until the drag turns downward.
+/// always run if reached. A Home press arms both pull-down and page drag, and
+/// the pull-down falls through until the drag turns downward.
 pub fn on_motion(state: &mut State, x: f32, y: f32) {
     state.last_pointer_pos = Some((x, y));
     if !state.pointer_down {
@@ -588,7 +588,7 @@ fn press_arm_gesture(state: &mut State, x: f32, y: f32) {
             start_y,
             source,
         } => {
-            // Arm a launch and a page drag from the same point; the release picks.
+            // Arm a launch, page drag and pull-down from the same point.
             state.pending_launch = Some(PendingLaunch {
                 app_id: app_id.clone(),
                 origin,
@@ -596,6 +596,7 @@ fn press_arm_gesture(state: &mut State, x: f32, y: f32) {
                 start_y,
             });
             state.page_drag = Some(FingerDrag::begin(norm(state, start_x, start_y)));
+            state.search_arm = Some((start_x, start_y));
             state.icon_press = Some(IconPress {
                 app_id,
                 source,
