@@ -9,6 +9,8 @@ pub(crate) enum MenuAction {
     Open(ToplevelId),
     NewWindow,
     CloseAll,
+    /// Enters arrange mode, as a long press on the background does.
+    EditHome,
     Remove,
     AddToHome,
     /// Flatpak only: arm the confirm row.
@@ -71,6 +73,12 @@ pub(crate) fn items_for(
             } else {
                 "Close".into()
             },
+        });
+    }
+    if !in_library {
+        items.push(MenuItem {
+            action: MenuAction::EditHome,
+            label: "Edit home screen".into(),
         });
     }
     items.push(if in_library {
@@ -160,6 +168,7 @@ impl crate::state::State {
             }
             MenuAction::NewWindow => self.spawn_instance(&app_id, origin),
             MenuAction::CloseAll => self.close_all(&app_id),
+            MenuAction::EditHome => self.enter_arrange("icon menu"),
             MenuAction::Remove => {
                 self.model.delete(&app_id);
                 self.after_arrange_edit();
@@ -228,14 +237,17 @@ mod tests {
     fn a_stopped_app_can_only_be_started_or_removed() {
         assert_eq!(
             labels(&items_for(&[], false, false)),
-            ["New window", "Remove"]
+            ["New window", "Edit home screen", "Remove"]
         );
     }
 
     #[test]
     fn a_single_window_gets_a_plain_open() {
         let items = items_for(&[(3, "some terminal".into())], false, false);
-        assert_eq!(labels(&items), ["Open", "New window", "Close", "Remove"]);
+        assert_eq!(
+            labels(&items),
+            ["Open", "New window", "Close", "Edit home screen", "Remove"]
+        );
         assert_eq!(items[0].action, MenuAction::Open(3));
     }
 
@@ -244,7 +256,14 @@ mod tests {
         let items = items_for(&[(7, "notes.md".into()), (2, "~/src".into())], false, false);
         assert_eq!(
             labels(&items),
-            ["notes.md", "~/src", "New window", "Close all", "Remove"]
+            [
+                "notes.md",
+                "~/src",
+                "New window",
+                "Close all",
+                "Edit home screen",
+                "Remove"
+            ]
         );
         assert_eq!(items[0].action, MenuAction::Open(7));
         assert_eq!(items[1].action, MenuAction::Open(2));
@@ -260,7 +279,7 @@ mod tests {
     fn only_flatpak_apps_offer_uninstall() {
         assert_eq!(
             labels(&items_for(&[], true, false)),
-            ["New window", "Remove", "Uninstall"]
+            ["New window", "Edit home screen", "Remove", "Uninstall"]
         );
         assert!(!labels(&items_for(&[], false, false)).contains(&"Uninstall"));
     }
