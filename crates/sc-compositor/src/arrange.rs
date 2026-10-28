@@ -257,16 +257,24 @@ impl State {
         if p.at.elapsed().as_millis() < HOLD_MS {
             return;
         }
-        // The VM test asserts this line: arrange doesn't change the `UiState`
+        self.enter_arrange("background");
+        if let Some(a) = &mut self.arrange {
+            a.just_engaged = true;
+        }
+    }
+
+    pub(crate) fn enter_arrange(&mut self, from: &str) {
+        // The VM tests assert this line: arrange doesn't change the `UiState`
         // discriminant, so no state-change line fires.
-        debug!(target: "springchick::debug", "arrange engaged from background");
+        debug!(target: "springchick::debug", "arrange engaged from {from}");
         self.arrange = Some(ArrangeState {
             drag: None,
-            just_engaged: true,
+            just_engaged: false,
         });
         self.bg_press = None;
         self.page_drag = None;
         self.search_arm = None;
+        self.needs_render = true;
     }
 
     /// Take a drag over from the search app with the finger still down. Search

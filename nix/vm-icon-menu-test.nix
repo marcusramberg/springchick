@@ -1,7 +1,7 @@
 # Icon menu and multiple windows: a long press opens the menu without
 # launching; "New window" starts instances (twice, giving two toplevels); a tap
-# then raises instead of launching; and a wrapper-launched window keeps the
-# launch's identity, not the terminal's.
+# then raises instead of launching; "Edit home screen" enters arrange; and a
+# wrapper-launched window keeps the launch's identity, not the terminal's.
 #
 # Run:  nix build .#checks.aarch64-linux.vm-icon-menu -L
 { self, pkgs }:
@@ -143,5 +143,20 @@ mkTest {
     assert foot_count() == 2, (
         f"tapping a running app's icon must raise, not launch; foot count {foot_count()}"
     )
+
+    # Two windows: both titles / New window / Close all / Edit home screen / Remove.
+    go_home()
+    dbg(f"down {col(0)} {ROW0}")
+    machine.sleep(2)
+    machine.wait_until_succeeds(
+        f"{JOURNAL} | grep -qE 'icon menu opened app_id=aaa .*running=2'", timeout=15
+    )
+    dbg("up")
+    dbg(f"tap {MENU_X} {menu_row(4)}")
+    machine.wait_until_succeeds(
+        f"{JOURNAL} | grep -qF 'arrange engaged from icon menu'", timeout=15
+    )
+    dbg("settle 2000")
+    machine.screenshot("05-edit-home")
   '';
 }
