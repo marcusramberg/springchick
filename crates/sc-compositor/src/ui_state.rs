@@ -501,20 +501,26 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     Vec::new()
                 };
                 let current_progress = tracker.up_progress().clamp(0.0, 1.0);
-                let settle_target = match target {
-                    NavTarget::BackToApp => 0.0,
-                    NavTarget::Home | NavTarget::Switcher | NavTarget::QuickSwitch(_) => 1.0,
-                };
                 let mut progress = if matches!(target, NavTarget::Home) {
                     minimize_spring(current_progress, current_progress)
+                } else if matches!(target, NavTarget::BackToApp) {
+                    // 1 = the release pose (the caller puts it in `origin`), 0 = fullscreen.
+                    let mut s = Spring::new(1.0);
+                    s.stiffness = 280.0;
+                    s.damping = 32.0;
+                    s.velocity = -tracker.velocity.y / current_progress.max(0.05);
+                    s.retarget(0.0);
+                    s
                 } else {
                     let mut s = Spring::new(current_progress);
                     s.stiffness = 280.0;
                     s.damping = 32.0;
                     s
                 };
-                progress.velocity = -tracker.velocity.y; // upward velocity → positive progress
-                progress.retarget(settle_target);
+                if !matches!(target, NavTarget::BackToApp) {
+                    progress.velocity = -tracker.velocity.y; // upward velocity → positive progress
+                    progress.retarget(1.0);
+                }
                 *state = UiState::Settling {
                     toplevel,
                     app_id,

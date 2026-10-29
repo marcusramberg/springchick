@@ -335,14 +335,18 @@ pub fn compute_scene(
             use sc_input::NavTarget;
             let transform = match target {
                 NavTarget::BackToApp => {
+                    // From the release pose in `origin`, with `from_tracker`'s radius.
                     let p = progress.value.clamp(0.0, 1.0);
-                    let scale = 1.0 - p * 0.5;
-                    WindowTransform {
-                        scale,
-                        center_x: w / 2.0,
-                        center_y: h / 2.0 - p * h * 0.1,
-                        corner_radius: lerp(corners.screen, card_radius * 1.2, p),
-                    }
+                    let mut t =
+                        WindowTransform::from_zoom_progress(1.0 - p, *origin, w, h, corners);
+                    let lift = if corners.screen > 0.0 {
+                        corners.screen
+                    } else {
+                        card_radius * 0.6
+                    };
+                    let drag = lift + (1.0 - t.scale) * card_radius * 0.7;
+                    t.corner_radius = lerp(corners.screen, drag, p);
+                    t
                 }
                 NavTarget::Switcher => {
                     // Hold the deck's radius the whole way; `from_zoom_progress` would flash
@@ -402,14 +406,14 @@ pub fn compute_scene(
             }
             Scene {
                 window: Some((*toplevel, transform)),
-                show_home: !matches!(target, NavTarget::BackToApp),
+                show_home: true,
                 home_lift: 0.0,
                 home_shift: 0.0,
                 home_recede: None,
                 home_page: 0,
                 backdrop_blur: match target {
                     NavTarget::Home => grab_backdrop_blur(progress.value),
-                    NavTarget::Switcher => 1.0,
+                    NavTarget::Switcher | NavTarget::BackToApp => 1.0,
                     _ => 0.0,
                 },
                 cards: Vec::new(),
@@ -809,6 +813,41 @@ mod tests {
         let finger_y = 0.7 * h;
         assert!(t.center_y < finger_y);
         assert!(t.corner_radius > 0.0);
+    }
+
+    #[test]
+    fn settling_back_to_app_starts_at_the_release_pose() {
+        let (w, h) = (TEST_SIZE.0 as f32, TEST_SIZE.1 as f32);
+        let mut tracker = Tracker::begin(sc_input::Pt { x: 0.5, y: 0.95 });
+        tracker.current = sc_input::Pt { x: 0.3, y: 0.85 };
+        let pose = WindowTransform::from_tracker(&tracker, w, h, TEST_RADIUS);
+        let settle = |p: f32| {
+            let state = UiState::Settling {
+                toplevel: 0,
+                app_id: "x".into(),
+                target: sc_input::NavTarget::BackToApp,
+                progress: sc_anim::Spring::new(p),
+                origin: crate::ui_state::ZoomOrigin::card(
+                    (pose.center_x, pose.center_y),
+                    pose.scale,
+                ),
+                cards: Vec::new(),
+            };
+            compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS)
+                .window
+                .unwrap()
+                .1
+        };
+        let start = settle(1.0);
+        assert!((start.scale - pose.scale).abs() < 1e-4);
+        assert!((start.center_x - pose.center_x).abs() < 1e-3);
+        assert!((start.center_y - pose.center_y).abs() < 1e-3);
+        assert!((start.corner_radius - pose.corner_radius).abs() < 1e-3);
+        let end = settle(0.0);
+        assert_eq!(
+            (end.scale, end.center_x, end.center_y),
+            (1.0, w / 2.0, h / 2.0)
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
 use crate::arrange::BgPress;
 use crate::icon_menu;
 use crate::input_dispatch::{self, DownAction};
+use crate::scene::{Corners, WindowTransform};
 use crate::switcher;
 use crate::ui_state::{transition, ToplevelId, UiEvent, UiState, ZoomOrigin};
 use crate::{DragItem, IconPress, State};
@@ -965,6 +966,18 @@ fn release_grab(state: &mut State, still_for: f32) {
         *toplevel,
         app_id.clone(),
     );
+    // Only center and scale matter; the settle redoes the radius.
+    let (w, h) = state.output_size_f();
+    let pose = WindowTransform::from_tracker(
+        tracker,
+        w,
+        h,
+        Corners {
+            card: 0.0,
+            screen: 0.0,
+        },
+    );
+    let release = ZoomOrigin::card((pose.center_x, pose.center_y), pose.scale);
     debug!(target: "springchick::debug", "on_release grab target={:?}", target);
 
     match target {
@@ -987,11 +1000,13 @@ fn release_grab(state: &mut State, still_for: f32) {
             // Toward the switcher, settle into the front slot so the shrink flows into
             // the fan.
             if let UiState::Settling { origin, target, .. } = &mut state.ui {
-                *origin = if matches!(target, sc_input::NavTarget::Switcher) {
-                    let (cx, cy, s) = switcher::front_slot(size);
-                    ZoomOrigin::card((cx, cy), s)
-                } else {
-                    home_origin
+                *origin = match target {
+                    sc_input::NavTarget::Switcher => {
+                        let (cx, cy, s) = switcher::front_slot(size);
+                        ZoomOrigin::card((cx, cy), s)
+                    }
+                    sc_input::NavTarget::BackToApp => release,
+                    _ => home_origin,
                 };
             }
         }
