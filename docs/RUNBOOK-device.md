@@ -110,7 +110,7 @@ Defaults, mirroring the niri bindings this replaced:
 | key | short | long |
 |---|---|---|
 | `XF86AudioRaiseVolume` | action `volume-up` | action `close-app` |
-| `XF86AudioLowerVolume` | action `volume-down` | `pkill -SIGRTMIN -f wvkbd-mobintl` |
+| `XF86AudioLowerVolume` | action `volume-down` | `pkill -SIGRTMIN 'sc-osk\|wvkbd-mobintl'` |
 | `XF86PowerOff` | action `toggle-display` | `systemctl poweroff` |
 | `Super`+`h` | action `home` | — |
 | `Super`+`f` | action `toggle-fullscreen` | — |

@@ -15,7 +15,7 @@ crates/
   sc-anim/         Pure spring physics engine
   sc-input/        Pure gesture recognizer + nav state machine
   sc-shell-model/  Pure grid/dock data model (4x6 pages, dock, frecency) + persist
-  sc-config/       config.toml parsing ([main] + [keybinds])
+  sc-config/       config.toml parsing (sections, include, [theme])
   sc-catalog/      .desktop scan/parse, field-code stripping, search ranking
   sc-keys/         Short/long key-press timing rules (pure; types live in sc-config)
   sc-layout/       Pure geometry: (size, page, model) → icon rects + hit-testing

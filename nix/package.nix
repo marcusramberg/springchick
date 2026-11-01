@@ -97,7 +97,11 @@ let
       let
         rel = lib.removePrefix "${toString src}/" (toString path);
       in
-      rel == "Cargo.toml" || rel == "Cargo.lock" || rel == "crates" || lib.hasPrefix "crates/" rel;
+      rel == "Cargo.toml"
+      || rel == "Cargo.lock"
+      || rel == "config.example.toml"
+      || rel == "crates"
+      || lib.hasPrefix "crates/" rel;
   };
 
   # dlopen'd at runtime, so they go on LD_LIBRARY_PATH.

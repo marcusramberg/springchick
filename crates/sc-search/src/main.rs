@@ -29,10 +29,47 @@ const HOLD_SLOP: f32 = 12.0;
 /// Providers shell out, so wait for the typing to pause.
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
-const TEXT: Color32 = Color32::from_rgb(240, 242, 246);
-const DIM: Color32 = Color32::from_rgb(150, 156, 168);
-const FIELD: Color32 = Color32::from_rgba_premultiplied(22, 22, 22, 22);
-const PRESS: Color32 = Color32::from_rgba_premultiplied(32, 32, 32, 32);
+/// `[theme]`, resolved for egui.
+#[derive(Clone, Copy)]
+struct Palette {
+    text: Color32,
+    dim: Color32,
+    field: Color32,
+    press: Color32,
+    backdrop: Color32,
+}
+
+/// Premultiplied in gamma space, as egui blends.
+/// `Color32::from_rgba_unmultiplied` goes through linear and lands too bright.
+fn translucent(rgb: u32, alpha: u8) -> Color32 {
+    let [_, r, g, b] = rgb.to_be_bytes();
+    Color32::from_rgb(r, g, b).gamma_multiply(alpha as f32 / 255.0)
+}
+
+impl Palette {
+    fn new(theme: &sc_config::Theme) -> Self {
+        Palette {
+            text: translucent(theme.foreground, 240),
+            dim: translucent(theme.muted, 255),
+            field: translucent(theme.foreground, 22),
+            press: translucent(theme.foreground, 32),
+            backdrop: translucent(theme.background, 170),
+        }
+    }
+
+    /// What egui paints itself: the caret, selection and scrollbar.
+    fn apply(&self, ctx: &egui::Context) {
+        ctx.style_mut(|style| {
+            let visuals = &mut style.visuals;
+            visuals.text_cursor.stroke.color = self.text;
+            visuals.selection.bg_fill = self.press;
+            let widgets = &mut visuals.widgets;
+            widgets.inactive.fg_stroke.color = self.dim;
+            widgets.hovered.fg_stroke.color = self.text;
+            widgets.active.fg_stroke.color = self.text;
+        });
+    }
+}
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -53,6 +90,7 @@ fn main() -> eframe::Result<()> {
 type Sections = Vec<(String, Vec<Hit>)>;
 
 struct SearchApp {
+    palette: Palette,
     catalog: HashMap<String, AppEntry>,
     frecency: FrecencyStore,
     query: String,
@@ -86,6 +124,7 @@ impl SearchApp {
             .insert(0, "Inter".into());
         cc.egui_ctx.set_fonts(fonts);
         let mut app = Self {
+            palette: Palette::new(&sc_config::Theme::default()),
             catalog: HashMap::new(),
             frecency: FrecencyStore::default(),
             query: String::new(),
@@ -101,12 +140,14 @@ impl SearchApp {
             held: None,
             _blur: blur::blur_whole_window(cc),
         };
-        app.rescan();
+        app.rescan(&cc.egui_ctx);
         app
     }
 
     /// The compositor raises this process instead of respawning it.
-    fn rescan(&mut self) {
+    fn rescan(&mut self, ctx: &egui::Context) {
+        self.palette = Palette::new(&sc_config::load().theme);
+        self.palette.apply(ctx);
         self.catalog = sc_catalog::scan_apps()
             .into_iter()
             .map(|e| (e.id.clone(), e))
@@ -250,7 +291,7 @@ impl SearchApp {
                     let tex = self.icon(ui.ctx(), id);
                     let p = ui.painter();
                     if resp.is_pointer_button_down_on() {
-                        p.rect_filled(rect.shrink(4.0), 16.0, PRESS);
+                        p.rect_filled(rect.shrink(4.0), 16.0, self.palette.press);
                     }
                     let icon_rect = Rect::from_center_size(
                         Pos2::new(rect.center().x, rect.top() + 8.0 + icon / 2.0),
@@ -270,7 +311,7 @@ impl SearchApp {
                         Align2::CENTER_TOP,
                         label,
                         FontId::proportional(13.0),
-                        TEXT,
+                        self.palette.text,
                     );
 
                     if resp.clicked() {
@@ -313,7 +354,7 @@ impl SearchApp {
             ui.label(
                 egui::RichText::new(title)
                     .font(FontId::proportional(13.0))
-                    .color(DIM),
+                    .color(self.palette.dim),
             );
             ui.add_space(6.0);
             for (hi, hit) in hits.iter().enumerate() {
@@ -321,13 +362,13 @@ impl SearchApp {
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), 56.0), Sense::click());
                 let p = ui.painter();
                 if resp.is_pointer_button_down_on() {
-                    p.rect_filled(rect, 12.0, PRESS);
+                    p.rect_filled(rect, 12.0, self.palette.press);
                 }
                 let glyph = Rect::from_center_size(
                     Pos2::new(rect.left() + 28.0, rect.center().y),
                     Vec2::splat(36.0),
                 );
-                p.rect_filled(glyph, 9.0, FIELD);
+                p.rect_filled(glyph, 9.0, self.palette.field);
                 let ext = hit
                     .path
                     .extension()
@@ -345,7 +386,7 @@ impl SearchApp {
                     Align2::CENTER_CENTER,
                     tag,
                     FontId::proportional(10.0),
-                    DIM,
+                    self.palette.dim,
                 );
                 let x = glyph.right() + 14.0;
                 p.text(
@@ -353,14 +394,14 @@ impl SearchApp {
                     Align2::LEFT_BOTTOM,
                     &hit.title,
                     FontId::proportional(16.0),
-                    TEXT,
+                    self.palette.text,
                 );
                 p.text(
                     Pos2::new(x, rect.center().y + 2.0),
                     Align2::LEFT_TOP,
                     &hit.subtitle,
                     FontId::proportional(12.0),
-                    DIM,
+                    self.palette.dim,
                 );
                 if resp.clicked() {
                     open = Some((si, hi));
@@ -414,16 +455,16 @@ fn ipc_cmd(line: &str) -> bool {
 }
 
 /// Rounded pill with a magnifier glyph and a frameless text edit inside.
-fn search_field(ui: &mut egui::Ui, query: &mut String) -> egui::Response {
+fn search_field(ui: &mut egui::Ui, query: &mut String, palette: Palette) -> egui::Response {
     let h = 48.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, Rounding::same(h / 2.0), FIELD);
+    p.rect_filled(rect, Rounding::same(h / 2.0), palette.field);
     let c = Pos2::new(rect.left() + 26.0, rect.center().y - 1.0);
-    p.circle_stroke(c, 7.0, Stroke::new(2.0_f32, DIM));
+    p.circle_stroke(c, 7.0, Stroke::new(2.0_f32, palette.dim));
     p.line_segment(
         [c + Vec2::new(5.0, 5.0), c + Vec2::new(10.5, 10.5)],
-        Stroke::new(2.0_f32, DIM),
+        Stroke::new(2.0_f32, palette.dim),
     );
     let edit_rect = Rect::from_min_max(
         Pos2::new(rect.left() + 46.0, rect.top()),
@@ -437,8 +478,8 @@ fn search_field(ui: &mut egui::Ui, query: &mut String) -> egui::Response {
     child.add(
         egui::TextEdit::singleline(query)
             .frame(false)
-            .hint_text(egui::RichText::new("Search").color(DIM))
-            .text_color(TEXT)
+            .hint_text(egui::RichText::new("Search").color(palette.dim))
+            .text_color(palette.text)
             .desired_width(f32::INFINITY)
             .font(FontId::proportional(18.0)),
     )
@@ -457,17 +498,17 @@ impl eframe::App for SearchApp {
 
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if focused && !self.focused {
-            self.rescan();
+            self.rescan(ctx);
         }
         self.focused = focused;
         self.poll_providers(ctx);
 
         let frame = egui::Frame::central_panel(&ctx.style())
-            .fill(Color32::from_rgba_unmultiplied(12, 14, 18, 170))
+            .fill(self.palette.backdrop)
             .inner_margin(egui::Margin::symmetric(16.0, 0.0));
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             ui.add_space(20.0);
-            let edit = search_field(ui, &mut self.query);
+            let edit = search_field(ui, &mut self.query, self.palette);
             if !self.focus_requested {
                 edit.request_focus();
                 self.focus_requested = true;
@@ -497,5 +538,43 @@ impl eframe::App for SearchApp {
                 self.activate_first();
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn over(c: Color32, screen: [u8; 3]) -> [u8; 3] {
+        let [r, g, b, a] = c.to_array();
+        let mix = |c: u8, s: u8| (c as u32 + s as u32 * (255 - a as u32) / 255) as u8;
+        [mix(r, screen[0]), mix(g, screen[1]), mix(b, screen[2])]
+    }
+
+    #[test]
+    fn a_translucent_colour_over_itself_stays_itself() {
+        let light = [0xe8, 0xf0, 0xf8];
+        let [r, g, b] = over(translucent(0xe8f0f8, 170), light);
+        assert!(r.abs_diff(light[0]) <= 1, "{r}");
+        assert!(g.abs_diff(light[1]) <= 1, "{g}");
+        assert!(b.abs_diff(light[2]) <= 1, "{b}");
+    }
+
+    #[test]
+    fn default_field_and_press_match_the_old_white_washes() {
+        let palette = Palette::new(&sc_config::Theme::default());
+        assert_eq!(
+            palette.field,
+            Color32::from_rgba_premultiplied(22, 22, 22, 22)
+        );
+        assert_eq!(
+            palette.press,
+            Color32::from_rgba_premultiplied(32, 32, 32, 32)
+        );
+    }
+
+    #[test]
+    fn opaque_alpha_keeps_the_colour() {
+        assert_eq!(translucent(0x969ca8, 255), Color32::from_rgb(150, 156, 168));
     }
 }

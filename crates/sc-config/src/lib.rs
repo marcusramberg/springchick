@@ -1,6 +1,6 @@
-//! `config.toml`: `[main]`, `[resources]` and `[keybinds]`. Lenient: a bad
-//! entry is dropped with a warning and the rest applies, because a compositor
-//! that won't start over a typo on a phone means a recovery session.
+//! `config.toml` and its `include`s. Lenient: a bad entry is dropped with a
+//! warning and the rest applies, because a compositor that won't start over a
+//! typo on a phone means a recovery session.
 #![forbid(unsafe_code)]
 
 use serde::Deserialize;
@@ -123,6 +123,7 @@ pub struct Config {
     pub resources: Resources,
     pub xkb: Xkb,
     pub predict: Predict,
+    pub theme: Theme,
     pub osk: OskColors,
     /// `[osk] haptics`: a feedbackd `button-pressed` on each key down.
     pub osk_haptics: bool,
@@ -142,6 +143,35 @@ pub struct Predict {
     /// `scripts/aosp-wordlist.py` writes them. Several make the keyboard
     /// bilingual.
     pub dictionaries: Vec<String>,
+}
+
+/// Shell and search colours, `0xRRGGBB`. Alpha stays with each use, so one
+/// colour can be a solid label and a faint highlight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Theme {
+    pub background: u32,
+    pub surface: u32,
+    pub foreground: u32,
+    pub muted: u32,
+    pub danger: u32,
+    pub badge: u32,
+    pub warning: u32,
+    pub highlight: u32,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Theme {
+            background: 0x0f1a24,
+            surface: 0x1c1e24,
+            foreground: 0xffffff,
+            muted: 0x969ca8,
+            danger: 0xff786e,
+            badge: 0xdc3232,
+            warning: 0xffaa3c,
+            highlight: 0xffcd46,
+        }
+    }
 }
 
 /// On-screen keyboard colours, `0xRRGGBB`.
@@ -173,17 +203,30 @@ impl Default for OskColors {
 }
 
 /// `"#rrggbb"`; anything else keeps `default`.
-fn parse_color(key: &str, v: Option<&String>, default: u32) -> u32 {
+fn parse_color(key: &str, v: Option<&toml::Value>, default: u32) -> u32 {
     let Some(v) = v else { return default };
-    match v.strip_prefix('#').filter(|h| h.len() == 6) {
-        Some(h) => u32::from_str_radix(h, 16).unwrap_or_else(|_| {
-            warn!(key, value = %v, "osk colour is not #rrggbb, using default");
+    v.as_str()
+        .and_then(|s| s.strip_prefix('#'))
+        .filter(|h| h.len() == 6 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .and_then(|h| u32::from_str_radix(h, 16).ok())
+        .unwrap_or_else(|| {
+            warn!(key, value = %v, "colour is not #rrggbb, using default");
             default
-        }),
-        None => {
-            warn!(key, value = %v, "osk colour is not #rrggbb, using default");
-            default
-        }
+        })
+}
+
+fn parse_theme(raw: Option<RawTheme>) -> Theme {
+    let d = Theme::default();
+    let Some(t) = raw else { return d };
+    Theme {
+        background: parse_color("background", t.background.as_ref(), d.background),
+        surface: parse_color("surface", t.surface.as_ref(), d.surface),
+        foreground: parse_color("foreground", t.foreground.as_ref(), d.foreground),
+        muted: parse_color("muted", t.muted.as_ref(), d.muted),
+        danger: parse_color("danger", t.danger.as_ref(), d.danger),
+        badge: parse_color("badge", t.badge.as_ref(), d.badge),
+        warning: parse_color("warning", t.warning.as_ref(), d.warning),
+        highlight: parse_color("highlight", t.highlight.as_ref(), d.highlight),
     }
 }
 
@@ -371,9 +414,9 @@ fn parse_resources(raw: Option<RawResources>) -> Resources {
     let apps = raw
         .apps
         .into_iter()
-        .filter_map(|(id, policy)| match policy.parse() {
-            Ok(p) => Some((id, p)),
-            Err(()) => {
+        .filter_map(|(id, policy)| match policy.as_str().map(str::parse) {
+            Some(Ok(p)) => Some((id, p)),
+            _ => {
                 warn!(app = %id, value = %policy, "app policy must be ignore, throttle, freeze or messenger");
                 None
             }
@@ -515,7 +558,7 @@ action = "volume-down"
 [[keybinds.binding]]
 key = "XF86AudioLowerVolume"
 press = "long"
-command = "pkill -SIGRTMIN -f wvkbd-mobintl"
+command = "pkill -SIGRTMIN 'sc-osk|wvkbd-mobintl'"
 
 [[keybinds.binding]]
 key = "XF86PowerOff"
@@ -579,21 +622,36 @@ struct RawConfigFile {
     resources: Option<RawResources>,
     xkb: Option<RawXkb>,
     predict: Option<RawPredict>,
+    theme: Option<RawTheme>,
     osk: Option<RawOsk>,
     #[serde(flatten)]
     unknown: toml::Table,
 }
 
 #[derive(Deserialize, Default)]
+struct RawTheme {
+    background: Option<toml::Value>,
+    surface: Option<toml::Value>,
+    foreground: Option<toml::Value>,
+    muted: Option<toml::Value>,
+    danger: Option<toml::Value>,
+    badge: Option<toml::Value>,
+    warning: Option<toml::Value>,
+    highlight: Option<toml::Value>,
+    #[serde(flatten)]
+    unknown: toml::Table,
+}
+
+#[derive(Deserialize, Default)]
 struct RawOsk {
-    bg: Option<String>,
-    key: Option<String>,
-    function_key: Option<String>,
-    pressed: Option<String>,
-    latched: Option<String>,
-    ink: Option<String>,
-    ink_on_latched: Option<String>,
-    selected: Option<String>,
+    bg: Option<toml::Value>,
+    key: Option<toml::Value>,
+    function_key: Option<toml::Value>,
+    pressed: Option<toml::Value>,
+    latched: Option<toml::Value>,
+    ink: Option<toml::Value>,
+    ink_on_latched: Option<toml::Value>,
+    selected: Option<toml::Value>,
     haptics: Option<bool>,
     #[serde(flatten)]
     unknown: toml::Table,
@@ -629,7 +687,7 @@ struct RawResources {
     freeze_wake_secs: Option<u64>,
     freeze_wake_for_secs: Option<u64>,
     #[serde(default)]
-    apps: BTreeMap<String, String>,
+    apps: BTreeMap<String, toml::Value>,
     #[serde(flatten)]
     unknown: toml::Table,
 }
@@ -686,6 +744,9 @@ fn unknown_keys(file: &RawConfigFile) -> Vec<String> {
     if let Some(predict) = &file.predict {
         add("predict.", &predict.unknown);
     }
+    if let Some(theme) = &file.theme {
+        add("theme.", &theme.unknown);
+    }
     if let Some(osk) = &file.osk {
         add("osk.", &osk.unknown);
     }
@@ -706,38 +767,16 @@ impl Config {
         Config::parse(DEFAULT_TOML)
     }
 
-    /// A whole-file parse error yields an empty config; see
-    /// [`Config::parse_or_defaults`].
+    /// A whole-file parse error yields an empty config, unlike a file on disk:
+    /// see [`try_read`]. `include` is only honoured there.
     pub fn parse(text: &str) -> Config {
-        let file: RawConfigFile = match toml::from_str(text) {
-            Ok(file) => file,
-            Err(e) => {
-                warn!(%e, "config is not valid TOML");
-                return Config {
-                    long_press_ms: DEFAULT_LONG_PRESS_MS,
-                    dpi: DEFAULT_DPI,
-                    idle_blank_secs: DEFAULT_IDLE_BLANK_SECS,
-                    card_radius: None,
-                    show_touches: DEFAULT_SHOW_TOUCHES,
-                    save_screenshots: DEFAULT_SAVE_SCREENSHOTS,
-                    natural_scroll: DEFAULT_NATURAL_SCROLL,
-                    prefer_no_csd: DEFAULT_PREFER_NO_CSD,
-                    uclamp_min: DEFAULT_UCLAMP_MIN,
-                    gpu_min_mhz: DEFAULT_GPU_MIN_MHZ,
-                    vrr: DEFAULT_VRR,
-                    rotation_settle_ms: DEFAULT_ROTATION_SETTLE_MS,
-                    rotation_fade_ms: DEFAULT_ROTATION_FADE_MS,
-                    rotate_ui: DEFAULT_ROTATE_UI,
-                    startup: Vec::new(),
-                    resources: Resources::default(),
-                    xkb: Xkb::default(),
-                    predict: Predict::default(),
-                    osk: OskColors::default(),
-                    osk_haptics: false,
-                    bindings: Vec::new(),
-                };
-            }
-        };
+        Config::from_raw(toml::from_str(text).unwrap_or_else(|e| {
+            warn!(%e, "config is not valid TOML");
+            RawConfigFile::default()
+        }))
+    }
+
+    fn from_raw(file: RawConfigFile) -> Config {
         for key in unknown_keys(&file) {
             warn!(%key, "unknown config key, ignored");
         }
@@ -768,6 +807,7 @@ impl Config {
         let predict = file.predict.map_or_else(Predict::default, |p| Predict {
             dictionaries: p.dictionaries.unwrap_or_default(),
         });
+        let theme = parse_theme(file.theme);
         let osk_haptics = file.osk.as_ref().and_then(|o| o.haptics).unwrap_or(false);
         let osk = file.osk.map_or_else(OskColors::default, |o| {
             let d = OskColors::default();
@@ -808,20 +848,10 @@ impl Config {
             resources,
             xkb,
             predict,
+            theme,
             osk,
             osk_haptics,
             bindings,
-        }
-    }
-
-    /// An unparseable file keeps the defaults so hardware buttons still work.
-    pub fn parse_or_defaults(text: &str) -> Config {
-        match toml::from_str::<RawConfigFile>(text) {
-            Ok(_) => Config::parse(text),
-            Err(e) => {
-                warn!(%e, "config is not valid TOML; using defaults");
-                Config::defaults()
-            }
         }
     }
 }
@@ -948,12 +978,120 @@ pub fn screenshot_dir() -> Option<PathBuf> {
     .map(|p| p.join("Screenshots"))
 }
 
+/// Tables merge key by key and `[[tables]]` append, so bindings from several
+/// files add up. Anything else `over` sets replaces what `base` had.
+fn merge(base: &mut toml::Table, over: toml::Table) {
+    use toml::Value;
+    for (key, value) in over {
+        match (base.get_mut(&key), value) {
+            (Some(Value::Table(b)), Value::Table(o)) => merge(b, o),
+            (Some(Value::Array(b)), Value::Array(o)) if o.first().is_some_and(Value::is_table) => {
+                b.extend(o)
+            }
+            (_, value) => {
+                base.insert(key, value);
+            }
+        }
+    }
+}
+
+/// Files merged per load, since repeating an include at each level is exponential.
+const MAX_INCLUDES: usize = 256;
+
+/// `text`, read from `path`, on top of its includes, later ones over earlier.
+/// `Err` is `text` itself being bad, a wrong-typed value included; a bad
+/// include is only skipped.
+fn expand(
+    text: &str,
+    path: &Path,
+    chain: &mut Vec<PathBuf>,
+    reads: &mut usize,
+) -> Result<toml::Table, toml::de::Error> {
+    toml::from_str::<RawConfigFile>(text)?;
+    let mut own: toml::Table = text.parse()?;
+    let includes: Vec<String> = own
+        .remove("include")
+        .and_then(|v| {
+            v.try_into()
+                .inspect_err(|e| warn!(%e, "include must be a list of paths"))
+                .ok()
+        })
+        .unwrap_or_default();
+    let mut merged = toml::Table::new();
+    for include in includes {
+        // Beside `path`, not its target: a config symlinked in from the nix
+        // store still finds its neighbours.
+        let target = path.with_file_name(include);
+        if let Some(table) = read_include(&target, chain, reads) {
+            merge(&mut merged, table);
+        }
+    }
+    merge(&mut merged, own);
+    Ok(merged)
+}
+
+fn read_include(path: &Path, chain: &mut Vec<PathBuf>, reads: &mut usize) -> Option<toml::Table> {
+    let read = std::fs::canonicalize(path).and_then(|real| {
+        let text = std::fs::read_to_string(&real)?;
+        Ok((real, text))
+    });
+    let (real, text) = match read {
+        Ok(found) => found,
+        Err(e) => {
+            warn!(%e, path = %path.display(), "cannot read include");
+            return None;
+        }
+    };
+    if chain.contains(&real) {
+        warn!(path = %path.display(), "include cycle, skipped");
+        return None;
+    }
+    if *reads == MAX_INCLUDES {
+        warn!(path = %path.display(), "too many includes, skipped");
+        return None;
+    }
+    *reads += 1;
+    chain.push(real);
+    let table = expand(&text, path, chain, reads);
+    chain.pop();
+    table
+        .inspect_err(|e| warn!(%e, path = %path.display(), "bad include, skipped"))
+        .ok()
+}
+
+/// An unparseable file keeps the defaults so hardware buttons still work, and
+/// so does one left with no usable binding; `binding = []` is how to clear them.
+fn parse_file(text: &str, path: &Path) -> Config {
+    let mut chain = Vec::from_iter(std::fs::canonicalize(path));
+    let expanded = expand(text, path, &mut chain, &mut 0);
+    let cleared = expanded.as_ref().is_ok_and(|table| {
+        table
+            .get("keybinds")
+            .and_then(|keybinds| keybinds.get("binding"))
+            .and_then(toml::Value::as_array)
+            .is_some_and(Vec::is_empty)
+    });
+    match expanded.and_then(toml::Table::try_into) {
+        Ok(file) => {
+            let mut config = Config::from_raw(file);
+            if config.bindings.is_empty() && !cleared {
+                config.bindings = Config::defaults().bindings;
+            }
+            config
+        }
+        Err(e) => {
+            warn!(%e, path = %path.display(), "bad config; using defaults");
+            Config::defaults()
+        }
+    }
+}
+
 /// A missing file is silent; other read errors warn.
 fn try_read(path: &Path) -> Option<Config> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
             info!(path = %path.display(), "loading config");
-            Some(Config::parse_or_defaults(&text))
+            Some(parse_file(&text, path))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
@@ -1092,9 +1230,260 @@ mod tests {
     }
 
     #[test]
-    fn malformed_toml_falls_back_to_defaults_when_asked() {
-        let cfg = Config::parse_or_defaults("this is not toml {{{");
+    fn malformed_file_falls_back_to_defaults() {
+        let cfg = parse_file(
+            "this is not toml {{{",
+            Path::new("/nonexistent/config.toml"),
+        );
         assert_eq!(cfg.bindings.len(), Config::defaults().bindings.len());
+    }
+
+    const BIND: &str = "[[keybinds.binding]]\nkey = \"a\"\naction = \"home\"\n";
+
+    fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn read(path: &Path) -> Config {
+        try_read(path).unwrap()
+    }
+
+    #[test]
+    fn wrong_typed_include_is_skipped_and_the_rest_applies() {
+        for bad in [
+            "theme = \"nord\"\n",
+            "[[keybinds.binding]]\naction = \"home\"\n",
+            "[main]\ndpi = \"big\"\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let d = dir.path();
+            write(d, "bad.toml", bad);
+            write(d, "good.toml", "[theme]\nmuted = \"#000001\"\n");
+            let main = write(
+                d,
+                "config.toml",
+                &format!("include = [\"bad.toml\", \"good.toml\"]\n[main]\ndpi = 2\n{BIND}"),
+            );
+            let cfg = read(&main);
+            assert_eq!(cfg.dpi, 2.0, "{bad}");
+            assert_eq!(cfg.theme.muted, 0x000001, "{bad}");
+            assert_eq!(cfg.bindings.len(), 1, "{bad}");
+        }
+    }
+
+    #[test]
+    fn wrong_typed_main_file_falls_back_to_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = write(dir.path(), "config.toml", "[main]\ndpi = \"big\"\n");
+        assert_eq!(
+            read(&main).bindings.len(),
+            Config::defaults().bindings.len()
+        );
+    }
+
+    #[test]
+    fn a_bad_colour_drops_only_itself() {
+        for bad in ["0x102030", "5", "\"#+12345\"", "\"#12345\"", "[1]"] {
+            let cfg = Config::parse(&format!(
+                "[main]\ndpi = 2\n[theme]\nsurface = {bad}\nmuted = \"#000001\"\n\
+                 [osk]\nbg = {bad}\nkey = \"#000002\"\n"
+            ));
+            assert_eq!(cfg.dpi, 2.0, "{bad}");
+            assert_eq!(cfg.theme.surface, Theme::default().surface, "{bad}");
+            assert_eq!(cfg.theme.muted, 0x000001, "{bad}");
+            assert_eq!(cfg.osk.bg, OskColors::default().bg, "{bad}");
+            assert_eq!(cfg.osk.key, 0x000002, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_example_is_the_defaults() {
+        assert_eq!(
+            format!(
+                "{:?}",
+                Config::parse(include_str!("../../../config.example.toml"))
+            ),
+            format!("{:?}", Config::defaults())
+        );
+    }
+
+    #[test]
+    fn built_ins_return_when_no_binding_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = write(
+            dir.path(),
+            "config.toml",
+            "[[keybinds.binding]]\nkey = \"a\"\naction = \"no-such-action\"\n",
+        );
+        assert_eq!(
+            read(&main).bindings.len(),
+            Config::defaults().bindings.len()
+        );
+    }
+
+    #[test]
+    fn built_in_bindings_stay_until_a_file_mentions_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let built_in = Config::defaults().bindings.len();
+        assert!(built_in > 1);
+        write(d, "theme.toml", "[theme]\nmuted = \"#000001\"\n");
+        let theme_only = write(d, "theme-only.toml", "include = [\"theme.toml\"]\n");
+        assert_eq!(read(&theme_only).bindings.len(), built_in);
+
+        let cleared = write(d, "cleared.toml", "[keybinds]\nbinding = []\n");
+        assert!(read(&cleared).bindings.is_empty());
+
+        write(d, "binds.toml", BIND);
+        let over = write(
+            d,
+            "over.toml",
+            "include = [\"binds.toml\"]\n[keybinds]\nbinding = []\n",
+        );
+        assert!(read(&over).bindings.is_empty());
+    }
+
+    #[test]
+    fn a_non_string_app_policy_drops_only_that_entry() {
+        let cfg = Config::parse(
+            "[main]\ndpi = 2\n[resources.apps]\nfoo = 1\ninclude = [\"x\"]\nmaps = \"ignore\"\n",
+        );
+        assert_eq!(cfg.dpi, 2.0);
+        assert_eq!(cfg.resources.apps.len(), 1);
+        assert!(cfg.resources.apps.contains_key("maps"));
+    }
+
+    #[test]
+    fn includes_stop_at_the_read_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let names: Vec<String> = (0..MAX_INCLUDES + 2).map(|i| format!("{i}.toml")).collect();
+        for (i, name) in names.iter().enumerate() {
+            write(d, name, &format!("[main]\nidle_blank_secs = {i}\n"));
+        }
+        let main = write(d, "config.toml", &format!("include = {names:?}\n"));
+        assert_eq!(read(&main).idle_blank_secs, MAX_INCLUDES as u64 - 1);
+    }
+
+    #[test]
+    fn missing_includes_and_cycles_spend_no_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        write(d, "last.toml", "[main]\ndpi = 2\n");
+        let mut names: Vec<String> = (0..MAX_INCLUDES).map(|i| format!("no-{i}.toml")).collect();
+        names.extend(std::iter::repeat_n("config.toml".to_string(), MAX_INCLUDES));
+        names.push("last.toml".to_string());
+        let main = write(d, "config.toml", &format!("include = {names:?}\n"));
+        assert_eq!(read(&main).dpi, 2.0);
+    }
+
+    #[test]
+    fn includer_overrides_and_later_includes_win() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        write(
+            d,
+            "a.toml",
+            "[theme]\nsurface = \"#000001\"\nmuted = \"#000001\"\n",
+        );
+        write(
+            d,
+            "b.toml",
+            "[theme]\nmuted = \"#000002\"\nwarning = \"#000002\"\n",
+        );
+        let main = write(
+            d,
+            "config.toml",
+            "include = [\"a.toml\", \"b.toml\"]\n[theme]\nwarning = \"#000003\"\n",
+        );
+        let t = read(&main).theme;
+        assert_eq!(t.surface, 1);
+        assert_eq!(t.muted, 2);
+        assert_eq!(t.warning, 3);
+    }
+
+    #[test]
+    fn included_bindings_add_up_and_plain_arrays_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let inc = format!("[main]\nstartup = [\"x\"]\n{BIND}");
+        write(d, "binds.toml", &inc);
+        let main = write(
+            d,
+            "config.toml",
+            &format!("include = [\"binds.toml\"]\n[main]\nstartup = []\n{BIND}"),
+        );
+        let cfg = read(&main);
+        assert_eq!(cfg.bindings.len(), 2);
+        assert!(cfg.startup.is_empty());
+    }
+
+    #[test]
+    fn nested_includes_resolve_against_their_own_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        write(d, "themes/base.toml", "[main]\ndpi = 2\n");
+        write(d, "themes/nord.toml", "include = [\"base.toml\"]\n");
+        let main = write(d, "config.toml", "include = [\"themes/nord.toml\"]\n");
+        assert_eq!(read(&main).dpi, 2.0);
+    }
+
+    #[test]
+    fn a_symlinked_config_includes_from_beside_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let store = write(d, "store/config.toml", "include = [\"local.toml\"]\n");
+        write(d, "etc/local.toml", "[main]\ndpi = 2\n");
+        let link = d.join("etc/config.toml");
+        std::os::unix::fs::symlink(store, &link).unwrap();
+        assert_eq!(read(&link).dpi, 2.0);
+    }
+
+    #[test]
+    fn a_bad_include_is_skipped_and_the_rest_applies() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        write(d, "broken.toml", "{{{");
+        let main = write(
+            d,
+            "config.toml",
+            "include = [\"missing.toml\", \"broken.toml\"]\n[main]\ndpi = 2\n",
+        );
+        assert_eq!(read(&main).dpi, 2.0);
+
+        let main = write(d, "c2.toml", "include = \"broken.toml\"\n[main]\ndpi = 2\n");
+        assert_eq!(read(&main).dpi, 2.0);
+    }
+
+    #[test]
+    fn include_cycles_terminate_but_diamonds_keep_both_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let a = write(d, "a.toml", "include = [\"b.toml\"]\n[main]\ndpi = 2\n");
+        write(
+            d,
+            "b.toml",
+            "include = [\"a.toml\"]\n[main]\nidle_blank_secs = 5\n",
+        );
+        let cfg = read(&a);
+        assert_eq!((cfg.dpi, cfg.idle_blank_secs), (2.0, 5));
+
+        write(d, "shared.toml", BIND);
+        write(d, "l.toml", "include = [\"shared.toml\"]\n");
+        write(d, "r.toml", "include = [\"shared.toml\"]\n");
+        let main = write(d, "config.toml", "include = [\"l.toml\", \"r.toml\"]\n");
+        assert_eq!(read(&main).bindings.len(), 2);
+    }
+
+    #[test]
+    fn theme_parses_and_drops_bad_values() {
+        let t = Config::parse("[theme]\nsurface = \"#102030\"\nforeground = \"red\"\n").theme;
+        assert_eq!(t.surface, 0x102030);
+        assert_eq!(t.foreground, Theme::default().foreground);
+        assert_eq!(Config::parse("").theme, Theme::default());
     }
 
     #[test]
@@ -1313,7 +1702,7 @@ mod tests {
         );
         assert!(matches!(
             find("XF86AudioLowerVolume", PressKind::Long).unwrap().action,
-            Action::Command(ref c) if c.contains("wvkbd-mobintl")
+            Action::Command(ref c) if c.contains("sc-osk|wvkbd-mobintl")
         ));
         assert_eq!(
             find("XF86PowerOff", PressKind::Short).unwrap().action,

@@ -461,6 +461,7 @@ impl State {
         let uclamp_min = config.uclamp_min;
         let gpu_min_mhz = config.gpu_min_mhz;
         let vrr = config.vrr;
+        let theme = config.theme;
         let resources = config.resources.clone();
         let bg_allowed_cpus = resources::resolve_allowed_cpus(&resources.bg_allowed_cpus);
         resources::thaw_stale_scopes();
@@ -704,7 +705,7 @@ impl State {
             rotation_await_size: None,
             sensor: sensor::spawn(),
             landscape_hint: false,
-            skia: SkiaGl::new(),
+            skia: SkiaGl::new(theme),
             wayland_socket,
             last_pointer_pos: None,
             last_touch_pos: None,
@@ -794,6 +795,9 @@ impl State {
         self.natural_scroll = config.natural_scroll;
         self.show_touches = config.show_touches;
         self.save_screenshots = config.save_screenshots;
+        self.skia.theme = config.theme;
+        self.skia.drop_backdrop();
+        self.needs_render = true;
         self.idle = blank::Idle::new(config.idle_blank_secs, std::time::Instant::now());
         self.orientation_settle.set_hold(config.rotation_settle_ms);
         // A fade in flight keeps its duration.

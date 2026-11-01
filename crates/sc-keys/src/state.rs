@@ -127,9 +127,14 @@ impl PressTracker {
                 long_fired: false,
             },
         );
-        let chord = self.bindings.chords.iter().find(|(keys, _)| {
-            keys.contains(&keysym) && keys.iter().all(|k| self.held.contains_key(k))
-        });
+        let chord = self
+            .bindings
+            .chords
+            .iter()
+            .filter(|(keys, _)| {
+                keys.contains(&keysym) && keys.iter().all(|k| self.held.contains_key(k))
+            })
+            .max_by_key(|(keys, _)| keys.len());
         let Some((keys, action)) = chord else {
             return PressOutcome::Swallow;
         };
@@ -399,6 +404,38 @@ mod tests {
             assert_eq!(t.on_release(first, at(t0, 950)), PressOutcome::Swallow);
             assert_eq!(t.on_release(second, at(t0, 960)), PressOutcome::Swallow);
         }
+    }
+
+    #[test]
+    fn the_last_binding_of_a_chord_wins() {
+        let mut t = PressTracker::new(bindings().with_chords([
+            (vec![VOL_UP, VOL_DOWN], Action::Command("first".into())),
+            (vec![VOL_DOWN, VOL_UP], Action::Command("last".into())),
+        ]));
+        let base = Instant::now();
+        t.on_press(VOL_UP, ModMask::NONE, base);
+        assert_eq!(
+            t.on_press(VOL_DOWN, ModMask::NONE, at(base, 10)),
+            PressOutcome::Fire(Action::Command("last".into()))
+        );
+    }
+
+    #[test]
+    fn the_chord_with_the_most_keys_wins_whatever_the_order() {
+        let mut t = PressTracker::new(bindings().with_chords([
+            (
+                vec![VOL_UP, VOL_DOWN, UNBOUND],
+                Action::Command("triple".into()),
+            ),
+            (vec![VOL_UP, VOL_DOWN], Action::Command("pair".into())),
+        ]));
+        let base = Instant::now();
+        t.on_press(UNBOUND, ModMask::NONE, base);
+        t.on_press(VOL_UP, ModMask::NONE, at(base, 10));
+        assert_eq!(
+            t.on_press(VOL_DOWN, ModMask::NONE, at(base, 20)),
+            PressOutcome::Fire(Action::Command("triple".into()))
+        );
     }
 
     #[test]

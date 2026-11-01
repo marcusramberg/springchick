@@ -7,7 +7,7 @@ PartOf=graphical-session.target
 [Service]
 # --hidden + --auto: stay off screen until an app focuses a text input.
 # SIGRTMIN cycles the layout — springchick's stock config.toml binds that to
-# a long press on volume-down ("pkill -SIGRTMIN -f wvkbd-mobintl").
+# a long press on volume-down ("pkill -SIGRTMIN 'sc-osk|wvkbd-mobintl'").
 ExecStart=/usr/bin/wvkbd-mobintl --alpha 220 --hidden --auto
 # Wanted by springchick.service, so we come up alongside it and the socket
 # may not exist yet; keep retrying until the compositor publishes

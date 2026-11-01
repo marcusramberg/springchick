@@ -34,7 +34,7 @@ nix build .#checks.aarch64-linux.vm-boot -L
 
 The other checks are `vm-screenshots` (README images; `just screenshots` copies them to `assets/`), `vm-switcher`, `vm-dialog`, `vm-rotation`, `vm-arrange`, `vm-icon-menu`, `vm-library`, `vm-lock`, `vm-capture`, `vm-portal`, `vm-pointer`, `vm-card-mask` and `vm-osk-card` (listed in `flake.nix`).
 
-Build the check matching `builtins.currentSystem`. Cross-building runs the release tree under qemu-user emulation, which SIGSEGVs rustc. `nix/package.nix` filters `src` to `Cargo.toml`/`Cargo.lock`/`crates/`, so edits under `nix/`, `tests/`, `docs/` don't rebuild the compositor.
+Build the check matching `builtins.currentSystem`. Cross-building runs the release tree under qemu-user emulation, which SIGSEGVs rustc. `nix/package.nix` filters `src` to `Cargo.toml`/`Cargo.lock`/`config.example.toml`/`crates/`, so edits under `nix/`, `tests/`, `docs/` don't rebuild the compositor.
 
 ### Running / driving it
 
@@ -44,7 +44,7 @@ A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; 
 
 `springchick ipc layers` dumps every layer surface and layer-rooted popup being composited (namespace, layer, logical geometry, the physical rect, buffer size, pending-map/slide state, anchor and exclusive zone), plus the usable area and regrow-guard state. Run it first when the screen shows something no client admits to, e.g. two on-screen keyboards from one wvkbd process.
 
-`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `save_screenshots`, `prefer_no_csd` (next window to negotiate decorations), `natural_scroll` (next touchpad added), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn), `rotate_ui`, `[xkb]` (the seat keymap). `dpi`, `uclamp_min`, `gpu_min_mhz` and `vrr` are ignored on reload and need a restart.
+`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `save_screenshots`, `prefer_no_csd` (next window to negotiate decorations), `natural_scroll` (next touchpad added), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn), `rotate_ui`, `[xkb]` (the seat keymap), `[theme]`, and any `include`d file. `dpi`, `uclamp_min`, `gpu_min_mhz` and `vrr` are ignored on reload and need a restart.
 
 `reload` also rescans the app catalog (`.desktop` files + icons): newly installed apps land on Home, uninstalled ones leave pages/dock/hidden and lose their frecency stats, and the renderer's uploaded icon textures are dropped so re-themed icons repaint. The catalog rescans itself too: `catalog_watch.rs` inotify-watches every XDG `applications/` dir, so a package-manager install/remove lands without an explicit reload. The watch has a 750 ms debounce, and the rescan runs on the compositor thread at the next event-loop wake, so a blanked screen costs nothing.
 
@@ -59,7 +59,7 @@ crates/
   sc-anim/         Spring physics (critically damped, interruptible)
   sc-catalog/      .desktop scan/parse + field-code stripping + search ranking
   sc-compositor/   The `springchick` binary
-  sc-config/       config.toml parsing: [main] + [keybinds]. Lenient — bad entry dropped, rest applies
+  sc-config/       config.toml parsing: sections, `include`, [theme]. Lenient — bad entry dropped, rest applies
   sc-icons/        Icon theme lookup + resvg → raw RGBA (no Skia dep)
   sc-input/        Gesture recognizer (Tracker/Pt) + nav state machine (NavTarget)
   sc-keys/         Short/long key-press timing rules (types live in sc-config)
@@ -124,6 +124,10 @@ libinput/DRM/GBM/session types are used via `smithay::reexports::*` to avoid ver
 ## Configuration
 
 `config.example.toml` documents every option at its compiled-in default. Lookup order: `$SPRINGCHICK_CONFIG`, then `$XDG_CONFIG_HOME/springchick/config.toml`, then `/etc/springchick/config.toml`. Persisted state (dock, pages, frecency) is separate: `sc_shell_model::persist` writes `state.toml`.
+
+A top-level `include = ["themes/nord.toml"]` merges other files underneath the one naming them. Paths resolve beside the file as named, not through its symlink target, so a store-linked config finds its neighbours. Tables merge by key, `[[tables]]` append, anything else is replaced. An include that fails to parse or holds a wrong-typed value is skipped with a warning. With no usable `keybinds.binding` the built-in bindings apply; `binding = []` clears them.
+
+`[theme]` colours are `"#rrggbb"` strings, `0xRRGGBB` in `sc_config::Theme`; each draw site keeps its own alpha. `SkiaGl::theme` feeds the shell, and `sc-search` reloads it each time it is raised. `sc-osk` keeps its own `[osk]` colours, so a theme file sets both.
 
 Notable options:
 

@@ -41,8 +41,6 @@ const BLUR_SIGMA_LOGICAL: f32 = 8.0;
 /// The switcher backdrop, logical px. Stronger: it pushes all of Home back.
 const BACKDROP_BLUR_SIGMA_LOGICAL: f32 = 18.0;
 
-pub const CLEAR_COLOR: Color32F = Color32F::new(0.06, 0.10, 0.14, 1.0);
-
 /// smithay's `texture.frag` (pin 7ddcd17) plus a rounded-rect SDF mask.
 ///
 /// The mask works in framebuffer px off `gl_FragCoord`, with the card rect as
@@ -674,8 +672,14 @@ fn pass_background(
     let mut frame = renderer
         .render(framebuffer, size, ctx.base())
         .map_err(SwapBuffersError::from)?;
+    let [_, r, g, b] = ctx
+        .skia
+        .theme
+        .background
+        .to_be_bytes()
+        .map(|c| c as f32 / 255.0);
     frame
-        .clear(CLEAR_COLOR, &[damage])
+        .clear(Color32F::new(r, g, b, 1.0), &[damage])
         .map_err(SwapBuffersError::from)?;
 
     for elements in &plan.below_elements {
@@ -1294,7 +1298,7 @@ fn draw_locked(
     let mut frame = renderer
         .render(framebuffer, size, ctx.transform)
         .map_err(SwapBuffersError::from)?;
-    // Black, not `CLEAR_COLOR`: an idle-looking backdrop would hide a dead
+    // Black, not the theme background: an idle-looking backdrop would hide a dead
     // lock client.
     frame
         .clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage])

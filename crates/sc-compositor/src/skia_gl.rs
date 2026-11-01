@@ -8,6 +8,7 @@ use sc_icons::IconPixels;
 use sc_layout::{self, IconSlot, Layout};
 use sc_shell_model::ShellModel;
 
+use sc_config::Theme;
 use skia_safe::gpu::gl::{Format, FramebufferInfo, Interface};
 use skia_safe::gpu::{
     backend_render_targets, direct_contexts, surfaces, Budgeted, DirectContext, SurfaceOrigin,
@@ -43,6 +44,7 @@ pub struct BackdropKey {
 }
 
 pub struct SkiaGl {
+    pub theme: Theme,
     context: Option<DirectContext>,
     gl_get_integerv: Option<GlGetIntegerv>,
     gl_finish: Option<GlFinish>,
@@ -131,6 +133,17 @@ const LAUNCH_DIM: f32 = 0.45;
 const HOME_RECEDE_ZOOM: f32 = 0.15;
 const HOME_RECEDE_DIM: f32 = 0.6;
 
+fn argb(alpha: u8, rgb: u32) -> Color {
+    Color::from_argb(alpha, (rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
+
+/// `t` of the way to white, for the paler rim and glow around `highlight`.
+fn lighten(rgb: u32, t: f32) -> u32 {
+    let [_, r, g, b] = rgb.to_be_bytes();
+    let up = |c: u8| (c as f32 + (255.0 - c as f32) * t).round() as u32;
+    up(r) << 16 | up(g) << 8 | up(b)
+}
+
 fn draw_card_shadow_rrect(canvas: &skia_safe::Canvas, card: &CardDecor) {
     let sigma = (card.w * SHADOW_SIGMA_FRAC).max(1.0);
     let mut paint = Paint::default();
@@ -158,6 +171,7 @@ struct IconAssets<'a> {
     icon_images: &'a HashMap<String, Image>,
     font: &'a Option<Font>,
     app_catalog: &'a HashMap<String, AppEntry>,
+    theme: Theme,
 }
 
 #[derive(Clone, Copy)]
@@ -222,6 +236,7 @@ fn draw_card_title_text(
     title: &str,
     alpha: f32,
     base_font: &Font,
+    foreground: u32,
 ) {
     let alpha = alpha.clamp(0.0, 1.0);
     if alpha <= 0.0 || title.is_empty() {
@@ -269,7 +284,7 @@ fn draw_card_title_text(
 
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    paint.set_color(Color::WHITE);
+    paint.set_color(argb(255, foreground));
     paint.set_alpha_f(alpha);
     canvas.draw_text_blob(&blob, (x0, baseline), &paint);
 
@@ -318,8 +333,9 @@ struct CachedSurface {
 }
 
 impl SkiaGl {
-    pub fn new() -> Self {
+    pub fn new(theme: Theme) -> Self {
         Self {
+            theme,
             context: None,
             gl_get_integerv: None,
             gl_finish: None,
@@ -462,7 +478,7 @@ impl SkiaGl {
         canvas.translate((menu.anchor.0, menu.anchor.1));
         canvas.scale((scale, scale));
         canvas.translate((-menu.anchor.0, -menu.anchor.1));
-        draw_menu_panel(canvas, menu, &self.font, p);
+        draw_menu_panel(canvas, menu, &self.font, p, self.theme);
         canvas.restore();
 
         if let Some(ctx) = self.context.as_mut() {
@@ -509,12 +525,12 @@ impl SkiaGl {
         let radius = p.w * 0.06;
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
-        paint.set_color(Color::from_argb(235, 28, 28, 32));
+        paint.set_color(argb(235, self.theme.surface));
         canvas.draw_rrect(RRect::new_rect_xy(card, radius, radius), &paint);
 
         if let Some(f) = &self.font {
             let mut text = Paint::default();
-            text.set_color(Color::WHITE);
+            text.set_color(argb(255, self.theme.foreground));
             if let Some(blob) = TextBlob::new(&folder.title, f) {
                 let tw = f.measure_str(&folder.title, None).0;
                 let t = folder.layout.title_rect;
@@ -538,6 +554,7 @@ impl SkiaGl {
             icon_images: &self.icon_images,
             font: &self.font,
             app_catalog,
+            theme: self.theme,
         };
         for (i, slot) in folder.layout.apps.iter().enumerate() {
             draw_icon_slot(
@@ -648,6 +665,7 @@ impl SkiaGl {
             icon_images: &self.icon_images,
             font: &self.font,
             app_catalog,
+            theme: self.theme,
         };
         let cues = |slot: &IconSlot| IconCues {
             pressed: pressed_app == Some(slot.app_id.as_str()),
@@ -662,32 +680,32 @@ impl SkiaGl {
             canvas.save();
             canvas.translate((lib.x_offset, 0.0));
             for (tile, preview) in lib.tiles.iter().zip(lib.previews.iter()) {
-                draw_folder_tile(canvas, tile, preview, &self.icon_images, &self.font);
+                draw_folder_tile(canvas, tile, preview, assets);
             }
             canvas.restore();
         }
 
         let mut current_layout = sc_layout::compute(width as f32, height as f32, page, model);
 
-        draw_dock_frame(canvas, &current_layout);
+        draw_dock_frame(canvas, &current_layout, self.theme.foreground);
         let dock_slots = visible_dock_slots(&current_layout, dock_positions);
         for slot in &dock_slots {
             draw_icon_slot(canvas, slot, assets, cues(slot));
         }
 
-        draw_dots(canvas, &current_layout, page);
+        draw_dots(canvas, &current_layout, page, self.theme.foreground);
 
         // No bar here: the chrome overlay draws the pill.
 
         if let Some(view) = arrange {
             for slot in anim_slots.iter().chain(dock_slots.iter()) {
-                draw_remove_badge(canvas, slot);
+                draw_remove_badge(canvas, slot, self.theme);
             }
             current_layout.avoid_cutouts(&view.cutouts);
-            draw_arrange_buttons(canvas, &current_layout, &self.font);
+            draw_arrange_buttons(canvas, &current_layout, &self.font, self.theme.foreground);
 
             if view.over_dock {
-                draw_dock_highlight(canvas, &current_layout);
+                draw_dock_highlight(canvas, &current_layout, self.theme.foreground);
             }
 
             if let (Some(app_id), Some(pos)) = (view.drag_app, view.drag_pos) {
@@ -817,8 +835,9 @@ impl SkiaGl {
             Some(c) => sc_layout::pill_under(c, width as f32, height as f32),
             None => sc_layout::pill_rect(width as f32, height as f32),
         };
+        let foreground = self.theme.foreground;
         self.with_overlay_canvas(width, height, flip_y, |canvas| {
-            draw_pill(canvas, pill, alpha)
+            draw_pill(canvas, pill, alpha, foreground)
         });
     }
 
@@ -835,8 +854,17 @@ impl SkiaGl {
         if alpha <= 0.0 {
             return;
         }
+        let theme = self.theme;
         self.with_overlay_canvas(width, height, flip_y, |canvas| {
-            draw_volume_osd(canvas, width as f32, height as f32, level, muted, alpha);
+            draw_volume_osd(
+                canvas,
+                width as f32,
+                height as f32,
+                level,
+                muted,
+                alpha,
+                theme,
+            );
         });
     }
 
@@ -1034,7 +1062,7 @@ impl SkiaGl {
                 }
             }
             if let (Some((title, alpha)), Some(font)) = (c.title, &self.font) {
-                draw_card_title_text(canvas, card, title, alpha, font);
+                draw_card_title_text(canvas, card, title, alpha, font, self.theme.foreground);
             }
             canvas.restore();
         }
@@ -1066,8 +1094,9 @@ impl SkiaGl {
 
     /// White pop, an edge glow and stars along the rim, all fading by `t` = 1.
     pub fn draw_screenshot_flash(&mut self, width: i32, height: i32, t: f32, flip_y: bool) {
+        let highlight = self.theme.highlight;
         self.with_overlay_canvas(width, height, flip_y, |canvas| {
-            draw_screenshot_flash(canvas, width as f32, height as f32, t);
+            draw_screenshot_flash(canvas, width as f32, height as f32, t, highlight);
         });
     }
 
@@ -1081,8 +1110,9 @@ impl SkiaGl {
         if marks.is_empty() {
             return;
         }
+        let highlight = self.theme.highlight;
         self.with_overlay_canvas(width, height, flip_y, |canvas| {
-            draw_touch_marks(canvas, marks);
+            draw_touch_marks(canvas, marks, highlight);
         });
     }
 
@@ -1151,7 +1181,7 @@ fn draw_cursor_arrow(canvas: &skia_safe::Canvas, x: f32, y: f32, scale: f32) {
     canvas.draw_path(&path, &fill);
 }
 
-fn draw_screenshot_flash(canvas: &skia_safe::Canvas, w: f32, h: f32, t: f32) {
+fn draw_screenshot_flash(canvas: &skia_safe::Canvas, w: f32, h: f32, t: f32, highlight: u32) {
     let a = |x: f32| (x * 255.0).round().clamp(0.0, 255.0) as u8;
     let full = Rect::from_xywh(0.0, 0.0, w, h);
 
@@ -1167,7 +1197,7 @@ fn draw_screenshot_flash(canvas: &skia_safe::Canvas, w: f32, h: f32, t: f32) {
     glow.set_anti_alias(true);
     glow.set_stroke(true);
     glow.set_stroke_width(glow_w);
-    glow.set_color(Color::from_argb(a((1.0 - t).powi(2) * 0.85), 255, 248, 225));
+    glow.set_color(argb(a((1.0 - t).powi(2) * 0.85), lighten(highlight, 0.85)));
     glow.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, glow_w * 0.6, false));
     let radius = w.min(h) * 0.06;
     canvas.draw_rrect(RRect::new_rect_xy(full, radius, radius), &glow);
@@ -1175,7 +1205,7 @@ fn draw_screenshot_flash(canvas: &skia_safe::Canvas, w: f32, h: f32, t: f32) {
     for s in crate::screenshot::sparkles(w, h, t) {
         let mut halo = Paint::default();
         halo.set_anti_alias(true);
-        halo.set_color(Color::from_argb(a(s.alpha * 0.45), 255, 235, 170));
+        halo.set_color(argb(a(s.alpha * 0.45), lighten(highlight, 0.55)));
         halo.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, s.size * 0.35, false));
         canvas.draw_circle((s.x, s.y), s.size * 0.45, &halo);
 
@@ -1195,30 +1225,31 @@ fn draw_screenshot_flash(canvas: &skia_safe::Canvas, w: f32, h: f32, t: f32) {
     }
 }
 
-fn draw_touch_marks(canvas: &skia_safe::Canvas, marks: &[crate::touch_viz::TouchMark]) {
-    const R: u8 = 255;
-    const G: u8 = 205;
-    const B: u8 = 70;
+fn draw_touch_marks(
+    canvas: &skia_safe::Canvas,
+    marks: &[crate::touch_viz::TouchMark],
+    highlight: u32,
+) {
     for m in marks {
         let a = |x: f32| (x * m.alpha).round().clamp(0.0, 255.0) as u8;
         if m.filled {
             let mut fill = Paint::default();
             fill.set_anti_alias(true);
-            fill.set_color(Color::from_argb(a(255.0), R, G, B));
+            fill.set_color(argb(a(255.0), highlight));
             canvas.draw_circle((m.x, m.y), m.radius, &fill);
 
             let mut rim = Paint::default();
             rim.set_anti_alias(true);
             rim.set_stroke(true);
             rim.set_stroke_width(m.radius * 0.10);
-            rim.set_color(Color::from_argb(a(255.0), 255, 235, 170));
+            rim.set_color(argb(a(255.0), lighten(highlight, 0.55)));
             canvas.draw_circle((m.x, m.y), m.radius, &rim);
         } else {
             let mut ring = Paint::default();
             ring.set_anti_alias(true);
             ring.set_stroke(true);
             ring.set_stroke_width(m.radius * 0.12);
-            ring.set_color(Color::from_argb(a(255.0), R, G, B));
+            ring.set_color(argb(a(255.0), highlight));
             canvas.draw_circle((m.x, m.y), m.radius, &ring);
         }
     }
@@ -1231,6 +1262,7 @@ fn draw_volume_osd(
     level: f32,
     muted: bool,
     alpha: f32,
+    theme: Theme,
 ) {
     let a = |x: f32| (x * alpha).round().clamp(0.0, 255.0) as u8;
 
@@ -1245,7 +1277,7 @@ fn draw_volume_osd(
     let pad = track_w * 0.35;
     let mut backing = Paint::default();
     backing.set_anti_alias(true);
-    backing.set_color(Color::from_argb(a(170.0), 20, 20, 24));
+    backing.set_color(argb(a(170.0), theme.surface));
     let backing_rect = Rect::new(x - pad, y - pad, x + track_w + pad, y + track_h + pad);
     canvas.draw_rrect(
         RRect::new_rect_xy(backing_rect, radius + pad, radius + pad),
@@ -1254,23 +1286,23 @@ fn draw_volume_osd(
 
     let mut track = Paint::default();
     track.set_anti_alias(true);
-    track.set_color(Color::from_argb(a(90.0), 40, 40, 40));
+    track.set_color(argb(a(10.0), theme.foreground));
     let track_rect = Rect::new(x, y, x + track_w, y + track_h);
     canvas.draw_rrect(RRect::new_rect_xy(track_rect, radius, radius), &track);
 
     let frac = level.clamp(0.0, 1.0);
     let fill_h = track_h * frac;
     let fill_top = y + track_h - fill_h;
-    let (r, g, b) = if muted {
-        (110, 110, 120)
+    let level_color = if muted {
+        theme.muted
     } else if level > 1.0 {
-        (255, 170, 60)
+        theme.warning
     } else {
-        (255, 255, 255)
+        theme.foreground
     };
     let mut fill = Paint::default();
     fill.set_anti_alias(true);
-    fill.set_color(Color::from_argb(a(235.0), r, g, b));
+    fill.set_color(argb(a(235.0), level_color));
     if fill_h > 0.5 {
         let fill_rect = Rect::new(x, fill_top, x + track_w, y + track_h);
         canvas.draw_rrect(RRect::new_rect_xy(fill_rect, radius, radius), &fill);
@@ -1279,19 +1311,13 @@ fn draw_volume_osd(
     if muted {
         let mut slash = Paint::default();
         slash.set_anti_alias(true);
-        slash.set_color(Color::from_argb(a(235.0), 235, 90, 90));
+        slash.set_color(argb(a(235.0), theme.danger));
         slash.set_stroke_width(track_w * 0.22);
         slash.set_stroke(true);
         let cx = x + track_w / 2.0;
         let cy = y + track_h / 2.0;
         let r = track_w * 1.1;
         canvas.draw_line((cx - r, cy - r), (cx + r, cy + r), &slash);
-    }
-}
-
-impl Default for SkiaGl {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -1317,6 +1343,7 @@ fn draw_icon_slot(
         icon_images,
         font,
         app_catalog,
+        theme,
     } = assets;
     let IconCues {
         pressed,
@@ -1332,7 +1359,7 @@ fn draw_icon_slot(
     if pressed && launching.is_none() {
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
-        paint.set_color(Color::from_argb(60, 255, 255, 255));
+        paint.set_color(argb(60, theme.foreground));
         let pad = slot.icon_rect.w * 0.12;
         let rect = Rect::new(
             slot.icon_rect.x - pad,
@@ -1362,7 +1389,7 @@ fn draw_icon_slot(
         canvas.draw_image_rect(image, None, icon_dst, &paint);
     } else {
         let mut paint = Paint::default();
-        paint.set_color(Color::from_argb(255, 80, 80, 100));
+        paint.set_color(argb(115, theme.muted));
         let rrect = RRect::new_rect_xy(icon_dst, 20.0, 20.0);
         canvas.draw_rrect(rrect, &paint);
     }
@@ -1370,7 +1397,7 @@ fn draw_icon_slot(
     if running {
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
-        paint.set_color(Color::from_argb(200, 255, 255, 255));
+        paint.set_color(argb(200, theme.foreground));
         let d = slot.dot_rect;
         canvas.draw_circle((d.center_x(), d.center_y()), d.w / 2.0, &paint);
     }
@@ -1378,7 +1405,7 @@ fn draw_icon_slot(
     if let Some(entry) = app_catalog.get(&slot.app_id) {
         if let Some(f) = font {
             let mut paint = Paint::default();
-            paint.set_color(Color::WHITE);
+            paint.set_color(argb(255, theme.foreground));
             // Long names would run under their neighbours' labels.
             let name = ellipsize(f, &entry.name, slot.label_rect.w);
             if let Some(blob) = TextBlob::new(&name, f) {
@@ -1395,14 +1422,19 @@ fn draw_folder_tile(
     canvas: &skia_safe::Canvas,
     slot: &sc_layout::library::FolderSlot,
     preview: &[String],
-    icon_images: &HashMap<String, Image>,
-    font: &Option<Font>,
+    assets: IconAssets<'_>,
 ) {
+    let IconAssets {
+        icon_images,
+        font,
+        theme,
+        ..
+    } = assets;
     let t = slot.tile_rect;
     let rect = Rect::new(t.x, t.y, t.x + t.w, t.y + t.h);
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    paint.set_color(Color::from_argb(56, 255, 255, 255));
+    paint.set_color(argb(56, theme.foreground));
     canvas.draw_rrect(RRect::new_rect_xy(rect, t.w * 0.22, t.w * 0.22), &paint);
 
     for (r, app_id) in slot.preview.iter().zip(preview.iter()) {
@@ -1414,7 +1446,7 @@ fn draw_folder_tile(
 
     if let Some(f) = font {
         let mut paint = Paint::default();
-        paint.set_color(Color::WHITE);
+        paint.set_color(argb(255, theme.foreground));
         if let Some(blob) = TextBlob::new(&slot.name, f) {
             let text_width = f.measure_str(&slot.name, None).0;
             let x = slot.label_rect.x + (slot.label_rect.w - text_width) / 2.0;
@@ -1450,6 +1482,7 @@ fn draw_menu_panel(
     menu: &crate::render::MenuView,
     font: &Option<Font>,
     progress: f32,
+    theme: Theme,
 ) {
     let a = |alpha: f32| (alpha * progress).clamp(0.0, 255.0) as u8;
     let panel = &menu.layout.panel;
@@ -1469,7 +1502,7 @@ fn draw_menu_panel(
     // Fully opaque: any bleed-through ghosts the icon labels across the rows.
     let mut bg = Paint::default();
     bg.set_anti_alias(true);
-    bg.set_color(Color::from_argb(a(255.0), 28, 30, 36));
+    bg.set_color(argb(a(255.0), theme.surface));
     canvas.draw_rrect(RRect::new_rect_xy(panel_rect, radius, radius), &bg);
 
     for (i, row) in menu.layout.items.iter().enumerate() {
@@ -1477,12 +1510,12 @@ fn draw_menu_panel(
         if menu.pressed == Some(i) {
             let mut hl = Paint::default();
             hl.set_anti_alias(true);
-            hl.set_color(Color::from_argb(a(50.0), 255, 255, 255));
+            hl.set_color(argb(a(50.0), theme.foreground));
             canvas.draw_rect(rect, &hl);
         }
         if i > 0 {
             let mut sep = Paint::default();
-            sep.set_color(Color::from_argb(a(40.0), 255, 255, 255));
+            sep.set_color(argb(a(40.0), theme.foreground));
             let inset = row.w * 0.05;
             canvas.draw_rect(
                 Rect::new(row.x + inset, row.y, row.x + row.w - inset, row.y + 1.0),
@@ -1501,18 +1534,21 @@ fn draw_menu_panel(
         };
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
-        paint.set_color(if *destructive {
-            Color::from_argb(a(255.0), 255, 120, 110)
-        } else {
-            Color::from_argb(a(255.0), 255, 255, 255)
-        });
+        paint.set_color(argb(
+            a(255.0),
+            if *destructive {
+                theme.danger
+            } else {
+                theme.foreground
+            },
+        ));
         let (_, metrics) = f.metrics();
         let y = row.y + row.h / 2.0 - (metrics.ascent + metrics.descent) / 2.0;
         canvas.draw_text_blob(&blob, (x, y), &paint);
     }
 }
 
-fn draw_dots(canvas: &skia_safe::Canvas, layout: &Layout, current_page: usize) {
+fn draw_dots(canvas: &skia_safe::Canvas, layout: &Layout, current_page: usize, foreground: u32) {
     let dot_radius = 6.0_f32;
     let dot_spacing = 20.0_f32;
     let total_width = layout.page_count as f32 * dot_spacing;
@@ -1523,20 +1559,16 @@ fn draw_dots(canvas: &skia_safe::Canvas, layout: &Layout, current_page: usize) {
         let cx = start_x + i as f32 * dot_spacing + dot_spacing / 2.0;
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
-        if i == current_page {
-            paint.set_color(Color::WHITE);
-        } else {
-            paint.set_color(Color::from_argb(128, 255, 255, 255));
-        }
+        paint.set_color(argb(if i == current_page { 255 } else { 128 }, foreground));
         canvas.draw_circle((cx, cy), dot_radius, &paint);
     }
 }
 
-fn draw_pill(canvas: &skia_safe::Canvas, pill: sc_layout::Rect, alpha: f32) {
+fn draw_pill(canvas: &skia_safe::Canvas, pill: sc_layout::Rect, alpha: f32, foreground: u32) {
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     let a = (180.0 * alpha.clamp(0.0, 1.0)).round() as u8;
-    paint.set_color(Color::from_argb(a, 255, 255, 255));
+    paint.set_color(argb(a, foreground));
 
     let rect = Rect::new(pill.x, pill.y, pill.x + pill.w, pill.y + pill.h);
     let radius = pill.h / 2.0;
@@ -1544,7 +1576,7 @@ fn draw_pill(canvas: &skia_safe::Canvas, pill: sc_layout::Rect, alpha: f32) {
     canvas.draw_rrect(rrect, &paint);
 }
 
-fn draw_remove_badge(canvas: &skia_safe::Canvas, slot: &IconSlot) {
+fn draw_remove_badge(canvas: &skia_safe::Canvas, slot: &IconSlot, theme: Theme) {
     let r = &slot.badge_rect;
     let cx = r.center_x();
     let cy = r.center_y();
@@ -1552,22 +1584,27 @@ fn draw_remove_badge(canvas: &skia_safe::Canvas, slot: &IconSlot) {
 
     let mut fill = Paint::default();
     fill.set_anti_alias(true);
-    fill.set_color(Color::from_argb(255, 220, 50, 50));
+    fill.set_color(argb(255, theme.badge));
     canvas.draw_circle((cx, cy), radius, &fill);
 
     let mut stroke = Paint::default();
     stroke.set_anti_alias(true);
-    stroke.set_color(Color::WHITE);
+    stroke.set_color(argb(255, theme.foreground));
     stroke.set_stroke_width((radius * 0.22).max(1.5));
     let half = radius * 0.5;
     canvas.draw_line((cx - half, cy), (cx + half, cy), &stroke);
 }
 
 /// Over the hidden status bar: a "+" disc on the left, bare "Done" on the right.
-fn draw_arrange_buttons(canvas: &skia_safe::Canvas, layout: &Layout, font: &Option<Font>) {
+fn draw_arrange_buttons(
+    canvas: &skia_safe::Canvas,
+    layout: &Layout,
+    font: &Option<Font>,
+    foreground: u32,
+) {
     let mut fill = Paint::default();
     fill.set_anti_alias(true);
-    fill.set_color(Color::from_argb(60, 255, 255, 255));
+    fill.set_color(argb(60, foreground));
     let add = &layout.add_button;
     let radius = add.h * 0.3;
     let (cx, cy) = (add.x + radius, add.center_y());
@@ -1575,7 +1612,7 @@ fn draw_arrange_buttons(canvas: &skia_safe::Canvas, layout: &Layout, font: &Opti
 
     let mut stroke = Paint::default();
     stroke.set_anti_alias(true);
-    stroke.set_color(Color::WHITE);
+    stroke.set_color(argb(255, foreground));
     stroke.set_stroke_width((radius * 0.14).max(1.5));
     stroke.set_stroke_cap(skia_safe::paint::Cap::Round);
     let half = radius * 0.5;
@@ -1595,21 +1632,21 @@ fn draw_arrange_buttons(canvas: &skia_safe::Canvas, layout: &Layout, font: &Opti
     let y = done.center_y() - (metrics.ascent + metrics.descent) / 2.0;
     let mut text = Paint::default();
     text.set_anti_alias(true);
-    text.set_color(Color::WHITE);
+    text.set_color(argb(255, foreground));
     canvas.draw_str("Done", (done.x + done.w - width, y), &f, &text);
 }
 
-fn draw_dock_highlight(canvas: &skia_safe::Canvas, layout: &Layout) {
+fn draw_dock_highlight(canvas: &skia_safe::Canvas, layout: &Layout, foreground: u32) {
     let z = &layout.dock_zone;
     let rect = Rect::new(z.x, z.y, z.x + z.w, z.y + z.h);
 
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    paint.set_color(Color::from_argb(70, 255, 255, 255));
+    paint.set_color(argb(70, foreground));
     canvas.draw_rect(rect, &paint);
 }
 
-fn draw_dock_frame(canvas: &skia_safe::Canvas, layout: &Layout) {
+fn draw_dock_frame(canvas: &skia_safe::Canvas, layout: &Layout, foreground: u32) {
     let z = &layout.dock_zone;
     // Full band height: dock icons already sit tight to its top.
     let inset = z.h * 0.16;
@@ -1619,7 +1656,7 @@ fn draw_dock_frame(canvas: &skia_safe::Canvas, layout: &Layout) {
     paint.set_anti_alias(true);
     paint.set_style(skia_safe::paint::Style::Stroke);
     paint.set_stroke_width((z.h * 0.012).max(1.0));
-    paint.set_color(Color::from_argb(48, 255, 255, 255));
+    paint.set_color(argb(48, foreground));
     canvas.draw_round_rect(rect, z.h * 0.22, z.h * 0.22, &paint);
 }
 
@@ -1702,6 +1739,21 @@ mod tests {
     use super::*;
     use sc_shell_model::ShellModel;
     use std::collections::HashMap;
+
+    #[test]
+    fn lighten_runs_from_the_colour_to_white() {
+        assert_eq!(lighten(0xffcd46, 0.0), 0xffcd46);
+        assert_eq!(lighten(0xffcd46, 1.0), 0xffffff);
+        assert_eq!(lighten(0x204060, 0.5), 0x90a0b0);
+    }
+
+    #[test]
+    fn argb_keeps_channel_order() {
+        assert_eq!(
+            argb(0x12, 0x345678),
+            Color::from_argb(0x12, 0x34, 0x56, 0x78)
+        );
+    }
 
     fn on_screen_positions(apps: &[&str]) -> HashMap<String, (f32, f32)> {
         let mut gp = HashMap::new();

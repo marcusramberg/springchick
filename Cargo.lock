@@ -2771,6 +2771,7 @@ name = "sc-config"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "tempfile",
  "toml 0.8.23",
  "tracing",
 ]
@@ -2848,6 +2849,7 @@ dependencies = [
  "egui",
  "raw-window-handle",
  "sc-catalog",
+ "sc-config",
  "sc-fonts",
  "sc-icons",
  "sc-shell-model",

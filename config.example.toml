@@ -8,6 +8,15 @@
 # Unknown keys are ignored; a bad entry is dropped with a warning and the rest
 # still applies. `springchick ipc reload` applies changes live, except `dpi`,
 # `uclamp_min`, `gpu_min_mhz` and `vrr` (restart needed) and `prefer_no_csd` (new windows only).
+#
+# Other TOML files to merge in, for example a theme. Must come before the first
+# [section]. Relative paths start from the file naming them, and included files
+# can include others. Later files override earlier ones and this file overrides
+# them all; [[keybinds.binding]] entries add up instead, the last for the same
+# key, mods and press winning, and for a chord the most keys, then the last. A
+# missing or broken include is skipped with a warning, as is any past the 256th.
+# include = ["themes/nord.toml", "keybinds.toml"]
+
 [main]
 # Shell commands run via `sh -c` once the Wayland socket exists.
 # startup = [
@@ -94,6 +103,19 @@ options = ""     # e.g. "grp:win_space_toggle"
 [predict]
 dictionaries = []   # e.g. ["nb", "en_US"]
 
+# Shell colours, "#rrggbb". Shadows, dims, the pointer and the camera-flash pop
+# and stars stay fixed. The search app rereads these each time it opens; the
+# keyboard has its own [osk] colours, which only apply when it starts.
+[theme]
+background = "#0f1a24"   # behind Home and windows, tints the search backdrop
+surface = "#1c1e24"      # icon menu, folders, volume indicator
+foreground = "#ffffff"   # labels, dots, pill, and faint highlights and tiles
+muted = "#969ca8"        # secondary search text, muted volume, missing icons
+danger = "#ff786e"       # destructive menu rows, the mute slash
+badge = "#dc3232"        # the remove badge in arrange mode
+warning = "#ffaa3c"      # volume above 100%
+highlight = "#ffcd46"    # touch markers, screenshot glow
+
 # On-screen keyboard colours, "#rrggbb". A bad value keeps its default.
 [osk]
 bg = "#1c1c1e"             # behind the keys
@@ -163,6 +185,8 @@ freeze_wake_for_secs = 3
 # Hold time (ms) before a "long" binding fires instead of "short".
 long_press_ms = 800
 
+# With no usable binding the ones below apply; `binding = []` leaves none.
+#
 # Each binding: `key` (xkb keysym), `press` ("short", the default, or "long"), and either
 # `action` or `command` (run via `sh -c`). Optional `mods`: any of
 # "Ctrl", "Alt", "Shift", "Super".
@@ -194,7 +218,7 @@ action = "volume-down"
 [[keybinds.binding]]
 key = "XF86AudioLowerVolume"
 press = "long"
-command = "pkill -SIGRTMIN sc-osk"
+command = "pkill -SIGRTMIN 'sc-osk|wvkbd-mobintl'"
 
 [[keybinds.binding]]
 key = "XF86PowerOff"
