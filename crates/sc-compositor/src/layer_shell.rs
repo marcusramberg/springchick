@@ -7,10 +7,11 @@
 
 use sc_layout::Rect;
 use smithay::backend::renderer::utils::{with_renderer_surface_state, Buffer};
+use smithay::desktop::utils::under_from_surface_tree;
 use smithay::desktop::{layer_map_for_output, LayerSurface, WindowSurfaceType};
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Rectangle};
+use smithay::utils::{Logical, Point, Rectangle};
 use smithay::wayland::compositor::{with_states, SurfaceAttributes};
 use smithay::wayland::shell::wlr_layer::{
     KeyboardInteractivity, Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData,
@@ -656,7 +657,19 @@ impl LayerShell {
                 if let Some(geo) = map.layer_geometry(layer) {
                     // The animated position, so a tap lands where the surface is drawn.
                     let rect = self.place(layer.wl_surface(), geo, dpi);
-                    if rect.contains(x, y) {
+                    if !rect.contains(x, y) {
+                        continue;
+                    }
+                    let local = Point::from(((x - rect.x) as f64 / dpi, (y - rect.y) as f64 / dpi));
+                    // Outside the input region the tap belongs to whatever is below.
+                    if under_from_surface_tree(
+                        layer.wl_surface(),
+                        local,
+                        (0, 0),
+                        WindowSurfaceType::ALL,
+                    )
+                    .is_some()
+                    {
                         return Some((layer.wl_surface().clone(), (rect.x as i32, rect.y as i32)));
                     }
                 }
