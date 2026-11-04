@@ -14,6 +14,9 @@ pub enum DebugCmd {
         from: (f32, f32),
         to: (f32, f32),
         dur_ms: u32,
+        /// `tswipe`: a finger through `touch::down`/`motion`/`up`, so a client
+        /// under it scrolls; `swipe` only feeds the shell's gesture funnel.
+        touch: bool,
     },
     Settle {
         timeout_ms: u32,
@@ -166,7 +169,7 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
             done(tok)?;
             DebugCmd::Quit
         }
-        "swipe" => {
+        "swipe" | "tswipe" => {
             let x1 = num(&mut tok)?;
             let y1 = num(&mut tok)?;
             let x2 = num(&mut tok)?;
@@ -180,6 +183,7 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
                 from: (x1, y1),
                 to: (x2, y2),
                 dur_ms,
+                touch: verb == "tswipe",
             }
         }
         "key" => {
@@ -273,6 +277,7 @@ pub struct ActiveGesture {
     from: (f32, f32),
     to: (f32, f32),
     started: bool,
+    touch: bool,
     reply: SyncSender<Reply>,
 }
 
@@ -428,13 +433,19 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             input_common::on_release(state);
             let _ = reply.send("ok\n".into());
         }
-        DebugCmd::Swipe { from, to, dur_ms } => {
+        DebugCmd::Swipe {
+            from,
+            to,
+            dur_ms,
+            touch,
+        } => {
             state.active_gesture = Some(ActiveGesture {
                 start: Instant::now(),
                 dur_ms,
                 from,
                 to,
                 started: false,
+                touch,
                 reply,
             });
         }
@@ -595,9 +606,15 @@ fn advance_gesture(state: &mut State) {
     // right after the press stamped `last_motion`, reads as tens of screens per
     // second, and on a slow output the phantom speed survives to the release as
     // a flick.
+    let slot = smithay::backend::input::TouchSlot::from(Some(0));
     if !g.started {
-        input_common::on_motion(state, g.from.0, g.from.1);
-        input_common::on_press(state);
+        if g.touch {
+            crate::touch::down(state, g.from.0, g.from.1, slot, InputTime::now());
+            crate::touch::frame(state);
+        } else {
+            input_common::on_motion(state, g.from.0, g.from.1);
+            input_common::on_press(state);
+        }
         g.started = true;
         g.start = Instant::now();
         state.active_gesture = Some(g);
@@ -607,10 +624,20 @@ fn advance_gesture(state: &mut State) {
     let elapsed = g.start.elapsed().as_millis() as f32;
     let t = swipe_t(elapsed, g.dur_ms);
     let (px, py) = sc_anim::lerp_point(g.from, g.to, t);
-    input_common::on_motion(state, px, py);
+    if g.touch {
+        crate::touch::motion(state, px, py, slot, InputTime::now());
+        crate::touch::frame(state);
+    } else {
+        input_common::on_motion(state, px, py);
+    }
 
     if t >= 1.0 {
-        input_common::on_release(state);
+        if g.touch {
+            crate::touch::up(state, slot, InputTime::now());
+            crate::touch::frame(state);
+        } else {
+            input_common::on_release(state);
+        }
         let _ = g.reply.send("ok\n".into());
     } else {
         state.active_gesture = Some(g);
@@ -768,7 +795,8 @@ mod tests {
             Ok(DebugCmd::Swipe {
                 from: (1.0, 2.0),
                 to: (3.0, 4.0),
-                dur_ms: 500
+                dur_ms: 500,
+                touch: false
             })
         );
         assert_eq!(
@@ -776,7 +804,21 @@ mod tests {
             Ok(DebugCmd::Swipe {
                 from: (1.0, 2.0),
                 to: (3.0, 4.0),
-                dur_ms: 200
+                dur_ms: 200,
+                touch: false
+            })
+        );
+    }
+
+    #[test]
+    fn parses_tswipe_as_touch_swipe() {
+        assert_eq!(
+            parse_line("tswipe 1 2 3 4 300", W, H),
+            Ok(DebugCmd::Swipe {
+                from: (1.0, 2.0),
+                to: (3.0, 4.0),
+                dur_ms: 300,
+                touch: true
             })
         );
     }

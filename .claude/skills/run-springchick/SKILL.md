@@ -70,7 +70,8 @@ the compositor — only `crates/`, `Cargo.toml`, `Cargo.lock` do.
 A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`
 (override with `SPRINGCHICK_IPC_SOCK`). The shipped `springchick ipc <verb>`
 client sends one line and prints the reply (exit non-zero on error). Verbs are
-the debug-input gestures: `tap X Y`, `swipe X1 Y1 X2 Y2 [MS]`, `key NAME [MS]`,
+the debug-input gestures: `tap X Y`, `swipe X1 Y1 X2 Y2 [MS]` (shell only),
+`tswipe X1 Y1 X2 Y2 [MS]` (wl_touch finger drag, reaches the client), `key NAME [MS]`,
 `keydown NAME` / `keyup NAME`, `down/move/up`, `settle [MS]`, plus
 `action NAME` (run a built-in keybinding action — `screenshot`, `home`,
 `close-app`, … — without going through a key), the control verb `reload`
