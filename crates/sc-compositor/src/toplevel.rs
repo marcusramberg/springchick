@@ -313,6 +313,9 @@ impl State {
             wl_app_id,
             logged_size: None,
             rotation: rotation::Rotation::None,
+            dialog: false,
+            oversize: false,
+            shown_at: None,
         }));
 
         if !is_search {
@@ -356,23 +359,23 @@ impl State {
         for (idx, slot) in self.toplevels.iter_mut().enumerate() {
             if let Some(tl) = slot {
                 if tl.surface.wl_surface() == surface {
-                    // The xdg resource is gone by the time close_toplevel runs.
-                    closed = Some((idx, Self::is_dialog(&tl.surface)));
+                    closed = Some(idx);
                     *slot = None;
                     break;
                 }
             }
         }
-        if let Some((id, was_dialog)) = closed {
-            self.close_toplevel(id, was_dialog);
+        if let Some(id) = closed {
+            self.close_toplevel(id);
         }
     }
 
-    /// `was_dialog`: a dialog (e.g. a portal file chooser, a separate process)
-    /// hands the screen back to the app behind it; an app close goes Home.
-    pub(crate) fn close_toplevel(&mut self, id: ToplevelId, was_dialog: bool) {
+    /// A window the client closes hands the screen back to the app behind it
+    /// (a dialog, or a portal's unparented GTK3 dialog in its own process).
+    /// Only [`Self::close_front_app`] goes Home.
+    pub(crate) fn close_toplevel(&mut self, id: ToplevelId) {
         self.detach_toplevel(id);
-        let next = if was_dialog { self.mru_app() } else { None };
+        let next = self.mru_app();
         transition(&mut self.ui, UiEvent::ToplevelClosed { toplevel: id, next });
     }
 
@@ -983,8 +986,9 @@ impl State {
             .is_inhibited(visible.as_ref(), |s| layers.is_mapped_layer(s))
     }
 
-    /// `set_parent` (in-process dialogs) or the xdg-dialog hint (portal file
-    /// choosers, a separate process).
+    /// `set_parent` (in-process dialogs) or a modal xdg-dialog hint (portal
+    /// file choosers, a separate process). GTK4 binds xdg_dialog_v1 to every
+    /// window, so a plain `Dialog` hint says nothing.
     fn is_dialog(toplevel: &ToplevelSurface) -> bool {
         if toplevel.parent().is_some() {
             return true;
@@ -993,7 +997,7 @@ impl State {
             states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
-                .map(|d| d.lock().unwrap().dialog_hint != ToplevelDialogHint::Unknown)
+                .map(|d| d.lock().unwrap().dialog_hint == ToplevelDialogHint::Modal)
                 .unwrap_or(false)
         })
     }
@@ -1027,29 +1031,142 @@ impl State {
     }
 
     /// Maximized to the usable area (logical size). Maximized, not
-    /// Fullscreen, so dialogs keep their header bar.
+    /// Fullscreen, so dialogs keep their header bar. A dialog that fits
+    /// floats instead: width capped, height its own.
     /// Returns the logical size requested, which the rotation fade waits for.
     pub(crate) fn configure_maximized(&mut self, surface: &ToplevelSurface) -> (i32, i32) {
         let (w, h) = self.maximized_logical(self.layers.settled_usable());
         let orientation = self.view_rotation();
         let deco = self.decoration_for(surface, None);
+        let dialog = Self::is_dialog(surface);
         // The VM xdg-dialog test asserts this line.
         info!(
             target: "springchick::debug",
             "configure toplevel dialog={} decoration={:?}",
-            Self::is_dialog(surface),
+            dialog,
             deco,
         );
+        let floating = dialog
+            && self.toplevel_mut(surface.wl_surface()).is_some_and(|tl| {
+                tl.dialog = true;
+                !tl.oversize
+            });
         surface.with_pending_state(|state| {
-            state.size = Some((w, h).into());
+            state.size = Some(if floating { (w, 0) } else { (w, h) }.into());
             state.decoration_mode = Some(deco);
             state.states.unset(xdg_toplevel::State::Fullscreen);
-            state.states.set(xdg_toplevel::State::Maximized);
+            if floating {
+                state.states.unset(xdg_toplevel::State::Maximized);
+            } else {
+                state.states.set(xdg_toplevel::State::Maximized);
+            }
             state.states.set(xdg_toplevel::State::Activated);
         });
         surface.send_configure();
         self.record_toplevel_rotation(surface, orientation);
         (w, h)
+    }
+
+    /// `set_parent` / the dialog hint, which arrive after the first configure.
+    /// Reconfigures, takes the parent's identity, and skips the zoom-in.
+    pub(crate) fn dialog_changed(&mut self, surface: &ToplevelSurface) {
+        self.configure_maximized(surface);
+        let Some(id) = self.toplevel_id(surface.wl_surface()) else {
+            return;
+        };
+        if let Some(parent) = self.dialog_parent(id) {
+            let parent_app = self.toplevels[parent].as_ref().map(|p| p.app_id.clone());
+            if let (Some(tl), Some(app_id)) = (self.toplevels[id].as_mut(), parent_app) {
+                if tl.app_id.starts_with("unknown_") {
+                    tl.app_id = app_id;
+                }
+            }
+        }
+        if let UiState::AppOpening {
+            toplevel, app_id, ..
+        } = &self.ui
+        {
+            if *toplevel == id {
+                let app_id = app_id.clone();
+                transition(
+                    &mut self.ui,
+                    UiEvent::RaiseApp {
+                        toplevel: id,
+                        app_id,
+                    },
+                );
+            }
+        }
+    }
+
+    fn toplevel_id(&self, surface: &WlSurface) -> Option<ToplevelId> {
+        self.toplevels.iter().position(|t| {
+            t.as_ref()
+                .is_some_and(|t| t.surface.wl_surface() == surface)
+        })
+    }
+
+    fn toplevel_mut(&mut self, surface: &WlSurface) -> Option<&mut AppToplevel> {
+        let id = self.toplevel_id(surface)?;
+        self.toplevels[id].as_mut()
+    }
+
+    /// The xdg parent, else the app behind it in MRU (portal dialogs have no
+    /// in-process parent).
+    pub(crate) fn dialog_parent(&self, id: ToplevelId) -> Option<ToplevelId> {
+        let tl = self.toplevels.get(id)?.as_ref()?;
+        tl.surface
+            .parent()
+            .and_then(|p| self.toplevel_id(&p))
+            .or_else(|| self.history.stack.iter().copied().find(|&t| t != id))
+    }
+
+    /// A floating dialog: its rect (physical, view space, centred in the
+    /// usable area), the origin its buffer is drawn at, and the draw scale
+    /// (`dpi`, shrunk for one wider than the screen: GTK can't go below its
+    /// minimum width). `None` for an app or an oversize dialog, which are
+    /// maximized.
+    pub(crate) fn floating_dialog(
+        &self,
+        id: ToplevelId,
+    ) -> Option<(sc_layout::Rect, (i32, i32), f64)> {
+        let tl = self.toplevels.get(id)?.as_ref()?;
+        if !tl.dialog || tl.oversize {
+            return None;
+        }
+        let geo = smithay::wayland::compositor::with_states(tl.surface.wl_surface(), |states| {
+            states
+                .cached_state
+                .get::<SurfaceCachedState>()
+                .current()
+                .geometry
+        })?;
+        if geo.size.w <= 0 || geo.size.h <= 0 {
+            return None;
+        }
+        let u = self.layers.usable(self.dpi);
+        let scale = dialog_scale(self.dpi, (geo.size.w, geo.size.h), (u.w, u.h))?;
+        let (w, h) = (geo.size.w as f64 * scale, geo.size.h as f64 * scale);
+        let rect = sc_layout::Rect {
+            x: (u.x as f64 + (u.w as f64 - w) / 2.0).round() as f32,
+            y: (u.y as f64 + (u.h as f64 - h) / 2.0).round() as f32,
+            w: w as f32,
+            h: h as f32,
+        };
+        let origin = (
+            (rect.x as f64 - geo.loc.x as f64 * scale).round() as i32,
+            (rect.y as f64 - geo.loc.y as f64 * scale).round() as i32,
+        );
+        Some((rect, origin, scale))
+    }
+
+    /// The front window when it is a dialog that will float, with its parent.
+    /// Before its first buffer `floating_dialog` is still `None`, but the
+    /// parent must already be drawn or the screen blinks to the background.
+    pub(crate) fn front_floating_dialog(&self) -> Option<(ToplevelId, Option<ToplevelId>)> {
+        let id = ui_state::desired_focus(&self.ui)?;
+        let tl = self.toplevels.get(id)?.as_ref()?;
+        (tl.dialog && !tl.oversize).then(|| (id, self.dialog_parent(id)))
     }
 
     /// Logs committed geometry against the configured size, on change. GTK's file
@@ -1096,6 +1213,13 @@ impl State {
             avail_h,
             size.0 > avail_w || size.1 > avail_h,
         );
+        let outgrown = dialog_scale(1.0, size, (avail_w as f32, avail_h as f32)).is_none();
+        if tl.dialog && !tl.oversize && outgrown {
+            tl.oversize = true;
+            let surface = tl.surface.clone();
+            self.configure_maximized(&surface);
+        }
+        self.needs_render = true;
     }
 
     /// Sized by the current [`Self::rotation`], not assumed landscape. Returns
@@ -1149,8 +1273,26 @@ fn commit_needs_frame(owner: Option<ToplevelId>, drawn: &[ToplevelId]) -> bool {
     }
 }
 
+/// Draw scale for a dialog of logical `size` in a `usable` area of `dpi`
+/// units: `dpi`, shrunk to fit the width. `None` when even that is too tall.
+fn dialog_scale(dpi: f64, size: (i32, i32), usable: (f32, f32)) -> Option<f64> {
+    let scale = dpi.min(usable.0 as f64 / size.0 as f64);
+    (size.1 as f64 * scale <= usable.1 as f64 + 0.5).then_some(scale)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_dialog_floats_at_dpi_shrinks_to_the_width_or_is_too_tall() {
+        assert_eq!(
+            super::dialog_scale(3.0, (100, 50), (360.0, 702.0)),
+            Some(3.0)
+        );
+        let s = super::dialog_scale(3.0, (401, 255), (1080.0, 2106.0)).unwrap();
+        assert!((s - 1080.0 / 401.0).abs() < 1e-9);
+        assert_eq!(super::dialog_scale(1.0, (360, 720), (360.0, 702.0)), None);
+    }
+
     use super::*;
 
     #[test]

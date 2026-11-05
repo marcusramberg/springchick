@@ -67,6 +67,12 @@ pub(crate) struct AppToplevel {
     /// oriented. Differs from the view once the app is backgrounded; a card
     /// drawn from the buffer is turned by the difference.
     pub rotation: crate::rotation::Rotation,
+    /// Sticky: `set_parent` and the dialog hint are gone by `toplevel_destroyed`.
+    pub dialog: bool,
+    /// A dialog that outgrew the screen; maximized like an app from then on.
+    pub oversize: bool,
+    /// First frame it floated; the fade-in counts from here.
+    pub shown_at: Option<std::time::Instant>,
 }
 
 /// Spawned but not yet mapped; its icon pulses. Several can overlap ("new
@@ -101,7 +107,11 @@ pub(crate) struct IconOverlays {
 /// output transform, Skia flip and framebuffer.
 pub(crate) struct FramePrep {
     pub scene: scene::Scene,
+    /// The front app, or the app behind a floating dialog.
     pub app_surface: Option<WlSurface>,
+    /// A floating dialog, its buffer origin, draw scale and fade-in alpha,
+    /// over the blurred app.
+    pub dialog: Option<(WlSurface, (i32, i32), f64, f32)>,
     pub frame_time: u32,
     pub osd_view: Option<(f32, bool, f32)>,
     /// Post-screenshot sparkle progress, 0..1.

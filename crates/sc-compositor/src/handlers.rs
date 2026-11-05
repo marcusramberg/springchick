@@ -108,9 +108,7 @@ impl XdgShellHandler for State {
     }
 
     fn parent_changed(&mut self, surface: ToplevelSurface) {
-        // `set_parent` arrives after the first configure, so a dialog was
-        // configured as a top-level app. Reconfigure to restore its CSD buttons.
-        self.configure_maximized(&surface);
+        self.dialog_changed(&surface);
     }
 
     fn fullscreen_request(
@@ -303,8 +301,7 @@ impl XdgDecorationHandler for State {
 
 impl XdgDialogHandler for State {
     fn dialog_hint_changed(&mut self, toplevel: ToplevelSurface, _hint: ToplevelDialogHint) {
-        // The dialog hint postdates the first configure, as in `parent_changed`.
-        self.configure_maximized(&toplevel);
+        self.dialog_changed(&toplevel);
     }
 }
 

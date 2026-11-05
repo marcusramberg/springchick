@@ -234,6 +234,9 @@ pub struct DrawCtx<'a> {
     )>,
     /// Root→leaf, clamped physical origins. Above the app, below top layers.
     pub app_popups: &'a [(WlSurface, (i32, i32))],
+    /// A floating dialog, its buffer origin and draw scale: the app is
+    /// frosted under it.
+    pub dialog: Option<(&'a WlSurface, (i32, i32), f64, f32)>,
     /// Root→leaf. Above the layers, below springchick chrome.
     pub layer_popups: &'a [(WlSurface, (i32, i32))],
     pub bar_alpha: f32,
@@ -310,11 +313,17 @@ fn draw_layer(
     ctx: &DrawCtx<'_>,
     surface: &WlSurface,
     origin: (i32, i32),
+    (scale, alpha): (f64, f32),
 ) -> Result<(), SwapBuffersError> {
-    // Layer clients render at `dpi`, so their buffers land 1:1 like apps.
-    let scale = ctx.app_scale;
     let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-        render_elements_from_surface_tree(renderer, surface, origin, scale, 1.0, Kind::Unspecified);
+        render_elements_from_surface_tree(
+            renderer,
+            surface,
+            origin,
+            scale,
+            alpha,
+            Kind::Unspecified,
+        );
     if elements.is_empty() {
         return Ok(());
     }
@@ -1067,6 +1076,42 @@ fn pass_switcher_cards(
     Ok(())
 }
 
+/// Frost everything drawn so far (the app behind), then the dialog itself.
+fn pass_dialog(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    size: Size<i32, Physical>,
+    ctx: &mut DrawCtx<'_>,
+) -> Result<(), SwapBuffersError> {
+    let Some((surface, origin, scale, alpha)) = ctx.dialog else {
+        return Ok(());
+    };
+    let v = ctx.view(size);
+    let full = [crate::background_effect::BlurRect {
+        x: 0.0,
+        y: 0.0,
+        w: v.w as f32,
+        h: v.h as f32,
+        add: true,
+    }];
+    ctx.skia.blur_backdrop(
+        v.w,
+        v.h,
+        &full,
+        BACKDROP_BLUR_SIGMA_LOGICAL * ctx.app_scale as f32 * alpha,
+        ctx.skia_flip_y,
+    );
+    draw_layer(
+        renderer,
+        framebuffer,
+        size,
+        ctx,
+        surface,
+        origin,
+        (scale, alpha),
+    )
+}
+
 /// Back-to-front: app popups (in the view), top/overlay layers, then their
 /// popups. Layers and their popups are hidden while turned;
 /// `touch::surface_under` skips them too.
@@ -1110,7 +1155,16 @@ fn draw_overlay(
         ctx.app_scale,
         ctx.skia_flip_y,
     );
-    draw_layer(renderer, framebuffer, size, ctx, surface, origin)
+    // Layer clients render at `dpi`, so their buffers land 1:1 like apps.
+    draw_layer(
+        renderer,
+        framebuffer,
+        size,
+        ctx,
+        surface,
+        origin,
+        (ctx.app_scale, 1.0),
+    )
 }
 
 /// A full upload every frame (the buffer may belong to a destroyed surface,
@@ -1202,6 +1256,9 @@ fn send_frame_callbacks(ctx: &mut DrawCtx<'_>) {
     if let Some(wl_surface) = ctx.app_surface {
         drawn.push(wl_surface);
     }
+    if let Some((surface, _, _, _)) = ctx.dialog {
+        drawn.push(surface);
+    }
     for card in &ctx.scene.cards {
         if let Some(Some(tl)) = ctx.toplevels.get(card.toplevel) {
             drawn.push(tl.surface.wl_surface());
@@ -1255,6 +1312,7 @@ pub fn draw_scene(
     pass_blurred_app(renderer, &mut *framebuffer, size, ctx, &plan)?;
     pass_app_card(renderer, &mut *framebuffer, size, ctx, &mut plan)?;
     pass_switcher_cards(renderer, &mut *framebuffer, size, ctx)?;
+    pass_dialog(renderer, &mut *framebuffer, size, ctx)?;
     pass_overlays(renderer, &mut *framebuffer, size, ctx)?;
     pass_chrome(size, ctx);
     let v = ctx.view(size);

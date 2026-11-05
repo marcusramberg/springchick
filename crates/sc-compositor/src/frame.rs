@@ -14,9 +14,12 @@ use crate::popups;
 use crate::render;
 use crate::scene::compute_scene;
 use crate::state::{AppToplevel, FramePrep, Launching, PopupRect, State, SEARCH_APP_ID};
-use crate::ui_state::{self, transition, UiEvent, UiState};
+use crate::ui_state::{self, transition, ToplevelId, UiEvent, UiState};
 
 use std::collections::{HashMap, HashSet};
+
+/// A floating dialog and the frost under it fade in over this long.
+const DIALOG_FADE_SECS: f32 = 0.15;
 
 fn bar_mode(ui: &UiState) -> crate::bar_hint::BarMode {
     use crate::bar_hint::BarMode;
@@ -171,6 +174,15 @@ impl State {
     /// fullscreen. Clamp, unconstrain, hit-test and draw must all agree on
     /// this.
     pub(crate) fn app_popup_space(&self) -> ((i32, i32), (i32, i32)) {
+        if let Some((rect, _, _)) = self
+            .front_floating_dialog()
+            .and_then(|(id, _)| self.floating_dialog(id))
+        {
+            return (
+                (rect.x as i32, rect.y as i32),
+                (rect.w.round() as i32, rect.h.round() as i32),
+            );
+        }
         if self.foreground_is_fullscreen() {
             return ((0, 0), self.output_size());
         }
@@ -476,7 +488,7 @@ impl State {
         let effect = transition(&mut self.ui, UiEvent::Tick { dt });
         match effect {
             ui_state::Effect::CloseToplevel { toplevel } => {
-                self.close_toplevel(toplevel, false);
+                self.close_toplevel(toplevel);
             }
             ui_state::Effect::EnterSwitcher => {
                 let cards = self.history.deck_order();
@@ -523,12 +535,33 @@ impl State {
         // No-op except on the frame focus settles.
         self.apply_resource_tiers();
 
-        let app_surface = scene.window.as_ref().and_then(|(tid, _)| {
+        // A floating dialog is drawn over its (blurred) parent, not as the app.
+        let floating = self.front_floating_dialog();
+        let placed = floating.and_then(|(id, _)| self.floating_dialog(id));
+        let now = std::time::Instant::now();
+        // The fade counts from the first frame with pixels.
+        let fade = floating.filter(|_| placed.is_some()).and_then(|(id, _)| {
+            let shown = *self.toplevels[id].as_mut()?.shown_at.get_or_insert(now);
+            Some((now.duration_since(shown).as_secs_f32() / DIALOG_FADE_SECS).min(1.0))
+        });
+        if fade.is_some_and(|a| a < 1.0) {
+            self.needs_render = true;
+        }
+        let wl = |tid: ToplevelId| {
             self.toplevels
-                .get(*tid)
+                .get(tid)
                 .and_then(|slot| slot.as_ref())
                 .map(|tl| tl.surface.wl_surface().clone())
+        };
+        let app_surface = match floating {
+            Some((_, parent)) => parent.and_then(wl),
+            None => scene.window.as_ref().and_then(|(tid, _)| wl(*tid)),
+        };
+        let dialog = floating.and_then(|(id, _)| {
+            let (_, origin, scale) = placed?;
+            Some((wl(id)?, origin, scale, fade?))
         });
+        self.drawn_toplevels.extend(floating.and_then(|(_, p)| p));
 
         let frame_time = self.clock.now().as_millis();
         let osd_now = std::time::Instant::now();
@@ -652,6 +685,7 @@ impl State {
         FramePrep {
             scene,
             app_surface,
+            dialog,
             frame_time,
             osd_view,
             screenshot_flash,
@@ -748,6 +782,7 @@ impl State {
             layers_above: &prep.layers_above,
             closing: prep.closing.as_ref().map(|(b, r)| (b, *r)),
             app_popups: &prep.app_popups,
+            dialog: prep.dialog.as_ref().map(|(s, o, k, a)| (s, *o, *k, *a)),
             layer_popups: &prep.layer_popups,
             bar_alpha: prep.bar_alpha,
             pill_anchor: None,

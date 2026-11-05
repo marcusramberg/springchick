@@ -312,8 +312,7 @@ pub enum UiEvent {
         origin: ZoomOrigin,
     },
     /// `next` is the fallback when the closed one was in front, resolved by the
-    /// caller from MRU. `Some` only for a dismissed dialog; an app close goes
-    /// Home.
+    /// caller from MRU; `None` lands Home.
     ToplevelClosed {
         toplevel: ToplevelId,
         next: Option<(ToplevelId, String)>,
@@ -443,8 +442,6 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 _ => false,
             };
             if is_foreground {
-                // A dismissed dialog (e.g. a portal file chooser, its own process) hands
-                // back to the app underneath; an app close lands Home.
                 *state = match next {
                     Some((t, app_id)) => UiState::App {
                         toplevel: t,

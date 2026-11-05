@@ -251,8 +251,9 @@ mkTest {
     machine.screenshot("02-portal-chooser-fits")
 
     # phrosh keeps its window when the peer dies, and a leftover picker would
-    # satisfy phase C's `dialog=true` wait early.
-    ipc("touch 100 45")
+    # satisfy phase C's `dialog=true` wait early. The 576-tall chooser floats
+    # centred in the 702 usable area, so its header starts 63 logical down.
+    ipc("touch 100 171")
     machine.wait_until_succeeds(
         f"{UNIT} --since '{phase_b}' | grep -qE 'state changed to Home '", timeout=90
     )

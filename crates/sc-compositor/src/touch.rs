@@ -69,6 +69,17 @@ fn root_under(state: &State, x: f32, y: f32) -> Option<Target> {
         let (w, h) = state.output_size_f();
         let bar = sc_layout::bar_rect(w, h);
         if !bar.contains(x, y) {
+            // A floating dialog is modal: outside it, nothing.
+            if let Some((rect, origin, scale)) = state.floating_dialog(*toplevel) {
+                return rect.contains(x, y).then(|| {
+                    let tl = state.toplevels[*toplevel].as_ref().unwrap();
+                    Target::at(
+                        tl.surface.wl_surface().clone(),
+                        (origin.0 as f64, origin.1 as f64),
+                        scale,
+                    )
+                });
+            }
             if let Some(Some(tl)) = state.toplevels.get(*toplevel) {
                 let (ox, oy) = state.app_origin();
                 return Some(Target::at(

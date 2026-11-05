@@ -79,7 +79,7 @@ Every crate except `sc-compositor`, `sc-search` and `sc-osk` (its `uinput.rs`) i
 
 - `state.rs`: the central `State`, holding every protocol state object, the shell model, input bookkeeping, and `FramePrep` (the backend-agnostic render snapshot). Behaviour lives in sibling `impl State` modules.
 - `handlers.rs`: smithay protocol handler impls and the `delegate_dispatch2!` call.
-- `toplevel.rs`: app window lifecycle, focus, decoration, rotation.
+- `toplevel.rs`: app window lifecycle, focus, decoration, rotation. A modal or parented dialog (`is_dialog`: `set_parent` or the modal xdg-dialog hint; GTK4 binds xdg_dialog_v1 to every window, so a plain hint means nothing) floats: its own height, width capped at the usable area (scaled down when GTK can't go narrower), centred over the app behind it, which is frosted; one too tall even then is maximized like an app. Any client-closed window hands the screen back to the MRU app; only the shell's own close goes Home.
 - `ui_state.rs`: the pure state machine, `transition(&mut state, event) -> Effect`. States are `Home`/`App`/`AppOpening`/`AppClosing`/`Grabbing`/`Settling`/`QuickSwitch`/`Switcher`. Side effects are returned, never performed here.
 - `scene.rs`: pure `compute_scene(state, output_size) -> Scene` (window transforms: scale, center, corner radius). No GPU deps.
 - `input_dispatch.rs` / `input_common.rs` / `touch.rs` / `keybinds.rs`: input normalization to `Pt` (0..1) and routing by `UiState`. `kbd_switch.rs` is held-modifier (Super+Tab) switching.
