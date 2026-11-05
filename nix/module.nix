@@ -225,6 +225,9 @@ in
         # match springchick (explicit preference overrides UseIn, portal ≥1.18).
         "org.freedesktop.impl.portal.FileChooser" = "phrosh";
         "org.freedesktop.impl.portal.AppChooser" = "phrosh";
+        # gnome's Access impl proxies to org.gnome.Shell, absent here: camera
+        # permission requests fail as "not activatable".
+        "org.freedesktop.impl.portal.Access" = "gtk";
       };
     };
 
