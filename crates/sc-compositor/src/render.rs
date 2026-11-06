@@ -1009,15 +1009,15 @@ fn pass_app_card(
         );
     }
     let mut bounds = card.drawn_bounds(&plan.app_elements, ctx.app_scale);
-    let mut elements = ctx
-        .app_surface
+    // Docked layers sit in view space, so only an upright card carries them.
+    let host = ctx.app_surface.filter(|_| upright);
+    let mut elements = host
         .map(|host| card_layer_elements(renderer, ctx, host, 1.0))
         .unwrap_or_default();
     if !elements.is_empty() {
         bounds = union(bounds, card.drawn_bounds(&elements, ctx.app_scale));
     }
-    let closing = ctx
-        .app_surface
+    let closing = host
         .and_then(|host| card_closing(renderer, ctx, host, card))
         .map(|(e, b)| {
             bounds = union(bounds, b);
@@ -1157,21 +1157,24 @@ fn pass_switcher_cards(
         );
         // Use the real drawn bounds: a backgrounded app keeps its old size. A card
         // turned against the view fills its slot, and its placement is in its own
-        // space, so use the view-space slot.
+        // space, so the decor uses the view-space slot but the mask, drawn with
+        // `card_t`, needs the card-space bounds.
         let mut closing = None;
-        let (x, y, w, h) = if upright {
-            let mut b = placement.drawn_bounds(&elements[n_layers..], ctx.app_scale);
-            if n_layers > 0 {
-                b = union(
-                    b,
-                    placement.drawn_bounds(&elements[..n_layers], ctx.app_scale),
-                );
-            }
+        let mut mask = placement.drawn_bounds(&elements[n_layers..], ctx.app_scale);
+        if n_layers > 0 {
+            mask = union(
+                mask,
+                placement.drawn_bounds(&elements[..n_layers], ctx.app_scale),
+            );
+        }
+        if upright {
             if let Some((e, cb)) = card_closing(renderer, ctx, tl.surface.wl_surface(), placement) {
-                b = union(b, cb);
+                mask = union(mask, cb);
                 closing = Some(e);
             }
-            b
+        }
+        let (x, y, w, h) = if upright {
+            mask
         } else {
             let slot = Card::centered(
                 view,
@@ -1190,7 +1193,7 @@ fn pass_switcher_cards(
             content: CardContent {
                 elements,
                 closing,
-                bounds: (x, y, w, h),
+                bounds: mask,
             },
             placement,
             card_t,

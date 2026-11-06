@@ -53,10 +53,12 @@ mkTest {
   packages = [
     pkgs.imv
     pkgs.foot
-    # A real overlay layer surface, to show layers hide while turned.
+    # A real overlay layer surface, to show layers turn with the view.
     pkgs.wvkbd
   ];
   extraPythonPackages = p: [ p.pillow ];
+  # rotate_ui taps foot's Home icon.
+  homePages = [ [ "foot" ] ];
 
   testScript = ''
     from PIL import Image
@@ -128,7 +130,7 @@ mkTest {
 
     # Layer chrome is visible to begin with. The probe is left of the home pill,
     # which is never hidden. Comparing against Home proves the keyboard is really
-    # there, or the "hidden while rotated" check would pass with none.
+    # there, or the "turned with the view" check would pass with none.
     KEYBOARD_PROBE = (W // 4, H - 80)
     machine.screenshot("00-home")
     machine.succeed(
@@ -141,8 +143,8 @@ mkTest {
     kbd_px = pixel("01-keyboard-up", *KEYBOARD_PROBE)
     assert kbd_px != home_px, (
         f"pixel at {KEYBOARD_PROBE} is unchanged ({home_px}) after wvkbd mapped "
-        "— the layer surface never reached the screen, so the hiding assertion "
-        "below would prove nothing"
+        "— the layer surface never reached the screen, so the rotated-layer "
+        "assertion below would prove nothing"
     )
 
     # Fullscreen on an upright phone stays portrait. imv -f is fullscreen at map.
@@ -193,7 +195,26 @@ mkTest {
     machine.sleep(3)
     machine.screenshot("02-landscape")
 
-    got = quadrant_colours("02-landscape")
+    # The keyboard went with the view: it anchors to the turned view's bottom,
+    # the screen's right edge, so the upright keyboard strip is app content now.
+    rotated_px = pixel("02-landscape", *KEYBOARD_PROBE)
+    assert rotated_px == COLOURS["red"], (
+        f"expected app content (red) at {KEYBOARD_PROBE} while rotated, "
+        f"found {rotated_px} — the layer surface is being drawn in the upright "
+        "space, over the rotated app"
+    )
+    edge_px = pixel("02-landscape", W - 40, H // 4)
+    assert edge_px not in COLOURS.values(), (
+        f"expected the keyboard at the screen's right edge while rotated, "
+        f"found app pixel {edge_px} — the layer surface is not in the turned view"
+    )
+
+    # It covers part of the app; the quadrants need the whole of it.
+    machine.succeed("systemctl --user -M tester@.host stop wvkbd")
+    machine.sleep(2)
+    machine.screenshot("02-landscape-no-keyboard")
+
+    got = quadrant_colours("02-landscape-no-keyboard")
     # Top-left of the image lands at the screen's bottom-left.
     want = {
         "top-left": "green",
@@ -209,15 +230,6 @@ mkTest {
             "Mirrored corners mean the rotation turns the wrong way "
             "(Rotation::transform), not that rotation failed."
         )
-
-    # The keyboard went with the view: it anchors to the turned view's bottom,
-    # which is a screen side edge, so this strip is app content now.
-    rotated_px = pixel("02-landscape", *KEYBOARD_PROBE)
-    assert rotated_px == COLOURS["red"], (
-        f"expected app content (red) at {KEYBOARD_PROBE} while rotated, "
-        f"found {rotated_px} — the layer surface is being drawn in the upright "
-        "space, over the rotated app"
-    )
 
     # right-up must be 180° from left-up, not the same transform.
     turn("right-up")
@@ -283,22 +295,56 @@ mkTest {
     machine.wait_until_succeeds(f"[ $({JOURNAL} | grep -cF 'rotation None') -gt {before} ]", timeout=30)
     machine.sleep(2)
     machine.screenshot("09-portrait-app")
-    machine.succeed("systemctl --user -M tester@.host stop foot")
-    ipc("action home")
 
-    # Leaving fullscreen while turned -> portrait. Turn first, so fullscreen (not
-    # orientation) is what ends it.
-    turn("left-up")
-    machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation LeftUp'", timeout=30)
-    machine.succeed("systemctl --user -M tester@.host stop imv")
-    machine.wait_until_succeeds(f"{JOURNAL} | grep -qF 'rotation None'", timeout=30)
+    # A card turned against the deck: imv kept its landscape buffer behind
+    # portrait foot. Its mask must follow the card's own space, or the card is
+    # clipped to a transposed rect.
+    ipc("keydown Super_L")
+    ipc("action switcher-next")
+    ipc("settle 2000")
+    machine.screenshot("09b-deck-turned-card")
+    # Front slot (switcher::front_slot), quadrant centres.
+    cw, ch = W * 0.62, H * 0.62
+    left, top = W - cw - W * 0.06, (H - ch) / 2
+    for (fx, fy), expected in {
+        (0.25, 0.25): "green",
+        (0.75, 0.25): "yellow",
+        (0.25, 0.75): "red",
+        (0.75, 0.75): "blue",
+    }.items():
+        px = pixel("09b-deck-turned-card", int(left + fx * cw), int(top + fy * ch))
+        dist = sum(abs(px[c] - COLOURS[expected][c]) for c in range(3))
+        assert dist < 90, (
+            f"turned card at slot ({fx}, {fy}) is {px}, expected {expected} "
+            f"{COLOURS[expected]} — a card turned against the deck is masked "
+            "or placed in the wrong space"
+        )
+    ipc("action switcher-prev")
+    ipc("keyup Super_L")
+    ipc("settle 2000")
+
+    # foot gone: imv, fullscreen on a left-up device, is in front and turns.
+    seen = count("rotation LeftUp")
+    machine.succeed("systemctl --user -M tester@.host stop foot")
+    machine.wait_until_succeeds(
+        f"[ $({JOURNAL} | grep -cF 'rotation LeftUp') -gt {seen} ]", timeout=30
+    )
+
+    # Leaving the fullscreen app for Home turns back, though the device is
+    # still left-up.
+    seen = count("rotation None")
+    ipc("action home")
+    machine.wait_until_succeeds(
+        f"[ $({JOURNAL} | grep -cF 'rotation None') -gt {seen} ]", timeout=30
+    )
     machine.screenshot("03-back-to-portrait")
+    machine.succeed("systemctl --user -M tester@.host stop imv")
 
     # rotate_ui: Home and ordinary windows turn too. The device is still
     # left-up, so enabling it is enough to turn the view.
-    assert "enabled" in ipc("rotation enable"), "the rotation verb did not take"
     before = count("rotation None")
     seen = count("rotation LeftUp")
+    assert "enabled" in ipc("rotation enable"), "the rotation verb did not take"
     machine.wait_until_succeeds(
         f"[ $({JOURNAL} | grep -cF 'rotation LeftUp') -gt {seen} ]", timeout=30
     )
@@ -310,7 +356,7 @@ mkTest {
     # in the turned space and the contact is mapped back through the rotation.
     # `ipc home` reports icon centres in that same view space.
     dump = ipc("home")
-    field = next(f for f in dump.split(" | ") if f.startswith("icons="))
+    field = next(f for f in dump.splitlines() if f.startswith("icons="))
     icons = {}
     for part in field[len("icons="):].split():
         app_id, _, centre = part.partition("@")

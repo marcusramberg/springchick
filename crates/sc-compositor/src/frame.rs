@@ -531,6 +531,11 @@ impl State {
             self.last_log_state = Some(disc);
             debug!(target: "springchick::debug", "state changed to {:?} cards={}", self.ui, scene.cards.len());
         }
+        // `tick_rotation` ran before this frame's transition: settling on Home
+        // from a turned app would otherwise stay turned until something redraws.
+        if self.desired_view_rotation() != self.rotation {
+            self.needs_render = true;
+        }
 
         // No-op except on the frame focus settles.
         self.apply_resource_tiers();

@@ -215,8 +215,16 @@ fn main() {
 
     // Not blocking_dispatch: a long press needs to wake without an event.
     loop {
-        queue.dispatch_pending(&mut app).expect("wayland dispatch");
-        queue.flush().expect("wayland flush");
+        // The compositor going away ends us cleanly: a panic would trip
+        // Restart=on-failure while there is nothing to connect to.
+        if let Err(e) = queue.dispatch_pending(&mut app) {
+            eprintln!("sc-osk: wayland dispatch: {e}");
+            return;
+        }
+        if let Err(e) = queue.flush() {
+            eprintln!("sc-osk: wayland flush: {e}");
+            return;
+        }
         let Some(guard) = queue.prepare_read() else {
             continue;
         };
@@ -247,7 +255,8 @@ fn main() {
                 if let Err(e) = guard.read() {
                     if !matches!(e, wayland_client::backend::WaylandError::Io(ref io) if io.kind() == std::io::ErrorKind::WouldBlock)
                     {
-                        panic!("wayland read: {e}");
+                        eprintln!("sc-osk: wayland read: {e}");
+                        return;
                     }
                 }
             }

@@ -818,7 +818,7 @@ impl State {
         }
     }
 
-    fn desired_view_rotation(&self) -> rotation::Rotation {
+    pub(crate) fn desired_view_rotation(&self) -> rotation::Rotation {
         let rotatable = match self.rotation_anchor() {
             Some(Some(tid)) => self.rotate_ui || self.is_fullscreen(tid),
             Some(None) => self.rotate_ui,
