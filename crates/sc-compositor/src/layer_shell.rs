@@ -313,13 +313,14 @@ impl LayerShell {
         self.regrow.hold_until(self.regrow.now + SLIDE_SECS);
     }
 
-    pub fn closing_view(&self) -> Option<(Buffer, Rect)> {
+    /// `(buffer, drawn rect, resting rect)`.
+    pub fn closing_view(&self) -> Option<(Buffer, Rect, Rect)> {
         let c = self.closing.as_ref()?;
         let mut rect = c.rect;
         let dist = self.output_h - rect.y;
         // Ease-out on the way out too; the slide-in curve reversed hangs then snaps.
         rect.y += sc_anim::ease_out_cubic(c.progress) * dist;
-        Some((c.buffer.clone(), rect))
+        Some((c.buffer.clone(), rect, c.rect))
     }
 
     /// `Some(new)` when the usable area changed. Increases go through
@@ -487,38 +488,41 @@ impl LayerShell {
             .is_some()
     }
 
-    /// Output minus exclusive zones, physical.
+    /// Output minus exclusive zones, physical. The home bar band is not
+    /// reserved: apps and docked panels run edge to edge under the pill.
     pub fn usable(&self, dpi: f64) -> Rect {
         let zone = layer_map_for_output(&self.output).non_exclusive_zone();
-        let mut r = to_physical(zone, dpi);
-        // Always reserve the home bar zone. Bottom-docked surfaces are lifted by
-        // the same amount (`shift_docked`), so the pill's strip stays below them.
-        r.h = (r.h - self.gesture_zone()).max(0.0);
-        r
-    }
-
-    fn gesture_zone(&self) -> f32 {
-        sc_layout::gesture_exclusive_zone(self.output_h)
-    }
-
-    /// Lift a bottom-docked rect clear of the home pill. Fullscreen surfaces are
-    /// left alone.
-    fn shift_docked(&self, mut r: Rect) -> Rect {
-        if self.is_docked(r) {
-            r.y -= self.gesture_zone();
-        }
-        r
+        to_physical(zone, dpi)
     }
 
     fn is_docked(&self, r: Rect) -> bool {
         r.y + r.h >= self.output_h - 1.0 && r.y > 1.0
     }
 
-    /// Scaled to physical, lifted clear of the pill, offset by the remaining
-    /// slide-in. Only bottom-docked surfaces slide.
+    /// The pill's band at the bottom of the screen.
+    fn bar_band(&self) -> f32 {
+        sc_layout::bar_rect(0.0, self.output_h).h
+    }
+
+    /// Bottom-docked Top/Overlay surfaces (the OSK): drawn into the front
+    /// app's card and under the pill.
+    pub fn docked_above(&self, dpi: f64) -> Vec<WlSurface> {
+        let map = layer_map_for_output(&self.output);
+        map.layers()
+            .filter(|l| matches!(l.layer(), Layer::Top | Layer::Overlay))
+            .filter(|l| {
+                map.layer_geometry(l)
+                    .is_some_and(|g| self.is_docked(to_physical(g, dpi)))
+            })
+            .map(|l| l.wl_surface().clone())
+            .collect()
+    }
+
+    /// Scaled to physical, offset by the remaining slide-in. Only
+    /// bottom-docked surfaces slide.
     fn place(&self, surface: &WlSurface, geo: Rectangle<i32, Logical>, dpi: f64) -> Rect {
         let phys = to_physical(geo, dpi);
-        let mut r = self.shift_docked(phys);
+        let mut r = phys;
         if self.is_docked(phys) {
             if let Some(&p) = self.slides.get(surface) {
                 r.y += sc_anim::slide_in_offset(p, r.h);
@@ -619,8 +623,11 @@ impl LayerShell {
             .layers()
             .filter(|l| matches!(l.layer(), Layer::Top | Layer::Overlay))
             .any(|l| {
-                map.layer_geometry(l)
-                    .is_some_and(|g| rects_overlap(self.place(l.wl_surface(), g, dpi), rect))
+                map.layer_geometry(l).is_some_and(|g| {
+                    // Docked surfaces sit under the pill by design.
+                    !self.is_docked(to_physical(g, dpi))
+                        && rects_overlap(self.place(l.wl_surface(), g, dpi), rect)
+                })
             });
         hit
     }
@@ -658,6 +665,10 @@ impl LayerShell {
                     // The animated position, so a tap lands where the surface is drawn.
                     let rect = self.place(layer.wl_surface(), geo, dpi);
                     if !rect.contains(x, y) {
+                        continue;
+                    }
+                    // The pill's band over a docked surface belongs to the shell.
+                    if self.is_docked(rect) && y >= self.output_h - self.bar_band() {
                         continue;
                     }
                     let local = Point::from(((x - rect.x) as f64 / dpi, (y - rect.y) as f64 / dpi));

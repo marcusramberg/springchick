@@ -563,6 +563,16 @@ impl State {
         });
         self.drawn_toplevels.extend(floating.and_then(|(_, p)| p));
 
+        let docked = self.layers.docked_above(self.dpi);
+        if !docked.is_empty() {
+            // The deck has no front app; the last host keeps the keyboard.
+            if let Some(host) = self.app_focus_surface().or_else(|| app_surface.clone()) {
+                self.card_layer_host = Some(host);
+            }
+        } else if self.layers.closing_view().is_none() {
+            self.card_layer_host = None;
+        }
+
         let frame_time = self.clock.now().as_millis();
         let osd_now = std::time::Instant::now();
         let osd_view = self
@@ -684,7 +694,7 @@ impl State {
 
         FramePrep {
             scene,
-            app_surface,
+            app_surface: app_surface.clone(),
             dialog,
             frame_time,
             osd_view,
@@ -706,6 +716,7 @@ impl State {
             library,
             folder,
             closing: self.layers.closing_view(),
+            card_layers: (docked, self.card_layer_host.clone()),
             card_chrome,
             dim: self.rotation_fade.dim(std::time::Instant::now()),
         }
@@ -780,7 +791,9 @@ impl State {
             lock_surface: prep.lock_surface.as_ref(),
             layers_below: &prep.layers_below,
             layers_above: &prep.layers_above,
-            closing: prep.closing.as_ref().map(|(b, r)| (b, *r)),
+            card_layers: (&prep.card_layers.0, prep.card_layers.1.as_ref()),
+            card_layers_drawn: false,
+            closing: prep.closing.as_ref().map(|(b, r, rest)| (b, *r, *rest)),
             app_popups: &prep.app_popups,
             dialog: prep.dialog.as_ref().map(|(s, o, k, a)| (s, *o, *k, *a)),
             layer_popups: &prep.layer_popups,

@@ -104,6 +104,8 @@ struct App {
     /// Logical px; 0 until configured.
     width: u32,
     height: u32,
+    /// Blank band below the keys, under the compositor's pill.
+    inset: u32,
     scale: i32,
     osk: Osk,
     grid: Vec<Placed>,
@@ -169,6 +171,7 @@ fn main() {
         layer: None,
         width: 0,
         height: 0,
+        inset: 0,
         scale: 1,
         osk: Osk::default(),
         grid: Vec::new(),
@@ -337,25 +340,34 @@ impl App {
         // A grp: hotkey switches the seat behind our back; we never get the
         // `modifiers` event, having no keyboard focus.
         self.refresh_layouts();
-        let out_w = self
-            .output_state
-            .outputs()
-            .next()
-            .and_then(|o| self.output_state.info(&o)?.logical_size)
-            .map_or(400, |(w, _)| w);
-        let h = (out_w as f32 * 0.66).clamp(200.0, 320.0) as u32;
+        let (h, inset) = self.size_for_output();
+        self.inset = inset;
         let surface = self.compositor.create_surface(qh);
         let layer =
             self.layer_shell
                 .create_layer_surface(qh, surface, Layer::Overlay, Some("osk"), None);
         layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-        layer.set_size(0, h);
-        layer.set_exclusive_zone(h as i32);
+        layer.set_size(0, h + self.inset);
+        layer.set_exclusive_zone((h + self.inset) as i32);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.commit();
         self.layer = Some(layer);
         self.width = 0;
         self.height = h;
+    }
+
+    /// Key-row height and the blank band under it, from the output as it is
+    /// now. The compositor draws its home pill over that band.
+    fn size_for_output(&self) -> (u32, u32) {
+        let (out_w, out_h) = self
+            .output_state
+            .outputs()
+            .next()
+            .and_then(|o| self.output_state.info(&o)?.logical_size)
+            .unwrap_or((400, 800));
+        let h = (out_w as f32 * 0.66).clamp(200.0, 320.0) as u32;
+        let inset = sc_layout::bar_rect(out_w as f32, out_h as f32).h as u32;
+        (h, inset)
     }
 
     fn hide(&mut self) {
@@ -420,7 +432,7 @@ impl App {
         }
         let (w, h) = (
             self.width as i32 * self.scale,
-            self.height as i32 * self.scale,
+            (self.height + self.inset) as i32 * self.scale,
         );
         let pool = self.pool.get_or_insert_with(|| {
             SlotPool::new((w * h * 4) as usize, &self.shm).expect("shm pool")
@@ -689,7 +701,19 @@ impl OutputHandler for App {
         &mut self.output_state
     }
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    // A turn swaps the logical size: re-request the layer size so the band
+    // and exclusive zone follow.
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        let Some(layer) = &self.layer else { return };
+        let (h, inset) = self.size_for_output();
+        if (h, inset) == (self.height, self.inset) {
+            return;
+        }
+        self.inset = inset;
+        layer.set_size(0, h + inset);
+        layer.set_exclusive_zone((h + inset) as i32);
+        layer.commit();
+    }
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 }
 
@@ -707,8 +731,8 @@ impl LayerShellHandler for App {
         _: u32,
     ) {
         self.width = configure.new_size.0;
-        if configure.new_size.1 > 0 {
-            self.height = configure.new_size.1;
+        if configure.new_size.1 > self.inset {
+            self.height = configure.new_size.1 - self.inset;
         }
         self.relayout();
         self.draw();

@@ -658,6 +658,18 @@ impl State {
             }
             return;
         }
+        // A grab, and its snap back, keep focus: the OSK stays up and rides
+        // the card instead of closing and reopening.
+        if matches!(
+            self.ui,
+            ui_state::UiState::Grabbing { .. }
+                | ui_state::UiState::Settling {
+                    target: sc_input::NavTarget::BackToApp,
+                    ..
+                }
+        ) {
+            return;
+        }
         let app = self.app_focus_surface();
         // A layer asking for focus (shell dialog) outranks the app. Otherwise the
         // topmost grabbing popup, else the app. Focusing a non-grab popup makes

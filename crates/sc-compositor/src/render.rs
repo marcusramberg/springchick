@@ -20,11 +20,13 @@ use smithay::backend::renderer::element::utils::{
 };
 use smithay::backend::renderer::element::{Element, Id as ElementId, Kind};
 use smithay::backend::renderer::gles::{
-    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, Uniform, UniformName, UniformType,
+    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName,
+    UniformType,
 };
 use smithay::backend::renderer::utils::{draw_render_elements, CommitCounter};
 use smithay::backend::renderer::{
     buffer_type, BufferType, Color32F, Frame, ImportDmaWl, ImportMemWl, Renderer, RendererSuper,
+    Texture,
 };
 use smithay::backend::SwapBuffersError;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -227,9 +229,14 @@ pub struct DrawCtx<'a> {
     pub lock_surface: Option<&'a WlSurface>,
     pub layers_below: &'a [(WlSurface, (i32, i32))],
     pub layers_above: &'a [(WlSurface, (i32, i32))],
-    /// The held buffer and its physical rect this frame.
+    /// Docked members of `layers_above` and the app whose card carries them.
+    pub card_layers: (&'a [WlSurface], Option<&'a WlSurface>),
+    /// Set once a card pass drew them, so the overlay pass skips them.
+    pub card_layers_drawn: bool,
+    /// The held buffer, its physical rect this frame, and where it rests.
     pub closing: Option<(
         &'a smithay::backend::renderer::utils::Buffer,
+        sc_layout::Rect,
         sc_layout::Rect,
     )>,
     /// Root→leaf, clamped physical origins. Above the app, below top layers.
@@ -446,12 +453,10 @@ impl Card {
     /// is right on winit and upside-down on DRM.
     fn fb_rect(
         &self,
-        elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
-        app_scale: f64,
+        (x, y, w, h): Bounds,
         pass_transform: Transform,
         fb_size: Size<i32, Physical>,
     ) -> [f32; 4] {
-        let (x, y, w, h) = self.drawn_bounds(elements, app_scale);
         // Axis-swapped for a quarter turn, as `GlesFrame::render` does.
         let elem = pass_transform.transform_size(fb_size);
         let (ew, eh) = (elem.w as f32, elem.h as f32);
@@ -472,6 +477,125 @@ impl Card {
     }
 }
 
+/// `(x, y, w, h)` in view px.
+type Bounds = (f32, f32, f32, f32);
+
+fn union(a: Bounds, b: Bounds) -> Bounds {
+    let x = a.0.min(b.0);
+    let y = a.1.min(b.1);
+    (
+        x,
+        y,
+        (a.0 + a.2).max(b.0 + b.2) - x,
+        (a.1 + a.3).max(b.1 + b.3) - y,
+    )
+}
+
+/// The docked layers riding `host`'s card, in the card's app-local space.
+/// Front-to-back, so they go before the app's elements. Marks them drawn.
+fn card_layer_elements(
+    renderer: &mut GlesRenderer,
+    ctx: &mut DrawCtx<'_>,
+    host: &WlSurface,
+    alpha: f32,
+) -> Vec<WaylandSurfaceRenderElement<GlesRenderer>> {
+    if ctx.card_layers.1 != Some(host) {
+        return Vec::new();
+    }
+    let (ox, oy) = ctx.app_origin;
+    let elements: Vec<_> = ctx
+        .layers_above
+        .iter()
+        .filter(|(s, _)| ctx.card_layers.0.contains(s))
+        .flat_map(|(s, (x, y))| {
+            render_elements_from_surface_tree(
+                renderer,
+                s,
+                (x - ox, y - oy),
+                ctx.app_scale,
+                alpha,
+                Kind::Unspecified,
+            )
+        })
+        .collect();
+    ctx.card_layers_drawn |= !elements.is_empty();
+    elements
+}
+
+type ScaledTexture = RescaleRenderElement<RelocateRenderElement<TextureRenderElement<GlesTexture>>>;
+
+/// Everything a card draws under one mask: the app tree (front-to-back, with
+/// any docked layers first), the OSK slide-out, and the mask's bounds.
+struct CardContent {
+    elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+    closing: Option<ScaledTexture>,
+    bounds: Bounds,
+}
+
+/// The held OSK buffer as an element filling `rect` (physical), whatever
+/// scale the client rendered at. Draw it at scale 1.
+fn closing_element(
+    renderer: &mut GlesRenderer,
+    buffer: &smithay::backend::renderer::utils::Buffer,
+    rect: sc_layout::Rect,
+) -> Option<TextureRenderElement<GlesTexture>> {
+    let texture = match buffer_type(buffer) {
+        Some(BufferType::Shm) => renderer.import_shm_buffer(buffer, None, &[]).ok(),
+        Some(BufferType::Dma) => renderer.import_dma_buffer(buffer, None, &[]).ok(),
+        _ => None,
+    }?;
+    let whole = Rectangle::from_size(texture.size().to_logical(1, Transform::Normal).to_f64());
+    Some(TextureRenderElement::from_static_texture(
+        ElementId::new(),
+        renderer.context_id(),
+        (rect.x as f64, rect.y as f64),
+        texture,
+        1,
+        Transform::Normal,
+        Some(1.0),
+        Some(whole),
+        Some((rect.w as i32, rect.h as i32).into()),
+        None,
+        Kind::Unspecified,
+    ))
+}
+
+/// The OSK sliding out of `host`'s card: drawn at its slid position and
+/// clipped by the card mask, which spans its resting rect. Marks it drawn.
+fn card_closing(
+    renderer: &mut GlesRenderer,
+    ctx: &mut DrawCtx<'_>,
+    host: &WlSurface,
+    card: Card,
+) -> Option<(ScaledTexture, Bounds)> {
+    if ctx.card_layers.1 != Some(host) {
+        return None;
+    }
+    let (buffer, rect, rest) = ctx.closing?;
+    let (ox, oy) = (ctx.app_origin.0 as f32, ctx.app_origin.1 as f32);
+    let local = sc_layout::Rect {
+        x: rect.x - ox,
+        y: rect.y - oy,
+        ..rect
+    };
+    let element = closing_element(renderer, buffer, local)?;
+    let relocated = RelocateRenderElement::from_element(element, card.origin(), Relocate::Relative);
+    let scaled = RescaleRenderElement::from_element(
+        relocated,
+        card.origin(),
+        Scale::from(card.scale as f64),
+    );
+    let s = card.scale;
+    let bounds = (
+        card.x as f32 + (rest.x - ox) * s,
+        card.y as f32 + (rest.y - oy) * s,
+        rest.w * s,
+        rest.h * s,
+    );
+    ctx.card_layers_drawn = true;
+    Some((scaled, bounds))
+}
+
 /// Relocate and rescale the tree to the card, then draw it into an open
 /// frame. Rounded cards go through the shader in one `draw_render_elements`
 /// call: the slice is front-to-back and reversed internally, so splitting it
@@ -481,16 +605,20 @@ fn draw_card_in_frame(
     frame: &mut GlesFrame<'_, '_>,
     size: Size<i32, Physical>,
     ctx: &DrawCtx<'_>,
-    elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+    content: CardContent,
     card: Card,
     pass_transform: Transform,
 ) {
+    let CardContent {
+        elements,
+        closing,
+        bounds,
+    } = content;
     if elements.is_empty() {
         return;
     }
     let app_scale = ctx.app_scale;
-    // Before the elements are consumed.
-    let card_rect = card.fb_rect(&elements, app_scale, pass_transform, size);
+    let card_rect = card.fb_rect(bounds, pass_transform, size);
     let damage = Rectangle::from_size(pass_transform.transform_size(size));
     let scaled: Vec<
         RescaleRenderElement<RelocateRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
@@ -517,28 +645,19 @@ fn draw_card_in_frame(
     if let Err(e) = draw_render_elements(frame, app_scale, &scaled, &[damage]) {
         warn!(?e, "failed to draw scaled card elements");
     }
-    frame.clear_tex_program_override();
-}
-
-/// One frame for a single card.
-fn draw_scaled_card(
-    renderer: &mut GlesRenderer,
-    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
-    size: Size<i32, Physical>,
-    ctx: &DrawCtx<'_>,
-    elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
-    card: Card,
-    pass_transform: Transform,
-) -> Result<(), SwapBuffersError> {
-    if elements.is_empty() {
-        return Ok(());
+    // On top of the app, under the same mask.
+    if let Some(closing) = closing {
+        // Sized in physical px already.
+        if let Err(e) = draw_render_elements::<GlesRenderer, f64, ScaledTexture>(
+            frame,
+            1.0,
+            &[closing],
+            &[damage],
+        ) {
+            warn!(?e, "failed to draw closing layer in card");
+        }
     }
-    let mut frame = renderer
-        .render(framebuffer, size, pass_transform)
-        .map_err(SwapBuffersError::from)?;
-    draw_card_in_frame(&mut frame, size, ctx, elements, card, pass_transform);
-    let _sync = frame.finish().map_err(SwapBuffersError::from)?;
-    Ok(())
+    frame.clear_tex_program_override();
 }
 
 /// Element collection borrows the renderer, so it happens before any pass.
@@ -889,12 +1008,37 @@ fn pass_app_card(
             ctx.skia_flip_y,
         );
     }
+    let mut bounds = card.drawn_bounds(&plan.app_elements, ctx.app_scale);
+    let mut elements = ctx
+        .app_surface
+        .map(|host| card_layer_elements(renderer, ctx, host, 1.0))
+        .unwrap_or_default();
+    if !elements.is_empty() {
+        bounds = union(bounds, card.drawn_bounds(&elements, ctx.app_scale));
+    }
+    let closing = ctx
+        .app_surface
+        .and_then(|host| card_closing(renderer, ctx, host, card))
+        .map(|(e, b)| {
+            bounds = union(bounds, b);
+            e
+        });
     if upright {
-        let (x, y, w, h) = card.drawn_bounds(&plan.app_elements, ctx.app_scale);
+        let (x, y, w, h) = bounds;
         ctx.pill_anchor = Some(sc_layout::Rect { x, y, w, h });
     }
-    let elements = std::mem::take(&mut plan.app_elements);
-    draw_scaled_card(renderer, framebuffer, size, ctx, elements, card, card_t)
+    elements.append(&mut plan.app_elements);
+    let mut frame = renderer
+        .render(framebuffer, size, card_t)
+        .map_err(SwapBuffersError::from)?;
+    let content = CardContent {
+        elements,
+        closing,
+        bounds,
+    };
+    draw_card_in_frame(&mut frame, size, ctx, content, card, card_t);
+    let _sync = frame.finish().map_err(SwapBuffersError::from)?;
+    Ok(())
 }
 
 /// Frost Home before the deck. Ramps with `scene.backdrop_blur`; popping to
@@ -955,7 +1099,7 @@ fn backdrop_key(
 
 /// A deck card with its elements collected and placement solved.
 struct DeckCard {
-    elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+    content: CardContent,
     placement: Card,
     card_t: Transform,
     decor: crate::skia_gl::CardDecor,
@@ -980,7 +1124,7 @@ fn pass_switcher_cards(
             continue;
         };
         // Whether a card is turned depends on its buffer, so collect first.
-        let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+        let app_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             render_elements_from_surface_tree(
                 renderer,
                 tl.surface.wl_surface(),
@@ -989,11 +1133,19 @@ fn pass_switcher_cards(
                 card.alpha,
                 Kind::Unspecified,
             );
-        if elements.is_empty() {
+        if app_elements.is_empty() {
             continue;
         }
-        let card_t = card_transform(ctx, tl.rotation, &elements, size);
+        let card_t = card_transform(ctx, tl.rotation, &app_elements, size);
         let upright = card_t == ctx.base();
+        // Docked layers sit in view space, so only an upright card carries them.
+        let mut elements = if upright {
+            card_layer_elements(renderer, ctx, tl.surface.wl_surface(), card.alpha)
+        } else {
+            Vec::new()
+        };
+        let n_layers = elements.len();
+        elements.extend(app_elements);
         let placement = Card::placed(
             view,
             card.center_x,
@@ -1006,8 +1158,20 @@ fn pass_switcher_cards(
         // Use the real drawn bounds: a backgrounded app keeps its old size. A card
         // turned against the view fills its slot, and its placement is in its own
         // space, so use the view-space slot.
+        let mut closing = None;
         let (x, y, w, h) = if upright {
-            placement.drawn_bounds(&elements, ctx.app_scale)
+            let mut b = placement.drawn_bounds(&elements[n_layers..], ctx.app_scale);
+            if n_layers > 0 {
+                b = union(
+                    b,
+                    placement.drawn_bounds(&elements[..n_layers], ctx.app_scale),
+                );
+            }
+            if let Some((e, cb)) = card_closing(renderer, ctx, tl.surface.wl_surface(), placement) {
+                b = union(b, cb);
+                closing = Some(e);
+            }
+            b
         } else {
             let slot = Card::centered(
                 view,
@@ -1023,7 +1187,11 @@ fn pass_switcher_cards(
             ctx.pill_anchor = Some(sc_layout::Rect { x, y, w, h });
         }
         deck.push(DeckCard {
-            elements,
+            content: CardContent {
+                elements,
+                closing,
+                bounds: (x, y, w, h),
+            },
             placement,
             card_t,
             decor: crate::skia_gl::CardDecor {
@@ -1051,8 +1219,15 @@ fn pass_switcher_cards(
             .render(framebuffer, size, t)
             .map_err(SwapBuffersError::from)?;
         while i < deck.len() && deck[i].card_t == t {
-            let elements = std::mem::take(&mut deck[i].elements);
-            draw_card_in_frame(&mut frame, size, ctx, elements, deck[i].placement, t);
+            let content = std::mem::replace(
+                &mut deck[i].content,
+                CardContent {
+                    elements: Vec::new(),
+                    closing: None,
+                    bounds: (0.0, 0.0, 0.0, 0.0),
+                },
+            );
+            draw_card_in_frame(&mut frame, size, ctx, content, deck[i].placement, t);
             i += 1;
         }
         let _sync = frame.finish().map_err(SwapBuffersError::from)?;
@@ -1127,10 +1302,14 @@ fn pass_overlays(
         draw_overlay(renderer, framebuffer, size, ctx, surface, *origin)?;
     }
     for (surface, origin) in layers_above {
+        if ctx.card_layers_drawn && ctx.card_layers.0.contains(surface) {
+            continue;
+        }
         draw_overlay(renderer, framebuffer, size, ctx, surface, *origin)?;
     }
-    // The hidden OSK is gone from the render lists; draw its held buffer.
-    if let Some((buffer, rect)) = ctx.closing {
+    // The hidden OSK is gone from the render lists; draw its held buffer
+    // unless a card took it.
+    if let (Some((buffer, rect, _)), false) = (ctx.closing, ctx.card_layers_drawn) {
         draw_closing(renderer, framebuffer, size, ctx, buffer, rect)?;
     }
     for (surface, origin) in layer_popups {
@@ -1178,38 +1357,17 @@ fn draw_closing(
     buffer: &smithay::backend::renderer::utils::Buffer,
     rect: sc_layout::Rect,
 ) -> Result<(), SwapBuffersError> {
-    let texture = match buffer_type(buffer) {
-        Some(BufferType::Shm) => renderer.import_shm_buffer(buffer, None, &[]).ok(),
-        Some(BufferType::Dma) => renderer.import_dma_buffer(buffer, None, &[]).ok(),
-        _ => None,
-    };
-    let Some(texture) = texture else {
+    let Some(element) = closing_element(renderer, buffer, rect) else {
         return Ok(());
     };
-    // 1:1: the layer client renders at `dpi`.
-    let elements = vec![TextureRenderElement::from_static_texture(
-        ElementId::new(),
-        renderer.context_id(),
-        (rect.x as f64, rect.y as f64),
-        texture,
-        1,
-        Transform::Normal,
-        Some(1.0),
-        None,
-        None,
-        None,
-        Kind::Unspecified,
-    )];
+    let elements = [element];
     let mut frame = renderer
         .render(framebuffer, size, ctx.base())
         .map_err(SwapBuffersError::from)?;
     let damage = [Rectangle::from_size(ctx.view(size))];
-    if let Err(e) = draw_render_elements::<
-        GlesRenderer,
-        f64,
-        TextureRenderElement<smithay::backend::renderer::gles::GlesTexture>,
-    >(&mut frame, 1.0, &elements, &damage)
-    {
+    if let Err(e) = draw_render_elements::<GlesRenderer, f64, TextureRenderElement<GlesTexture>>(
+        &mut frame, 1.0, &elements, &damage,
+    ) {
         warn!(?e, "failed to draw closing layer surface");
     }
     let _sync = frame.finish().map_err(SwapBuffersError::from)?;

@@ -135,12 +135,6 @@ pub fn bar_rect(width: f32, height: f32) -> Rect {
     }
 }
 
-/// Space the gesture bar reserves from apps: the gap above plus below the
-/// centered pill.
-pub fn gesture_exclusive_zone(height: f32) -> f32 {
-    (height * BAR_HEIGHT - PILL_HEIGHT).max(0.0)
-}
-
 pub fn pill_in_bar(bar: Rect) -> Rect {
     let pill_w = bar.w * 0.35;
     Rect {
@@ -155,17 +149,18 @@ pub fn pill_rect(width: f32, height: f32) -> Rect {
     pill_in_bar(bar_rect(width, height))
 }
 
-/// The pill under a card, measured from the card's drawn rect (the app's
-/// pixels, which are only the usable area), scaled with the card so it
+/// The pill inside a card's bottom bar band, scaled with the card so it
 /// doesn't jump as the card returns to fullscreen.
 pub fn pill_under(card: Rect, width: f32, height: f32) -> Rect {
     let scale = if width > 0.0 { card.w / width } else { 1.0 };
     let pill_w = card.w * 0.35;
+    let band = height * BAR_HEIGHT * scale;
+    let pill_h = PILL_HEIGHT * scale;
     Rect {
         x: card.x + (card.w - pill_w) / 2.0,
-        y: card.y + card.h + (gesture_exclusive_zone(height) / 2.0 - PILL_HEIGHT) * scale,
+        y: card.y + card.h - band + (band - pill_h) / 2.0,
         w: pill_w,
-        h: PILL_HEIGHT * scale,
+        h: pill_h,
     }
 }
 
@@ -490,7 +485,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             w,
-            h: h - gesture_exclusive_zone(h),
+            h,
         };
         let under = pill_under(app, w, h);
         let screen = pill_rect(w, h);
@@ -509,8 +504,8 @@ mod tests {
         let small = pill_under(half, w, h);
         assert!((small.w - under.w / 2.0).abs() < 0.01);
         assert!((small.h - under.h / 2.0).abs() < 0.01);
-        let gap = |p: Rect, card: Rect| p.y - (card.y + card.h);
-        assert!((gap(small, half) - gap(under, app) / 2.0).abs() < 0.01);
+        let inset = |p: Rect, card: Rect| (card.y + card.h) - (p.y + p.h);
+        assert!((inset(small, half) - inset(under, app) / 2.0).abs() < 0.01);
     }
 
     use super::*;

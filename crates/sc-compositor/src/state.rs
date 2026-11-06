@@ -119,6 +119,9 @@ pub(crate) struct FramePrep {
     pub bar_alpha: f32,
     pub layers_below: layer_shell::RenderList,
     pub layers_above: layer_shell::RenderList,
+    /// Docked members of `layers_above` (the OSK) and the app whose card they
+    /// ride; drawn scaled into that card instead of over the view.
+    pub card_layers: (Vec<WlSurface>, Option<WlSurface>),
     pub app_popups: layer_shell::RenderList,
     pub layer_popups: layer_shell::RenderList,
     pub touch_marks: Vec<touch_viz::TouchMark>,
@@ -131,7 +134,11 @@ pub(crate) struct FramePrep {
     pub library: Option<crate::render::LibraryView>,
     pub folder: Option<crate::render::FolderView>,
     /// The OSK sliding out: its held buffer and where it's drawn.
-    pub closing: Option<(smithay::backend::renderer::utils::Buffer, sc_layout::Rect)>,
+    pub closing: Option<(
+        smithay::backend::renderer::utils::Buffer,
+        sc_layout::Rect,
+        sc_layout::Rect,
+    )>,
     pub card_chrome: crate::render::CardChromeView,
     /// 0..=1 black over everything: the rotation dip.
     pub dim: f32,
@@ -417,6 +424,8 @@ pub(crate) struct State {
     pub kbd_switch: Option<crate::kbd_switch::KbdSwitch>,
     /// Multiplied into `bar_alpha`.
     pub bar_hint: crate::bar_hint::BarHint,
+    /// The app whose card the OSK rides, kept through its slide-out.
+    pub card_layer_host: Option<WlSurface>,
     pub active_gesture: Option<debug_input::ActiveGesture>,
     pub active_key: Option<debug_input::ActiveKey>,
     pub active_touch: Option<debug_input::ActiveTouch>,
@@ -736,6 +745,7 @@ impl State {
             card_chrome: switcher::CardChrome::new(),
             kbd_switch: None,
             bar_hint: crate::bar_hint::BarHint::new(),
+            card_layer_host: None,
             active_gesture: None,
             active_key: None,
             active_touch: None,
