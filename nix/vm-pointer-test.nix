@@ -15,6 +15,9 @@ mkTest {
   extraPythonPackages = p: [ p.pillow ];
 
   extraMachineConfig = {
+    # Motion is logged at trace: per event, too noisy for the shared filter.
+    systemd.user.services.springchick.environment.RUST_LOG =
+      pkgs.lib.mkForce "info,springchick::debug=trace";
     virtualisation.qemu.options = [
       "-device qemu-xhci,id=xhci"
       "-device usb-mouse,bus=xhci.0"
