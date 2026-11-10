@@ -19,6 +19,7 @@ sc-panel = { path = "../sc-panel" }
 sc-fonts = { path = "../sc-fonts" }
 sc-icons = { path = "../sc-icons" }
 sc-keys = { path = "../sc-keys" }
+sc-haptics = { path = "../sc-haptics" }
 png = "0.17"
 serde_json = "1"
 

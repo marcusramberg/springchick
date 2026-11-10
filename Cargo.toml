@@ -13,6 +13,7 @@ members = [
   "crates/sc-fonts",
   "crates/sc-search",
   "crates/sc-predict",
+  "crates/sc-haptics",
   "crates/sc-osk",
   "crates/sc-compositor",
 ]

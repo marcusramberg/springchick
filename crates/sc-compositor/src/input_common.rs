@@ -274,7 +274,14 @@ fn motion_page_drag(state: &mut State, x: f32, y: f32) {
 fn motion_live_gesture(state: &mut State, x: f32, y: f32) {
     let dt = state.motion_dt();
     if let Some(ev) = input_dispatch::on_move(&state.ui, x, y, dt, state.output_size()) {
-        transition(&mut state.ui, ev);
+        if matches!(
+            transition(&mut state.ui, ev),
+            crate::ui_state::Effect::Haptic
+        ) {
+            if let Some(h) = &state.haptics {
+                h.tap();
+            }
+        }
     }
 
     // A grab turning horizontal while still low becomes a quick-switch slide.

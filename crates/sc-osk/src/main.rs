@@ -9,7 +9,6 @@ mod accents;
 mod draw;
 mod emoji;
 mod grid;
-mod haptics;
 mod labels;
 mod osk;
 mod suggest;
@@ -116,7 +115,7 @@ struct App {
     layouts: Vec<String>,
     active_layout: u32,
     uinput: Option<uinput::Uinput>,
-    haptics: Option<haptics::Haptics>,
+    haptics: Option<sc_haptics::Haptics>,
     im: Option<ZwpInputMethodV2>,
     pending_active: bool,
     pending_purpose: u32,
@@ -182,7 +181,14 @@ fn main() {
         layouts: Vec::new(),
         active_layout: 0,
         uinput,
-        haptics: config.osk_haptics.then(haptics::Haptics::new).flatten(),
+        haptics: config
+            .osk_haptics
+            .then(|| {
+                sc_haptics::Haptics::new("sc-osk")
+                    .map_err(|e| eprintln!("sc-osk: no session bus ({e}); no haptics"))
+                    .ok()
+            })
+            .flatten(),
         im: None,
         pending_active: false,
         pending_purpose: 0,
@@ -591,7 +597,7 @@ impl App {
 
     fn buzz(&self) {
         if let Some(h) = &self.haptics {
-            h.press();
+            h.tap();
         }
     }
 

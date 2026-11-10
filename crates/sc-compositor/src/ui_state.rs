@@ -1,7 +1,7 @@
 //! Pure UI state machine: `transition(state, event) -> Effect`.
 
 use sc_anim::Spring;
-use sc_input::{NavTarget, Tracker};
+use sc_input::{live_state, NavState, NavTarget, Tracker};
 use tracing::debug;
 
 /// Index into the compositor's toplevel vec.
@@ -372,6 +372,8 @@ pub enum Effect {
     },
     /// The caller populates the cards.
     EnterSwitcher,
+    /// The drag just reached the switcher line.
+    Haptic,
     None,
 }
 
@@ -476,7 +478,13 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
         }
         UiEvent::GrabMove { point, dt } => {
             if let UiState::Grabbing { tracker, .. } = state {
+                let was = live_state(tracker);
                 tracker.update(point, dt);
+                if was != NavState::SwitcherPreview
+                    && live_state(tracker) == NavState::SwitcherPreview
+                {
+                    return Effect::Haptic;
+                }
             }
             Effect::None
         }
@@ -934,6 +942,29 @@ mod tests {
             }
         }
         assert!(matches!(state, UiState::Home { .. }));
+    }
+
+    #[test]
+    fn grab_crossing_the_switcher_line_taps_once() {
+        let mut state = UiState::App {
+            toplevel: 1,
+            app_id: "x".into(),
+        };
+        transition(
+            &mut state,
+            UiEvent::GrabStart {
+                point: Pt { x: 0.5, y: 0.95 },
+            },
+        );
+        let mv = |y| UiEvent::GrabMove {
+            point: Pt { x: 0.5, y },
+            dt: 0.016,
+        };
+        assert!(matches!(transition(&mut state, mv(0.90)), Effect::None));
+        assert!(matches!(transition(&mut state, mv(0.80)), Effect::Haptic));
+        assert!(matches!(transition(&mut state, mv(0.75)), Effect::None));
+        assert!(matches!(transition(&mut state, mv(0.90)), Effect::None));
+        assert!(matches!(transition(&mut state, mv(0.80)), Effect::Haptic));
     }
 
     #[test]

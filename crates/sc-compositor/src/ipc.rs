@@ -29,6 +29,9 @@ pub fn run_client(args: &[String]) -> ExitCode {
         eprintln!("       springchick ipc tswipe 640 1600 640 400 300 # finger drag");
         eprintln!("       springchick ipc launch org.gnome.Maps [new]");
         eprintln!("       springchick ipc reload   # re-read config.toml + rescan apps");
+        eprintln!(
+            "       springchick ipc haptic [EVENT] # feedbackd event, default button-pressed"
+        );
         eprintln!("       springchick ipc layers   # dump layer surfaces + their popups");
         eprintln!("       springchick ipc home     # dump home grid + catalog resolution");
         eprintln!("       springchick ipc layout [N] # list xkb layouts / lock layout N");

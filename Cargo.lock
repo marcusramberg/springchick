@@ -2751,6 +2751,7 @@ dependencies = [
  "sc-catalog",
  "sc-config",
  "sc-fonts",
+ "sc-haptics",
  "sc-icons",
  "sc-input",
  "sc-keys",
@@ -2779,6 +2780,13 @@ dependencies = [
 [[package]]
 name = "sc-fonts"
 version = "0.1.0"
+
+[[package]]
+name = "sc-haptics"
+version = "0.1.0"
+dependencies = [
+ "dbus",
+]
 
 [[package]]
 name = "sc-icons"
@@ -2811,12 +2819,12 @@ dependencies = [
 name = "sc-osk"
 version = "0.1.0"
 dependencies = [
- "dbus",
  "libc",
  "rustix 1.1.4",
  "rustybuzz",
  "sc-config",
  "sc-fonts",
+ "sc-haptics",
  "sc-layout",
  "sc-predict",
  "skia-safe",

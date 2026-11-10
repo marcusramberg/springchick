@@ -396,6 +396,8 @@ pub(crate) struct State {
     pub rotation_await_size: Option<(i32, i32)>,
     /// `None` without an accelerometer (dev box, VM).
     pub sensor: Option<sensor::Sensor>,
+    /// `None` without a session bus.
+    pub haptics: Option<sc_haptics::Haptics>,
     /// Foreground app is fullscreen landscape content
     /// ([`content_type::wants_landscape`]).
     pub landscape_hint: bool,
@@ -732,6 +734,9 @@ impl State {
             rotation_fade: rotation::Fade::new(config_rotation_fade_ms),
             rotation_await_size: None,
             sensor: sensor::spawn(),
+            haptics: sc_haptics::Haptics::new("springchick")
+                .map_err(|e| info!("no session bus ({e}); no haptics"))
+                .ok(),
             landscape_hint: false,
             skia: SkiaGl::new(theme),
             wayland_socket,

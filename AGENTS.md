@@ -40,7 +40,7 @@ Build the check matching `builtins.currentSystem`. Cross-building runs the relea
 
 Use the `run-springchick` skill (`.claude/skills/run-springchick/SKILL.md`). It covers the nested-winit driver (`driver.sh`: build/up/client/send/shot/down), the interactive VM driver, and a long list of gotchas. Never `pkill foot`: the user's own terminal is a foot window, so kill by recorded PID only.
 
-A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y` (a real contact: routed to the client under it, else the shell), `swipe X1 Y1 X2 Y2 [MS]` (shell gestures only), `tswipe X1 Y1 X2 Y2 [MS]` (a real finger drag: scrolls the client under it), `key NAME [MS]`, `down/move/up`, `settle [MS]`, `launch APP_ID [new]`, `action NAME`, `reload`, `layers`, `layout [N]`, `rotation [enable|disable]`, `quit`). Works nested, in the VM, and on-device.
+A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y` (a real contact: routed to the client under it, else the shell), `swipe X1 Y1 X2 Y2 [MS]` (shell gestures only), `tswipe X1 Y1 X2 Y2 [MS]` (a real finger drag: scrolls the client under it), `key NAME [MS]`, `down/move/up`, `settle [MS]`, `launch APP_ID [new]`, `action NAME`, `reload`, `haptic [EVENT]` (a feedbackd event through the shell's own haptics, default `button-pressed`), `layers`, `layout [N]`, `rotation [enable|disable]`, `quit`). Works nested, in the VM, and on-device.
 
 `springchick ipc layers` dumps every layer surface and layer-rooted popup being composited (namespace, layer, logical geometry, the physical rect, buffer size, pending-map/slide state, anchor and exclusive zone), plus the usable area and regrow-guard state. Run it first when the screen shows something no client admits to, e.g. two on-screen keyboards from one wvkbd process.
 
@@ -60,6 +60,7 @@ crates/
   sc-catalog/      .desktop scan/parse + field-code stripping + search ranking
   sc-compositor/   The `springchick` binary
   sc-config/       config.toml parsing: sections, `include`, [theme]. Lenient — bad entry dropped, rest applies
+  sc-haptics/      feedbackd haptics over the session bus (shell switcher line, OSK keys)
   sc-icons/        Icon theme lookup + resvg → raw RGBA (no Skia dep)
   sc-input/        Gesture recognizer (Tracker/Pt) + nav state machine (NavTarget)
   sc-keys/         Short/long key-press timing rules (types live in sc-config)

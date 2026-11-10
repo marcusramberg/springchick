@@ -49,6 +49,9 @@ pub enum DebugCmd {
     Rotation(Option<bool>),
     /// Re-read `config.toml` (live settings only) and rescan the catalog.
     Reload,
+    /// Fire a feedbackd event (default `button-pressed`), as the shell's own
+    /// haptics do. Answers `err` without a session bus.
+    Haptic(String),
     /// As SIGTERM. The shell's logout goes through this.
     Quit,
     /// A query; see [`State::layers_dump`].
@@ -148,6 +151,11 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
         "reload" => {
             done(tok)?;
             DebugCmd::Reload
+        }
+        "haptic" => {
+            let event = tok.next().unwrap_or("button-pressed").to_string();
+            done(tok)?;
+            DebugCmd::Haptic(event)
         }
         "layers" => {
             done(tok)?;
@@ -389,6 +397,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
         cmd,
         DebugCmd::Settle { .. }
             | DebugCmd::Reload
+            | DebugCmd::Haptic(_)
             | DebugCmd::Layers
             | DebugCmd::Home
             | DebugCmd::Rotation(_)
@@ -527,6 +536,15 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             state.reload_config();
             state.reload_catalog();
             let _ = reply.send("ok\n".into());
+        }
+        DebugCmd::Haptic(event) => {
+            let _ = reply.send(match &state.haptics {
+                Some(h) => {
+                    h.trigger(&event);
+                    "ok\n".into()
+                }
+                None => "err no session bus\n".into(),
+            });
         }
         DebugCmd::Layers => {
             let _ = reply.send(format!("ok {}\n", state.layers_dump()));
@@ -937,6 +955,14 @@ mod tests {
     #[test]
     fn parses_reload() {
         assert_eq!(parse_line("reload", W, H), Ok(DebugCmd::Reload));
+        assert_eq!(
+            parse_line("haptic", W, H),
+            Ok(DebugCmd::Haptic("button-pressed".into()))
+        );
+        assert_eq!(
+            parse_line("haptic window-close", W, H),
+            Ok(DebugCmd::Haptic("window-close".into()))
+        );
         assert_eq!(parse_line("rotation", W, H), Ok(DebugCmd::Rotation(None)));
         assert_eq!(
             parse_line("rotation enable", W, H),
