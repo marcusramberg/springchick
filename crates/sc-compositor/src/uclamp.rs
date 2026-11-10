@@ -214,11 +214,11 @@ mod tests {
     #[test]
     fn holds_the_floor_briefly_after_drawing_stops() {
         let mut u = Uclamp::new(UclampMin::Fixed(450));
-        if u.broken {
-            return; // kernel without uclamp support
-        }
         let t0 = Instant::now();
         u.update(true, t0);
+        if u.broken {
+            return; // kernel without uclamp support (nix sandbox)
+        }
         assert!(u.applied, "floor applies while drawing");
         u.update(false, t0 + Duration::from_millis(100));
         assert!(u.applied, "still held inside the release delay");
