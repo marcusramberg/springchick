@@ -290,6 +290,14 @@ pub(crate) struct State {
     pub touch_targets: HashMap<smithay::backend::input::TouchSlot, f64>,
     /// The one slot driving the single-touch gesture funnel.
     pub gesture_slot: Option<smithay::backend::input::TouchSlot>,
+    /// A client-routed slot that landed in an app's bar band, with its start:
+    /// moving past the tap slop hands it to the shell.
+    pub bar_candidate: Option<(
+        smithay::backend::input::TouchSlot,
+        f32,
+        f32,
+        std::time::Instant,
+    )>,
     /// Pointer press held on a client surface.
     pub pointer_grab: bool,
     /// False under winit, where the host draws the cursor.
@@ -661,6 +669,7 @@ impl State {
             touch,
             touch_targets: HashMap::new(),
             gesture_slot: None,
+            bar_candidate: None,
             pointer_grab: false,
             cursor_overlay: false,
             cursor_visible: false,
@@ -792,6 +801,7 @@ impl State {
         self.pointer_down = false;
         self.pointer_grab = false;
         self.gesture_slot = None;
+        self.bar_candidate = None;
         self.touch_targets.clear();
         self.page_drag = None;
         self.last_motion = None;

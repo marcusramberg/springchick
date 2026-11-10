@@ -34,6 +34,7 @@ fn descend(t: Target, x: f32, y: f32) -> Target {
                 t.origin.1 + loc.y as f64 * t.scale,
             ),
             scale: t.scale,
+            bar: t.bar,
         },
         _ => t,
     }
@@ -63,31 +64,34 @@ fn root_under(state: &State, x: f32, y: f32) -> Option<Target> {
             }
         }
     }
-    // The focused app, minus the bar zone. It's drawn at the usable-area
-    // origin, not (0, 0).
+    // The focused app, drawn at the usable-area origin, not (0, 0). The bar
+    // band is the app's too: a touch there is handed over to the shell only
+    // once it moves (`down`/`motion`), so the pill never eats a tap.
     if let crate::ui_state::UiState::App { toplevel, .. } = &state.ui {
         let (w, h) = state.output_size_f();
-        let bar = sc_layout::bar_rect(w, h);
-        if !bar.contains(x, y) {
-            // A floating dialog is modal: outside it, nothing.
-            if let Some((rect, origin, scale)) = state.floating_dialog(*toplevel) {
-                return rect.contains(x, y).then(|| {
-                    let tl = state.toplevels[*toplevel].as_ref().unwrap();
-                    Target::at(
-                        tl.surface.wl_surface().clone(),
-                        (origin.0 as f64, origin.1 as f64),
-                        scale,
-                    )
-                });
-            }
-            if let Some(Some(tl)) = state.toplevels.get(*toplevel) {
-                let (ox, oy) = state.app_origin();
-                return Some(Target::at(
+        let bar = sc_layout::bar_rect(w, h).contains(x, y);
+        // A floating dialog is modal: outside it, nothing.
+        if let Some((rect, origin, scale)) = state.floating_dialog(*toplevel) {
+            return rect.contains(x, y).then(|| {
+                let tl = state.toplevels[*toplevel].as_ref().unwrap();
+                let mut t = Target::at(
                     tl.surface.wl_surface().clone(),
-                    (ox as f64, oy as f64),
-                    state.dpi,
-                ));
-            }
+                    (origin.0 as f64, origin.1 as f64),
+                    scale,
+                );
+                t.bar = bar;
+                t
+            });
+        }
+        if let Some(Some(tl)) = state.toplevels.get(*toplevel) {
+            let (ox, oy) = state.app_origin();
+            let mut t = Target::at(
+                tl.surface.wl_surface().clone(),
+                (ox as f64, oy as f64),
+                state.dpi,
+            );
+            t.bar = bar;
+            return Some(t);
         }
     }
     None
@@ -102,6 +106,8 @@ struct Target {
     surface: WlSurface,
     origin: (f64, f64),
     scale: f64,
+    /// The app under the home-bar band: the shell may still claim the contact.
+    bar: bool,
 }
 
 impl Target {
@@ -110,6 +116,7 @@ impl Target {
             surface,
             origin,
             scale,
+            bar: false,
         }
     }
 
@@ -143,6 +150,7 @@ fn popup_under(state: &State, x: f32, y: f32) -> Option<Target> {
         surface: kind.wl_surface().clone(),
         origin: (origin.0 as f64, origin.1 as f64),
         scale: state.dpi,
+        bar: false,
     })
 }
 
@@ -195,6 +203,7 @@ fn popup_press(state: &mut State, x: f32, y: f32) -> PopupPress {
                 surface: kind.wl_surface().clone(),
                 origin: (origin.0 as f64, origin.1 as f64),
                 scale: state.dpi,
+                bar: false,
             };
             PopupPress::Route(descend(t, x, y))
         }
@@ -289,7 +298,7 @@ pub fn pointer_button(state: &mut State, pressed: bool, button: u32, time: Input
         let target = match popup_press(state, x, y) {
             PopupPress::Consumed => return,
             PopupPress::Route(target) => Some(target),
-            PopupPress::None => surface_under(state, x, y),
+            PopupPress::None => surface_under(state, x, y).filter(|t| !t.bar),
         };
         if let Some(target) = target {
             let ptr = state.seat.get_pointer().unwrap();
@@ -462,6 +471,9 @@ pub fn down(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: InputTime)
     if let Some(target) = target {
         // Presence marks the slot client-routed.
         state.touch_targets.insert(slot, target.scale);
+        if target.bar && state.gesture_slot.is_none() {
+            state.bar_candidate = Some((slot, x, y, std::time::Instant::now()));
+        }
         state.layers.note_tap(&target.surface);
         let touch = state.touch.clone();
         let event = DownEvent {
@@ -492,6 +504,12 @@ pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: InputTim
             .contact(slot_id(slot), x, y, std::time::Instant::now());
         state.needs_render = true;
     }
+    if let Some((cslot, sx, sy, at)) = state.bar_candidate {
+        if cslot == slot && sc_input::home::exceeds_icon_tap_slop(x - sx, y - sy) {
+            claim_bar_drag(state, slot, (sx, sy, at), x, y);
+            return;
+        }
+    }
     if let Some(&scale) = state.touch_targets.get(&slot) {
         let touch = state.touch.clone();
         let location = to_local(scale, x, y);
@@ -507,6 +525,27 @@ pub fn motion(state: &mut State, x: f32, y: f32, slot: TouchSlot, time: InputTim
     if state.gesture_slot == Some(slot) {
         input_common::on_motion(state, x, y);
     }
+}
+
+/// A bar-band contact that moved: the client's touch is cancelled (seat-wide,
+/// so every client slot goes) and the shell grabs from the original point.
+fn claim_bar_drag(
+    state: &mut State,
+    slot: TouchSlot,
+    (sx, sy, at): (f32, f32, std::time::Instant),
+    x: f32,
+    y: f32,
+) {
+    state.bar_candidate = None;
+    let touch = state.touch.clone();
+    touch.cancel(state);
+    state.touch_targets.clear();
+    state.gesture_slot = Some(slot);
+    input_common::on_motion(state, sx, sy);
+    input_common::on_press(state);
+    // Time the slop distance from the real down, or it reads as a flick.
+    state.last_motion = Some(at);
+    input_common::on_motion(state, x, y);
 }
 
 /// libinput `TOUCH_FRAME`. Batching on the real frame keeps multi-finger
@@ -548,6 +587,9 @@ pub fn up(state: &mut State, slot: TouchSlot, time: InputTime) {
             .touch_viz
             .release(slot_id(slot), std::time::Instant::now());
         state.needs_render = true;
+    }
+    if state.bar_candidate.is_some_and(|(s, ..)| s == slot) {
+        state.bar_candidate = None;
     }
     if state.touch_targets.remove(&slot).is_some() {
         let touch = state.touch.clone();
