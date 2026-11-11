@@ -71,6 +71,9 @@ const SWITCHER_HANDOVER: f32 = 0.985;
 /// The shrink's tail reads as a hitch before Home appears.
 const MINIMIZE_HANDOVER: f32 = 0.95;
 
+/// A few pixels from fullscreen; the spring itself takes 0.2 s more to settle.
+const OPEN_HANDOVER: f32 = 0.999;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ZoomOrigin {
     /// Logical px.
@@ -85,6 +88,10 @@ impl ZoomOrigin {
     }
     pub fn card(center: (f32, f32), scale: f32) -> Self {
         Self { center, scale }
+    }
+    // ponytail: told apart by size; carry the kind if a third origin appears.
+    pub fn is_card(&self) -> bool {
+        self.scale > 0.3
     }
 }
 
@@ -583,7 +590,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     ..
                 } => {
                     progress.step(dt);
-                    if progress.is_settled() {
+                    if progress.is_settled() || progress.value >= OPEN_HANDOVER {
                         let toplevel = *toplevel;
                         let app_id = app_id.clone();
                         *state = UiState::App { toplevel, app_id };
@@ -1668,5 +1675,24 @@ mod tests {
             app_id: "foot".into(),
         };
         assert_eq!(keyboard_focus(&app), Some(3));
+    }
+
+    #[test]
+    fn opening_hands_over_a_pixel_from_fullscreen() {
+        let mut state = UiState::AppOpening {
+            toplevel: 1,
+            app_id: "foot".into(),
+            progress: Spring::zoom(0.0, 1.0),
+            origin: ZoomOrigin::icon((0.5, 0.5)),
+            open_mode: OpenMode::Zoom,
+        };
+        let mut frames = 0;
+        while matches!(state, UiState::AppOpening { .. }) {
+            transition(&mut state, UiEvent::Tick { dt: 1.0 / 120.0 });
+            frames += 1;
+            assert!(frames < 200);
+        }
+        // The spring alone takes 87 frames at 120 Hz.
+        assert!((55..70).contains(&frames), "frames={frames}");
     }
 }

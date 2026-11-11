@@ -223,19 +223,21 @@ pub fn compute_scene(
                 crate::ui_state::OpenMode::SlideFromLeft => home_slide_out(p, w),
                 _ => 0.0,
             };
+            let zoom = matches!(open_mode, crate::ui_state::OpenMode::Zoom);
+            // Out of the deck Home stays as the switcher left it, frosted and
+            // still, until the window covers it.
+            let from_deck = zoom && origin.is_card();
             Scene {
                 window: Some((*toplevel, transform)),
                 show_home: true,
                 home_lift: 0.0,
                 home_shift,
-                home_recede: matches!(open_mode, crate::ui_state::OpenMode::Zoom).then(|| {
-                    HomeRecede {
-                        pivot: origin.center,
-                        amount: p,
-                    }
+                home_recede: (zoom && !from_deck).then_some(HomeRecede {
+                    pivot: origin.center,
+                    amount: p,
                 }),
                 home_page: 0,
-                backdrop_blur: 0.0,
+                backdrop_blur: if from_deck { 1.0 } else { 0.0 },
                 cards: Vec::new(),
             }
         }
@@ -664,6 +666,25 @@ mod tests {
         let scene = compute_scene(&state, TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
         assert!(scene.home_lift > 0.0, "lift={}", scene.home_lift);
         assert!(scene.show_home);
+    }
+
+    #[test]
+    fn opening_from_a_card_keeps_the_frosted_backdrop() {
+        let mk = |origin| UiState::AppOpening {
+            toplevel: 0,
+            app_id: "foot".into(),
+            progress: sc_anim::Spring::zoom(0.0, 1.0),
+            origin,
+            open_mode: crate::ui_state::OpenMode::Zoom,
+        };
+        let card = crate::ui_state::ZoomOrigin::card((200.0, 400.0), 0.62);
+        let from_card = compute_scene(&mk(card), TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
+        assert_eq!(from_card.backdrop_blur, 1.0);
+        assert!(from_card.home_recede.is_none());
+        let icon = crate::ui_state::ZoomOrigin::icon((200.0, 400.0));
+        let from_icon = compute_scene(&mk(icon), TEST_SIZE, (0.0, 0.0), TEST_RADIUS);
+        assert_eq!(from_icon.backdrop_blur, 0.0);
+        assert!(from_icon.home_recede.is_some());
     }
 
     #[test]
