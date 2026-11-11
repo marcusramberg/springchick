@@ -420,6 +420,7 @@ fn revert_quick_switch(state: &mut State, x: f32, y: f32) {
     state.ui = UiState::Grabbing {
         toplevel: current,
         app_id,
+        tapped: false,
         tracker,
         cards,
     };

@@ -1,7 +1,7 @@
 //! Pure UI state machine: `transition(state, event) -> Effect`.
 
 use sc_anim::Spring;
-use sc_input::{live_state, NavState, NavTarget, Tracker};
+use sc_input::{NavTarget, Tracker};
 use tracing::debug;
 
 /// Index into the compositor's toplevel vec.
@@ -137,6 +137,8 @@ pub enum UiState {
         toplevel: ToplevelId,
         app_id: String,
         tracker: Tracker,
+        /// The switcher haptic has fired on this drag.
+        tapped: bool,
         /// MRU deck for the live fan, filled in by the caller after the grab starts.
         cards: Vec<ToplevelId>,
     },
@@ -487,18 +489,22 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     toplevel,
                     app_id,
                     tracker: Tracker::begin(point),
+                    tapped: false,
                     cards: Vec::new(),
                 };
             }
             Effect::None
         }
         UiEvent::GrabMove { point, dt } => {
-            if let UiState::Grabbing { tracker, .. } = state {
-                let was = live_state(tracker);
+            if let UiState::Grabbing {
+                tracker, tapped, ..
+            } = state
+            {
                 tracker.update(point, dt);
-                if was != NavState::SwitcherPreview
-                    && live_state(tracker) == NavState::SwitcherPreview
-                {
+                // Once a drag, when letting go would open the switcher: not
+                // on a flick through the band on the way Home.
+                if !*tapped && sc_input::classify_release(tracker) == NavTarget::Switcher {
+                    *tapped = true;
                     return Effect::Haptic;
                 }
             }
@@ -510,6 +516,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 app_id,
                 tracker,
                 cards,
+                ..
             } = state
             {
                 let target = sc_input::classify_release(tracker);
@@ -567,6 +574,7 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                         toplevel,
                         app_id,
                         tracker: Tracker::begin(point),
+                        tapped: false,
                         cards: Vec::new(),
                     };
                 }
@@ -962,25 +970,50 @@ mod tests {
 
     #[test]
     fn grab_crossing_the_switcher_line_taps_once() {
-        let mut state = UiState::App {
-            toplevel: 1,
-            app_id: "x".into(),
+        let start = |state: &mut UiState| {
+            *state = UiState::App {
+                toplevel: 1,
+                app_id: "x".into(),
+            };
+            transition(
+                state,
+                UiEvent::GrabStart {
+                    point: Pt { x: 0.5, y: 0.95 },
+                },
+            );
         };
-        transition(
-            &mut state,
-            UiEvent::GrabStart {
-                point: Pt { x: 0.5, y: 0.95 },
-            },
-        );
-        let mv = |y| UiEvent::GrabMove {
+        let mv = |y, dt| UiEvent::GrabMove {
             point: Pt { x: 0.5, y },
-            dt: 0.016,
+            dt,
         };
-        assert!(matches!(transition(&mut state, mv(0.90)), Effect::None));
-        assert!(matches!(transition(&mut state, mv(0.80)), Effect::Haptic));
-        assert!(matches!(transition(&mut state, mv(0.75)), Effect::None));
-        assert!(matches!(transition(&mut state, mv(0.90)), Effect::None));
-        assert!(matches!(transition(&mut state, mv(0.80)), Effect::Haptic));
+        let mut state = UiState::home(0, 1);
+        start(&mut state);
+        assert!(matches!(
+            transition(&mut state, mv(0.90, 0.3)),
+            Effect::None
+        ));
+        assert!(matches!(
+            transition(&mut state, mv(0.80, 0.3)),
+            Effect::Haptic
+        ));
+        assert!(matches!(
+            transition(&mut state, mv(0.75, 0.3)),
+            Effect::None
+        ));
+        assert!(matches!(
+            transition(&mut state, mv(0.90, 0.3)),
+            Effect::None
+        ));
+        assert!(
+            matches!(transition(&mut state, mv(0.80, 0.3)), Effect::None),
+            "once a drag"
+        );
+
+        // A flick Home passes through the band without a tap.
+        start(&mut state);
+        for y in [0.85, 0.75, 0.65, 0.55, 0.45] {
+            assert!(matches!(transition(&mut state, mv(y, 0.008)), Effect::None));
+        }
     }
 
     #[test]
@@ -1037,6 +1070,7 @@ mod tests {
         let mut state = UiState::Grabbing {
             toplevel: 3,
             app_id: "x".into(),
+            tapped: false,
             tracker: Tracker::begin(Pt { x: 0.5, y: 0.9 }),
             cards: Vec::new(),
         };

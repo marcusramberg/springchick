@@ -816,6 +816,7 @@ mod tests {
         let state = UiState::Grabbing {
             toplevel: 0,
             app_id: "x".into(),
+            tapped: false,
             tracker,
             cards: Vec::new(),
         };
@@ -911,6 +912,7 @@ mod tests {
         let state = UiState::Grabbing {
             toplevel: 7,
             app_id: "x".into(),
+            tapped: false,
             tracker,
             cards: vec![7, 3, 1],
         };
@@ -934,6 +936,7 @@ mod tests {
         let state = UiState::Grabbing {
             toplevel: 7,
             app_id: "x".into(),
+            tapped: false,
             tracker,
             cards: vec![7, 3, 1],
         };
@@ -962,6 +965,7 @@ mod tests {
         let state = UiState::Grabbing {
             toplevel: 7,
             app_id: "x".into(),
+            tapped: false,
             tracker,
             cards: vec![7, 3, 1],
         };
