@@ -78,8 +78,8 @@ struct Adaptive {
     roomy: u32,
     calm_windows: u32,
     calm_needed: u32,
-    /// The last change was a step down that no window has confirmed yet.
-    probing: bool,
+    /// A step down has been tried; any raise since says it went too low.
+    lowered: bool,
 }
 
 impl Adaptive {
@@ -92,7 +92,7 @@ impl Adaptive {
             roomy: 0,
             calm_windows: 0,
             calm_needed: 1,
-            probing: false,
+            lowered: false,
         }
     }
 
@@ -111,23 +111,32 @@ impl Adaptive {
         if self.misses >= MISSES_TO_RAISE && self.level < LEVELS {
             self.level += 1;
             self.calm_windows = 0;
-            if std::mem::take(&mut self.probing) {
+            if self.lowered {
                 self.calm_needed = (self.calm_needed * 2).min(MAX_CALM_WINDOWS);
             }
         } else if self.frames >= WINDOW {
             let calm = self.roomy * 10 >= WINDOW * 9 && self.misses * 20 <= WINDOW;
-            self.probing = false;
             self.calm_windows = if calm { self.calm_windows + 1 } else { 0 };
             if self.calm_windows >= self.calm_needed && self.level > 0 {
                 self.level -= 1;
                 self.calm_windows = 0;
-                self.probing = true;
+                self.lowered = true;
             }
         } else {
             return false;
         }
         (self.frames, self.misses, self.roomy) = (0, 0, 0);
         self.level != was
+    }
+}
+
+/// With the frame's fence handed to KMS the render returns before the GPU is
+/// done, so a slow frame only shows as a skipped refresh. Longer gaps are
+/// pauses.
+fn cost(dt: Duration, interval: Option<Duration>, budget: Duration) -> Duration {
+    match interval {
+        Some(i) if i * 2 > budget * 3 && i < budget * 4 => i,
+        _ => dt,
     }
 }
 
@@ -172,9 +181,11 @@ impl Uclamp {
         }
     }
 
-    /// A frame's render time against the refresh interval.
-    pub fn observe(&mut self, dt: Duration, budget: Duration) {
+    /// A frame against the refresh interval. `interval` is the time since
+    /// the previous frame of the same animation started.
+    pub fn observe(&mut self, dt: Duration, interval: Option<Duration>, budget: Duration) {
         let Some(a) = &mut self.adaptive else { return };
+        let dt = cost(dt, interval, budget);
         if a.observe(dt, budget) {
             debug!(util_min = a.floor(), "uclamp auto: floor moved");
         }
@@ -388,6 +399,18 @@ mod tests {
         assert_eq!(a.level, 1, "one calm window is no longer enough");
         feed(&mut a, WINDOW, 3_000);
         assert_eq!(a.level, 0);
+    }
+
+    #[test]
+    fn a_skipped_refresh_is_the_frame_cost() {
+        let ms = Duration::from_millis;
+        assert_eq!(cost(ms(3), None, BUDGET), ms(3));
+        assert_eq!(
+            cost(ms(3), Some(Duration::from_micros(8_400)), BUDGET),
+            ms(3)
+        );
+        assert_eq!(cost(ms(3), Some(ms(17)), BUDGET), ms(17));
+        assert_eq!(cost(ms(3), Some(ms(400)), BUDGET), ms(3), "a pause");
     }
 
     /// FP5 at full clock: 1.4% of frames over, the rest far inside.

@@ -461,7 +461,10 @@ pub(crate) struct State {
     /// For the per-frame `gap_ms` trace.
     pub last_frame_end: Option<std::time::Instant>,
     /// For the backend's uclamp controller.
-    pub last_frame_dt: Option<Duration>,
+    /// Render time, and mid-animation the time since the previous frame
+    /// started. Client-paced frames have no cadence to miss.
+    pub last_frame_dt: Option<(Duration, Option<Duration>)>,
+    pub last_anim_frame: Option<std::time::Instant>,
 
     pub running: bool,
 }
@@ -780,6 +783,7 @@ impl State {
             last_perf_log: std::time::Instant::now(),
             last_frame_end: None,
             last_frame_dt: None,
+            last_anim_frame: None,
             running: true,
         }
     }
@@ -1097,7 +1101,13 @@ impl State {
     pub(crate) fn record_and_log_frame(&mut self, frame_start: std::time::Instant) {
         let dt = frame_start.elapsed();
         self.stats.record_frame(dt);
-        self.last_frame_dt = Some(dt);
+        let animating = self.ui.needs_animation();
+        let interval = self
+            .last_anim_frame
+            .filter(|_| animating)
+            .map(|t| frame_start - t);
+        self.last_anim_frame = animating.then_some(frame_start);
+        self.last_frame_dt = Some((dt, interval));
         // `springchick::perf=trace`. A large `gap_ms` marks the first frame after
         // idle, the one that pays schedutil's ramp; the aggregate can't show it.
         let now = std::time::Instant::now();
