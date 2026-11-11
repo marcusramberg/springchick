@@ -1471,8 +1471,8 @@ fn mode_refresh_mhz(mode: &smithay::reexports::drm::control::Mode) -> i32 {
     if htotal == 0 || vtotal == 0 {
         return 0;
     }
-    // kHz clock; the extra 1_000_000 converts Hz to mHz.
-    ((clock * 1_000_000_000) / (htotal * vtotal)) as i32
+    // kHz clock to mHz.
+    ((clock * 1_000_000) / (htotal * vtotal)) as i32
 }
 
 fn find_output(
