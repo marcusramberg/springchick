@@ -386,6 +386,15 @@ pub fn desired_focus(state: &UiState) -> Option<ToplevelId> {
     }
 }
 
+/// The keyboard also follows an app on its way in, so the OSK rises with
+/// the zoom instead of after it.
+pub fn keyboard_focus(state: &UiState) -> Option<ToplevelId> {
+    match state {
+        UiState::App { toplevel, .. } | UiState::AppOpening { toplevel, .. } => Some(*toplevel),
+        _ => None,
+    }
+}
+
 pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
     match event {
         UiEvent::AppMapped {
@@ -1641,5 +1650,23 @@ mod tests {
             transition(&mut state, UiEvent::Tick { dt: 1.0 / 60.0 });
         }
         assert!(matches!(state, UiState::App { toplevel: 2, .. }));
+    }
+
+    #[test]
+    fn keyboard_focus_leads_the_opening_app_in() {
+        let opening = UiState::AppOpening {
+            toplevel: 3,
+            app_id: "foot".into(),
+            progress: Spring::zoom(0.0, 1.0),
+            origin: ZoomOrigin::icon((0.5, 0.5)),
+            open_mode: OpenMode::Zoom,
+        };
+        assert_eq!(keyboard_focus(&opening), Some(3));
+        assert_eq!(desired_focus(&opening), None);
+        let app = UiState::App {
+            toplevel: 3,
+            app_id: "foot".into(),
+        };
+        assert_eq!(keyboard_focus(&app), Some(3));
     }
 }

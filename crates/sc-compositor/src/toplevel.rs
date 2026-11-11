@@ -567,10 +567,10 @@ impl State {
 
     /// Per frame while an OSK slides; `recompute_layers` lands the final size.
     pub(crate) fn follow_slide(&mut self) {
-        // On the way out of the app the OSK slides off inside the card, over a
-        // window already at full height; easing would reflow it all the way.
-        let leaving = !matches!(self.ui, ui_state::UiState::App { .. });
-        let Some(usable) = self.layers.sliding_usable(self.dpi, leaving) else {
+        // In transit the OSK slides inside the card over the window, so one
+        // resize will do; easing would reflow it all the way.
+        let transit = !matches!(self.ui, ui_state::UiState::App { .. });
+        let Some(usable) = self.layers.sliding_usable(self.dpi, transit) else {
             return;
         };
         let size = (
@@ -673,7 +673,9 @@ impl State {
         ) {
             return;
         }
-        let app = self.app_focus_surface();
+        let app = ui_state::keyboard_focus(&self.ui)
+            .and_then(|tid| self.toplevels.get(tid)?.as_ref())
+            .map(|tl| tl.surface.wl_surface().clone());
         // A layer asking for focus (shell dialog) outranks the app. Otherwise the
         // topmost grabbing popup, else the app. Focusing a non-grab popup makes
         // Firefox read the leave as deactivation and close it.
