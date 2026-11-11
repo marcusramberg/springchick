@@ -197,6 +197,10 @@ in
     services.udev.extraRules = ''
       ACTION=="add|change", SUBSYSTEM=="devfreq", KERNEL=="*gpu*", RUN+="${pkgs.coreutils}/bin/chgrp video /sys%p/min_freq", RUN+="${pkgs.coreutils}/bin/chmod g+w /sys%p/min_freq"
     '';
+    # `uclamp_min = "auto"`: likewise for the CPU clusters' clock floor.
+    systemd.tmpfiles.rules = [
+      "z /sys/devices/system/cpu/cpufreq/policy*/scaling_min_freq 0664 root video - -"
+    ];
     # Not extraRules: that is 99-local.rules, after the uaccess ACL is applied.
     services.udev.packages = [
       (pkgs.writeTextDir "lib/udev/rules.d/70-springchick-uinput.rules" (

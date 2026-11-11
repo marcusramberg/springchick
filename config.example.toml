@@ -66,7 +66,9 @@ prefer_no_csd = true
 # Without it, idle decays the thread onto the little cores and short
 # interactions finish before the governor ramps up.
 #   "auto"  just above the little cluster's cpu_capacity, raised while frames
-#           miss the refresh interval; off on symmetric CPUs
+#           miss the refresh interval; off on symmetric CPUs. Raises the big
+#           clusters' cpufreq scaling_min_freq with it when that is writable
+#           (the NixOS module makes it so for the video group)
 #   "off"   no floor (same as 0)
 #   <n>     explicit, e.g. 450 on the FP5 (little cluster is 382)
 uclamp_min = "auto"

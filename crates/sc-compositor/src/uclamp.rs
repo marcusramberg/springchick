@@ -180,6 +180,20 @@ impl Uclamp {
         }
     }
 
+    /// `(level, levels)` for [`crate::cpu_boost`]: 0 unless the adaptive
+    /// floor is both raised and in force.
+    pub fn boost(&self) -> (u32, u32) {
+        let level = self
+            .applied
+            .and(self.adaptive.as_ref())
+            .map_or(0, |a| a.level);
+        (level, LEVELS)
+    }
+
+    pub fn adapts(&self) -> bool {
+        self.adaptive.is_some()
+    }
+
     /// Call before rendering, so the first frame of a touch benefits.
     pub fn update(&mut self, drawing: bool, now: Instant) {
         let Some(floor) = self.floor else { return };

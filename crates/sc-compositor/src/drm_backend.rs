@@ -659,6 +659,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // This is the render thread.
     let mut uclamp = crate::uclamp::Uclamp::new(app.state.uclamp_min);
+    let mut cpu_boost = crate::cpu_boost::CpuBoost::new(uclamp.adapts());
     let mut gpu_boost = crate::gpu_boost::GpuBoost::new(app.state.gpu_min_mhz);
 
     while running.load(Ordering::Relaxed) && app.state.running {
@@ -719,6 +720,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             uclamp.observe(dt, Duration::from_nanos(1_000_000_000_000 / mhz));
         }
         uclamp.update(drawing, now);
+        let (level, levels) = uclamp.boost();
+        cpu_boost.set(level, levels);
         gpu_boost.update(drawing, now);
         if drawing {
             app.render();

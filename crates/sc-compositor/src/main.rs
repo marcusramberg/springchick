@@ -9,6 +9,7 @@ mod blank;
 mod capture;
 mod catalog_watch;
 mod content_type;
+mod cpu_boost;
 mod debug_input;
 mod drm_backend;
 mod foreign_toplevel;

@@ -93,7 +93,7 @@ Every crate except `sc-compositor`, `sc-search` and `sc-osk` (its `uinput.rs`) i
 - `winit_backend.rs` / `drm_backend.rs`: the two ways to present. `session.rs` is the Wayland display/socket plumbing they share, and `mirror.rs` is external-display mirroring on DRM.
 - `debug_input.rs` + `ipc.rs`: synthetic-input socket and its CLI client.
 - Protocol extras: `layer_shell.rs`, `popups.rs`, `idle_notify.rs`, `idle_inhibit.rs`, `gamma_control.rs`, `output_power.rs`, `background_effect.rs`, `content_type.rs`, `session_lock.rs`, `wlr_screencopy.rs`.
-- Shell and device bits: `switcher.rs`, `bar_hint.rs`, `osd.rs`, `touch_viz.rs`, `app_history.rs`, `rotation.rs` + `sensor.rs` (iio-sensor-proxy), `blank.rs`, `sleep.rs` (blank before suspend), `screenshot.rs`, `capture.rs`, `catalog_watch.rs`, `uclamp.rs`, `gpu_boost.rs`, `frame_stats.rs`.
+- Shell and device bits: `switcher.rs`, `bar_hint.rs`, `osd.rs`, `touch_viz.rs`, `app_history.rs`, `rotation.rs` + `sensor.rs` (iio-sensor-proxy), `blank.rs`, `sleep.rs` (blank before suspend), `screenshot.rs`, `capture.rs`, `catalog_watch.rs`, `uclamp.rs`, `cpu_boost.rs`, `gpu_boost.rs`, `frame_stats.rs`.
 - Client pacing: `presentation.rs` (wp_presentation, with feedback answered from the DRM vblank, or after the swap on winit) and `pacing.rs` (wp_fifo + wp_commit_timing). Both are driven from `render.rs`'s frame-callback walk and hand the backend a `FrameSinks`. Its two halves are obligations: unanswered feedback hangs a client, and a signalled blocker still needs `pacing::clear_blockers` to apply the commit waiting on it.
 
 ### Render pipeline (`render.rs`)
@@ -140,7 +140,7 @@ Notable options:
 - `rotation_settle_ms` (default 400): accelerometer debounce.
 - `rotation_fade_ms` (default 130): half the dip-to-black that covers a turn.
 - `vrr` (default `true`): asks the panel for variable refresh. DRM backend only, no-op unless the connector reports `vrr_capable`, startup-only.
-- `uclamp_min` (default `"auto"`): scheduler `util_min` floor held on the render thread while drawing, derived from CPU topology and raised while frames miss the refresh interval. See `uclamp.rs`.
+- `uclamp_min` (default `"auto"`): scheduler `util_min` floor held on the render thread while drawing, derived from CPU topology and raised while frames miss the refresh interval, taking the big clusters' cpufreq `scaling_min_freq` up with it (`cpu_boost.rs`, needs the module's tmpfiles rule). See `uclamp.rs`.
 - `gpu_min_mhz` (default `"auto"`): GPU devfreq `min_freq` held while drawing, the lowest OPP at or above half the top clock (FP5: 450 MHz). Needs the module's udev rule. See `gpu_boost.rs`.
 
 Env vars: `SPRINGCHICK_BACKEND`, `SPRINGCHICK_CONFIG`, `SPRINGCHICK_IPC_SOCK`, `SPRINGCHICK_DEBUG_SOCK` (legacy), `SPRINGCHICK_WINIT_SIZE` (`WxH`). `SPRINGCHICK_PANEL_TRANSFORM` (`90`/`180`/`270`/`normal`, module option `panelTransform`) overrides the DRM connector's `panel orientation`, which otherwise turns a sideways-mounted panel (Steam Deck) upright. `SPRINGCHICK_OUTPUT` is read only by `scripts/screenshot.sh` and `scripts/record.sh`.
