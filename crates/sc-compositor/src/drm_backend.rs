@@ -705,6 +705,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // rendering so the first frame of a touch benefits.
         let now = Instant::now();
         let drawing = app.state.is_animating(now);
+        if let (Some(dt), Ok(mhz @ 1..)) = (
+            app.state.last_frame_dt.take(),
+            u64::try_from(app.drm.refresh_mhz),
+        ) {
+            uclamp.observe(dt, Duration::from_nanos(1_000_000_000_000 / mhz));
+        }
         uclamp.update(drawing, now);
         gpu_boost.update(drawing, now);
         if drawing {

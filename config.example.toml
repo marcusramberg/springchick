@@ -65,7 +65,8 @@ prefer_no_csd = true
 # Scheduler util_min floor (0..=1024) on the render thread while drawing.
 # Without it, idle decays the thread onto the little cores and short
 # interactions finish before the governor ramps up.
-#   "auto"  just above the little cluster's cpu_capacity; off on symmetric CPUs
+#   "auto"  just above the little cluster's cpu_capacity, raised while frames
+#           miss the refresh interval; off on symmetric CPUs
 #   "off"   no floor (same as 0)
 #   <n>     explicit, e.g. 450 on the FP5 (little cluster is 382)
 uclamp_min = "auto"

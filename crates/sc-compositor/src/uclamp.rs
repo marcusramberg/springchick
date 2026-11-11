@@ -53,10 +53,90 @@ pub fn read_capacities() -> Vec<(u32, u32)> {
     out
 }
 
+/// Steps from the placement floor to the top of the scale.
+const LEVELS: u32 = 4;
+/// Frames judged together. Not a burst: a session can draw without pause.
+const WINDOW: u32 = 60;
+/// Missed frames in a window that raise the floor a level. Every phone
+/// drops the odd frame at any clock.
+const MISSES_TO_RAISE: u32 = WINDOW / 5;
+const MAX_CALM_WINDOWS: u32 = 256;
+
+/// `auto` only. The placement floor moves the thread off the little cluster.
+/// Where frames still miss it climbs, and is tried one level lower after
+/// windows where nine frames in ten had half the budget to spare, doubling
+/// the wait each time that fails.
+// ponytail: a frame that is slow for another reason (GPU-bound, a stalled
+// client) climbs to 1024, cluster clocks with it, for nothing; split CPU from
+// GPU time if that shows.
+#[derive(Debug)]
+struct Adaptive {
+    base: u32,
+    level: u32,
+    frames: u32,
+    misses: u32,
+    roomy: u32,
+    calm_windows: u32,
+    calm_needed: u32,
+    /// The last change was a step down that no window has confirmed yet.
+    probing: bool,
+}
+
+impl Adaptive {
+    fn new(base: u32) -> Self {
+        Self {
+            base,
+            level: 0,
+            frames: 0,
+            misses: 0,
+            roomy: 0,
+            calm_windows: 0,
+            calm_needed: 1,
+            probing: false,
+        }
+    }
+
+    fn floor(&self) -> u32 {
+        self.base + (1024u32.saturating_sub(self.base)) * self.level / LEVELS
+    }
+
+    /// True when the floor moved.
+    fn observe(&mut self, dt: Duration, budget: Duration) -> bool {
+        self.frames += 1;
+        self.roomy += u32::from(dt * 2 < budget);
+        // A frame this close to the budget loses its vblank to the flip's own
+        // latency.
+        self.misses += u32::from(dt * 20 > budget * 17);
+        let was = self.level;
+        if self.misses >= MISSES_TO_RAISE && self.level < LEVELS {
+            self.level += 1;
+            self.calm_windows = 0;
+            if std::mem::take(&mut self.probing) {
+                self.calm_needed = (self.calm_needed * 2).min(MAX_CALM_WINDOWS);
+            }
+        } else if self.frames >= WINDOW {
+            let calm = self.roomy * 10 >= WINDOW * 9 && self.misses * 20 <= WINDOW;
+            self.probing = false;
+            self.calm_windows = if calm { self.calm_windows + 1 } else { 0 };
+            if self.calm_windows >= self.calm_needed && self.level > 0 {
+                self.level -= 1;
+                self.calm_windows = 0;
+                self.probing = true;
+            }
+        } else {
+            return false;
+        }
+        (self.frames, self.misses, self.roomy) = (0, 0, 0);
+        self.level != was
+    }
+}
+
 pub struct Uclamp {
     /// `None` disables the mechanism.
     floor: Option<u32>,
-    applied: bool,
+    adaptive: Option<Adaptive>,
+    /// The `util_min` in force.
+    applied: Option<u32>,
     last_active: Option<Instant>,
     /// Set once the kernel refuses (no `CONFIG_UCLAMP_TASK`), to warn only once.
     broken: bool,
@@ -85,9 +165,18 @@ impl Uclamp {
         }
         Self {
             floor,
-            applied: false,
+            adaptive: floor.filter(|_| cfg == UclampMin::Auto).map(Adaptive::new),
+            applied: None,
             last_active: None,
             broken: false,
+        }
+    }
+
+    /// A frame's render time against the refresh interval.
+    pub fn observe(&mut self, dt: Duration, budget: Duration) {
+        let Some(a) = &mut self.adaptive else { return };
+        if a.observe(dt, budget) {
+            debug!(util_min = a.floor(), "uclamp auto: floor moved");
         }
     }
 
@@ -104,10 +193,11 @@ impl Uclamp {
             || self
                 .last_active
                 .is_some_and(|t| now.duration_since(t) < RELEASE_AFTER);
+        let want = want.then(|| self.adaptive.as_ref().map_or(floor, Adaptive::floor));
         if want == self.applied {
             return;
         }
-        let value = if want { floor } else { 0 };
+        let value = want.unwrap_or(0);
         match set_util_min(value) {
             Ok(()) => self.applied = want,
             Err(e) => {
@@ -203,7 +293,7 @@ mod tests {
         let mut u = Uclamp::new(UclampMin::Off);
         assert!(u.floor.is_none());
         u.update(true, Instant::now());
-        assert!(!u.applied);
+        assert!(u.applied.is_none());
     }
 
     #[test]
@@ -219,10 +309,89 @@ mod tests {
         if u.broken {
             return; // kernel without uclamp support (nix sandbox)
         }
-        assert!(u.applied, "floor applies while drawing");
+        assert_eq!(u.applied, Some(450), "floor applies while drawing");
         u.update(false, t0 + Duration::from_millis(100));
-        assert!(u.applied, "still held inside the release delay");
+        assert!(u.applied.is_some(), "still held inside the release delay");
         u.update(false, t0 + RELEASE_AFTER + Duration::from_millis(1));
-        assert!(!u.applied, "released once the delay elapses");
+        assert!(u.applied.is_none(), "released once the delay elapses");
+    }
+
+    const BUDGET: Duration = Duration::from_micros(8_333);
+
+    fn feed(a: &mut Adaptive, frames: u32, dt_us: u64) {
+        for _ in 0..frames {
+            a.observe(Duration::from_micros(dt_us), BUDGET);
+        }
+    }
+
+    #[test]
+    fn fixed_floor_never_adapts() {
+        assert!(Uclamp::new(UclampMin::Fixed(450)).adaptive.is_none());
+    }
+
+    #[test]
+    fn frames_inside_the_budget_leave_the_placement_floor() {
+        let mut a = Adaptive::new(316);
+        feed(&mut a, 600, 7_000);
+        assert_eq!(a.floor(), 316);
+    }
+
+    #[test]
+    fn missed_frames_climb_to_the_top_of_the_scale() {
+        let mut a = Adaptive::new(316);
+        feed(&mut a, MISSES_TO_RAISE - 1, 15_000);
+        assert_eq!(a.level, 0);
+        assert!(a.observe(Duration::from_millis(15), BUDGET));
+        assert_eq!(a.floor(), 493);
+        feed(&mut a, 100, 15_000);
+        assert_eq!(a.floor(), 1024);
+    }
+
+    #[test]
+    fn frames_just_inside_the_budget_still_count_as_misses() {
+        let mut a = Adaptive::new(316);
+        feed(&mut a, WINDOW, 7_800);
+        assert!(a.level >= 1);
+    }
+
+    #[test]
+    fn a_tight_fit_holds_the_raised_floor() {
+        let mut a = Adaptive::new(316);
+        feed(&mut a, MISSES_TO_RAISE, 15_000);
+        feed(&mut a, 600, 7_000);
+        assert_eq!(a.level, 1);
+    }
+
+    #[test]
+    fn a_failed_step_down_is_retried_less_often() {
+        let mut a = Adaptive::new(316);
+        feed(&mut a, MISSES_TO_RAISE, 15_000);
+        feed(&mut a, WINDOW, 3_000);
+        assert_eq!(a.level, 0, "half the budget to spare: try lower");
+        feed(&mut a, MISSES_TO_RAISE, 15_000);
+        assert_eq!(a.level, 1);
+        feed(&mut a, WINDOW, 3_000);
+        assert_eq!(a.level, 1, "one calm window is no longer enough");
+        feed(&mut a, WINDOW, 3_000);
+        assert_eq!(a.level, 0);
+    }
+
+    /// FP5 at full clock: 1.4% of frames over, the rest far inside.
+    #[test]
+    fn the_odd_dropped_frame_neither_raises_nor_blocks_a_step_down() {
+        let budget = Duration::from_micros(11_111);
+        let mut a = Adaptive::new(429);
+        feed(&mut a, MISSES_TO_RAISE, 15_000);
+        assert_eq!(a.level, 1);
+        for i in 0..WINDOW {
+            let us = if i == 7 { 12_000 } else { 1_000 };
+            a.observe(Duration::from_micros(us), budget);
+        }
+        assert_eq!(a.level, 0);
+        for i in 0..700 {
+            let us = if i % 70 == 0 { 12_000 } else { 9_000 };
+            a.observe(Duration::from_micros(us), budget);
+        }
+        assert_eq!(a.level, 0);
     }
 }

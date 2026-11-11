@@ -140,7 +140,7 @@ Notable options:
 - `rotation_settle_ms` (default 400): accelerometer debounce.
 - `rotation_fade_ms` (default 130): half the dip-to-black that covers a turn.
 - `vrr` (default `true`): asks the panel for variable refresh. DRM backend only, no-op unless the connector reports `vrr_capable`, startup-only.
-- `uclamp_min` (default `"auto"`): scheduler `util_min` floor held on the render thread while drawing, derived from CPU topology. See `uclamp.rs`.
+- `uclamp_min` (default `"auto"`): scheduler `util_min` floor held on the render thread while drawing, derived from CPU topology and raised while frames miss the refresh interval. See `uclamp.rs`.
 - `gpu_min_mhz` (default `"auto"`): GPU devfreq `min_freq` held while drawing, the lowest OPP at or above half the top clock (FP5: 450 MHz). Needs the module's udev rule. See `gpu_boost.rs`.
 
 Env vars: `SPRINGCHICK_BACKEND`, `SPRINGCHICK_CONFIG`, `SPRINGCHICK_IPC_SOCK`, `SPRINGCHICK_DEBUG_SOCK` (legacy), `SPRINGCHICK_WINIT_SIZE` (`WxH`). `SPRINGCHICK_PANEL_TRANSFORM` (`90`/`180`/`270`/`normal`, module option `panelTransform`) overrides the DRM connector's `panel orientation`, which otherwise turns a sideways-mounted panel (Steam Deck) upright. `SPRINGCHICK_OUTPUT` is read only by `scripts/screenshot.sh` and `scripts/record.sh`.
