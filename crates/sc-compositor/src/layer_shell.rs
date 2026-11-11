@@ -347,7 +347,8 @@ impl LayerShell {
 
     /// The usable area eased along with an in-flight slide, so apps resize with
     /// the OSK. `None` when nothing slides or a flapping surface holds growth.
-    pub fn sliding_usable(&self, dpi: f64) -> Option<Rect> {
+    /// `jump` skips the easing for growth: the full area at once.
+    pub fn sliding_usable(&self, dpi: f64, jump: bool) -> Option<Rect> {
         let p = match &self.closing {
             Some(c) => c.progress,
             None => self.slides.values().copied().reduce(f32::min)?,
@@ -356,7 +357,11 @@ impl LayerShell {
         if to.h > from.h && self.regrow.now < self.regrow.flap_until {
             return None;
         }
-        let t = sc_anim::ease_out_cubic(p);
+        let t = if jump && to.h > from.h {
+            1.0
+        } else {
+            sc_anim::ease_out_cubic(p)
+        };
         Some(Rect {
             h: from.h + (to.h - from.h) * t,
             ..to

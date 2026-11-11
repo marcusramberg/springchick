@@ -567,7 +567,10 @@ impl State {
 
     /// Per frame while an OSK slides; `recompute_layers` lands the final size.
     pub(crate) fn follow_slide(&mut self) {
-        let Some(usable) = self.layers.sliding_usable(self.dpi) else {
+        // On the way out of the app the OSK slides off inside the card, over a
+        // window already at full height; easing would reflow it all the way.
+        let leaving = !matches!(self.ui, ui_state::UiState::App { .. });
+        let Some(usable) = self.layers.sliding_usable(self.dpi, leaving) else {
             return;
         };
         let size = (
