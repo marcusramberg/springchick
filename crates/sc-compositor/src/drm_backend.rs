@@ -312,7 +312,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let scanout_gbm = render_gbm.clone();
     let egl_display = unsafe { EGLDisplay::new(render_gbm)? };
     let egl_context = EGLContext::new(&egl_display)?;
-    let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
+    // One context on one thread needs none of smithay's per-texture fences,
+    // and mesa turns each into a CPU wait on the GPU, several per frame.
+    let caps = unsafe { GlesRenderer::supported_capabilities(&egl_context)? }
+        .into_iter()
+        .filter(|c| *c != Capability::Fencing);
+    let mut renderer = unsafe { GlesRenderer::with_capabilities(egl_context, caps)? };
     let rounded_tex_shader = crate::render::compile_rounded_tex_shader(&mut renderer)?;
 
     let (connector_handle, crtc_handle, mode) = find_output(&drm_device)?;
