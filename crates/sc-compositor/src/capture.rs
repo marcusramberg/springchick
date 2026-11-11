@@ -3,7 +3,7 @@
 //! offscreen and read back into the client's pool.
 
 use smithay::backend::allocator::Fourcc;
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
+use smithay::backend::renderer::gles::{GlesMapping, GlesRenderer, GlesTexture};
 use smithay::backend::renderer::{Color32F, ExportMem, Frame, Offscreen, Renderer, RendererSuper};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_shm;
@@ -148,8 +148,8 @@ pub fn readback_rgba(
     Some(out)
 }
 
-/// `framebuffer` must be bound to the [`offscreen`] texture with the scene
-/// drawn. `src` is sized like the client buffer; row 0 is the image top.
+/// `framebuffer` must hold the drawn scene. `src` is sized like the client
+/// buffer; row 0 is the image top.
 pub fn readback_into_shm(
     renderer: &mut GlesRenderer,
     framebuffer: &<GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -157,15 +157,34 @@ pub fn readback_into_shm(
     target: &ShmTarget,
     src: Rectangle<i32, smithay::utils::Buffer>,
 ) -> bool {
+    readback_start(renderer, framebuffer, target, src)
+        .is_some_and(|mapping| readback_finish(renderer, &mapping, buffer, target))
+}
+
+/// Queues the GPU→PBO copy. Finishing it a frame later costs no GPU stall.
+pub fn readback_start(
+    renderer: &mut GlesRenderer,
+    framebuffer: &<GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    target: &ShmTarget,
+    src: Rectangle<i32, smithay::utils::Buffer>,
+) -> Option<GlesMapping> {
     debug_assert_eq!(src.size, target.size);
-    let mapping = match renderer.copy_framebuffer(framebuffer, src, target.fourcc) {
-        Ok(m) => m,
+    match renderer.copy_framebuffer(framebuffer, src, target.fourcc) {
+        Ok(m) => Some(m),
         Err(e) => {
             warn!("screencopy: copy_framebuffer failed: {e}");
-            return false;
+            None
         }
-    };
-    let pixels = match renderer.map_texture(&mapping) {
+    }
+}
+
+pub fn readback_finish(
+    renderer: &mut GlesRenderer,
+    mapping: &GlesMapping,
+    buffer: &WlBuffer,
+    target: &ShmTarget,
+) -> bool {
+    let pixels = match renderer.map_texture(mapping) {
         Ok(p) => p,
         Err(e) => {
             warn!("screencopy: map_texture failed: {e}");

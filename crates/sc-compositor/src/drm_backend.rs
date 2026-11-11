@@ -72,6 +72,12 @@ struct Drm {
     pending_flip: bool,
     /// Answered from the vblank that scans it out. Empty when no flip is pending.
     pending_presentation: Vec<PresentationFeedbackCallback>,
+    /// wlr-screencopy readbacks queued last frame.
+    wlr_readbacks: Vec<(
+        smithay::backend::renderer::gles::GlesMapping,
+        crate::wlr_screencopy::PendingCopy,
+        smithay::utils::Time<Monotonic>,
+    )>,
     refresh_mhz: i32,
     device_fd: DrmDeviceFd,
     /// `None` means blanking falls back to freezing the last frame.
@@ -450,6 +456,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         active: true,
         pending_flip: false,
         pending_presentation: Vec::new(),
+        wlr_readbacks: Vec::new(),
         refresh_mhz: mode_refresh_mhz(&mode),
         device_fd: device_fd.clone(),
         connector: connector_handle,
@@ -1103,8 +1110,13 @@ impl App {
 
         self.state.record_and_log_frame(frame_start);
 
-        self.capture_pending_frames(&prep);
-        self.wlr_capture_pending_frames(&prep);
+        // A turned view is drawn sideways, so its captures re-render upright.
+        let drawn = (!self.state.view_rotation().swaps_axes()).then(|| match scene {
+            Some(tex) => FrameSrc::Tex(tex),
+            None => FrameSrc::Buf(dmabuf),
+        });
+        self.capture_pending_frames(&prep, drawn.as_ref());
+        self.wlr_capture_pending_frames(&prep, drawn.as_ref());
         self.take_screenshot(&prep);
     }
 
@@ -1267,7 +1279,7 @@ impl App {
     }
 
     /// dmabuf capture keeps the GPU→CPU download in the recorder process.
-    fn capture_pending_frames(&mut self, prep: &crate::FramePrep) {
+    fn capture_pending_frames(&mut self, prep: &crate::FramePrep, drawn: Option<&FrameSrc>) {
         if self.state.pending_captures.is_empty() {
             return;
         }
@@ -1279,7 +1291,7 @@ impl App {
                 Ok(d) => d.clone(),
                 Err(_) => {
                     // grim and friends allocate shm.
-                    match self.capture_frame_shm(&buffer, prep) {
+                    match self.capture_frame_shm(&buffer, prep, drawn) {
                         Some(true) => frame.success(transform, None, present),
                         Some(false) => frame.fail(CaptureFailureReason::Unknown),
                         None => frame.fail(CaptureFailureReason::BufferConstraints),
@@ -1312,10 +1324,11 @@ impl App {
         &mut self,
         buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
         prep: &crate::FramePrep,
+        drawn: Option<&FrameSrc>,
     ) -> Option<bool> {
         let target = crate::capture::shm_target(buffer)?;
         let src = Rectangle::from_size(target.size);
-        self.capture_region_shm(buffer, prep, &target, src)
+        self.capture_region_shm(buffer, prep, &target, src, drawn)
     }
 
     fn capture_region_shm(
@@ -1324,18 +1337,54 @@ impl App {
         prep: &crate::FramePrep,
         target: &crate::capture::ShmTarget,
         src: Rectangle<i32, smithay::utils::Buffer>,
+        drawn: Option<&FrameSrc>,
     ) -> Option<bool> {
-        let (mut tex, _) = self.capture_scene(prep, target.fourcc)?;
-        let fb = match self.drm.renderer.bind(&mut tex) {
+        let ok = self
+            .capture_start(prep, target, src, drawn)
+            .is_some_and(|mapping| {
+                crate::capture::readback_finish(&mut self.drm.renderer, &mapping, buffer, target)
+            });
+        Some(ok)
+    }
+
+    /// Queues the readback of `src`.
+    fn capture_start(
+        &mut self,
+        prep: &crate::FramePrep,
+        target: &crate::capture::ShmTarget,
+        src: Rectangle<i32, smithay::utils::Buffer>,
+        drawn: Option<&FrameSrc>,
+    ) -> Option<smithay::backend::renderer::gles::GlesMapping> {
+        let renderer = &mut self.drm.renderer;
+        let (mut tex, mut buf);
+        let fb = match drawn {
+            Some(FrameSrc::Buf(b)) => {
+                buf = b.clone();
+                renderer.bind(&mut buf)
+            }
+            Some(FrameSrc::Tex(t)) => {
+                tex = t.clone();
+                renderer.bind(&mut tex)
+            }
+            None => {
+                tex = self.capture_scene(prep, target.fourcc)?.0;
+                self.drm.renderer.bind(&mut tex)
+            }
+        };
+        let fb = match fb {
             Ok(fb) => fb,
             Err(e) => {
                 warn!("screencopy: readback bind failed: {e}");
-                return Some(false);
+                return None;
             }
         };
-        let ok =
-            crate::capture::readback_into_shm(&mut self.drm.renderer, &fb, buffer, target, src);
-        Some(ok)
+        let mapping = crate::capture::readback_start(&mut self.drm.renderer, &fb, target, src);
+        drop(fb);
+        // A scanout buffer the driver won't read back: draw the scene again.
+        if mapping.is_none() && drawn.is_some() {
+            return self.capture_start(prep, target, src, None);
+        }
+        mapping
     }
 
     /// Draws into `fb`, which is sized like the output clients are told about:
@@ -1402,24 +1451,39 @@ impl App {
         Some((out, (vw, vh).into()))
     }
 
-    fn wlr_capture_pending_frames(&mut self, prep: &crate::FramePrep) {
-        if self.state.wlr_captures.is_empty() {
-            return;
-        }
-        let present = self.clock.now();
-        for frame in std::mem::take(&mut self.state.wlr_captures) {
+    fn wlr_capture_pending_frames(&mut self, prep: &crate::FramePrep, drawn: Option<&FrameSrc>) {
+        // Mapped a frame after the copy was queued, when the GPU is done with
+        // it: mapping at once stalls this thread for the whole frame's render.
+        for (mapping, frame, present) in std::mem::take(&mut self.drm.wlr_readbacks) {
             let target = frame.target();
-            let ok = self
-                .capture_region_shm(&frame.buffer, prep, &target, frame.region)
-                .unwrap_or(false);
-            if ok {
-                self.state.skia.finish_gpu();
+            if crate::capture::readback_finish(
+                &mut self.drm.renderer,
+                &mapping,
+                &frame.buffer,
+                &target,
+            ) {
                 frame.success(present);
             } else {
                 frame.failed();
             }
         }
+        let present = self.clock.now();
+        for frame in std::mem::take(&mut self.state.wlr_captures) {
+            let target = frame.target();
+            match self.capture_start(prep, &target, frame.region, drawn) {
+                Some(mapping) => self.drm.wlr_readbacks.push((mapping, frame, present)),
+                None => frame.failed(),
+            }
+        }
+        // The next frame delivers them.
+        self.state.needs_render |= !self.drm.wlr_readbacks.is_empty();
     }
+}
+
+/// The frame `render` just drew, upright in view space.
+enum FrameSrc {
+    Tex(GlesTexture),
+    Buf(Dmabuf),
 }
 
 fn turn_onto_panel(
