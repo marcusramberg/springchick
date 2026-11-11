@@ -35,6 +35,9 @@ pub fn run_client(args: &[String]) -> ExitCode {
         eprintln!("       springchick ipc layers   # dump layer surfaces + their popups");
         eprintln!("       springchick ipc home     # dump home grid + catalog resolution");
         eprintln!("       springchick ipc layout [N] # list xkb layouts / lock layout N");
+        eprintln!(
+            "       springchick ipc record start PATH [SCALE] | stop # hardware H.264 of every frame"
+        );
         eprintln!("       springchick ipc rotation [enable|disable] # whole-UI rotation");
         eprintln!("       springchick ipc quit     # end the session");
         return ExitCode::from(2);

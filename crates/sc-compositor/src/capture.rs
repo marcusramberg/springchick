@@ -2,9 +2,16 @@
 //! but grim and most tools only allocate shm; for those the scene is drawn
 //! offscreen and read back into the client's pool.
 
+use smithay::backend::allocator::dmabuf::Dmabuf;
+use smithay::backend::allocator::Buffer as _;
 use smithay::backend::allocator::Fourcc;
-use smithay::backend::renderer::gles::{GlesMapping, GlesRenderer, GlesTexture};
-use smithay::backend::renderer::{Color32F, ExportMem, Frame, Offscreen, Renderer, RendererSuper};
+use smithay::backend::renderer::gles::{
+    GlesError, GlesMapping, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName,
+    UniformType,
+};
+use smithay::backend::renderer::{
+    Bind, Color32F, ExportMem, Frame, Offscreen, Renderer, RendererSuper, Texture,
+};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::utils::{Physical, Point, Rectangle, Size, Transform};
@@ -146,6 +153,74 @@ pub fn readback_rgba(
         px[3] = 0xff;
     }
     Some(out)
+}
+
+/// RGB to one NV12 plane, BT.709 limited range: Y in `r`, or with `chroma`
+/// set Cb in `r` and Cr in `g`.
+const NV12_SHADER: &str = r#"
+//_DEFINES_
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+precision highp float;
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+uniform float chroma;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+void main() {
+    vec3 c = texture2D(tex, v_coords).rgb;
+    float y = 0.0627 + dot(c, vec3(0.1826, 0.6142, 0.0620));
+    vec2 cbcr = 0.5020 + vec2(dot(c, vec3(-0.1006, -0.3386, 0.4392)),
+                              dot(c, vec3(0.4392, -0.3989, -0.0403)));
+    gl_FragColor = vec4(mix(vec2(y, 0.0), cbcr, chroma), 0.0, 1.0);
+}
+"#;
+
+pub fn compile_nv12_shader(renderer: &mut GlesRenderer) -> Result<GlesTexProgram, GlesError> {
+    renderer
+        .compile_custom_texture_shader(NV12_SHADER, &[UniformName::new("chroma", UniformType::_1f)])
+}
+
+/// Draws `src` into the top-left `visible` of `target`, one plane of a
+/// recorder pair (the rest is the encoder's row padding).
+pub fn nv12_plane(
+    renderer: &mut GlesRenderer,
+    shader: &GlesTexProgram,
+    src: &GlesTexture,
+    target: &mut Dmabuf,
+    visible: Size<i32, Physical>,
+    chroma: bool,
+) -> Result<(), GlesError> {
+    let full = target.size();
+    let from = src.size();
+    let dst = Rectangle::from_size(visible);
+    let mut fb = renderer.bind(target)?;
+    let mut frame = renderer.render(&mut fb, (full.w, full.h).into(), Transform::Normal)?;
+    frame.render_texture_from_to(
+        src,
+        Rectangle::from_size((from.w as f64, from.h as f64).into()),
+        dst,
+        &[dst],
+        &[],
+        Transform::Normal,
+        1.0,
+        Some(shader),
+        &[Uniform::new("chroma", if chroma { 1.0 } else { 0.0 })],
+    )?;
+    let _sync = frame.finish()?;
+    Ok(())
 }
 
 /// `framebuffer` must hold the drawn scene. `src` is sized like the client

@@ -1,5 +1,5 @@
 #!/usr/bin/env nix-shell
-#!nix-shell -i bash -p wf-recorder
+#!nix-shell -i bash -p wf-recorder mkvtoolnix-cli ffmpeg
 #
 # Record the springchick screen on-device.
 #
@@ -26,10 +26,19 @@
 # rerun with SOFTWARE=1 for CPU x264 (heavy at native 1224x2700 — downscale with
 # RESOLUTION, e.g. RESOLUTION=612x1350, for a smooth demo).
 #
+# NATIVE=1 skips all of that for springchick's own recorder (`ipc record`,
+# crates/sc-compositor/src/record.rs): every rendered frame, GPU-converted
+# straight into the hardware encoder's buffers. It writes a raw H.264 stream
+# plus FILE.ts (`TIME_NS DROPPED_BEFORE` per frame), which mkvmerge muxes with
+# the real frame times; ffmpeg cannot take timestamps for a raw stream from a
+# file. `mux` does only that step, e.g. on another machine.
+#
 # Ctrl-C stops and finalizes the file.
 #
 # Usage:
 #   scripts/record.sh [output.mp4]
+#   NATIVE=1 [SCALE=0.5] scripts/record.sh [output.mkv|output.mp4]
+#   scripts/record.sh mux recording.h264 output.mkv|output.mp4
 # Env overrides:
 #   SPRINGCHICK_OUTPUT  wl_output name to capture    (default: springchick-0)
 #   FPS                 constant framerate           (default: 30)
@@ -37,6 +46,44 @@
 #                       both dimensions must be EVEN — H.264 rejects odd sizes
 #   SOFTWARE=1          force CPU x264 instead of the v4l2 hardware encoder
 set -euo pipefail
+
+# Raw stream + its .ts -> a variable-frame-rate file.
+mux() {
+  local raw=$1 dest=$2 mkv=$2
+  [[ $dest == *.mkv ]] || mkv=$(mktemp --suffix=.mkv)
+  { echo "# timestamp format v2"
+    awk 'NR == 1 { t0 = $1 } { printf "%.6f\n", ($1 - t0) / 1e6 }' "$raw.ts"; } > "$raw.tsv2"
+  # The encoder writes no colour description; the frames are BT.709 limited.
+  ffmpeg -nostdin -loglevel error -y -i "$raw" -c copy -bsf:v \
+    h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0 \
+    -f h264 "$raw.tagged"
+  # 0.1 ms ticks: the default 1 ms would round 120 Hz frame times.
+  mkvmerge -q -o "$mkv" --timestamp-scale 100000 --timestamps "0:$raw.tsv2" "$raw.tagged"
+  if [ "$mkv" != "$dest" ]; then
+    ffmpeg -nostdin -loglevel error -y -i "$mkv" -c copy "$dest"
+    rm -f "$mkv"
+  fi
+  rm -f "$raw.tsv2" "$raw.tagged"
+  echo "$dest: $(wc -l < "$raw.ts") frames, $(awk 'END { print $2 }' "$raw.ts") dropped" >&2
+}
+
+if [ "${1:-}" = mux ]; then
+  mux "$2" "$3"
+  exit
+fi
+
+if [ -n "${NATIVE:-}" ]; then
+  DEST="${1:-$HOME/springchick-$(date +%Y%m%d-%H%M%S).mkv}"
+  RAW="${DEST%.*}.h264"
+  springchick ipc record start "$RAW" "${SCALE:-1}"
+  echo "Recording -> $DEST. Ctrl-C to stop." >&2
+  trap : INT
+  sleep infinity || true
+  springchick ipc record stop
+  mux "$RAW" "$DEST"
+  rm -f "$RAW" "$RAW.ts"
+  exit
+fi
 
 OUTPUT="${SPRINGCHICK_OUTPUT:-springchick-0}"
 FPS="${FPS:-30}"

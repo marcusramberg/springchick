@@ -280,6 +280,9 @@ pub(crate) struct State {
     pub pending_captures: Vec<CaptureFrame>,
     /// Separate because the two protocols reply differently.
     pub wlr_captures: Vec<crate::wlr_screencopy::PendingCopy>,
+    /// `ipc record` commands for the backend to answer. `None` where there is
+    /// no recorder (winit).
+    pub record_requests: Option<Vec<crate::debug_input::RecordRequest>>,
     /// Dropping a `Session` sends `stopped` and fails the client's frames.
     pub capture_sessions: Vec<CaptureSession>,
     pub layers: layer_shell::LayerShell,
@@ -669,6 +672,7 @@ impl State {
             pending_captures: Vec::new(),
             capture_sessions: Vec::new(),
             wlr_captures: Vec::new(),
+            record_requests: None,
             layers: layer_shell::LayerShell::new(output.clone(), out_w as f32, out_h as f32),
             touch,
             touch_targets: HashMap::new(),

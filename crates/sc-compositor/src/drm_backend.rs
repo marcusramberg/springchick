@@ -63,6 +63,10 @@ struct Drm {
     /// extra work.
     mirrors: Vec<crate::mirror::MirrorOutput>,
     rounded_tex_shader: GlesTexProgram,
+    nv12_shader: GlesTexProgram,
+    /// Allocates the recorder's buffers where the renderer draws.
+    render_gbm: GbmDevice<DrmDeviceFd>,
+    recorder: Option<crate::record::Recorder>,
     /// What the shell lays out in: the mode turned upright by `panel`.
     output_size: Size<i32, Physical>,
     transform: Transform,
@@ -316,7 +320,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Scanout BOs from the render GPU: writeback into the KMS device's linear
     // write-combine dumb buffers runs ~3x slower.
     let scanout_gbm = render_gbm.clone();
-    let egl_display = unsafe { EGLDisplay::new(render_gbm)? };
+    let egl_display = unsafe { EGLDisplay::new(render_gbm.clone())? };
     let egl_context = EGLContext::new(&egl_display)?;
     // One context on one thread needs none of smithay's per-texture fences,
     // and mesa turns each into a CPU wait on the GPU, several per frame.
@@ -325,6 +329,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|c| *c != Capability::Fencing);
     let mut renderer = unsafe { GlesRenderer::with_capabilities(egl_context, caps)? };
     let rounded_tex_shader = crate::render::compile_rounded_tex_shader(&mut renderer)?;
+    let nv12_shader = crate::capture::compile_nv12_shader(&mut renderer)?;
 
     let (connector_handle, crtc_handle, mode) = find_output(&drm_device)?;
     let (mw, mh) = mode.size();
@@ -374,6 +379,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     crate::publish_wayland_display(&socket_name, true);
     let mut state = State::new(&display, socket_name, (output_size.w, output_size.h));
     state.perf_log = true;
+    state.record_requests = Some(Vec::new());
     // Nothing else draws a cursor on bare KMS.
     state.cursor_overlay = true;
 
@@ -448,6 +454,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         mirrors,
         renderer,
         rounded_tex_shader,
+        nv12_shader,
+        render_gbm,
+        recorder: None,
         output_size,
         // The GBM scanout buffer is Y-flipped vs winit's framebuffer, so apps
         // composite with Normal while Skia gets flip_y.
@@ -681,6 +690,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(chan) = &debug_chan {
             crate::debug_input::drain(&mut app.state, chan);
         }
+        let requests = app.state.record_requests.as_mut().map(std::mem::take);
+        for (cmd, reply) in requests.into_iter().flatten() {
+            let _ = reply.send(app.record_cmd(cmd));
+        }
         // Long presses are polled here: page-flips stop on an idle screen.
         if crate::catalog_watch::take(&catalog_dirty) {
             app.state.reload_catalog();
@@ -779,6 +792,7 @@ impl App {
     /// Hand over a sane device: panel on, original gamma. Master and seat are
     /// released as `App` drops.
     fn shutdown(&mut self) {
+        self.stop_recording();
         info!("restoring DRM state for clean handoff");
         self.drm.set_primary_dpms(true);
         self.drm.set_mirror_dpms(true);
@@ -936,6 +950,7 @@ impl App {
             }
         }
         if blanked {
+            self.stop_recording();
             // External displays keep power and frames while the phone panel sleeps.
             let mirroring = self.drm.mirroring();
             info!(mirroring, "blanking panel");
@@ -1025,6 +1040,7 @@ impl App {
         // A commit after this point re-sets the flag and gets its own render.
         self.state.needs_render = false;
         let frame_start = Instant::now();
+        let frame_time = self.clock.now();
 
         // Clamped so a stall can't fling the springs.
         let dt = self.last_frame.elapsed().as_secs_f32().min(1.0 / 30.0);
@@ -1118,9 +1134,107 @@ impl App {
             Some(tex) => FrameSrc::Tex(tex),
             None => FrameSrc::Buf(dmabuf),
         });
+        self.record_frame(drawn.as_ref(), frame_time);
         self.capture_pending_frames(&prep, drawn.as_ref());
         self.wlr_capture_pending_frames(&prep, drawn.as_ref());
         self.take_screenshot(&prep);
+    }
+
+    fn record_cmd(&mut self, cmd: Option<(String, f64)>) -> String {
+        let stopped = self
+            .drm
+            .recorder
+            .take()
+            .map(crate::record::Recorder::finish);
+        let Some((path, scale)) = cmd else {
+            return match stopped {
+                Some(stats) => format!("ok {stats}\n"),
+                None => "err not recording\n".into(),
+            };
+        };
+        if self.state.blank.is_blanked() || self.state.view_rotation().swaps_axes() {
+            return "err screen is dark or turned\n".into();
+        }
+        // ponytail: no fence, no recording; a glFinish per frame is the fallback if a GPU needs it.
+        let caps = self.drm.renderer.capabilities();
+        if !caps.contains(&Capability::ExportFence) {
+            return "err GPU exports no fences\n".into();
+        }
+        let out = self.drm.output_size;
+        let size = crate::record::record_size((out.w, out.h), scale);
+        let fps = (self.drm.refresh_mhz / 1000).max(1) as u32;
+        match crate::record::Recorder::start(&self.drm.render_gbm, &path, size, fps) {
+            Ok(rec) => {
+                let answer = format!("ok {}x{} {}\n", rec.size.0, rec.size.1, rec.device);
+                self.drm.recorder = Some(rec);
+                // The stream opens on what is showing.
+                self.state.needs_render = true;
+                answer
+            }
+            Err(e) => format!("err {e}\n"),
+        }
+    }
+
+    fn stop_recording(&mut self) {
+        if let Some(rec) = self.drm.recorder.take() {
+            info!("recording stopped: {}", rec.finish());
+        }
+    }
+
+    /// Converts the frame into a free buffer pair and hands it to the encoder
+    /// thread. Never waits: with every pair busy the frame is dropped.
+    fn record_frame(&mut self, drawn: Option<&FrameSrc>, time: smithay::utils::Time<Monotonic>) {
+        let Some(mut rec) = self.drm.recorder.take() else {
+            return;
+        };
+        let start = Instant::now();
+        let renderer = &mut self.drm.renderer;
+        let src = match drawn {
+            Some(FrameSrc::Tex(t)) => t.clone(),
+            Some(FrameSrc::Buf(b)) => match renderer.import_dmabuf(b, None) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("record: scanout import failed: {e}");
+                    self.drm.recorder = Some(rec);
+                    return;
+                }
+            },
+            // A turned view changes the frame's shape; the stream ends here.
+            None => {
+                info!("recording stopped by rotation: {}", rec.finish());
+                return;
+            }
+        };
+        let (w, h) = (rec.size.0 as i32, rec.size.1 as i32);
+        if let Some((index, y, c)) = rec.acquire() {
+            let shader = &self.drm.nv12_shader;
+            let drew = crate::capture::nv12_plane(renderer, shader, &src, y, (w, h).into(), false)
+                .and_then(|()| {
+                    let half = (w / 2, h / 2).into();
+                    crate::capture::nv12_plane(renderer, shader, &src, c, half, true)
+                });
+            match (drew, self.frame_fence().and_then(|s| s.export())) {
+                (Ok(()), Some(fence)) => {
+                    let ns = Duration::from(time).as_nanos() as u64;
+                    rec.submit(index, ns, fence);
+                }
+                (drew, _) => {
+                    rec.abandon(index);
+                    let why = drew.err().map_or("no fence".into(), |e| e.to_string());
+                    warn!(
+                        "recording stopped, frame not converted ({why}): {}",
+                        rec.finish()
+                    );
+                    return;
+                }
+            }
+        }
+        trace!(
+            target: "springchick::perf",
+            "record ms={:.2}",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+        self.drm.recorder = Some(rec);
     }
 
     fn take_screenshot(&mut self, prep: &crate::FramePrep) {

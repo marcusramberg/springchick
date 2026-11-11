@@ -59,6 +59,9 @@ pub enum DebugCmd {
     /// Locks xkb layout `N`, if given. Answers `ok ACTIVE NAME|NAME|…`, for the
     /// on-screen keyboard's labels.
     Layout(Option<u32>),
+    /// `record start PATH [SCALE]` or, as `None`, `record stop`. See
+    /// [`crate::record`]. Answers `ok WxH DEVICE`, then `ok frames=N dropped=M`.
+    Record(Option<(String, f64)>),
     Home,
     /// Open an app as an icon tap would (raise, else launch); `new_window`
     /// forces a new instance. The search app uses this for attribution and
@@ -173,6 +176,22 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
             done(tok)?;
             DebugCmd::Layout(n)
         }
+        "record" => {
+            let cmd = match tok.next() {
+                Some("stop") => None,
+                Some("start") => {
+                    let path = tok.next().ok_or("parse: missing path")?;
+                    let scale = match tok.next() {
+                        None => 1.0,
+                        Some(t) => t.parse::<f64>().map_err(|_| "parse: not a number")?,
+                    };
+                    Some((path.to_string(), scale))
+                }
+                _ => return Err("parse: record start|stop".to_string()),
+            };
+            done(tok)?;
+            DebugCmd::Record(cmd)
+        }
         "quit" => {
             done(tok)?;
             DebugCmd::Quit
@@ -278,6 +297,8 @@ use crate::State;
 type Reply = String;
 
 type Job = (DebugCmd, SyncSender<Reply>);
+
+pub type RecordRequest = (Option<(String, f64)>, SyncSender<Reply>);
 
 pub struct ActiveGesture {
     start: Instant,
@@ -552,6 +573,12 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
         DebugCmd::Home => {
             let _ = reply.send(format!("ok {}\n", state.home_dump()));
         }
+        DebugCmd::Record(cmd) => match &mut state.record_requests {
+            Some(queue) => queue.push((cmd, reply)),
+            None => {
+                let _ = reply.send("err record needs the drm backend\n".into());
+            }
+        },
         DebugCmd::Layout(n) => {
             let keyboard = state.keyboard.clone();
             let answer = keyboard.with_xkb_state(state, |mut ctx| {
@@ -940,6 +967,19 @@ mod tests {
         assert_eq!(parse_line("layers", W, H), Ok(DebugCmd::Layers));
         assert_eq!(parse_line("layout", W, H), Ok(DebugCmd::Layout(None)));
         assert_eq!(parse_line("layout 1", W, H), Ok(DebugCmd::Layout(Some(1))));
+        assert_eq!(
+            parse_line("record start /tmp/a.h264", W, H),
+            Ok(DebugCmd::Record(Some(("/tmp/a.h264".into(), 1.0))))
+        );
+        assert_eq!(
+            parse_line("record start /tmp/a.h264 0.5", W, H),
+            Ok(DebugCmd::Record(Some(("/tmp/a.h264".into(), 0.5))))
+        );
+        assert_eq!(parse_line("record stop", W, H), Ok(DebugCmd::Record(None)));
+        assert!(parse_line("record", W, H).is_err());
+        assert!(parse_line("record start", W, H).is_err());
+        assert!(parse_line("record start a half", W, H).is_err());
+        assert!(parse_line("record stop now", W, H).is_err());
         assert!(parse_line("layout x", W, H).is_err());
         assert_eq!(parse_line("home", W, H), Ok(DebugCmd::Home));
         assert!(parse_line("home now", W, H).is_err());

@@ -36,6 +36,7 @@ mod pacing;
 mod popups;
 mod presentation;
 mod provenance;
+mod record;
 mod render;
 mod resources;
 mod rotation;
