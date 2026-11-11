@@ -63,7 +63,9 @@ impl State {
         if self.foreign_toplevels.managers.is_empty() {
             return;
         }
-        let focus = ui_state::desired_focus(&self.ui);
+        // Activated is what the OSK picks its per-app bar from, so it leads
+        // with the keyboard.
+        let focus = ui_state::keyboard_focus(&self.ui);
         let current: Vec<(ToplevelId, String, String, bool)> = self
             .toplevels
             .iter()

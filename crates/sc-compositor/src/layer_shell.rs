@@ -500,6 +500,15 @@ impl LayerShell {
         to_physical(zone, dpi)
     }
 
+    /// A surface reserves its zone at the configure, a commit before it maps
+    /// and starts to slide. One hidden by a null commit reserves nothing.
+    pub fn shrink_awaits_map(&self, dpi: f64) -> bool {
+        let reserving = layer_map_for_output(&self.output).layers().any(|l| {
+            self.unmapped.contains(l.wl_surface()) && i32::from(l.cached_state().exclusive_zone) > 0
+        });
+        reserving && self.usable(dpi).h < self.last_usable.h
+    }
+
     fn is_docked(&self, r: Rect) -> bool {
         r.y + r.h >= self.output_h - 1.0 && r.y > 1.0
     }

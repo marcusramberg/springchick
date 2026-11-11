@@ -552,7 +552,7 @@ impl State {
     pub(crate) fn recompute_layers(&mut self) {
         // Hold the app's size while a layer slides in, or the keyboard slides up
         // into a bare strip. `advance_frame` calls back when it lands.
-        if self.layers.sliding() {
+        if self.layers.sliding() || self.layers.shrink_awaits_map(self.dpi) {
             return;
         }
         // Mid-slide sizes must be undone even if the guard held the final growth.
