@@ -76,7 +76,17 @@ impl State {
         self.pending_launch = None;
         for (idx, slot) in self.toplevels.iter().enumerate() {
             if slot.as_ref().is_some_and(|tl| tl.app_id == SEARCH_APP_ID) {
-                self.raise_toplevel_centered(idx, false);
+                // Slide up like the first map; `RaiseApp` would pop it in.
+                transition(
+                    &mut self.ui,
+                    UiEvent::AppMapped {
+                        toplevel: idx,
+                        app_id: SEARCH_APP_ID.to_string(),
+                        origin: self.last_origin,
+                        open_mode: ui_state::OpenMode::SlideUp,
+                    },
+                );
+                self.needs_render = true;
                 return;
             }
         }

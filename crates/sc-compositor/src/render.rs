@@ -836,7 +836,7 @@ fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan)
     if !(plan.app_blurred || (scene.show_home && !plan.app_fills_screen)) {
         return;
     }
-    if backdrop_key(size, ctx).is_some_and(|k| ctx.skia.backdrop_cached(k)) {
+    if backdrop_key(size, ctx, plan).is_some_and(|k| ctx.skia.backdrop_cached(k)) {
         return;
     }
     let view = HomeView {
@@ -895,13 +895,16 @@ fn pass_blurred_app(
         return Ok(());
     }
     let v = ctx.view(size);
-    ctx.skia.blur_backdrop(
-        v.w,
-        v.h,
-        &plan.app_blur,
-        BLUR_SIGMA_LOGICAL * ctx.app_scale as f32,
-        ctx.skia_flip_y,
-    );
+    let sigma = BLUR_SIGMA_LOGICAL * ctx.app_scale as f32;
+    match backdrop_key(size, ctx, plan) {
+        Some(key) => {
+            let clip = Some((plan.app_blur.as_slice(), ctx.skia_flip_y));
+            ctx.skia.blur_backdrop_cached(v.w, v.h, key, sigma, clip);
+        }
+        None => ctx
+            .skia
+            .blur_backdrop(v.w, v.h, &plan.app_blur, sigma, ctx.skia_flip_y),
+    }
     let damage = Rectangle::from_size(ctx.view(size));
     let mut frame = renderer
         .render(framebuffer, size, ctx.base())
@@ -999,14 +1002,24 @@ fn pass_app_card(
     // Skipped for a card turned against the view: its rect isn't in Skia's
     // view space.
     if let (Some(surface), true) = (ctx.app_surface, upright) {
-        blur_behind(
-            ctx.skia,
-            ctx.view(size),
-            surface,
-            (card.x, card.y),
-            ctx.app_scale * t.scale as f64,
-            ctx.skia_flip_y,
-        );
+        let (v, scale) = (ctx.view(size), ctx.app_scale * t.scale as f64);
+        let key = card_frost_key(size, ctx, plan).filter(|k| ctx.skia.backdrop_cached(*k));
+        if let Some(key) = key {
+            let rects = crate::background_effect::blur_rects(surface, (card.x, card.y), scale);
+            let clip = Some((rects.as_slice(), ctx.skia_flip_y));
+            let sigma = BLUR_SIGMA_LOGICAL * ctx.app_scale as f32;
+            ctx.skia.blur_backdrop_cached(v.w, v.h, key, sigma, clip);
+        } else if ctx.scene.backdrop_blur < 1.0 {
+            // Over the full deck frost a second blur shows nothing.
+            blur_behind(
+                ctx.skia,
+                v,
+                surface,
+                (card.x, card.y),
+                scale,
+                ctx.skia_flip_y,
+            );
+        }
     }
     let mut bounds = card.drawn_bounds(&plan.app_elements, ctx.app_scale);
     // Docked layers sit in view space, so only an upright card carries them.
@@ -1046,17 +1059,18 @@ fn pass_app_card(
 /// isn't drawn, so it would frost the app itself.
 fn pass_backdrop_blur(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan) {
     let strength = ctx.scene.backdrop_blur.clamp(0.0, 1.0);
+    let key = backdrop_key(size, ctx, plan);
     if strength <= 0.0 || plan.app_fills_screen {
-        ctx.skia.drop_backdrop();
+        ctx.skia.drop_backdrop(true);
         return;
     }
     let v = ctx.view(size);
-    if let Some(key) = backdrop_key(size, ctx) {
+    if let Some(key) = key {
         let sigma = BACKDROP_BLUR_SIGMA_LOGICAL * ctx.app_scale as f32;
-        ctx.skia.blur_backdrop_cached(v.w, v.h, key, sigma);
+        ctx.skia.blur_backdrop_cached(v.w, v.h, key, sigma, None);
         return;
     }
-    ctx.skia.drop_backdrop();
+    ctx.skia.drop_backdrop(true);
     let full = [crate::background_effect::BlurRect {
         x: 0.0,
         y: 0.0,
@@ -1073,28 +1087,72 @@ fn pass_backdrop_blur(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &S
     );
 }
 
-/// `Some` while the deck sits on a fully frosted, static Home, the frames
-/// the cached backdrop can serve.
+/// `Some` while the deck, or a settled translucent app (search), sits on a
+/// frosted, static Home: the frames the cached backdrop can serve.
 fn backdrop_key(
     size: Size<i32, Physical>,
     ctx: &DrawCtx<'_>,
+    plan: &ScenePlan,
 ) -> Option<crate::skia_gl::BackdropKey> {
     let scene = ctx.scene;
-    let frozen = scene.backdrop_blur >= 1.0
-        && scene.home_lift == 0.0
+    let deck = scene.backdrop_blur >= 1.0 && !plan.app_fills_screen;
+    let app = plan.app_blurred && scene.backdrop_blur <= 0.0;
+    ((deck || app) && home_static(ctx)).then(|| frost_key(size, ctx, deck))
+}
+
+/// `Some` while a translucent app's card moves over a static Home (search
+/// sliding up): its frost can come from the cache too. Home is still drawn.
+fn card_frost_key(
+    size: Size<i32, Physical>,
+    ctx: &DrawCtx<'_>,
+    plan: &ScenePlan,
+) -> Option<crate::skia_gl::BackdropKey> {
+    let card = !plan.is_fullscreen && plan.window_transform.is_some() && !plan.app_blur.is_empty();
+    (card && home_static(ctx)).then(|| frost_key(size, ctx, false))
+}
+
+fn home_static(ctx: &DrawCtx<'_>) -> bool {
+    let scene = ctx.scene;
+    scene.home_lift == 0.0
         && scene.home_shift == 0.0
         && scene.home_recede.is_none()
         && ctx.pressed_app.is_none()
         && ctx.launch_pulses.is_empty()
-        && ctx.arrange.is_none();
-    frozen.then(|| crate::skia_gl::BackdropKey {
-        page: scene.home_page,
+        && ctx.arrange.is_none()
+}
+
+fn frost_key(
+    size: Size<i32, Physical>,
+    ctx: &DrawCtx<'_>,
+    deck: bool,
+) -> crate::skia_gl::BackdropKey {
+    crate::skia_gl::BackdropKey {
+        page: ctx.scene.home_page,
         catalog_gen: ctx.catalog_gen,
         running: ctx.running_apps.len(),
         size: (size.w, size.h),
         view: ctx.rotation,
         library: ctx.library.is_some(),
-    })
+        deck,
+    }
+}
+
+/// Frost the sharp Home for the app card before anything else lands on it.
+/// Not while the deck's frost stands in for Home.
+fn pass_prime_card_frost(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan) {
+    if plan.app_blur.is_empty() {
+        ctx.skia.drop_backdrop(false);
+        return;
+    }
+    let Some(key) = card_frost_key(size, ctx, plan) else {
+        return;
+    };
+    if backdrop_key(size, ctx, plan).is_some_and(|k| ctx.skia.backdrop_cached(k)) {
+        return;
+    }
+    let v = ctx.view(size);
+    let sigma = BLUR_SIGMA_LOGICAL * ctx.app_scale as f32;
+    ctx.skia.prime_backdrop(v.w, v.h, key, sigma);
 }
 
 /// A deck card with its elements collected and placement solved.
@@ -1468,6 +1526,7 @@ pub fn draw_scene(
     pass_home(size, ctx, &plan);
     pass_folder(size, ctx, &plan);
     pass_icon_menu(size, ctx, &plan);
+    pass_prime_card_frost(size, ctx, &plan);
     // Before any card pass, or a dragged card gets blurred too.
     pass_backdrop_blur(size, ctx, &plan);
     pass_blurred_app(renderer, &mut *framebuffer, size, ctx, &plan)?;

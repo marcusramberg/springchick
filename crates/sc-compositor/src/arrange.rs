@@ -293,6 +293,7 @@ impl State {
         touch.cancel(self);
         self.touch_targets.clear();
         self.gesture_slot = slot;
+        self.bar_candidate = None;
 
         // Not `cancel_gestures`: it clears `arrange.drag`.
         self.handle_return_home();

@@ -842,7 +842,8 @@ impl State {
         self.show_touches = config.show_touches;
         self.save_screenshots = config.save_screenshots;
         self.skia.theme = config.theme;
-        self.skia.drop_backdrop();
+        self.skia.drop_backdrop(true);
+        self.skia.drop_backdrop(false);
         self.needs_render = true;
         self.idle = blank::Idle::new(config.idle_blank_secs, std::time::Instant::now());
         self.orientation_settle.set_hold(config.rotation_settle_ms);

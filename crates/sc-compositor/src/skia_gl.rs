@@ -32,7 +32,7 @@ type GlGetIntegerv = unsafe extern "system" fn(pname: u32, params: *mut c_int);
 type GlFinish = unsafe extern "system" fn();
 type GlFlush = unsafe extern "system" fn();
 
-/// What the cached deck backdrop was built from.
+/// What the cached backdrop was built from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BackdropKey {
     pub page: usize,
@@ -41,6 +41,49 @@ pub struct BackdropKey {
     pub size: (i32, i32),
     pub view: Rotation,
     pub library: bool,
+    /// The deck's frost, not a translucent app's lighter one.
+    pub deck: bool,
+}
+
+/// The blur region as a canvas clip. `None` without an additive rect.
+fn blur_clip(
+    view: Rotation,
+    (pw, ph): (i32, i32),
+    rects: &[crate::background_effect::BlurRect],
+    flip_y: bool,
+) -> Option<skia_safe::Path> {
+    let to_canvas = |r: &crate::background_effect::BlurRect| {
+        // Inverse of `Rotation::map_input`.
+        let (x, y, w, h) = match view {
+            Rotation::None => (r.x, r.y, r.w, r.h),
+            Rotation::LeftUp => (r.y, ph as f32 - r.x - r.w, r.h, r.w),
+            Rotation::RightUp => (pw as f32 - r.y - r.h, r.x, r.h, r.w),
+        };
+        let y = if flip_y { ph as f32 - (y + h) } else { y };
+        Rect::from_xywh(x, y, w, h)
+    };
+    let mut add = PathBuilder::new();
+    let mut sub = PathBuilder::new();
+    let mut any_add = false;
+    let mut any_sub = false;
+    for r in rects {
+        if r.add {
+            add.add_rect(to_canvas(r), None, None);
+            any_add = true;
+        } else {
+            sub.add_rect(to_canvas(r), None, None);
+            any_sub = true;
+        }
+    }
+    if !any_add {
+        return None;
+    }
+    let add = add.detach();
+    Some(if any_sub {
+        skia_safe::op(&add, &sub.detach(), PathOp::Difference).unwrap_or(add)
+    } else {
+        add
+    })
 }
 
 pub struct SkiaGl {
@@ -55,8 +98,8 @@ pub struct SkiaGl {
     icon_gen: u64,
     font: Option<Font>,
     draws: u64,
-    /// The deck's frosted Home at quarter size; see `blur_backdrop_cached`.
-    backdrop: Option<(BackdropKey, Image)>,
+    /// Frosted Home at quarter size, `[app, deck]`; see `blur_backdrop_cached`.
+    backdrop: [Option<(BackdropKey, Image)>; 2],
     /// Every draw takes view-space sizes; set per frame by [`Self::set_view`].
     view: Rotation,
 }
@@ -346,7 +389,7 @@ impl SkiaGl {
             icon_gen: 0,
             font: None,
             draws: 0,
-            backdrop: None,
+            backdrop: [None, None],
             view: Rotation::None,
         }
     }
@@ -887,39 +930,9 @@ impl SkiaGl {
             return;
         }
 
-        let view = self.view;
-        let (pw, ph) = view.app_size((width, height));
-        let to_canvas = |r: &crate::background_effect::BlurRect| {
-            // Inverse of `Rotation::map_input`.
-            let (x, y, w, h) = match view {
-                Rotation::None => (r.x, r.y, r.w, r.h),
-                Rotation::LeftUp => (r.y, ph as f32 - r.x - r.w, r.h, r.w),
-                Rotation::RightUp => (pw as f32 - r.y - r.h, r.x, r.h, r.w),
-            };
-            let y = if flip_y { ph as f32 - (y + h) } else { y };
-            Rect::from_xywh(x, y, w, h)
-        };
-        let mut add = PathBuilder::new();
-        let mut sub = PathBuilder::new();
-        let mut any_add = false;
-        let mut any_sub = false;
-        for r in rects {
-            if r.add {
-                add.add_rect(to_canvas(r), None, None);
-                any_add = true;
-            } else {
-                sub.add_rect(to_canvas(r), None, None);
-                any_sub = true;
-            }
-        }
-        if !any_add {
+        let (pw, ph) = self.view.app_size((width, height));
+        let Some(clip) = blur_clip(self.view, (pw, ph), rects, flip_y) else {
             return;
-        }
-        let add = add.detach();
-        let clip = if any_sub {
-            skia_safe::op(&add, &sub.detach(), PathOp::Difference).unwrap_or(add)
-        } else {
-            add
         };
 
         let surface = &mut self.cached_surface.as_mut().unwrap().surface;
@@ -954,63 +967,104 @@ impl SkiaGl {
     }
 
     pub fn backdrop_cached(&self, key: BackdropKey) -> bool {
-        self.backdrop.as_ref().is_some_and(|(k, _)| *k == key)
+        self.backdrop[key.deck as usize]
+            .as_ref()
+            .is_some_and(|(k, _)| *k == key)
     }
 
-    pub fn drop_backdrop(&mut self) {
-        self.backdrop = None;
+    pub fn drop_backdrop(&mut self, deck: bool) {
+        self.backdrop[deck as usize] = None;
     }
 
     /// Full-strength deck blur. Home is static behind the deck, so it is
     /// frosted once at quarter size (blur cost scales with pixels) and the
     /// cached image is painted over the wallpaper on later frames; the
     /// caller skips drawing Home while `backdrop_cached`.
-    pub fn blur_backdrop_cached(&mut self, width: i32, height: i32, key: BackdropKey, sigma: f32) {
+    pub fn blur_backdrop_cached(
+        &mut self,
+        width: i32,
+        height: i32,
+        key: BackdropKey,
+        sigma: f32,
+        clip: Option<(&[crate::background_effect::BlurRect], bool)>,
+    ) {
         if !self.ensure_surface(width, height) {
             return;
         }
         let (pw, ph) = self.view.app_size((width, height));
-        if !self.backdrop_cached(key) {
-            let (sw, sh) = ((pw / 4).max(1), (ph / 4).max(1));
-            let surface = &mut self.cached_surface.as_mut().unwrap().surface;
-            let sharp = surface.image_snapshot();
-            let Some(ctx) = self.context.as_mut() else {
-                return;
-            };
-            let info = ImageInfo::new_n32_premul((sw, sh), None);
-            let Some(mut small) =
-                surfaces::render_target(ctx, Budgeted::Yes, &info, None, None, None, None, None)
-            else {
-                return;
-            };
-            let mut paint = Paint::default();
-            paint.set_image_filter(image_filters::blur(
-                (sigma / 4.0, sigma / 4.0),
-                TileMode::Clamp,
-                None,
-                None,
-            ));
-            small.canvas().draw_image_rect_with_sampling_options(
-                &sharp,
-                None,
-                Rect::from_wh(sw as f32, sh as f32),
-                SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
-                &paint,
-            );
-            self.backdrop = Some((key, small.image_snapshot()));
+        let clip = match clip {
+            Some((rects, flip_y)) => match blur_clip(self.view, (pw, ph), rects, flip_y) {
+                Some(path) => Some(path),
+                None => return,
+            },
+            None => None,
+        };
+        if !self.prime_backdrop(width, height, key, sigma) {
+            return;
         }
-        let image = self.backdrop.as_ref().unwrap().1.clone();
-        let surface = &mut self.cached_surface.as_mut().unwrap().surface;
-        surface.canvas().draw_image_rect_with_sampling_options(
+        let image = self.backdrop[key.deck as usize].as_ref().unwrap().1.clone();
+        let canvas = self.cached_surface.as_mut().unwrap().surface.canvas();
+        canvas.save();
+        if let Some(clip) = &clip {
+            canvas.clip_path(clip, None, true);
+        }
+        canvas.draw_image_rect_with_sampling_options(
             &image,
             None,
             Rect::from_wh(pw as f32, ph as f32),
             SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
             &Paint::default(),
         );
+        canvas.restore();
         if let Some(ctx) = self.context.as_mut() {
             ctx.flush(None);
         }
+    }
+
+    /// Frost what's drawn so far into the cache without painting it. False
+    /// when there is nothing cached afterwards.
+    pub fn prime_backdrop(
+        &mut self,
+        width: i32,
+        height: i32,
+        key: BackdropKey,
+        sigma: f32,
+    ) -> bool {
+        if self.backdrop_cached(key) {
+            return true;
+        }
+        if !self.ensure_surface(width, height) {
+            return false;
+        }
+        let (pw, ph) = self.view.app_size((width, height));
+        let (sw, sh) = ((pw / 4).max(1), (ph / 4).max(1));
+        let surface = &mut self.cached_surface.as_mut().unwrap().surface;
+        let sharp = surface.image_snapshot();
+        let Some(ctx) = self.context.as_mut() else {
+            return false;
+        };
+        let info = ImageInfo::new_n32_premul((sw, sh), None);
+        let Some(mut small) =
+            surfaces::render_target(ctx, Budgeted::Yes, &info, None, None, None, None, None)
+        else {
+            return false;
+        };
+        let mut paint = Paint::default();
+        paint.set_image_filter(image_filters::blur(
+            (sigma / 4.0, sigma / 4.0),
+            TileMode::Clamp,
+            None,
+            None,
+        ));
+        small.canvas().draw_image_rect_with_sampling_options(
+            &sharp,
+            None,
+            Rect::from_wh(sw as f32, sh as f32),
+            SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
+            &paint,
+        );
+        self.backdrop[key.deck as usize] = Some((key, small.image_snapshot()));
+        true
     }
 
     /// All cards' decor in one pass, back-to-front, after the cards were

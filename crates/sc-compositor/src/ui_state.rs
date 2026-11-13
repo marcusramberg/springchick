@@ -462,6 +462,8 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                 _ => false,
             };
             if is_foreground {
+                // Already on its way Home (search exits mid-close after a drag handoff).
+                let next = next.filter(|_| !matches!(state, UiState::AppClosing { .. }));
                 *state = match next {
                     Some((t, app_id)) => UiState::App {
                         toplevel: t,
@@ -1105,6 +1107,29 @@ mod tests {
             }
             other => panic!("expected App, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn toplevel_closed_while_closing_still_goes_home() {
+        let mut state = UiState::App {
+            toplevel: 7,
+            app_id: "search".into(),
+        };
+        transition(
+            &mut state,
+            UiEvent::ReturnHome {
+                origin: ZoomOrigin::icon((200.0, 400.0)),
+            },
+        );
+        assert!(matches!(state, UiState::AppClosing { .. }));
+        transition(
+            &mut state,
+            UiEvent::ToplevelClosed {
+                toplevel: 7,
+                next: Some((2, "org.example.Editor".into())),
+            },
+        );
+        assert!(matches!(state, UiState::Home { .. }));
     }
 
     #[test]
