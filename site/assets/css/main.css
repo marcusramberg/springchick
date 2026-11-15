@@ -111,8 +111,8 @@ h1, h2, h3 { line-height: 1.2; letter-spacing: -0.02em; }
 #sc-chick { transform-origin: 256px 470px; animation: hop 2.6s cubic-bezier(.4, 0, .3, 1) infinite; }
 #sc-legs  { transform-origin: 256px 470px; animation: legs 2.6s cubic-bezier(.4, 0, .3, 1) infinite; }
 #sc-body  { transform-origin: 256px 400px; animation: body 2.6s cubic-bezier(.4, 0, .3, 1) infinite; }
-#sc-wing-l { transform-origin: 144.85px 281.65px; animation: flapL 2.6s ease-in-out infinite; }
-#sc-wing-r { transform-origin: 367.15px 281.65px; animation: flapR 2.6s ease-in-out infinite; }
+#sc-wing-l { transform-origin: 135px 264px; animation: flapL 2.6s ease-in-out infinite; }
+#sc-wing-r { transform-origin: 377px 264px; animation: flapR 2.6s ease-in-out infinite; }
 
 @keyframes hop {
   0%, 18%, 70%, 100% { transform: translateY(0); }
