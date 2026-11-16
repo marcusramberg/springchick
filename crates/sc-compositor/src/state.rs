@@ -354,6 +354,7 @@ pub(crate) struct State {
     /// Dialogs always keep CSD so their action buttons survive.
     pub prefer_no_csd: bool,
     pub natural_scroll: bool,
+    pub lock_on_blank: bool,
     /// Startup only.
     pub uclamp_min: sc_config::UclampMin,
     pub gpu_min_mhz: sc_config::GpuMinMhz,
@@ -495,6 +496,7 @@ impl State {
         let save_screenshots = config.save_screenshots;
         let prefer_no_csd = config.prefer_no_csd;
         let natural_scroll = config.natural_scroll;
+        let lock_on_blank = config.lock_on_blank;
         let uclamp_min = config.uclamp_min;
         let gpu_min_mhz = config.gpu_min_mhz;
         let vrr = config.vrr;
@@ -713,6 +715,7 @@ impl State {
             panel,
             prefer_no_csd,
             natural_scroll,
+            lock_on_blank,
             uclamp_min,
             gpu_min_mhz,
             vrr,
@@ -839,6 +842,7 @@ impl State {
         self.card_radius = resolve_card_radius(config.card_radius, self.panel.as_ref());
         self.prefer_no_csd = config.prefer_no_csd;
         self.natural_scroll = config.natural_scroll;
+        self.lock_on_blank = config.lock_on_blank;
         self.show_touches = config.show_touches;
         self.save_screenshots = config.save_screenshots;
         self.skia.theme = config.theme;

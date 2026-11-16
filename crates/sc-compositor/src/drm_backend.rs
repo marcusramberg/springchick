@@ -950,6 +950,10 @@ impl App {
             }
         }
         if blanked {
+            // Already locked too: the locker goes back to its first screen.
+            if self.state.lock_on_blank {
+                crate::sleep::lock_session();
+            }
             self.stop_recording();
             // External displays keep power and frames while the phone panel sleeps.
             let mirroring = self.drm.mirroring();

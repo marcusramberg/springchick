@@ -53,6 +53,24 @@ pub fn spawn() -> Option<Sleep> {
     Some(Sleep { events, acks })
 }
 
+/// `loginctl lock-session`: whichever locker listens (sc-bar, swayidle) locks.
+/// On its own thread: the bus may be slow, and the caller is drawing.
+pub fn lock_session() {
+    std::thread::spawn(|| {
+        let call = Connection::new_system().and_then(|conn| {
+            conn.with_proxy(
+                SERVICE,
+                "/org/freedesktop/login1/session/auto",
+                CALL_TIMEOUT,
+            )
+            .method_call::<(), _, _, _>("org.freedesktop.login1.Session", "Lock", ())
+        });
+        if let Err(e) = call {
+            warn!(%e, "lock_on_blank: logind would not lock the session");
+        }
+    });
+}
+
 fn inhibit(conn: &Connection) -> Option<OwnedFd> {
     let proxy = conn.with_proxy(SERVICE, PATH, CALL_TIMEOUT);
     match proxy.method_call::<(OwnedFd,), _, _, _>(

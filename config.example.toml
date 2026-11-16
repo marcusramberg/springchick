@@ -58,6 +58,12 @@ save_screenshots = true
 # Touchpad content follows the fingers. Mouse wheels are unaffected.
 natural_scroll = true
 
+# Lock the session whenever the screen goes dark (power key, idle, suspend),
+# by asking logind as `loginctl lock-session` does. sc-bar answers with its
+# lock screen, whose pad types digits only: leave this off unless your
+# password is a PIN. `loginctl unlock-session` over ssh is the way back in.
+lock_on_blank = false
+
 # Ask top-level windows to drop their titlebars. Dialogs always keep theirs,
 # so GTK file choosers still show Open/Cancel.
 prefer_no_csd = true

@@ -102,6 +102,8 @@ pub struct Config {
     pub save_screenshots: bool,
     /// Touchpads only, applied as they are added.
     pub natural_scroll: bool,
+    /// Ask logind to lock the session whenever the panel goes dark.
+    pub lock_on_blank: bool,
     /// Tell top-level windows to drop client-side titlebars. Dialogs keep CSD
     /// so GTK file choosers still get their Open/Cancel header bar.
     pub prefer_no_csd: bool,
@@ -726,6 +728,7 @@ struct RawMain {
     show_touches: Option<bool>,
     save_screenshots: Option<bool>,
     natural_scroll: Option<bool>,
+    lock_on_blank: Option<bool>,
     prefer_no_csd: Option<bool>,
     uclamp_min: Option<toml::Value>,
     gpu_min_mhz: Option<toml::Value>,
@@ -816,6 +819,7 @@ impl Config {
         let show_touches = main.show_touches.unwrap_or(DEFAULT_SHOW_TOUCHES);
         let save_screenshots = main.save_screenshots.unwrap_or(DEFAULT_SAVE_SCREENSHOTS);
         let natural_scroll = main.natural_scroll.unwrap_or(DEFAULT_NATURAL_SCROLL);
+        let lock_on_blank = main.lock_on_blank.unwrap_or(false);
         let prefer_no_csd = main.prefer_no_csd.unwrap_or(DEFAULT_PREFER_NO_CSD);
         let uclamp_min = parse_uclamp_min(main.uclamp_min.as_ref());
         let gpu_min_mhz = parse_gpu_min_mhz(main.gpu_min_mhz.as_ref());
@@ -871,6 +875,7 @@ impl Config {
             show_touches,
             save_screenshots,
             natural_scroll,
+            lock_on_blank,
             prefer_no_csd,
             uclamp_min,
             gpu_min_mhz,
@@ -1154,6 +1159,12 @@ pub fn load() -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lock_on_blank_is_opt_in() {
+        assert!(!Config::parse("").lock_on_blank);
+        assert!(Config::parse("[main]\nlock_on_blank = true").lock_on_blank);
+    }
 
     #[test]
     fn natural_scroll_defaults_on_and_can_be_disabled() {
