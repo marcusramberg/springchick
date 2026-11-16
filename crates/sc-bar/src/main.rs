@@ -2,12 +2,14 @@
 //! on the right half, Notification Center on the left. Layer surfaces: the
 //! bar holds its strip at the top, the sheet covers the screen only while it
 //! is pulled or open, and a banner's strip is there while one shows. It is
-//! the notification daemon too, when no other is. Standalone: any other bar
-//! can replace it.
+//! the notification daemon too, when no other is, and the lock screen, when
+//! logind asks for one. Standalone: any other bar can replace it.
 
 mod center;
 mod draw;
+mod lock;
 mod notify;
+mod pam;
 mod panel;
 mod symbols;
 mod system;
@@ -30,6 +32,10 @@ use smithay_client_toolkit::{
         pointer::{PointerEvent, PointerEventKind, PointerHandler},
         touch::TouchHandler,
         Capability, SeatHandler, SeatState,
+    },
+    session_lock::{
+        SessionLock, SessionLockHandler, SessionLockState, SessionLockSurface,
+        SessionLockSurfaceConfigure,
     },
     shell::{
         wlr_layer::{
@@ -103,9 +109,33 @@ struct BannerSurface {
     dirty: bool,
 }
 
+/// The lock screen, there from the request until the PIN is right.
+struct Locked {
+    hidpi: Option<Hidpi>,
+    surface: SessionLockSurface,
+    session: SessionLock,
+    /// Logical px; 0 until configured.
+    w: u32,
+    h: u32,
+    frame_pending: bool,
+    dirty: bool,
+    pad: lock::Lock,
+    /// Unlocked before the compositor said `locked`: it goes then.
+    leaving: bool,
+}
+
+/// There while locked: a bar restarted under its own lock takes it up again.
+fn lock_marker() -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?).join("sc-bar.locked"))
+}
+
 /// What reaches the main loop from the other threads.
 enum Update {
     System(System),
+    /// logind asks the session to lock, or unlock.
+    Lock(bool),
+    /// What PAM made of the PIN, and which showing of the lock screen took it.
+    Auth(u32, bool),
     Notify(notify::Event),
     /// The icons of these shortcuts, in their order.
     Shortcuts(Vec<String>, Vec<sc_icons::IconPixels>),
@@ -129,6 +159,7 @@ enum Target {
     Bar,
     Sheet,
     Banner,
+    Lock,
 }
 
 /// The one finger followed: where it went down, where and when it last
@@ -192,6 +223,15 @@ struct App {
     note_icons: HashMap<String, Option<skia_safe::Image>>,
     /// Read once, for the icons of apps that notify.
     icon_jobs: mpsc::Sender<Icons>,
+    session_lock: SessionLockState,
+    locked: Option<Locked>,
+    /// Counts the lock screen's showings: a PIN answers for its own only.
+    showing: u32,
+    /// The main loop's own ends, for the thread that asks PAM.
+    updates: mpsc::Sender<Update>,
+    wake: std::sync::Arc<UnixStream>,
+    /// `[bar] lock`.
+    lock_screen: bool,
 }
 
 fn main() {
@@ -204,6 +244,8 @@ fn main() {
     wake_rx.set_nonblocking(true).expect("nonblocking");
     // With the worker gone its end would read as hung up, forever.
     let (notes_tx, wake_open) = (updates_tx.clone(), wake_tx.try_clone().expect("dup"));
+    let (lock_tx, lock_wake) = (updates_tx.clone(), wake_tx.try_clone().expect("dup"));
+    let (auth_tx, auth_wake) = (updates_tx.clone(), wake_tx.try_clone().expect("dup"));
     let worker = system::watch(move |system| {
         let _ = updates_tx.send(Update::System(system));
         let _ = (&wake_tx).write(&[0]);
@@ -238,6 +280,12 @@ fn main() {
     bar.set_keyboard_interactivity(KeyboardInteractivity::None);
 
     let config = sc_config::load();
+    if config.bar.lock {
+        system::watch_lock(move |lock| {
+            let _ = lock_tx.send(Update::Lock(lock));
+            let _ = (&lock_wake).write(&[0]);
+        });
+    }
     let long_press = config
         .bar
         .long_press
@@ -251,6 +299,7 @@ fn main() {
         })
         .collect();
 
+    let session_lock = SessionLockState::new(&globals, &qh);
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
@@ -292,6 +341,12 @@ fn main() {
         banner_tick: 0.0,
         note_icons: HashMap::new(),
         icon_jobs,
+        session_lock,
+        locked: None,
+        showing: 0,
+        lock_screen: config.bar.lock,
+        updates: auth_tx,
+        wake: auth_wake.into(),
     };
     app.bar_hidpi = app.hidpi(app.bar.wl_surface());
     app.bar.commit();
@@ -314,6 +369,18 @@ fn main() {
                     changed = true;
                 }
                 Update::Notify(event) => app.notified(event),
+                Update::Lock(true) => app.lock(),
+                Update::Lock(false) => app.unlock(),
+                // The screen went dark since: that PIN was for another showing.
+                Update::Auth(showing, _) if showing != app.showing => {}
+                Update::Auth(_, true) => app.unlock(),
+                Update::Auth(_, false) => {
+                    if let Some(locked) = &mut app.locked {
+                        locked.pad.failed();
+                    }
+                    app.last_tick = app.now();
+                    app.redraw_lock(true);
+                }
                 Update::Shortcuts(ids, pixels) => {
                     if ids == app.system.shortcuts {
                         app.icons = pixels.iter().filter_map(draw::icon).collect();
@@ -324,6 +391,7 @@ fn main() {
                     app.note_icons.insert(key, draw::icon(&pixels));
                     app.draw_banner();
                     app.redraw_list();
+                    app.redraw_lock(true);
                 }
             }
         }
@@ -332,6 +400,7 @@ fn main() {
             (app.clock, app.date) = (clock, date);
             app.draw_bar();
             app.redraw(true);
+            app.redraw_lock(true);
         }
         if app.banner_hide_at.is_some_and(|at| app.now() >= at) {
             app.banner_hide_at = None;
@@ -535,10 +604,12 @@ impl App {
         self.epoch.elapsed().as_secs_f64()
     }
 
-    /// The sheet's size, or the output's before it is configured.
+    /// The lock screen's or the sheet's size, or the output's before either
+    /// is configured.
     fn screen(&self) -> (f32, f32) {
-        match &self.sheet {
-            Some(s) if s.w > 0 => (s.w as f32, s.h as f32),
+        match (&self.locked, &self.sheet) {
+            (Some(l), _) if l.w > 0 => (l.w as f32, l.h as f32),
+            (_, Some(s)) if s.w > 0 => (s.w as f32, s.h as f32),
             _ => {
                 let (w, h) = self
                     .output_state
@@ -607,12 +678,16 @@ impl App {
                 self.cache_icon(&n);
                 // Silent mode still collects them.
                 let silent = panel::Toggle::Silent.get(&self.system.controls) == Some(true);
-                let banner = self.sheet.is_none() && !silent;
+                let alert = self.sheet.is_none() && !silent;
+                // The lock screen has it in its list.
+                let banner = alert && self.locked.is_none();
                 self.center.add(n, banner);
-                if banner {
+                if alert {
                     if let Some(haptics) = &self.haptics {
                         haptics.trigger("message-new-instant");
                     }
+                }
+                if banner {
                     self.banner_hide_at = Some(self.now() + center::BANNER_SHOWN);
                     self.show_banner();
                 }
@@ -622,6 +697,7 @@ impl App {
         self.banner_tick = self.now();
         self.draw_banner();
         self.redraw_list();
+        self.redraw_lock(true);
     }
 
     fn cache_icon(&mut self, n: &center::Notification) {
@@ -992,7 +1068,142 @@ impl App {
             self.scale = scale;
             self.draw_bar();
             self.redraw(true);
+            self.redraw_lock(true);
         }
+    }
+
+    /// Asks the compositor for the lock and puts the lock screen on it.
+    /// Asked again while locked (the screen went dark), back to the cover.
+    fn lock(&mut self) {
+        self.showing += 1;
+        if let Some(locked) = &mut self.locked {
+            locked.pad = lock::Lock::default();
+            locked.leaving = false;
+            return self.redraw_lock(true);
+        }
+        let Some(output) = self.output_state.outputs().next() else {
+            return;
+        };
+        let session = match self.session_lock.lock(&self.qh) {
+            Ok(session) => session,
+            Err(e) => return eprintln!("sc-bar: the compositor has no session lock: {e}"),
+        };
+        self.close_sheet();
+        self.center.dismiss_banner();
+        self.drop_banner();
+        self.banner_hide_at = None;
+        let surface = self.compositor.create_surface(&self.qh);
+        let hidpi = self.hidpi(&surface);
+        let surface = session.create_lock_surface(surface, &output, &self.qh);
+        self.locked = Some(Locked {
+            hidpi,
+            surface,
+            session,
+            w: 0,
+            h: 0,
+            frame_pending: false,
+            dirty: true,
+            pad: lock::Lock::default(),
+            leaving: false,
+        });
+        if let Some(marker) = lock_marker() {
+            let _ = std::fs::write(marker, "");
+        }
+    }
+
+    fn unlock(&mut self) {
+        // Dropped before `locked`, the compositor would stay locked alone.
+        if let Some(locked) = self.locked.take_if(|l| l.session.is_locked()) {
+            locked.session.unlock();
+            self.unlocked();
+        } else if let Some(locked) = &mut self.locked {
+            locked.leaving = true;
+        }
+    }
+
+    /// The lock is gone, by the PIN or the compositor's word.
+    fn unlocked(&mut self) {
+        if let Some(marker) = lock_marker() {
+            let _ = std::fs::remove_file(marker);
+        }
+        self.finger = None;
+        self.center.rest();
+    }
+
+    /// PAM takes seconds over a wrong PIN: asked on a thread of its own.
+    fn authenticate(&self, pin: String) {
+        let (updates, wake, showing) = (self.updates.clone(), self.wake.clone(), self.showing);
+        std::thread::spawn(move || {
+            let _ = updates.send(Update::Auth(showing, pam::authenticate(&pin)));
+            let _ = (&*wake).write(&[0]);
+        });
+    }
+
+    /// Draws the lock screen once the frame in flight is shown, or `now`: a
+    /// dark panel shows no frame, and must wake to the right one.
+    fn redraw_lock(&mut self, now: bool) {
+        let Some(locked) = &mut self.locked else {
+            return;
+        };
+        locked.dirty = true;
+        if now || !locked.frame_pending {
+            self.draw_lock();
+        }
+    }
+
+    // ponytail: the whole buffer for every frame the cover or a key moves;
+    // cache the cover as the sheet does if a phone drops frames here.
+    fn draw_lock(&mut self) {
+        let Some(locked) = &self.locked else { return };
+        if locked.w == 0 {
+            return;
+        }
+        let scale = self.scale;
+        let surface = locked.surface.wl_surface();
+        let (w, h) = self.sized(surface, &locked.hidpi, locked.w, locked.h);
+        let Some((buffer, pixels)) = buffer(&mut self.pool, &self.shm, w, h) else {
+            return;
+        };
+        let mut scene = draw::Scene {
+            font: &mut self.font,
+            theme: &self.theme,
+            system: &self.system,
+            clock: &self.clock,
+            icons: &self.icons,
+        };
+        let notes = draw::Notes {
+            center: &self.center,
+            date: &self.date,
+            now: Self::unix_now(),
+            icons: &self.note_icons,
+            serving: self.notify.is_some(),
+        };
+        let locked = self.locked.as_mut().unwrap();
+        draw::lock(pixels, w, h, scale, &mut scene, &notes, &locked.pad);
+        let surface = locked.surface.wl_surface();
+        surface.damage_buffer(0, 0, w, h);
+        locked.dirty = false;
+        locked.frame_pending = true;
+        surface.frame(&self.qh, FrameCallbackData(surface.clone()));
+        let _ = buffer.attach_to(surface);
+        surface.commit();
+    }
+
+    fn lock_frame(&mut self) {
+        let view = self.view();
+        let now = self.now();
+        let dt = (now - self.last_tick).min(0.05) as f32;
+        self.last_tick = now;
+        let Some(locked) = &mut self.locked else {
+            return;
+        };
+        locked.frame_pending = false;
+        locked.pad.step(dt);
+        self.center.step(dt, Some(view));
+        if locked.dirty || locked.pad.is_animating() || self.center.is_animating() {
+            self.draw_lock();
+        }
+        self.flush_outcomes();
     }
 
     fn carry_out(&mut self, change: Change) {
@@ -1043,6 +1254,12 @@ impl App {
             .is_some_and(|b| b.layer.wl_surface() == surface)
         {
             Target::Banner
+        } else if self
+            .locked
+            .as_ref()
+            .is_some_and(|l| l.surface.wl_surface() == surface)
+        {
+            Target::Lock
         } else {
             Target::Sheet
         };
@@ -1071,6 +1288,17 @@ impl App {
                 if self.center.touch_banner(at, w) {
                     self.banner_hide_at = None;
                 }
+            }
+            Target::Lock => {
+                let Some(locked) = &mut self.locked else {
+                    return;
+                };
+                // The bottom of the screen moves the cover, whatever is there.
+                let list = locked.pad.covered() && at.1 < h * 0.88;
+                if !(list && self.center.touch_list(at, draw::list_view(w, h))) {
+                    locked.pad.touch_down(at, w, h);
+                }
+                self.redraw_lock(false);
             }
             Target::Sheet => {
                 let Some(panel) = &mut self.panel else { return };
@@ -1105,11 +1333,18 @@ impl App {
             self.center.touch_move(at, self.view());
             match target {
                 Target::Banner => self.draw_banner(),
+                Target::Lock => self.redraw_lock(false),
                 _ => self.redraw_list(),
             }
             return;
         }
         let (w, h) = self.screen();
+        if target == Target::Lock {
+            if let Some(locked) = &mut self.locked {
+                locked.pad.touch_move(at, w, h);
+            }
+            return self.redraw_lock(false);
+        }
         let Some(panel) = &mut self.panel else { return };
         let change = panel.touch_move(at, w, h, &self.system.controls);
         if let Some(change) = change {
@@ -1155,8 +1390,15 @@ impl App {
             (finger.vx, finger.vy)
         };
         (self.last_tick, self.banner_tick) = (now, now);
+        let (_, h) = self.screen();
         if self.center.is_touched() {
             match self.center.touch_up((vx, vy), self.view()) {
+                // Opening one takes the PIN first.
+                Some(_) if finger.target == Target::Lock => {
+                    if let Some(locked) = &mut self.locked {
+                        locked.pad.show_pad(h);
+                    }
+                }
                 Some((id, action)) => self.open_notification(id, action),
                 // Put back, it stays its time again.
                 None if finger.target == Target::Banner && !self.center.banner_animating() => {
@@ -1167,9 +1409,16 @@ impl App {
             self.flush_outcomes();
             self.draw_banner();
             self.redraw_list();
+            self.redraw_lock(false);
             return;
         }
-        let (_, h) = self.screen();
+        if finger.target == Target::Lock {
+            let pin = self.locked.as_mut().and_then(|l| l.pad.touch_up(vy, h));
+            if let Some(pin) = pin {
+                self.authenticate(pin);
+            }
+            return self.redraw_lock(false);
+        }
         let Some(panel) = &mut self.panel else { return };
         let change = panel.touch_up(vy, h, &self.system.controls);
         if let Some(change) = change {
@@ -1212,6 +1461,13 @@ impl CompositorHandler for App {
             .is_some_and(|b| b.layer.wl_surface() == surface)
         {
             return self.banner_frame();
+        }
+        if self
+            .locked
+            .as_ref()
+            .is_some_and(|l| l.surface.wl_surface() == surface)
+        {
+            return self.lock_frame();
         }
         // A surface already put away can still have one in flight.
         if !self
@@ -1265,7 +1521,11 @@ impl OutputHandler for App {
     fn output_state(&mut self) -> &mut OutputState {
         &mut self.output_state
     }
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        if self.lock_screen && self.locked.is_none() && lock_marker().is_some_and(|m| m.exists()) {
+            self.lock();
+        }
+    }
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 }
@@ -1303,6 +1563,34 @@ impl LayerShellHandler for App {
             (sheet.w, sheet.h) = configure.new_size;
             sheet.frame_pending = false;
             self.redraw(true);
+        }
+    }
+}
+
+impl SessionLockHandler for App {
+    fn locked(&mut self, _: &Connection, _: &QueueHandle<Self>, _: SessionLock) {
+        if self.locked.as_ref().is_some_and(|l| l.leaving) {
+            self.unlock();
+        }
+    }
+
+    /// Refused: another locker has the session.
+    fn finished(&mut self, _: &Connection, _: &QueueHandle<Self>, _: SessionLock) {
+        self.locked = None;
+        self.unlocked();
+    }
+
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: SessionLockSurface,
+        configure: SessionLockSurfaceConfigure,
+        _: u32,
+    ) {
+        if let Some(locked) = &mut self.locked {
+            (locked.w, locked.h) = configure.new_size;
+            self.redraw_lock(true);
         }
     }
 }
@@ -1398,6 +1686,10 @@ impl TouchHandler for App {
     fn cancel(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch) {
         self.finger = None;
         self.center.cancel_touch();
+        if let Some(locked) = &mut self.locked {
+            locked.pad.cancel_touch();
+            self.redraw_lock(false);
+        }
         if let Some(panel) = &mut self.panel {
             panel.close();
             self.last_tick = self.now();

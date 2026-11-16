@@ -71,6 +71,7 @@
           vm-icon-menu = import ./nix/vm-icon-menu-test.nix { inherit self pkgs; };
           vm-library = import ./nix/vm-library-test.nix { inherit self pkgs; };
           vm-lock = import ./nix/vm-lock-test.nix { inherit self pkgs; };
+          vm-bar-lock = import ./nix/vm-bar-lock-test.nix { inherit self pkgs; };
           vm-capture = import ./nix/vm-capture-test.nix { inherit self pkgs; };
           vm-portal = import ./nix/vm-portal-test.nix { inherit self pkgs; };
           vm-pointer = import ./nix/vm-pointer-test.nix { inherit self pkgs; };
@@ -93,6 +94,8 @@
             pkgs.seatd
             # iio-sensor-proxy client.
             pkgs.dbus
+            # sc-bar's lock screen.
+            pkgs.pam
             pkgs.libgbm
             pkgs.libx11
             pkgs.libxcursor

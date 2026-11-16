@@ -268,8 +268,12 @@ in
     # gnome-keyring module only wires that into `login`, not greetd. Needs a
     # greetd that authenticates; autologin leaves it locked.
     # mkIf the whole attrset, or an empty greetd PAM service appears.
-    security.pam.services = lib.mkIf config.services.greetd.enable {
-      greetd.enableGnomeKeyring = lib.mkDefault true;
-    };
+    security.pam.services = lib.mkMerge [
+      (lib.mkIf config.services.greetd.enable {
+        greetd.enableGnomeKeyring = lib.mkDefault true;
+      })
+      # sc-bar's lock screen checks the PIN against the login password.
+      (lib.mkIf cfg.bar.enable { springchick = { }; })
+    ];
   };
 }

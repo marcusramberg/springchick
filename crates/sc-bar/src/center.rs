@@ -49,7 +49,7 @@ fn scale(w: f32) -> f32 {
 }
 
 /// A spring that takes about `response` seconds, as iOS names them.
-fn spring(value: f32, response: f32, ratio: f32) -> Spring {
+pub fn spring(value: f32, response: f32, ratio: f32) -> Spring {
     let w = std::f32::consts::TAU / response;
     Spring {
         stiffness: w * w,
@@ -64,7 +64,7 @@ fn retune(s: &mut Spring, response: f32, ratio: f32, target: f32) {
 }
 
 /// Gives less the further `x` goes past the end of a range.
-fn rubber_band(x: f32, range: f32) -> f32 {
+pub fn rubber_band(x: f32, range: f32) -> f32 {
     (1.0 - 1.0 / (x * 0.55 / range + 1.0)) * range
 }
 

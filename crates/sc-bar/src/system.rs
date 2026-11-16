@@ -105,6 +105,48 @@ pub fn watch(send: impl Fn(System) + Send + 'static) -> mpsc::Sender<Msg> {
     tx
 }
 
+/// Calls `send` when logind asks this session to lock (`true`, as `loginctl
+/// lock-session` and the compositor's `lock_on_blank` do) or unlock.
+pub fn watch_lock(send: impl Fn(bool) + Send + 'static) {
+    const LOGIN: &str = "org.freedesktop.login1";
+    thread::spawn(move || {
+        let Ok(bus) = Connection::new_system() else {
+            return;
+        };
+        let proxy = |path| bus.with_proxy(LOGIN, path, Duration::from_secs(5));
+        // The signals come from the session's own path, not `auto`.
+        let path = proxy("/org/freedesktop/login1/session/auto")
+            .get::<String>("org.freedesktop.login1.Session", "Id")
+            .and_then(|id| {
+                proxy("/org/freedesktop/login1").method_call::<(dbus::Path,), _, _, _>(
+                    "org.freedesktop.login1.Manager",
+                    "GetSession",
+                    (id,),
+                )
+            });
+        let path = match path {
+            Ok((path,)) => path,
+            Err(e) => return eprintln!("sc-bar: no logind session ({e}); nothing asks to lock"),
+        };
+        let rule = MatchRule::new()
+            .with_type(dbus::MessageType::Signal)
+            // Anyone on the bus may send a signal: only logind's count.
+            .with_sender(LOGIN)
+            .with_interface("org.freedesktop.login1.Session")
+            .with_path(path);
+        let _ = bus.add_match(rule, move |_: (), _, msg| {
+            match msg.member().as_deref() {
+                Some("Lock") => send(true),
+                Some("Unlock") => send(false),
+                _ => {}
+            }
+            true
+        });
+        while bus.process(Duration::from_secs(3600)).is_ok() {}
+        eprintln!("sc-bar: lost the system bus; nothing asks to lock");
+    });
+}
+
 /// Signals `changed` for every property change under `paths`, and for names
 /// coming and going (media players).
 fn forward(bus: Connection, paths: &[&'static str], changed: mpsc::Sender<Msg>) {

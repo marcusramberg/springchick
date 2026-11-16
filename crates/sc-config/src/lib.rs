@@ -154,6 +154,8 @@ pub struct Bar {
     /// A `sh -c` command per toggle (`"wifi"`, `"bluetooth"`, ...) for a long
     /// press on it. The file's entries go over the defaults; `""` clears one.
     pub long_press: BTreeMap<String, String>,
+    /// Answer logind's lock requests with the bar's own lock screen.
+    pub lock: bool,
 }
 
 impl Default for Bar {
@@ -161,6 +163,7 @@ impl Default for Bar {
         let long_press = [("wifi", "foot sh -c nmtui"), ("bluetooth", "foot bluetui")];
         Bar {
             long_press: long_press.map(|(k, v)| (k.into(), v.into())).into(),
+            lock: true,
         }
     }
 }
@@ -688,6 +691,7 @@ struct RawPredict {
 #[derive(Deserialize, Default)]
 struct RawBar {
     long_press: Option<BTreeMap<String, String>>,
+    lock: Option<bool>,
     #[serde(flatten)]
     unknown: toml::Table,
 }
@@ -844,6 +848,7 @@ impl Config {
         if let Some(raw) = file.bar {
             bar.long_press.extend(raw.long_press.unwrap_or_default());
             bar.long_press.retain(|_, command| !command.is_empty());
+            bar.lock = raw.lock.unwrap_or(true);
         }
         let theme = parse_theme(file.theme);
         let osk_haptics = file.osk.as_ref().and_then(|o| o.haptics).unwrap_or(false);
@@ -1159,6 +1164,12 @@ pub fn load() -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bars_lock_screen_can_be_turned_off() {
+        assert!(Config::parse("").bar.lock);
+        assert!(!Config::parse("[bar]\nlock = false").bar.lock);
+    }
 
     #[test]
     fn lock_on_blank_is_opt_in() {

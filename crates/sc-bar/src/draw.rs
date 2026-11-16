@@ -6,6 +6,7 @@ use skia_safe::{
 };
 
 use crate::center::{self, Center, Notification, Row, View};
+use crate::lock::{self, Key, Lock};
 use crate::panel::{
     self, Control, Grid, Look, MediaAction, Page, Panel, PowerAction, Slider, Toggle, BAR_H,
 };
@@ -636,30 +637,34 @@ pub fn notifications(
 ) {
     canvas_for(pixels, w, h, scale, |canvas| {
         let (w, h) = (w as f32 / scale, h as f32 / scale);
-        let view = list_view(w, h);
-        let k = view.k();
-        let ink = |a: f32| rgba(look.theme.foreground, a);
         canvas.draw_color(rgba(look.theme.background, 0.5), None);
         status_row(canvas, w, look);
-        centred(
-            canvas,
-            look.font,
-            notes.date,
-            (w / 2.0, BAR_H + 34.0 * k),
-            19.0 * k,
-            ink(0.85),
-        );
-        font_weighted(look.font, true);
-        centred(
-            canvas,
-            look.font,
-            look.clock,
-            (w / 2.0, BAR_H + 92.0 * k),
-            78.0 * k,
-            ink(1.0),
-        );
-        font_weighted(look.font, false);
+        heading(canvas, w, h, look, notes.date);
     });
+}
+
+/// The date over the clock.
+fn heading(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, date: &str) {
+    let k = list_view(w, h).k();
+    let ink = |a: f32| rgba(look.theme.foreground, a);
+    centred(
+        canvas,
+        look.font,
+        date,
+        (w / 2.0, BAR_H + 34.0 * k),
+        19.0 * k,
+        ink(0.85),
+    );
+    font_weighted(look.font, true);
+    centred(
+        canvas,
+        look.font,
+        look.clock,
+        (w / 2.0, BAR_H + 92.0 * k),
+        78.0 * k,
+        ink(1.0),
+    );
+    font_weighted(look.font, false);
 }
 
 /// The list, over a frame [`reveal`] made: down to `edge` (logical px) of a
@@ -678,108 +683,200 @@ pub fn notification_list(
 ) {
     canvas_over(pixels, w, h, scale, |canvas| {
         let (w, h) = (w as f32 / scale, h as f32 / scale);
-        let view = list_view(w, h);
-        let k = view.k();
-        let ink = |a: f32| rgba(look.theme.foreground, a);
         canvas.clip_rect(Rect::from_xywh(0.0, 0.0, w, edge), None, false);
         canvas.translate((0.0, shift));
-        let rows = notes.center.rows(view);
-        if rows.is_empty() {
+        list(canvas, w, h, look, notes);
+    });
+}
+
+fn list(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, notes: &Notes) {
+    let view = list_view(w, h);
+    let k = view.k();
+    let ink = |a: f32| rgba(look.theme.foreground, a);
+    let rows = notes.center.rows(view);
+    if rows.is_empty() {
+        centred(
+            canvas,
+            look.font,
+            if notes.serving {
+                "No Notifications"
+            } else {
+                "Another notification daemon is running"
+            },
+            (w / 2.0, h * 0.5),
+            17.0 * k,
+            ink(0.6),
+        );
+    }
+    // The list scrolls under the clock, not over it.
+    canvas.save();
+    canvas.clip_rect(Rect::from_xywh(0.0, view.top - 6.0 * k, w, h), None, false);
+    let glass = |a: f32| rgba(0xffffff, 0.17 * a);
+    for row in rows.iter().filter(|r| {
+        let r = r.rect();
+        r.y + r.h > 0.0 && r.y < h
+    }) {
+        match row {
+            Row::Header { rect } => {
+                let y = rect.center_y();
+                font_weighted(look.font, true);
+                text(
+                    canvas,
+                    look.font,
+                    "Notification Center",
+                    (rect.x + 8.0 * k, y),
+                    21.0 * k,
+                    ink(1.0),
+                    false,
+                    rect.w,
+                );
+                font_weighted(look.font, false);
+                let b = center::clear_button(*rect, view);
+                let c = (b.center_x(), b.center_y());
+                canvas.draw_circle(c, b.w / 2.0, &fill(glass(1.0)));
+                let mut stroke = fill(ink(0.9));
+                stroke.set_style(skia_safe::paint::Style::Stroke);
+                stroke.set_stroke_width(1.8 * k);
+                stroke.set_stroke_cap(skia_safe::paint::Cap::Round);
+                let arm = 5.0 * k;
+                canvas.draw_line((c.0 - arm, c.1 - arm), (c.0 + arm, c.1 + arm), &stroke);
+                canvas.draw_line((c.0 - arm, c.1 + arm), (c.0 + arm, c.1 - arm), &stroke);
+            }
+            Row::Card {
+                ids,
+                stacked,
+                buttons,
+                rect,
+            } => {
+                let Some(entry) = notes.center.entry(ids[0]) else {
+                    continue;
+                };
+                let alpha = notes.center.fade(ids[0], view);
+                // Older ones of a stack peek out from under its card.
+                if *stacked {
+                    // Only what sticks out: the card is see-through.
+                    canvas.save();
+                    let top =
+                        RRect::new_rect_xy(skia(*rect), center::RADIUS * k, center::RADIUS * k);
+                    canvas.clip_rrect(top, ClipOp::Difference, true);
+                    for i in (1..=(ids.len() - 1).min(2)).rev() {
+                        let i = i as f32;
+                        let peek = sc_layout::Rect {
+                            x: rect.x + center::PEEK_INSET * k * i,
+                            y: rect.y + center::PEEK * k * i,
+                            w: rect.w - 2.0 * center::PEEK_INSET * k * i,
+                            h: rect.h,
+                        };
+                        let radius = center::RADIUS * k;
+                        canvas.draw_rrect(
+                            RRect::new_rect_xy(skia(peek), radius, radius),
+                            &fill(glass(alpha * (1.0 - 0.3 * i))),
+                        );
+                    }
+                    canvas.restore();
+                }
+                card(
+                    canvas,
+                    *rect,
+                    &entry.notification,
+                    notes,
+                    look.font,
+                    glass(alpha),
+                    alpha,
+                    *buttons,
+                );
+            }
+        }
+    }
+    canvas.restore();
+}
+
+/// The lock screen: the passcode pad, and over it the cover (the date, the
+/// clock and the notifications) as far up as it has been pushed.
+pub fn lock(
+    pixels: &mut [u8],
+    w: i32,
+    h: i32,
+    scale: f32,
+    look: &mut Scene,
+    notes: &Notes,
+    lock: &Lock,
+) {
+    canvas_for(pixels, w, h, scale, |canvas| {
+        let (w, h) = (w as f32 / scale, h as f32 / scale);
+        let k = list_view(w, h).k();
+        let ink = |a: f32| rgba(look.theme.foreground, a);
+        canvas.draw_color(rgba(look.theme.background, 1.0), None);
+        let up = lock.reveal();
+        if up > 0.0 {
+            pad(canvas, w, h, look, lock);
+        }
+        if up < h {
+            canvas.save();
+            canvas.translate((0.0, -up));
+            canvas.clip_rect(Rect::from_xywh(0.0, 0.0, w, h), None, false);
+            canvas.draw_color(rgba(look.theme.background, 1.0), None);
+            heading(canvas, w, h, look, notes.date);
+            list(canvas, w, h, look, notes);
             centred(
                 canvas,
                 look.font,
-                if notes.serving {
-                    "No Notifications"
-                } else {
-                    "Another notification daemon is running"
-                },
-                (w / 2.0, h * 0.5),
-                17.0 * k,
+                "Swipe up to unlock",
+                (w / 2.0, h - 40.0 * k),
+                15.0 * k,
                 ink(0.6),
             );
+            let pill = Rect::from_xywh(w / 2.0 - 67.0 * k, h - 13.0 * k, 134.0 * k, 5.0 * k);
+            canvas.draw_rrect(RRect::new_rect_xy(pill, 2.5 * k, 2.5 * k), &fill(ink(0.9)));
+            canvas.restore();
         }
-        // The list scrolls under the clock, not over it.
-        canvas.save();
-        canvas.clip_rect(Rect::from_xywh(0.0, view.top - 6.0 * k, w, h), None, false);
-        let glass = |a: f32| rgba(0xffffff, 0.17 * a);
-        for row in rows.iter().filter(|r| {
-            let r = r.rect();
-            r.y + r.h > 0.0 && r.y < h
-        }) {
-            match row {
-                Row::Header { rect } => {
-                    let y = rect.center_y();
-                    font_weighted(look.font, true);
-                    text(
-                        canvas,
-                        look.font,
-                        "Notification Center",
-                        (rect.x + 8.0 * k, y),
-                        21.0 * k,
-                        ink(1.0),
-                        false,
-                        rect.w,
-                    );
-                    font_weighted(look.font, false);
-                    let b = center::clear_button(*rect, view);
-                    let c = (b.center_x(), b.center_y());
-                    canvas.draw_circle(c, b.w / 2.0, &fill(glass(1.0)));
-                    let mut stroke = fill(ink(0.9));
-                    stroke.set_style(skia_safe::paint::Style::Stroke);
-                    stroke.set_stroke_width(1.8 * k);
-                    stroke.set_stroke_cap(skia_safe::paint::Cap::Round);
-                    let arm = 5.0 * k;
-                    canvas.draw_line((c.0 - arm, c.1 - arm), (c.0 + arm, c.1 + arm), &stroke);
-                    canvas.draw_line((c.0 - arm, c.1 + arm), (c.0 + arm, c.1 - arm), &stroke);
-                }
-                Row::Card {
-                    ids,
-                    stacked,
-                    buttons,
-                    rect,
-                } => {
-                    let Some(entry) = notes.center.entry(ids[0]) else {
-                        continue;
-                    };
-                    let alpha = notes.center.fade(ids[0], view);
-                    // Older ones of a stack peek out from under its card.
-                    if *stacked {
-                        // Only what sticks out: the card is see-through.
-                        canvas.save();
-                        let top =
-                            RRect::new_rect_xy(skia(*rect), center::RADIUS * k, center::RADIUS * k);
-                        canvas.clip_rrect(top, ClipOp::Difference, true);
-                        for i in (1..=(ids.len() - 1).min(2)).rev() {
-                            let i = i as f32;
-                            let peek = sc_layout::Rect {
-                                x: rect.x + center::PEEK_INSET * k * i,
-                                y: rect.y + center::PEEK * k * i,
-                                w: rect.w - 2.0 * center::PEEK_INSET * k * i,
-                                h: rect.h,
-                            };
-                            let radius = center::RADIUS * k;
-                            canvas.draw_rrect(
-                                RRect::new_rect_xy(skia(peek), radius, radius),
-                                &fill(glass(alpha * (1.0 - 0.3 * i))),
-                            );
-                        }
-                        canvas.restore();
-                    }
-                    card(
-                        canvas,
-                        *rect,
-                        &entry.notification,
-                        notes,
-                        look.font,
-                        glass(alpha),
-                        alpha,
-                        *buttons,
-                    );
-                }
+        status_row(canvas, w, look);
+    });
+}
+
+fn pad(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, lock: &Lock) {
+    let k = list_view(w, h).k();
+    let ink = |a: f32| rgba(look.theme.foreground, a);
+    let top = lock::pad_top(w, h);
+    centred(
+        canvas,
+        look.font,
+        "Enter Passcode",
+        (w / 2.0, top),
+        20.0 * k,
+        ink(1.0),
+    );
+    let n = lock.digits() as f32;
+    let dot = fill(ink(if lock.checking() { 0.5 } else { 1.0 }));
+    for i in 0..lock.digits() {
+        let x = w / 2.0 + (i as f32 - (n - 1.0) / 2.0) * 22.0 * k + lock.shake() * k;
+        canvas.draw_circle((x, top + lock::DOTS * k), 6.0 * k, &dot);
+    }
+    for (row, column) in (0..4).flat_map(|row| (0..3).map(move |column| (row, column))) {
+        let c = lock::key_center(row, column, w, h);
+        let key = lock::key_for(row, column);
+        let pressed = lock.pressed() == Some(key);
+        match key {
+            Key::Digit(d) => {
+                let glass = rgba(0xffffff, if pressed { 0.45 } else { 0.17 });
+                canvas.draw_circle(c, lock::KEY_DIAMETER / 2.0 * k, &fill(glass));
+                centred(canvas, look.font, &d.to_string(), c, 34.0 * k, ink(1.0));
+            }
+            Key::Back | Key::Submit => {
+                let (label, enabled) = match key {
+                    Key::Back if lock.digits() == 0 => ("Cancel", true),
+                    Key::Back => ("Delete", true),
+                    _ => ("OK", lock.digits() > 0),
+                };
+                let alpha = match (pressed, enabled) {
+                    (true, _) => 0.5,
+                    (false, true) => 1.0,
+                    (false, false) => 0.4,
+                };
+                centred(canvas, look.font, label, c, 17.0 * k, ink(alpha));
             }
         }
-        canvas.restore();
-    });
+    }
 }
 
 fn font_weighted(font: &mut Font, bold: bool) {

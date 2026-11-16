@@ -16,6 +16,7 @@
   udev,
   seatd,
   dbus,
+  pam,
   fontconfig,
   freetype,
   expat,
@@ -150,6 +151,8 @@ rustPlatform.buildRustPackage {
     seatd
     # iio-sensor-proxy client.
     dbus
+    # sc-bar's lock screen.
+    pam
     fontconfig
     freetype
     expat

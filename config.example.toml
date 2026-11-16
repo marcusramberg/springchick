@@ -60,8 +60,8 @@ natural_scroll = true
 
 # Lock the session whenever the screen goes dark (power key, idle, suspend),
 # by asking logind as `loginctl lock-session` does. sc-bar answers with its
-# lock screen, whose pad types digits only: leave this off unless your
-# password is a PIN. `loginctl unlock-session` over ssh is the way back in.
+# lock screen (`[bar] lock`), whose pad types digits only: leave this off
+# unless your password is a PIN. `loginctl unlock-session` over ssh is the way back in.
 lock_on_blank = false
 
 # Ask top-level windows to drop their titlebars. Dialogs always keep theirs,
@@ -115,6 +115,12 @@ dictionaries = []   # e.g. ["nb", "en_US"]
 # sc-bar's control sheet. Read when the bar starts. Its app shortcuts are not
 # set here: a long press on a Home icon adds or removes one.
 #
+# sc-bar. `lock`: answer logind's lock requests (`loginctl lock-session`,
+# lock_on_blank) with the bar's lock screen; false leaves them to another
+# locker. Read when the bar starts.
+[bar]
+lock = true
+
 # A long press ([keybinds] long_press_ms) on a toggle runs its command with
 # `sh -c` and puts the sheet away. Toggles: airplane, cellular, wifi,
 # bluetooth, rotation_lock, silent, dark_mode, low_power, torch. "" clears one.
