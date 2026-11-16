@@ -275,5 +275,8 @@ in
       # sc-bar's lock screen checks the PIN against the login password.
       (lib.mkIf cfg.bar.enable { springchick = { }; })
     ];
+
+    # Nothing else in the session answers polkit's password prompts.
+    security.soteria.enable = lib.mkDefault true;
   };
 }

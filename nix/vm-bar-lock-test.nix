@@ -26,6 +26,7 @@ mkTest {
     )
     IPC_SOCK = "/run/user/1000/springchick-ipc.sock"
     machine.wait_until_succeeds(f"ls {IPC_SOCK}", timeout=30)
+    machine.wait_until_succeeds("systemctl --user -M tester@.host is-active polkit-soteria.service", timeout=30)
     machine.wait_until_succeeds(
         f"SPRINGCHICK_IPC_SOCK={IPC_SOCK} springchick ipc layers | grep -q 'ns=bar '", timeout=30
     )
