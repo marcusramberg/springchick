@@ -7,7 +7,7 @@
 let
   inherit (import ./test-support.nix { inherit self pkgs; }) mkTest;
 
-  # Catppuccin Macchiato surface1 -> crust, matching extras/waybar.
+  # Catppuccin Macchiato surface1 -> crust.
   wallpaper = pkgs.runCommand "springchick-wallpaper.png" { nativeBuildInputs = [ pkgs.imagemagick ]; } ''
     magick -size 1224x2700 gradient:'#494d64'-'#181926' $out
   '';
@@ -29,6 +29,35 @@ let
     gnome-music
     gnome-calendar
   ];
+
+  dbusmock = pkgs.python3.withPackages (p: [ p.python-dbusmock ]);
+  # python-dbusmock templates, and the names they take on the system bus.
+  mocked = [
+    "upower"
+    "networkmanager"
+    "modemmanager"
+    "bluez5"
+    "power_profiles_daemon"
+  ];
+  mockPolicy = pkgs.writeTextDir "share/dbus-1/system.d/springchick-mocks.conf" ''
+    <!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
+     "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+    <busconfig>
+      ${pkgs.lib.concatMapStrings
+        (name: ''
+          <policy user="root"><allow own="${name}"/></policy>
+          <policy context="default"><allow send_destination="${name}"/></policy>
+        '')
+        [
+          "org.freedesktop.UPower"
+          "org.freedesktop.NetworkManager"
+          "org.freedesktop.ModemManager1"
+          "org.bluez"
+          "net.hadess.PowerProfiles"
+        ]
+      }
+    </busconfig>
+  '';
 in
 mkTest {
   name = "springchick-screenshots";
@@ -64,11 +93,19 @@ mkTest {
     "org.gnome.Console"
   ];
 
-  extraMachineConfig = {
-    # Most of these are DBusActivatable, launched through `gapplication`.
-    services.dbus.packages = apps;
-    fonts.packages = [ pkgs.nerd-fonts.jetbrains-mono ];
-    # Matches the Macchiato bar.
+  extraMachineConfig = { lib, ... }: {
+    programs.springchick.bar.enable = lib.mkForce true;
+    # A phone's worth of system state for the bar, which only ever asks D-Bus.
+    systemd.services = lib.genAttrs' mocked (
+      template:
+      lib.nameValuePair "mock-${template}" {
+        wantedBy = [ "multi-user.target" ];
+        after = [ "dbus.service" ];
+        serviceConfig.ExecStart = "${dbusmock}/bin/python -m dbusmock --system --template ${template}";
+      }
+    );
+    services.dbus.packages = apps ++ [ mockPolicy ];
+    # Most of the apps are DBusActivatable, launched through `gapplication`.
     programs.dconf.profiles.user.databases = [
       { settings."org/gnome/desktop/interface".color-scheme = "prefer-dark"; }
     ];
@@ -94,7 +131,7 @@ mkTest {
   packages = apps ++ [
     pkgs.glib.bin
     pkgs.swaybg
-    pkgs.waybar
+    pkgs.libnotify
     pkgs.adwaita-icon-theme
   ];
 
@@ -108,6 +145,16 @@ mkTest {
             f"SPRINGCHICK_IPC_SOCK={IPC_SOCK} springchick ipc {line}"
         ).strip()
 
+    def layers(pattern):
+        return f"SPRINGCHICK_IPC_SOCK={IPC_SOCK} springchick ipc layers | grep -q '{pattern}'"
+
+    def notify(app, summary, body, flags=""):
+        machine.succeed(
+            "su - tester -c 'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+            f" notify-send {flags} -h string:desktop-entry:{app} \"{summary}\" \"{body}\""
+            " >/dev/null 2>&1 &'"
+        )
+
     def fresh():
         """Restart the compositor (dropping its clients); bring back wallpaper and bar."""
         machine.succeed(f"rm -f {IPC_SOCK}")
@@ -119,13 +166,9 @@ mkTest {
             f"--setenv=WAYLAND_DISPLAY={sock} "
             "${pkgs.swaybg}/bin/swaybg -m fill -i ${wallpaper}"
         )
-        machine.succeed(
-            "systemd-run --user -M tester@.host --collect "
-            f"--setenv=WAYLAND_DISPLAY={sock} "
-            "${pkgs.waybar}/bin/waybar -c ${../extras/waybar}/springchick.jsonc"
-            " -s ${../extras/waybar}/springchick.css"
-        )
-        machine.sleep(4)  # both map their layers
+        # sc-bar restarts with the compositor.
+        machine.wait_until_succeeds(layers("ns=bar layer=bottom"), timeout=30)
+        machine.sleep(4)  # the wallpaper maps, the bar hears from the system
 
     def shot(name):
         # Best effort: the deck takes seconds to settle under llvmpipe.
@@ -156,8 +199,64 @@ mkTest {
 
     machine.wait_for_unit("multi-user.target")
 
+    # 82% on battery, Wi-Fi and a mobile network with good signal, Bluetooth on.
+    NM = "org.freedesktop.NetworkManager"
+    NM_PATH = "/org/freedesktop/NetworkManager"
+    MM_PATH = "/org/freedesktop/ModemManager1"
+    MOCK = "org.freedesktop.DBus.Mock"
+    for call in [
+        f"org.freedesktop.UPower /org/freedesktop/UPower {MOCK} SetupDisplayDevice"
+        " uuddddxxbsu 2 2 82 40 50 5 14400 0 true battery-good-symbolic 1",
+        f"{NM} {NM_PATH} {MOCK} AddWiFiDevice ssi wlan0 wlan0 100",
+        f"{NM} {NM_PATH} {MOCK} AddAccessPoint ssssuuuyu"
+        f" {NM_PATH}/Devices/wlan0 ap0 Engine 00:11:22:33:44:55 2 2437 54000 78 0",
+        f"{NM} {NM_PATH}/Devices/wlan0 {MOCK} AddProperty ssv"
+        f" {NM}.Device.Wireless ActiveAccessPoint o {NM_PATH}/AccessPoint/ap0",
+        f"{NM} {NM_PATH} {MOCK} AddObject 'ssa{{sv}}a(ssss)'"
+        f" {NM_PATH}/Devices/wwan0 {NM}.Device 1 DeviceType u 8 0",
+        f"org.freedesktop.ModemManager1 {MM_PATH} {MOCK} AddObject 'ssa{{sv}}a(ssss)'"
+        f" {MM_PATH}/Modems/0 org.freedesktop.ModemManager1.Modem 3"
+        f" Sim o {MM_PATH}/SIM/0 UnlockRequired u 1 SignalQuality '(ub)' 80 true 0",
+        "org.bluez / org.bluez.Mock AddAdapter ss hci0 phone",
+    ]:
+        machine.wait_until_succeeds(f"busctl call {call}", timeout=30)
+    machine.succeed(f"busctl set-property {NM} {NM_PATH} {NM} WwanEnabled b true")
+
     fresh()
     shot("home")
+
+    WPCTL = "runuser -u tester -- env XDG_RUNTIME_DIR=/run/user/1000 wpctl"
+    machine.wait_until_succeeds(f"{WPCTL} get-volume @DEFAULT_SINK@ | grep -q Volume", timeout=30)
+    machine.succeed(f"{WPCTL} set-volume @DEFAULT_SINK@ 0.6")
+
+    SHORTCUTS = ["org.gnome.Snapshot", "org.gnome.Calculator", "org.gnome.clocks"]
+    for app in SHORTCUTS:
+        dbg(f"shortcuts {app}")
+    fresh()
+    dbg(f"tap {int(W * 0.8)} 40")
+    machine.wait_until_succeeds(layers("ns=bar-sheet"), timeout=30)
+    machine.sleep(4)
+    shot("control-centre")
+    # The icon menu below offers to add one, not to remove it.
+    for app in SHORTCUTS:
+        dbg(f"shortcuts {app}")
+
+    fresh()
+    dbg(f"tap {int(W * 0.2)} 40")
+    machine.wait_until_succeeds(layers("ns=bar-sheet"), timeout=30)
+    # Sent to the open sheet, they arrive without banners.
+    notify("org.gnome.Weather", "Rain from 16:00", "Light rain until the evening, 9°.")
+    notify("org.gnome.Calendar", "Design review", "Tomorrow at 10:00 in the workshop.")
+    notify("org.gnome.Calendar", "Lunch with Ada", "In 30 minutes at the engine house.")
+    notify("org.gnome.clocks", "Timer finished", "Tea, 4 minutes.", "-A again=Repeat -A stop=Stop")
+    machine.sleep(5)
+    shot("notifications")
+
+    fresh()
+    notify("org.gnome.Calendar", "Lunch with Ada", "In 30 minutes at the engine house.")
+    machine.wait_until_succeeds(layers("ns=bar-banner"), timeout=30)
+    machine.sleep(2)
+    machine.screenshot("banner")
 
     fresh()
     long_press(col(1), row(0), "icon menu opened")
@@ -178,9 +277,6 @@ mkTest {
             f"{JOURNAL} | grep -F 'state changed to App {{' | grep -qF '\"{app}\"'", timeout=60
         )
         machine.sleep(3)  # first frames under llvmpipe
-    WPCTL = "runuser -u tester -- env XDG_RUNTIME_DIR=/run/user/1000 wpctl"
-    machine.wait_until_succeeds(f"{WPCTL} get-volume @DEFAULT_SINK@ | grep -q Volume", timeout=30)
-    machine.succeed(f"{WPCTL} set-volume @DEFAULT_SINK@ 0.6")
     dbg("action volume-up")
     # The OSD is gone 1.8 s after the press: no polling waits here.
     machine.execute(f"SPRINGCHICK_IPC_SOCK={IPC_SOCK} springchick ipc settle 300")

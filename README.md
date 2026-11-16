@@ -39,6 +39,9 @@
 ![Editing the home screen](./assets/arrange.png)
 ![App library](./assets/library.png)
 ![Volume OSD over an app](./assets/volume.png)
+![Control centre](./assets/control-centre.png)
+![Notification Center](./assets/notifications.png)
+![A notification banner](./assets/banner.png)
 
 ## Install
 
