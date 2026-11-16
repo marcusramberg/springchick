@@ -27,6 +27,17 @@ mkTest {
 
     machine.screenshot("springchick-boot")
 
+    # The module's default theme, as an app in the session reads it.
+    theme = machine.succeed(
+        "systemd-run --user -M tester@.host --wait --pipe -q "
+        "${pkgs.dconf}/bin/dconf read /org/gnome/desktop/interface/gtk-theme"
+    )
+    assert "WhiteSur-Dark" in theme, theme
+    machine.succeed("test -d /run/current-system/sw/share/themes/WhiteSur-Dark/gtk-3.0")
+    machine.succeed("test -e /run/current-system/sw/share/Kvantum/WhiteSur/WhiteSurDark.kvconfig")
+    machine.succeed("grep -q WhiteSurDark /etc/xdg/Kvantum/kvantum.kvconfig")
+    machine.succeed("su - tester -c 'echo $QT_STYLE_OVERRIDE' | grep -qx kvantum")
+
     # app_id arrives after map, so this line proves the retag happened.
     socket = machine.succeed(
         "basename $(ls /run/user/1000/springchick-*.lock) .lock"

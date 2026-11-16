@@ -73,6 +73,14 @@ in
         default = true;
       };
 
+    whitesur.enable =
+      lib.mkEnableOption ''
+        WhiteSur (dark) as the default GTK 3 theme and, through Kvantum, the
+        Qt style. Defaults only: gsettings and ~/.config/Kvantum override them''
+      // {
+        default = true;
+      };
+
     osk.enable =
       lib.mkEnableOption ''
         sc-osk, springchick's uinput on-screen keyboard. It takes the seat's
@@ -87,7 +95,26 @@ in
     environment = {
 
       # bluetui: the bar's default long press on Bluetooth (`foot bluetui`).
-      systemPackages = [ cfg.package ] ++ lib.optional cfg.bar.enable pkgs.bluetui;
+      systemPackages = [
+        cfg.package
+      ]
+      ++ lib.optional cfg.bar.enable pkgs.bluetui
+      ++ lib.optionals cfg.whitesur.enable [
+        pkgs.whitesur-gtk-theme
+        pkgs.whitesur-kde
+      ];
+
+      pathsToLink = lib.mkIf cfg.whitesur.enable [
+        "/share/themes"
+        "/share/Kvantum"
+      ];
+      # Kvantum falls back to this when the user has no config of their own.
+      etc."xdg/Kvantum/kvantum.kvconfig" = lib.mkIf cfg.whitesur.enable {
+        text = ''
+          [General]
+          theme=WhiteSurDark
+        '';
+      };
 
       sessionVariables.XDG_DATA_DIRS = [
         # mobi.phosh.FileSelector
@@ -275,6 +302,24 @@ in
       # sc-bar's lock screen checks the PIN against the login password.
       (lib.mkIf cfg.bar.enable { springchick = { }; })
     ];
+
+    qt = lib.mkIf cfg.whitesur.enable {
+      enable = lib.mkDefault true;
+      style = lib.mkDefault "kvantum";
+    };
+
+    # libadwaita ignores gtk-theme and only follows the colour scheme.
+    programs.dconf = lib.mkIf cfg.whitesur.enable {
+      enable = lib.mkDefault true;
+      profiles.user.databases = [
+        {
+          settings."org/gnome/desktop/interface" = {
+            gtk-theme = "WhiteSur-Dark";
+            color-scheme = "prefer-dark";
+          };
+        }
+      ];
+    };
 
     # Nothing else in the session answers polkit's password prompts.
     security.soteria.enable = lib.mkDefault true;
