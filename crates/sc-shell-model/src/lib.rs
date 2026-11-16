@@ -99,6 +99,9 @@ pub struct ShellModel {
     pub pages: Vec<Vec<AppId>>,
     /// Fixed cells; `""` is an empty one. Trailing empties are trimmed.
     pub dock: Vec<AppId>,
+    /// Apps with a tile on the bar's control sheet, in the order added.
+    #[serde(default)]
+    pub shortcuts: Vec<AppId>,
     #[serde(default)]
     pub frecency: FrecencyStore,
 }
@@ -167,12 +170,23 @@ impl ShellModel {
             }
             trim(cells);
         }
+        self.shortcuts.retain(|id| installed.contains(id));
         self.frecency.prune(catalog_ids);
         for id in catalog_ids {
             self.frecency.seed(id, now, first_run);
         }
         // A persisted state.toml may break PAGE_CAP, hiding icons past the 24th.
         self.repack();
+    }
+
+    /// Adds `app` to the control sheet's shortcuts, or takes it off.
+    pub fn toggle_shortcut(&mut self, app: &str) {
+        match self.shortcuts.iter().position(|a| a == app) {
+            Some(i) => {
+                self.shortcuts.remove(i);
+            }
+            None => self.shortcuts.push(app.into()),
+        }
     }
 
     /// The first free cell on any page.
@@ -272,6 +286,17 @@ impl ShellModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcuts_toggle_and_go_with_their_app() {
+        let mut m = ShellModel::default();
+        m.toggle_shortcut("a");
+        m.toggle_shortcut("b");
+        m.toggle_shortcut("a");
+        assert_eq!(m.shortcuts, ["b"]);
+        m.reconcile(&["c".to_string()], 0, false);
+        assert!(m.shortcuts.is_empty());
+    }
 
     #[test]
     fn place_fills_pages_then_overflows() {
