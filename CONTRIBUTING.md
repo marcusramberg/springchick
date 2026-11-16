@@ -130,8 +130,9 @@ nix build .#checks.aarch64-linux.vm-lock -L      # ext-session-lock (swaylock)
 The rest follow the same pattern: `vm-arrange` (arrange mode), `vm-icon-menu`
 (icon menu, multiple windows), `vm-library` (app library), `vm-capture`
 (screencopy, with grim as the oracle), `vm-portal` (file chooser fit),
-`vm-pointer` (USB mouse) and `vm-card-mask` (rounded mask on a viewported
-client). Each `nix/vm-*-test.nix` opens with a comment saying what it asserts.
+`vm-pointer` (USB mouse), `vm-bar-lock` (sc-bar's lock screen: blank, PIN,
+restart) and `vm-card-mask` (rounded mask on a viewported client). Each
+`nix/vm-*-test.nix` opens with a comment saying what it asserts.
 
 - Build the host arch and never cross-build. Cross-building runs the whole
   release tree under qemu-user emulation and SIGSEGVs rustc (`qemu: uncaught

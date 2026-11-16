@@ -15,6 +15,8 @@
 - **Status bar.** Pull down on the right for the controls (radios, sliders,
   media, power, your own app shortcuts), on the left for Notification Center.
   New notifications drop in as banners.
+- **Lock screen.** With `lock_on_blank`, a dark screen locks: clock and
+  notifications, swipe up for the PIN pad.
 - **Rotation.** Automatic rotation for fullscreen media and games.
 - **Hardware bindings.** Full support for long/short/chorded hardware button mappings.
 - **Keyboard.** wvkbd pops up automatically, at the right scale.

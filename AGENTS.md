@@ -32,7 +32,7 @@ Binary: `target/debug/springchick`. Backend chosen by `SPRINGCHICK_BACKEND` (`dr
 nix build .#checks.aarch64-linux.vm-boot -L
 ```
 
-The other checks are `vm-screenshots` (README images; `just screenshots` copies them to `assets/`), `vm-switcher`, `vm-dialog`, `vm-rotation`, `vm-arrange`, `vm-icon-menu`, `vm-library`, `vm-lock`, `vm-capture`, `vm-portal`, `vm-pointer`, `vm-card-mask`, `vm-osk-card` and `vm-bar` (listed in `flake.nix`).
+The other checks are `vm-screenshots` (README images; `just screenshots` copies them to `assets/`), `vm-switcher`, `vm-dialog`, `vm-rotation`, `vm-arrange`, `vm-icon-menu`, `vm-library`, `vm-lock`, `vm-capture`, `vm-portal`, `vm-pointer`, `vm-card-mask`, `vm-osk-card`, `vm-bar` and `vm-bar-lock` (listed in `flake.nix`).
 
 Build the check matching `builtins.currentSystem`. Cross-building runs the release tree under qemu-user emulation, which SIGSEGVs rustc. `nix/package.nix` filters `src` to `Cargo.toml`/`Cargo.lock`/`config.example.toml`/`crates/`, so edits under `nix/`, `tests/`, `docs/` don't rebuild the compositor.
 
@@ -44,7 +44,7 @@ A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; 
 
 `springchick ipc layers` dumps every layer surface and layer-rooted popup being composited (namespace, layer, logical geometry, the physical rect, buffer size, pending-map/slide state, anchor and exclusive zone), plus the usable area and regrow-guard state. Run it first when the screen shows something no client admits to, e.g. two on-screen keyboards from one wvkbd process.
 
-`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `save_screenshots`, `prefer_no_csd` (next window to negotiate decorations), `natural_scroll` (next touchpad added), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn), `rotate_ui`, `[xkb]` (the seat keymap), `[theme]`, and any `include`d file. `dpi`, `uclamp_min`, `gpu_min_mhz` and `vrr` are ignored on reload and need a restart.
+`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `save_screenshots`, `prefer_no_csd` (next window to negotiate decorations), `lock_on_blank`, `natural_scroll` (next touchpad added), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn), `rotate_ui`, `[xkb]` (the seat keymap), `[theme]`, and any `include`d file. `dpi`, `uclamp_min`, `gpu_min_mhz` and `vrr` are ignored on reload and need a restart.
 
 `reload` also rescans the app catalog (`.desktop` files + icons): newly installed apps land on Home, uninstalled ones leave pages/dock/hidden and lose their frecency stats, and the renderer's uploaded icon textures are dropped so re-themed icons repaint. The catalog rescans itself too: `catalog_watch.rs` inotify-watches every XDG `applications/` dir, so a package-manager install/remove lands without an explicit reload. The watch has a 750 ms debounce, and the rescan runs on the compositor thread at the next event-loop wake, so a blanked screen costs nothing.
 
@@ -57,7 +57,7 @@ Push logic into pure crates (no GPU, no Wayland deps) and unit-test it there. `s
 ```
 crates/
   sc-anim/         Spring physics (critically damped, interruptible)
-  sc-bar/          Standalone status bar, pull-down control sheet (right half) and Notification Center (left half, with banners): layer-shell surfaces, the `org.freedesktop.Notifications` server, D-Bus (UPower, NM, MM, BlueZ, logind, feedbackd, MPRIS)
+  sc-bar/          Standalone status bar, pull-down control sheet (right half) and Notification Center (left half, with banners) and the lock screen (`lock.rs`, PIN through PAM service `springchick`): layer-shell surfaces, `ext-session-lock-v1`, the `org.freedesktop.Notifications` server, D-Bus (UPower, NM, MM, BlueZ, logind, feedbackd, MPRIS)
   sc-catalog/      .desktop scan/parse + field-code stripping + search ranking
   sc-compositor/   The `springchick` binary
   sc-config/       config.toml parsing: sections, `include`, [theme]. Lenient — bad entry dropped, rest applies
@@ -73,7 +73,7 @@ crates/
   sc-shell-model/  Grid/dock data model (4x6 pages, dock) + persist (state.toml)
 ```
 
-Every crate except `sc-compositor`, `sc-search`, `sc-osk` (its `uinput.rs`) and `sc-bar` (`localtime_r`) is `#![forbid(unsafe_code)]`.
+Every crate except `sc-compositor`, `sc-search`, `sc-osk` (its `uinput.rs`) and `sc-bar` (`localtime_r`, `pam.rs`) is `#![forbid(unsafe_code)]`.
 
 ### sc-compositor module map
 
@@ -136,6 +136,7 @@ Notable options:
 - `dpi` (default 3): advertised via `wp_fractional_scale`. The FP5 panel is illegible at 1:1.
 - `card_radius` (default `"auto"`): the panel's corner radius from `sc-panel`, else 120. Grabbed apps also leave fullscreen at the panel's own corners. `GMOBILE_DT_COMPATIBLES=fairphone,fp5` fakes a device.
 - `idle_blank_secs`, `show_touches`, `save_screenshots`, `prefer_no_csd`, `natural_scroll`.
+- `lock_on_blank` (default `false`): every blank (power key, idle, suspend) asks logind to lock the session, as `loginctl lock-session` does (DRM backend only). `sc-bar` hears the `Lock` signal and takes `ext-session-lock-v1` with its lock screen: Notification Center's cover, slid up to a digit pad checked through PAM. Digits only, hence off by default; `loginctl unlock-session` unlocks it too. `[bar] lock = false` leaves the signal to another locker. A lock whose client died goes only to another run of the same executable, and a restarted `sc-bar` asks (`$XDG_RUNTIME_DIR/sc-bar.locked`).
 - `[bar.long_press]` maps one of `sc-bar`'s toggles (`wifi`, `bluetooth`, ...) to a `sh -c` command run on a long press (defaults: `foot sh -c nmtui`, `foot bluetui`). Read when the bar starts. The sheet's app shortcuts are not config: the icon menu's "Add to Control Centre" row keeps them in `state.toml`, and the bar asks for them with `ipc shortcuts`.
 - `[predict] dictionaries` (default `[]`): word lists for OSK completion, `springchick/predict/NAME.txt` in the XDG data dirs (`word\tfreq`). The nix package ships all 26 AOSP lists (`nb`, `en_US`, `de`, `fr`, `sv`, ...); `scripts/predict-lists.sh DIR` builds the same set for any other distro. `scripts/aosp-wordlist.py --extra` merges a `word count` corpus list for words AOSP lacks (measured: no gain for nb, so not shipped). `cargo run -p sc-predict --example bench -- LIST.txt CORPUS.txt` measures a change to the ranking.
 - `rotate_ui` (default `false`): turn Home and ordinary windows with the device, not just fullscreen apps. `springchick ipc rotation enable|disable` overrides it live until the next `reload` (no arg queries). It holds an accelerometer claim whenever the screen is lit. A turn sets the smithay output's transform, so the layer map arranges panels and the OSK in the turned space and they are drawn, hit-tested and captured there; only the panel cutouts stay upright-only.
