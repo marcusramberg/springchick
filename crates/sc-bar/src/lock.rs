@@ -153,6 +153,11 @@ impl Lock {
     pub fn failed(&mut self) {
         self.checking = false;
         self.pin.clear();
+        self.refuse();
+    }
+
+    /// Shakes the dots and the cover's hint: a wrong PIN or finger.
+    pub fn refuse(&mut self) {
         self.shake.velocity = 900.0;
     }
 }

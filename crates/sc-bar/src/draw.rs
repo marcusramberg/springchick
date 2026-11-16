@@ -857,6 +857,7 @@ fn list(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, notes: &Notes) {
 
 /// The lock screen: the passcode pad, and over it the cover (the date, the
 /// clock and the notifications) as far up as it has been pushed.
+#[allow(clippy::too_many_arguments)]
 pub fn lock(
     pixels: &mut [u8],
     w: i32,
@@ -865,6 +866,7 @@ pub fn lock(
     look: &mut Scene,
     notes: &Notes,
     lock: &Lock,
+    hint: &str,
 ) {
     canvas_for(pixels, w, h, scale, |canvas| {
         let (w, h) = (w as f32 / scale, h as f32 / scale);
@@ -885,8 +887,8 @@ pub fn lock(
             centred(
                 canvas,
                 look.font,
-                "Swipe up to unlock",
-                (w / 2.0, h - 40.0 * k),
+                hint,
+                (w / 2.0 + lock.shake() * k, h - 40.0 * k),
                 15.0 * k,
                 ink(0.6),
             );

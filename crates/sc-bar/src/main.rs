@@ -7,6 +7,7 @@
 
 mod center;
 mod draw;
+mod fprint;
 mod lock;
 mod notify;
 mod pam;
@@ -122,6 +123,20 @@ struct Locked {
     pad: lock::Lock,
     /// Unlocked before the compositor said `locked`: it goes then.
     leaving: bool,
+    sensor: Sensor,
+}
+
+/// The fingerprint sensor, for one showing of the lock screen.
+#[derive(Clone, Copy, PartialEq)]
+enum Sensor {
+    /// Not asked yet: the panel may be dark.
+    Idle,
+    Asked,
+    Reading,
+    /// A finger it did not know, or could not read.
+    Missed,
+    /// None to read, or too many misses.
+    Off,
 }
 
 /// There while locked: a bar restarted under its own lock takes it up again.
@@ -136,6 +151,7 @@ enum Update {
     Lock(bool),
     /// What PAM made of the PIN, and which showing of the lock screen took it.
     Auth(u32, bool),
+    Fprint(fprint::Event),
     Notify(notify::Event),
     /// The icons of these shortcuts, in their order.
     Shortcuts(Vec<String>, Vec<sc_icons::IconPixels>),
@@ -232,6 +248,8 @@ struct App {
     wake: std::sync::Arc<UnixStream>,
     /// `[bar] lock`.
     lock_screen: bool,
+    /// The thread that reads fingers, once the lock screen has shown.
+    fprint: Option<mpsc::Sender<fprint::Cmd>>,
 }
 
 fn main() {
@@ -345,6 +363,7 @@ fn main() {
         locked: None,
         showing: 0,
         lock_screen: config.bar.lock,
+        fprint: None,
         updates: auth_tx,
         wake: auth_wake.into(),
     };
@@ -374,12 +393,12 @@ fn main() {
                 // The screen went dark since: that PIN was for another showing.
                 Update::Auth(showing, _) if showing != app.showing => {}
                 Update::Auth(_, true) => app.unlock(),
+                Update::Fprint(event) => app.fingerprint(event),
                 Update::Auth(_, false) => {
                     if let Some(locked) = &mut app.locked {
                         locked.pad.failed();
                     }
-                    app.last_tick = app.now();
-                    app.redraw_lock(true);
+                    app.refused();
                 }
                 Update::Shortcuts(ids, pixels) => {
                     if ids == app.system.shortcuts {
@@ -1077,9 +1096,11 @@ impl App {
     /// Asked again while locked (the screen went dark), back to the cover.
     fn lock(&mut self) {
         self.showing += 1;
+        self.sensor_off();
         if let Some(locked) = &mut self.locked {
             locked.pad = lock::Lock::default();
             locked.leaving = false;
+            locked.sensor = Sensor::Idle;
             return self.redraw_lock(true);
         }
         let Some(output) = self.output_state.outputs().next() else {
@@ -1106,6 +1127,7 @@ impl App {
             dirty: true,
             pad: lock::Lock::default(),
             leaving: false,
+            sensor: Sensor::Idle,
         });
         if let Some(marker) = lock_marker() {
             let _ = std::fs::write(marker, "");
@@ -1122,8 +1144,60 @@ impl App {
         }
     }
 
+    fn sensor_off(&self) {
+        if let Some(fprint) = &self.fprint {
+            let _ = fprint.send(fprint::Cmd::Stop);
+        }
+    }
+
+    /// Asks for fingers once per showing, from its first frame: none is shown
+    /// on a dark panel, so the sensor sleeps with it.
+    fn sensor_on(&mut self) {
+        let Some(locked) = self.locked.as_mut().filter(|l| l.sensor == Sensor::Idle) else {
+            return;
+        };
+        locked.sensor = Sensor::Asked;
+        let (updates, wake) = (self.updates.clone(), self.wake.clone());
+        let fprint = self.fprint.get_or_insert_with(|| {
+            fprint::watch(move |event| {
+                let _ = updates.send(Update::Fprint(event));
+                let _ = (&*wake).write(&[0]);
+            })
+        });
+        let _ = fprint.send(fprint::Cmd::Start(self.showing));
+    }
+
+    fn fingerprint(&mut self, event: fprint::Event) {
+        use fprint::Event::*;
+        let (Ready(showing) | Matched(showing) | Retry(showing) | Off(showing)) = event;
+        let Some(locked) = self.locked.as_mut().filter(|_| showing == self.showing) else {
+            return;
+        };
+        locked.sensor = match event {
+            Matched(_) => return self.unlock(),
+            Ready(_) => Sensor::Reading,
+            Retry(_) => {
+                locked.pad.refuse();
+                locked.sensor = Sensor::Missed;
+                return self.refused();
+            }
+            Off(_) => Sensor::Off,
+        };
+        self.redraw_lock(true);
+    }
+
+    /// A wrong PIN or finger: a buzz, and the shake starts from now.
+    fn refused(&mut self) {
+        if let Some(haptics) = &self.haptics {
+            haptics.trigger("bell-terminal");
+        }
+        self.last_tick = self.now();
+        self.redraw_lock(true);
+    }
+
     /// The lock is gone, by the PIN or the compositor's word.
     fn unlocked(&mut self) {
+        self.sensor_off();
         if let Some(marker) = lock_marker() {
             let _ = std::fs::remove_file(marker);
         }
@@ -1180,7 +1254,12 @@ impl App {
             serving: self.notify.is_some(),
         };
         let locked = self.locked.as_mut().unwrap();
-        draw::lock(pixels, w, h, scale, &mut scene, &notes, &locked.pad);
+        let hint = match locked.sensor {
+            Sensor::Reading => "Touch the sensor or swipe up",
+            Sensor::Missed => "Not recognised, try again",
+            _ => "Swipe up to unlock",
+        };
+        draw::lock(pixels, w, h, scale, &mut scene, &notes, &locked.pad, hint);
         let surface = locked.surface.wl_surface();
         surface.damage_buffer(0, 0, w, h);
         locked.dirty = false;
@@ -1191,6 +1270,7 @@ impl App {
     }
 
     fn lock_frame(&mut self) {
+        self.sensor_on();
         let view = self.view();
         let now = self.now();
         let dt = (now - self.last_tick).min(0.05) as f32;
