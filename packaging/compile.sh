@@ -19,7 +19,7 @@ case "$DISTRO" in
       curl ca-certificates \
       python3 git samurai gn bash \
       wayland-dev wayland-protocols libxkbcommon-dev libinput-dev mesa-dev \
-      eudev-dev libseat-dev dbus-dev fontconfig-dev freetype-dev expat-dev zlib-dev
+      eudev-dev libseat-dev dbus-dev linux-pam-dev fontconfig-dev freetype-dev expat-dev zlib-dev
     # No prebuilt skia exists for musl, so skia-bindings full-builds it (it
     # fetches the skia source itself); gn and ninja must be ours, the bundled
     # ones are glibc binaries.
@@ -41,7 +41,7 @@ case "$DISTRO" in
       clang libclang-dev rustup \
       libwayland-dev wayland-protocols libxkbcommon-dev libinput-dev \
       libgbm-dev libegl-dev libgles-dev libudev-dev libseat-dev \
-      libdbus-1-dev libfontconfig-dev libfreetype-dev libexpat1-dev zlib1g-dev
+      libdbus-1-dev libpam0g-dev libfontconfig-dev libfreetype-dev libexpat1-dev zlib1g-dev
     rustup default stable
     export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
     ;;
@@ -50,7 +50,7 @@ case "$DISTRO" in
     pacman -Syu --noconfirm --needed --disable-sandbox \
       base-devel pkgconf clang python git rustup \
       wayland wayland-protocols libxkbcommon libinput mesa seatd \
-      systemd-libs dbus fontconfig freetype2 expat zlib
+      systemd-libs dbus pam fontconfig freetype2 expat zlib
     rustup default stable
     export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
     ;;
