@@ -15,6 +15,7 @@ members = [
   "crates/sc-predict",
   "crates/sc-haptics",
   "crates/sc-osk",
+  "crates/sc-bar",
   "crates/sc-compositor",
 ]
 

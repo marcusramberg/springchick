@@ -2731,6 +2731,26 @@ name = "sc-anim"
 version = "0.1.0"
 
 [[package]]
+name = "sc-bar"
+version = "0.1.0"
+dependencies = [
+ "dbus",
+ "libc",
+ "rustix 1.1.4",
+ "sc-anim",
+ "sc-catalog",
+ "sc-config",
+ "sc-fonts",
+ "sc-haptics",
+ "sc-icons",
+ "sc-layout",
+ "skia-safe",
+ "smithay-client-toolkit 0.21.1",
+ "wayland-client",
+ "wayland-protocols",
+]
+
+[[package]]
 name = "sc-catalog"
 version = "0.1.0"
 dependencies = [
