@@ -356,6 +356,10 @@ impl State {
         self.icon_press = None;
         self.pending_launch = None;
         self.cancel_page_drag();
+        // 25 ms at full strength in feedbackd's theme; a key is 7 ms at 0.2.
+        if let Some(h) = &self.haptics {
+            h.trigger("window-close");
+        }
     }
 
     /// Page offset of the home grid; turns global-space springs into screen space.
