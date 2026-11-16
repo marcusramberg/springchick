@@ -12,6 +12,9 @@
   screenshots.
 - **Home grid.** Pages, drag-to-reorder, hide apps, dock. Long press for menu.
   Pull down to search.
+- **Status bar.** Pull down on the right for the controls (radios, sliders,
+  media, power, your own app shortcuts), on the left for Notification Center.
+  New notifications drop in as banners.
 - **Rotation.** Automatic rotation for fullscreen media and games.
 - **Hardware bindings.** Full support for long/short/chorded hardware button mappings.
 - **Keyboard.** wvkbd pops up automatically, at the right scale.

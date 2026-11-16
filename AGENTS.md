@@ -32,7 +32,7 @@ Binary: `target/debug/springchick`. Backend chosen by `SPRINGCHICK_BACKEND` (`dr
 nix build .#checks.aarch64-linux.vm-boot -L
 ```
 
-The other checks are `vm-screenshots` (README images; `just screenshots` copies them to `assets/`), `vm-switcher`, `vm-dialog`, `vm-rotation`, `vm-arrange`, `vm-icon-menu`, `vm-library`, `vm-lock`, `vm-capture`, `vm-portal`, `vm-pointer`, `vm-card-mask` and `vm-osk-card` (listed in `flake.nix`).
+The other checks are `vm-screenshots` (README images; `just screenshots` copies them to `assets/`), `vm-switcher`, `vm-dialog`, `vm-rotation`, `vm-arrange`, `vm-icon-menu`, `vm-library`, `vm-lock`, `vm-capture`, `vm-portal`, `vm-pointer`, `vm-card-mask`, `vm-osk-card` and `vm-bar` (listed in `flake.nix`).
 
 Build the check matching `builtins.currentSystem`. Cross-building runs the release tree under qemu-user emulation, which SIGSEGVs rustc. `nix/package.nix` filters `src` to `Cargo.toml`/`Cargo.lock`/`config.example.toml`/`crates/`, so edits under `nix/`, `tests/`, `docs/` don't rebuild the compositor.
 
@@ -40,7 +40,7 @@ Build the check matching `builtins.currentSystem`. Cross-building runs the relea
 
 Use the `run-springchick` skill (`.claude/skills/run-springchick/SKILL.md`). It covers the nested-winit driver (`driver.sh`: build/up/client/send/shot/down), the interactive VM driver, and a long list of gotchas. Never `pkill foot`: the user's own terminal is a foot window, so kill by recorded PID only.
 
-A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y` (a real contact: routed to the client under it, else the shell), `swipe X1 Y1 X2 Y2 [MS]` (shell gestures only), `tswipe X1 Y1 X2 Y2 [MS]` (a real finger drag: scrolls the client under it), `key NAME [MS]`, `down/move/up`, `settle [MS]`, `launch APP_ID [new]`, `action NAME`, `reload`, `haptic [EVENT]` (a feedbackd event through the shell's own haptics, default `button-pressed`), `layers`, `layout [N]`, `rotation [enable|disable]`, `record start PATH [SCALE]` / `record stop` (DRM only: every rendered frame through the V4L2 hardware H.264 encoder, see `record.rs`), `quit`). Works nested, in the VM, and on-device.
+A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y` (a real contact: routed to the client under it, else the shell), `swipe X1 Y1 X2 Y2 [MS]` (shell gestures only), `tswipe X1 Y1 X2 Y2 [MS]` (a real finger drag: scrolls the client under it), `key NAME [MS]`, `down/move/up`, `settle [MS]`, `launch APP_ID [new]`, `action NAME`, `reload`, `haptic [EVENT]` (a feedbackd event through the shell's own haptics, default `button-pressed`), `layers`, `busy` (what keeps the frame loop running right now, or `idle`: run it before restarting a compositor that draws with nothing moving), `shortcuts [APP_ID]` (the control sheet's app tiles; an id adds or removes it), `pill` (blink the home pill once, even on Home or under a covering layer: `sc-bar` sends it when its sheet reaches the bottom), `layout [N]`, `rotation [enable|disable]`, `record start PATH [SCALE]` / `record stop` (DRM only: every rendered frame through the V4L2 hardware H.264 encoder, see `record.rs`), `quit`). Works nested, in the VM, and on-device.
 
 `springchick ipc layers` dumps every layer surface and layer-rooted popup being composited (namespace, layer, logical geometry, the physical rect, buffer size, pending-map/slide state, anchor and exclusive zone), plus the usable area and regrow-guard state. Run it first when the screen shows something no client admits to, e.g. two on-screen keyboards from one wvkbd process.
 
@@ -57,6 +57,7 @@ Push logic into pure crates (no GPU, no Wayland deps) and unit-test it there. `s
 ```
 crates/
   sc-anim/         Spring physics (critically damped, interruptible)
+  sc-bar/          Standalone status bar, pull-down control sheet (right half) and Notification Center (left half, with banners): layer-shell surfaces, the `org.freedesktop.Notifications` server, D-Bus (UPower, NM, MM, BlueZ, logind, feedbackd, MPRIS)
   sc-catalog/      .desktop scan/parse + field-code stripping + search ranking
   sc-compositor/   The `springchick` binary
   sc-config/       config.toml parsing: sections, `include`, [theme]. Lenient — bad entry dropped, rest applies
@@ -72,7 +73,7 @@ crates/
   sc-shell-model/  Grid/dock data model (4x6 pages, dock) + persist (state.toml)
 ```
 
-Every crate except `sc-compositor`, `sc-search` and `sc-osk` (its `uinput.rs`) is `#![forbid(unsafe_code)]`.
+Every crate except `sc-compositor`, `sc-search`, `sc-osk` (its `uinput.rs`) and `sc-bar` (`localtime_r`) is `#![forbid(unsafe_code)]`.
 
 ### sc-compositor module map
 
@@ -84,7 +85,7 @@ Every crate except `sc-compositor`, `sc-search` and `sc-osk` (its `uinput.rs`) i
 - `ui_state.rs`: the pure state machine, `transition(&mut state, event) -> Effect`. States are `Home`/`App`/`AppOpening`/`AppClosing`/`Grabbing`/`Settling`/`QuickSwitch`/`Switcher`. Side effects are returned, never performed here.
 - `scene.rs`: pure `compute_scene(state, output_size) -> Scene` (window transforms: scale, center, corner radius). No GPU deps.
 - `input_dispatch.rs` / `input_common.rs` / `touch.rs` / `keybinds.rs`: input normalization to `Pt` (0..1) and routing by `UiState`. `kbd_switch.rs` is held-modifier (Super+Tab) switching.
-- `arrange.rs`: home-grid reflow springs and arrange-mode drag. A long press on empty home background enters arrange. A long press on an icon opens `icon_menu.rs` instead: Open (or one row per window, by title, when the app has several), New window, Close, Remove.
+- `arrange.rs`: home-grid reflow springs and arrange-mode drag. A long press on empty home background enters arrange. A long press on an icon opens `icon_menu.rs` instead: Open (or one row per window, by title, when the app has several), New window, Close, Add to/Remove from Control Centre, Remove.
 - `library.rs`: the app library, a derived last home page with one tile per category folder.
 - `launcher.rs` / `provenance.rs` / `resources.rs`: spawning apps (each in its own systemd scope), working out which launch a mapped window belongs to (xdg-activation token, then process ancestry), and per-app cgroup resource tiers. Window identity comes from the launch, not the client-reported `app_id`, so a `Terminal=true` entry isn't tagged `foot` and each PWA keeps its own id.
 - `frame.rs`: per-frame shell advance, popups, animation gating, producing `FramePrep`.
@@ -135,6 +136,7 @@ Notable options:
 - `dpi` (default 3): advertised via `wp_fractional_scale`. The FP5 panel is illegible at 1:1.
 - `card_radius` (default `"auto"`): the panel's corner radius from `sc-panel`, else 120. Grabbed apps also leave fullscreen at the panel's own corners. `GMOBILE_DT_COMPATIBLES=fairphone,fp5` fakes a device.
 - `idle_blank_secs`, `show_touches`, `save_screenshots`, `prefer_no_csd`, `natural_scroll`.
+- `[bar.long_press]` maps one of `sc-bar`'s toggles (`wifi`, `bluetooth`, ...) to a `sh -c` command run on a long press (defaults: `foot sh -c nmtui`, `foot bluetui`). Read when the bar starts. The sheet's app shortcuts are not config: the icon menu's "Add to Control Centre" row keeps them in `state.toml`, and the bar asks for them with `ipc shortcuts`.
 - `[predict] dictionaries` (default `[]`): word lists for OSK completion, `springchick/predict/NAME.txt` in the XDG data dirs (`word\tfreq`). The nix package ships all 26 AOSP lists (`nb`, `en_US`, `de`, `fr`, `sv`, ...); `scripts/predict-lists.sh DIR` builds the same set for any other distro. `scripts/aosp-wordlist.py --extra` merges a `word count` corpus list for words AOSP lacks (measured: no gain for nb, so not shipped). `cargo run -p sc-predict --example bench -- LIST.txt CORPUS.txt` measures a change to the ranking.
 - `rotate_ui` (default `false`): turn Home and ordinary windows with the device, not just fullscreen apps. `springchick ipc rotation enable|disable` overrides it live until the next `reload` (no arg queries). It holds an accelerometer claim whenever the screen is lit. A turn sets the smithay output's transform, so the layer map arranges panels and the OSK in the turned space and they are drawn, hit-tested and captured there; only the panel cutouts stay upright-only.
 - `rotation_settle_ms` (default 400): accelerometer debounce.
