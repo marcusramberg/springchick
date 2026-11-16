@@ -374,6 +374,14 @@ impl State {
             self.bar_alpha -= step;
         }
         self.bar_hint.advance(now);
+        // A hint is for the layer covering the pill, so it shows through it,
+        // and ends with it.
+        if self.bar_hint.hinting() {
+            if target > 0.0 {
+                self.bar_hint.end_hint();
+            }
+            return self.bar_hint.alpha(now);
+        }
         self.bar_alpha * self.bar_hint.alpha(now)
     }
 
@@ -386,44 +394,64 @@ impl State {
     /// False on a static screen so the vblank loop can stop and the GPU idle.
     /// `needs_render` and the springs re-arm it.
     pub(crate) fn is_animating(&self, now: std::time::Instant) -> bool {
-        self.needs_render
-            || self.ui.needs_animation()
-            || !self.launching.is_empty()
-            || self.osd.is_active(now)
-            || crate::screenshot::flash_progress(self.screenshot_flash, now).is_some()
-            || self.bar_fading()
-            || self.layers.sliding()
+        self.animating_reason(now).is_some()
+    }
+
+    /// What keeps the frame loop running, if anything does: the `busy` ipc
+    /// verb's answer, for a loop that stays on with nothing moving.
+    /// `needs-render` is last, so a client's commits don't hide a stuck term.
+    pub(crate) fn animating_reason(&self, now: std::time::Instant) -> Option<&'static str> {
+        let springs =
+            |anim: &std::collections::HashMap<String, (sc_anim::Spring, sc_anim::Spring)>| {
+                anim.values()
+                    .any(|(sx, sy)| !sx.is_settled() || !sy.is_settled())
+            };
+        let terms = [
+            (self.ui.needs_animation(), "ui"),
+            (!self.launching.is_empty(), "launching"),
+            (self.osd.is_active(now), "osd"),
+            (
+                crate::screenshot::flash_progress(self.screenshot_flash, now).is_some(),
+                "screenshot-flash",
+            ),
+            (self.bar_fading(), "bar-fading"),
+            (self.layers.sliding(), "layer-slide"),
             // The held-back regrow is only checked from a frame.
-            || self.layers.regrow_pending()
+            (self.layers.regrow_pending(), "layer-regrow"),
             // The lock confirmation waits for a presented frame.
-            || self.session_lock.needs_frame()
+            (self.session_lock.needs_frame(), "session-lock"),
             // A still finger sends no events, so the long-press timer needs frames.
             // Gated on `pointer_down`: a stale `icon_press` from a lost touch-up
             // would otherwise pin the loop on (battery).
-            || (self.pointer_down && (self.icon_press.is_some() || self.bg_press.is_some()))
-            || self
-                .icon_menu
-                .as_ref()
-                .is_some_and(|m| !m.open.is_settled())
-            || self.folder.as_ref().is_some_and(|f| !f.open.is_settled())
+            (
+                self.pointer_down && (self.icon_press.is_some() || self.bg_press.is_some()),
+                "press-held",
+            ),
+            (
+                self.icon_menu
+                    .as_ref()
+                    .is_some_and(|m| !m.open.is_settled()),
+                "icon-menu",
+            ),
+            (
+                self.folder.as_ref().is_some_and(|f| !f.open.is_settled()),
+                "folder",
+            ),
             // Deck fades outlive the deck on the way out.
-            || self.card_chrome.is_animating()
+            (self.card_chrome.is_animating(), "card-chrome"),
             // Debug-input playback; always None in normal runs.
-            || self.active_gesture.is_some()
-            || self.active_key.is_some()
-            || self.active_touch.is_some()
-            || self.pending_settle.is_some()
+            (self.active_gesture.is_some(), "ipc-gesture"),
+            (self.active_key.is_some(), "ipc-key"),
+            (self.active_touch.is_some(), "ipc-touch"),
+            (self.pending_settle.is_some(), "ipc-settle"),
             // An orientation change needs frames to settle.
-            || self.orientation_settle.is_pending()
-            || self.rotation_fade.is_active()
-            || self
-                .grid_anim
-                .values()
-                .any(|(sx, sy)| !sx.is_settled() || !sy.is_settled())
-            || self
-                .dock_anim
-                .values()
-                .any(|(sx, sy)| !sx.is_settled() || !sy.is_settled())
+            (self.orientation_settle.is_pending(), "orientation"),
+            (self.rotation_fade.is_active(), "rotation-fade"),
+            (springs(&self.grid_anim), "grid-springs"),
+            (springs(&self.dock_anim), "dock-springs"),
+            (self.needs_render, "needs-render"),
+        ];
+        terms.iter().find(|t| t.0).map(|t| t.1)
     }
 
     /// Tick springs, apply effects, compute the scene, and gather the render

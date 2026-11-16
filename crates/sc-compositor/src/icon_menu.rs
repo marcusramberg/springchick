@@ -13,6 +13,8 @@ pub(crate) enum MenuAction {
     EditHome,
     Remove,
     AddToHome,
+    /// Adds the app to the bar's control sheet, or takes it off.
+    Shortcut,
     /// Flatpak only: arm the confirm row.
     Uninstall,
     UninstallConfirm,
@@ -39,11 +41,13 @@ pub(crate) struct MenuItem {
 }
 
 /// Rows for an icon, `windows` in MRU order. One window gets a plain "Open";
-/// several are listed by title. `in_library` swaps "Remove" for "Add to Home".
+/// several are listed by title. `in_library` swaps "Remove" for "Add to Home";
+/// `shortcut` is whether the app is on the control sheet now.
 pub(crate) fn items_for(
     windows: &[(ToplevelId, String)],
     flatpak: bool,
     in_library: bool,
+    shortcut: bool,
 ) -> Vec<MenuItem> {
     let mut items = Vec::with_capacity(windows.len() + 4);
     match windows {
@@ -81,6 +85,14 @@ pub(crate) fn items_for(
             label: "Edit home screen".into(),
         });
     }
+    items.push(MenuItem {
+        action: MenuAction::Shortcut,
+        label: if shortcut {
+            "Remove from Control Centre".into()
+        } else {
+            "Add to Control Centre".into()
+        },
+    });
     items.push(if in_library {
         MenuItem {
             action: MenuAction::AddToHome,
@@ -173,6 +185,10 @@ impl crate::state::State {
                 self.model.delete(&app_id);
                 self.after_arrange_edit();
             }
+            MenuAction::Shortcut => {
+                self.model.toggle_shortcut(&app_id);
+                self.save_model();
+            }
             MenuAction::AddToHome => {
                 self.model.place(app_id.clone());
                 self.close_folder();
@@ -236,24 +252,41 @@ mod tests {
     #[test]
     fn a_stopped_app_can_only_be_started_or_removed() {
         assert_eq!(
-            labels(&items_for(&[], false, false)),
-            ["New window", "Edit home screen", "Remove"]
+            labels(&items_for(&[], false, false, false)),
+            [
+                "New window",
+                "Edit home screen",
+                "Add to Control Centre",
+                "Remove"
+            ]
         );
     }
 
     #[test]
     fn a_single_window_gets_a_plain_open() {
-        let items = items_for(&[(3, "some terminal".into())], false, false);
+        let items = items_for(&[(3, "some terminal".into())], false, false, false);
         assert_eq!(
             labels(&items),
-            ["Open", "New window", "Close", "Edit home screen", "Remove"]
+            [
+                "Open",
+                "New window",
+                "Close",
+                "Edit home screen",
+                "Add to Control Centre",
+                "Remove"
+            ]
         );
         assert_eq!(items[0].action, MenuAction::Open(3));
     }
 
     #[test]
     fn several_windows_are_listed_by_title_in_mru_order() {
-        let items = items_for(&[(7, "notes.md".into()), (2, "~/src".into())], false, false);
+        let items = items_for(
+            &[(7, "notes.md".into()), (2, "~/src".into())],
+            false,
+            false,
+            false,
+        );
         assert_eq!(
             labels(&items),
             [
@@ -262,6 +295,7 @@ mod tests {
                 "New window",
                 "Close all",
                 "Edit home screen",
+                "Add to Control Centre",
                 "Remove"
             ]
         );
@@ -271,24 +305,53 @@ mod tests {
 
     #[test]
     fn untitled_windows_fall_back_to_their_position() {
-        let items = items_for(&[(7, String::new()), (2, String::new())], false, false);
+        let items = items_for(
+            &[(7, String::new()), (2, String::new())],
+            false,
+            false,
+            false,
+        );
         assert_eq!(labels(&items)[..2], ["Window 1", "Window 2"]);
     }
 
     #[test]
     fn only_flatpak_apps_offer_uninstall() {
         assert_eq!(
-            labels(&items_for(&[], true, false)),
-            ["New window", "Edit home screen", "Remove", "Uninstall"]
+            labels(&items_for(&[], true, false, false)),
+            [
+                "New window",
+                "Edit home screen",
+                "Add to Control Centre",
+                "Remove",
+                "Uninstall"
+            ]
         );
-        assert!(!labels(&items_for(&[], false, false)).contains(&"Uninstall"));
+        assert!(!labels(&items_for(&[], false, false, false)).contains(&"Uninstall"));
     }
 
     #[test]
     fn a_library_member_offers_add_to_home_instead_of_remove() {
-        let items = items_for(&[], false, true);
-        assert_eq!(labels(&items), ["New window", "Add to Home"]);
+        let items = items_for(&[], false, true, false);
+        assert_eq!(
+            labels(&items),
+            ["New window", "Add to Control Centre", "Add to Home"]
+        );
         assert!(!items.iter().any(|i| i.action.is_destructive()));
+    }
+
+    #[test]
+    fn an_app_on_the_control_sheet_offers_to_come_off_it() {
+        let items = items_for(&[], false, false, true);
+        assert_eq!(
+            labels(&items),
+            [
+                "New window",
+                "Edit home screen",
+                "Remove from Control Centre",
+                "Remove"
+            ]
+        );
+        assert_eq!(items[2].action, MenuAction::Shortcut);
     }
 
     #[test]

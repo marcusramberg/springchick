@@ -29,6 +29,8 @@ enum Phase {
     Blink(Instant),
     Hidden,
     Reveal(Instant),
+    /// A blink a shell surface asked for; see [`BarHint::hint`].
+    Hint(Instant),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -78,11 +80,29 @@ impl BarHint {
         }
     }
 
+    /// Blinks once whatever the mode, Home and under a covering layer
+    /// included: a sheet that has come down over the screen says so.
+    pub fn hint(&mut self, now: Instant) {
+        self.phase = Phase::Hint(now);
+    }
+
+    /// The blink [`Self::hint`] started is still running.
+    pub fn hinting(&self) -> bool {
+        matches!(self.phase, Phase::Hint(_))
+    }
+
+    /// Ends a hint whose sheet has gone.
+    pub fn end_hint(&mut self) {
+        if self.hinting() {
+            self.phase = Phase::Hidden;
+        }
+    }
+
     pub fn alpha(&self, now: Instant) -> f32 {
         match self.phase {
             Phase::Steady => 1.0,
             Phase::Hidden => 0.0,
-            Phase::Blink(start) => Self::blink_alpha(secs_since(start, now)),
+            Phase::Blink(start) | Phase::Hint(start) => Self::blink_alpha(secs_since(start, now)),
             Phase::Reveal(start) => Self::reveal_alpha(secs_since(start, now)),
         }
     }
@@ -90,7 +110,7 @@ impl BarHint {
     /// Called once a frame.
     pub fn advance(&mut self, now: Instant) {
         let done = match self.phase {
-            Phase::Blink(start) => secs_since(start, now) >= Self::BLINK_TOTAL,
+            Phase::Blink(start) | Phase::Hint(start) => secs_since(start, now) >= Self::BLINK_TOTAL,
             Phase::Reveal(start) => secs_since(start, now) >= Self::REVEAL_TOTAL,
             _ => false,
         };
@@ -102,7 +122,7 @@ impl BarHint {
     pub fn is_animating(&self, now: Instant) -> bool {
         match self.phase {
             Phase::Steady | Phase::Hidden => false,
-            Phase::Blink(start) => secs_since(start, now) < Self::BLINK_TOTAL,
+            Phase::Blink(start) | Phase::Hint(start) => secs_since(start, now) < Self::BLINK_TOTAL,
             Phase::Reveal(start) => secs_since(start, now) < Self::REVEAL_TOTAL,
         }
     }
@@ -163,6 +183,20 @@ mod tests {
         hint.touched(t0);
         assert_eq!(hint.alpha(at(t0, REVEAL_IN)), 0.0);
         assert!(!hint.is_animating(t0));
+    }
+
+    #[test]
+    fn a_hint_blinks_even_on_home_then_hides() {
+        let mut hint = BarHint::new();
+        let t0 = Instant::now();
+        hint.set_mode(BarMode::Off, t0);
+        hint.hint(t0);
+        assert!(hint.hinting());
+        assert_eq!(hint.alpha(t0), 1.0);
+        let end = at(t0, BarHint::BLINK_TOTAL);
+        hint.advance(end);
+        assert!(!hint.hinting());
+        assert_eq!(hint.alpha(end), 0.0);
     }
 
     #[test]

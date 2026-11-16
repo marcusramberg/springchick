@@ -54,6 +54,15 @@ pub enum DebugCmd {
     Haptic(String),
     /// As SIGTERM. The shell's logout goes through this.
     Quit,
+    /// Blink the home pill once, through a layer covering it: for a shell
+    /// sheet that has just come down over the screen.
+    Pill,
+    /// The control sheet's app shortcuts: `Some` adds the app or takes it off.
+    /// Answers `ok ID ID …`, for `sc-bar`.
+    Shortcuts(Option<String>),
+    /// Why the frame loop is running, sampled now: `ok idle` or the first
+    /// term of [`State::animating_reason`], with `settle`'s detail.
+    Busy,
     /// A query; see [`State::layers_dump`].
     Layers,
     /// Locks xkb layout `N`, if given. Answers `ok ACTIVE NAME|NAME|…`, for the
@@ -163,6 +172,19 @@ pub fn parse_line(line: &str, w: f32, h: f32) -> Result<DebugCmd, String> {
         "layers" => {
             done(tok)?;
             DebugCmd::Layers
+        }
+        "shortcuts" => {
+            let app_id = tok.next().map(str::to_string);
+            done(tok)?;
+            DebugCmd::Shortcuts(app_id)
+        }
+        "busy" => {
+            done(tok)?;
+            DebugCmd::Busy
+        }
+        "pill" => {
+            done(tok)?;
+            DebugCmd::Pill
         }
         "home" => {
             done(tok)?;
@@ -419,6 +441,9 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
         DebugCmd::Settle { .. }
             | DebugCmd::Reload
             | DebugCmd::Haptic(_)
+            | DebugCmd::Pill
+            | DebugCmd::Busy
+            | DebugCmd::Shortcuts(_)
             | DebugCmd::Layers
             | DebugCmd::Home
             | DebugCmd::Rotation(_)
@@ -569,6 +594,26 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
         }
         DebugCmd::Layers => {
             let _ = reply.send(format!("ok {}\n", state.layers_dump()));
+        }
+        DebugCmd::Shortcuts(app_id) => {
+            if let Some(app_id) = app_id {
+                if !state.app_catalog.contains_key(&app_id) {
+                    let _ = reply.send(format!("err unknown app {app_id}\n"));
+                    return;
+                }
+                state.model.toggle_shortcut(&app_id);
+                state.save_model();
+            }
+            let _ = reply.send(format!("ok {}\n", state.model.shortcuts.join(" ")));
+        }
+        DebugCmd::Busy => {
+            let reason = state.animating_reason(Instant::now()).unwrap_or("idle");
+            let _ = reply.send(format!("ok {reason} [{}]\n", busy(state)));
+        }
+        DebugCmd::Pill => {
+            state.bar_hint.hint(Instant::now());
+            state.needs_render = true;
+            let _ = reply.send("ok\n".into());
         }
         DebugCmd::Home => {
             let _ = reply.send(format!("ok {}\n", state.home_dump()));
@@ -721,10 +766,37 @@ fn check_settle(state: &mut State) {
     if idle(state) {
         let _ = reply.send("ok\n".into());
     } else if Instant::now() >= deadline {
-        let _ = reply.send("err timeout\n".into());
+        let _ = reply.send(format!("err timeout: {}\n", busy(state)));
     } else {
         state.pending_settle = Some((reply, deadline));
     }
+}
+
+/// What keeps [`idle`] false, for a `settle` that timed out: a frame loop
+/// pinned on with nothing moving is otherwise found by guessing.
+fn busy(state: &State) -> String {
+    let mut why = Vec::new();
+    if state.ui.needs_animation() {
+        why.push("ui".to_string());
+    }
+    for (app, (x, y)) in &state.grid_anim {
+        if !x.is_settled() || !y.is_settled() {
+            why.push(format!(
+                "grid {app} {:.1},{:.1}->{:.1},{:.1}",
+                x.value, y.value, x.target, y.target
+            ));
+        }
+    }
+    let flags = [
+        (state.orientation_settle.is_pending(), "orientation"),
+        (state.rotation_fade.is_active(), "rotation-fade"),
+        (state.active_gesture.is_some(), "gesture"),
+        (state.active_key.is_some(), "key"),
+        (state.active_touch.is_some(), "touch"),
+        (state.pointer_down, "pointer-down"),
+    ];
+    why.extend(flags.iter().filter(|f| f.0).map(|f| f.1.to_string()));
+    why.join("; ")
 }
 
 fn idle(state: &State) -> bool {
@@ -965,6 +1037,11 @@ mod tests {
     #[test]
     fn parses_layers() {
         assert_eq!(parse_line("layers", W, H), Ok(DebugCmd::Layers));
+        assert_eq!(parse_line("pill", W, H), Ok(DebugCmd::Pill));
+        assert_eq!(
+            parse_line("shortcuts foot", W, H),
+            Ok(DebugCmd::Shortcuts(Some("foot".into())))
+        );
         assert_eq!(parse_line("layout", W, H), Ok(DebugCmd::Layout(None)));
         assert_eq!(parse_line("layout 1", W, H), Ok(DebugCmd::Layout(Some(1))));
         assert_eq!(

@@ -110,11 +110,7 @@ impl State {
         if self.arrange.is_none() {
             self.model.repack();
         }
-        if let Err(e) =
-            sc_shell_model::persist::save(&self.model, &sc_shell_model::persist::state_path())
-        {
-            warn!(%e, "failed to save shell model after arrange edit");
-        }
+        self.save_model();
         // The edit may have dropped a page, leaving the shell parked past the end.
         let page_count = self.home_page_count();
         if let UiState::Home {
@@ -132,6 +128,14 @@ impl State {
         }
         self.reflow_grid();
         self.reflow_dock();
+    }
+
+    pub(crate) fn save_model(&self) {
+        if let Err(e) =
+            sc_shell_model::persist::save(&self.model, &sc_shell_model::persist::state_path())
+        {
+            warn!(%e, "failed to save shell model");
+        }
     }
 
     pub(crate) fn exit_arrange(&mut self) {
@@ -345,7 +349,9 @@ impl State {
             "icon menu opened app_id={app_id} source={source:?} running={running}"
         );
         let in_library = source == input_dispatch::IconSource::Library;
-        let items = crate::icon_menu::items_for(&windows, self.is_flatpak(&app_id), in_library);
+        let shortcut = self.model.shortcuts.contains(&app_id);
+        let items =
+            crate::icon_menu::items_for(&windows, self.is_flatpak(&app_id), in_library, shortcut);
         self.icon_menu = Some(crate::icon_menu::IconMenu::new(app_id, anchor, items));
         self.icon_press = None;
         self.pending_launch = None;

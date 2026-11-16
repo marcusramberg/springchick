@@ -33,6 +33,13 @@ pub fn run_client(args: &[String]) -> ExitCode {
             "       springchick ipc haptic [EVENT] # feedbackd event, default button-pressed"
         );
         eprintln!("       springchick ipc layers   # dump layer surfaces + their popups");
+        eprintln!(
+            "       springchick ipc pill     # blink the home pill once, through a covering layer"
+        );
+        eprintln!(
+            "       springchick ipc shortcuts [APP_ID] # the control sheet's apps; an id adds or removes it"
+        );
+        eprintln!("       springchick ipc busy     # why the frame loop is running, or idle");
         eprintln!("       springchick ipc home     # dump home grid + catalog resolution");
         eprintln!("       springchick ipc layout [N] # list xkb layouts / lock layout N");
         eprintln!(
