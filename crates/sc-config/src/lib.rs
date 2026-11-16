@@ -123,6 +123,7 @@ pub struct Config {
     pub resources: Resources,
     pub xkb: Xkb,
     pub predict: Predict,
+    pub bar: Bar,
     pub theme: Theme,
     pub osk: OskColors,
     /// `[osk] haptics`: a feedbackd `button-pressed` on each key down.
@@ -143,6 +144,23 @@ pub struct Predict {
     /// `scripts/aosp-wordlist.py` writes them. Several make the keyboard
     /// bilingual.
     pub dictionaries: Vec<String>,
+}
+
+/// `sc-bar`'s control sheet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bar {
+    /// A `sh -c` command per toggle (`"wifi"`, `"bluetooth"`, ...) for a long
+    /// press on it. The file's entries go over the defaults; `""` clears one.
+    pub long_press: BTreeMap<String, String>,
+}
+
+impl Default for Bar {
+    fn default() -> Self {
+        let long_press = [("wifi", "foot sh -c nmtui"), ("bluetooth", "foot bluetui")];
+        Bar {
+            long_press: long_press.map(|(k, v)| (k.into(), v.into())).into(),
+        }
+    }
 }
 
 /// Shell and search colours, `0xRRGGBB`. Alpha stays with each use, so one
@@ -622,6 +640,7 @@ struct RawConfigFile {
     resources: Option<RawResources>,
     xkb: Option<RawXkb>,
     predict: Option<RawPredict>,
+    bar: Option<RawBar>,
     theme: Option<RawTheme>,
     osk: Option<RawOsk>,
     #[serde(flatten)]
@@ -660,6 +679,13 @@ struct RawOsk {
 #[derive(Deserialize, Default)]
 struct RawPredict {
     dictionaries: Option<Vec<String>>,
+    #[serde(flatten)]
+    unknown: toml::Table,
+}
+
+#[derive(Deserialize, Default)]
+struct RawBar {
+    long_press: Option<BTreeMap<String, String>>,
     #[serde(flatten)]
     unknown: toml::Table,
 }
@@ -744,6 +770,9 @@ fn unknown_keys(file: &RawConfigFile) -> Vec<String> {
     if let Some(predict) = &file.predict {
         add("predict.", &predict.unknown);
     }
+    if let Some(bar) = &file.bar {
+        add("bar.", &bar.unknown);
+    }
     if let Some(theme) = &file.theme {
         add("theme.", &theme.unknown);
     }
@@ -807,6 +836,11 @@ impl Config {
         let predict = file.predict.map_or_else(Predict::default, |p| Predict {
             dictionaries: p.dictionaries.unwrap_or_default(),
         });
+        let mut bar = Bar::default();
+        if let Some(raw) = file.bar {
+            bar.long_press.extend(raw.long_press.unwrap_or_default());
+            bar.long_press.retain(|_, command| !command.is_empty());
+        }
         let theme = parse_theme(file.theme);
         let osk_haptics = file.osk.as_ref().and_then(|o| o.haptics).unwrap_or(false);
         let osk = file.osk.map_or_else(OskColors::default, |o| {
@@ -848,6 +882,7 @@ impl Config {
             resources,
             xkb,
             predict,
+            bar,
             theme,
             osk,
             osk_haptics,
@@ -1549,6 +1584,14 @@ mod tests {
         assert_eq!(cfg.rotation_settle_ms, 250);
         assert_eq!(cfg.rotation_fade_ms, 0);
         assert!(Config::parse("[main]\nrotate_ui = true\n").rotate_ui);
+    }
+
+    #[test]
+    fn bar_long_press_goes_over_the_defaults() {
+        let bar = Config::parse("[bar.long_press]\nbluetooth = \"\"\ntorch = \"true\"\n").bar;
+        let keys: Vec<&str> = bar.long_press.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["torch", "wifi"]);
+        assert_eq!(Config::parse("").bar.long_press["wifi"], "foot sh -c nmtui");
     }
 
     #[test]

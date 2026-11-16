@@ -106,6 +106,17 @@ options = ""     # e.g. "grp:win_space_toggle"
 [predict]
 dictionaries = []   # e.g. ["nb", "en_US"]
 
+# sc-bar's control sheet. Read when the bar starts. Its app shortcuts are not
+# set here: a long press on a Home icon adds or removes one.
+#
+# A long press ([keybinds] long_press_ms) on a toggle runs its command with
+# `sh -c` and puts the sheet away. Toggles: airplane, cellular, wifi,
+# bluetooth, rotation_lock, silent, dark_mode, low_power, torch. "" clears one.
+[bar.long_press]
+# Through sh: started by foot itself, NixOS's nmtui only prints its usage.
+wifi = "foot sh -c nmtui"
+bluetooth = "foot bluetui"
+
 # Shell colours, "#rrggbb". Shadows, dims, the pointer and the camera-flash pop
 # and stars stay fixed. The search app rereads these each time it opens; the
 # keyboard has its own [osk] colours, which only apply when it starts.
