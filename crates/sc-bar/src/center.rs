@@ -17,6 +17,12 @@ const MARGIN: f32 = 14.5;
 pub const HEIGHT: f32 = 64.0;
 pub const RADIUS: f32 = 22.0;
 const SPACING: f32 = 10.0;
+/// A card's width in points, on any screen.
+pub const CARD_WIDTH: f32 = REFERENCE_WIDTH - 2.0 * MARGIN;
+/// From one line of a card's body to the next.
+pub const LINE: f32 = 19.0;
+/// The lines of its body a card shows until it is tapped open.
+const MAX_LINES: usize = 4;
 /// What a card grows by for its action buttons, and how many it shows.
 const ACTIONS: f32 = 42.0;
 const MAX_BUTTONS: usize = 3;
@@ -81,6 +87,8 @@ pub struct Notification {
     pub icon: String,
     pub summary: String,
     pub body: String,
+    /// The body as a card breaks it, by `draw::wrap`; empty shows as one line.
+    pub lines: Vec<String>,
     /// Action keys, with their labels.
     pub actions: Vec<(String, String)>,
     /// Shown as a banner without staying in the list.
@@ -99,20 +107,20 @@ impl Notification {
     }
 }
 
-/// A card's height in points, with `buttons` on it.
-pub fn card_height(buttons: usize) -> f32 {
-    HEIGHT + if buttons > 0 { ACTIONS } else { 0.0 }
+/// A card's height in points, with `lines` of body and `buttons` on it.
+pub fn card_height(lines: usize, buttons: usize) -> f32 {
+    HEIGHT + LINE * lines.saturating_sub(1) as f32 + if buttons > 0 { ACTIONS } else { 0.0 }
 }
 
-/// Where a card's `count` buttons are, left to right.
-pub fn button_rects(card: Rect, count: usize) -> Vec<Rect> {
-    let k = card.h / card_height(count);
+/// Where the `count` buttons of a card with `lines` of body are, left to right.
+pub fn button_rects(card: Rect, lines: usize, count: usize) -> Vec<Rect> {
+    let k = card.h / card_height(lines, count);
     let (inset, gap) = (13.5 * k, 8.0 * k);
     let w = (card.w - 2.0 * inset - gap * count.saturating_sub(1) as f32) / count.max(1) as f32;
     (0..count)
         .map(|i| Rect {
             x: card.x + inset + (w + gap) * i as f32,
-            y: card.y + (HEIGHT - 2.0) * k,
+            y: card.y + (card_height(lines, 0) - 2.0) * k,
             w,
             h: 34.0 * k,
         })
@@ -153,6 +161,8 @@ pub enum Row {
         stacked: bool,
         /// How many action buttons it shows; none while stacked.
         buttons: usize,
+        /// How many lines of its body it shows.
+        lines: usize,
         rect: Rect,
     },
     /// The title, with the button that clears the list.
@@ -229,6 +239,8 @@ pub struct Center {
     touch: Option<Touch>,
     /// The apps whose stacks are spread out.
     expanded: Vec<String>,
+    /// The notifications tapped open to their whole text.
+    unfolded: Vec<u32>,
     /// How far the list is scrolled up.
     scroll: Option<Spring>,
     outcomes: Vec<(u32, Outcome)>,
@@ -289,6 +301,7 @@ impl Center {
     /// The sheet went away: next time it starts over, everything in its place.
     pub fn rest(&mut self) {
         self.expanded.clear();
+        self.unfolded.clear();
         self.scroll = None;
         self.placed.clear();
         self.touch = None;
@@ -312,6 +325,16 @@ impl Center {
 
     fn listed(&self) -> impl Iterator<Item = &Entry> {
         self.entries.iter().filter(|e| !e.notification.transient)
+    }
+
+    /// How many lines of its body `n`'s card shows, and whether that is all.
+    fn lines(&self, n: &Notification) -> (usize, bool) {
+        let all = n.lines.len().max(1);
+        if self.unfolded.contains(&n.id) {
+            (all, true)
+        } else {
+            (all.min(MAX_LINES), all <= MAX_LINES)
+        }
     }
 
     /// Whether the list has anything in it.
@@ -406,9 +429,10 @@ impl Center {
                 } else {
                     entry.notification.buttons().count()
                 };
+                let (lines, _) = self.lines(&entry.notification);
                 let mut rect = view.card(y);
                 rect.x += entry.offset.value;
-                rect.h = card_height(buttons) * k;
+                rect.h = card_height(lines, buttons) * k;
                 y += rect.h + SPACING * k;
                 if stacked {
                     y += PEEK * k * (group.len() - 1).min(PEEKS) as f32;
@@ -417,6 +441,7 @@ impl Center {
                     ids,
                     stacked,
                     buttons,
+                    lines,
                     rect,
                 });
             }
@@ -656,12 +681,24 @@ impl Center {
                 (
                     Gesture::Pending,
                     Some(Row::Card {
-                        ids, buttons, rect, ..
+                        ids,
+                        buttons,
+                        lines,
+                        rect,
+                        ..
                     }),
                 ) => {
-                    let button = button_rects(rect, buttons)
+                    let button = button_rects(rect, lines, buttons)
                         .iter()
                         .position(|b| b.contains(start.0, start.1));
+                    // With no app to show the rest, the card does.
+                    let cut = self.entry(ids[0]).is_some_and(|e| {
+                        e.notification.app.is_none() && !self.lines(&e.notification).1
+                    });
+                    if button.is_none() && cut {
+                        self.unfolded.push(ids[0]);
+                        return None;
+                    }
                     let key = button.and_then(|i| {
                         let (key, _) = self.entry(ids[0])?.notification.buttons().nth(i)?;
                         Some(key.clone())
@@ -963,6 +1000,33 @@ mod tests {
     }
 
     #[test]
+    fn a_long_body_shows_four_lines_and_unfolds_on_a_tap_when_no_app_would_open() {
+        let long = |id, app: Option<&str>| Notification {
+            app: app.map(Into::into),
+            lines: vec!["line".to_string(); 9],
+            ..notification(id, "a")
+        };
+        let mut c = Center::default();
+        c.add(long(1, None), false);
+        settle(&mut c);
+        let card = first_card(&c);
+        assert_eq!(card.h, card_height(MAX_LINES, 0));
+        let p = (card.center_x(), card.y + 10.0);
+        assert!(c.touch_list(p, VIEW));
+        assert_eq!(c.touch_up((0.0, 0.0), VIEW), None);
+        assert_eq!(first_card(&c).h, card_height(9, 0));
+        // Unfolded, a tap is a tap again.
+        assert!(c.touch_list(p, VIEW));
+        assert_eq!(c.touch_up((0.0, 0.0), VIEW), Some((1, None)));
+
+        let mut c = Center::default();
+        c.add(long(2, Some("a")), false);
+        settle(&mut c);
+        assert!(c.touch_list(p, VIEW));
+        assert_eq!(c.touch_up((0.0, 0.0), VIEW), Some((2, None)));
+    }
+
+    #[test]
     fn a_card_with_actions_is_taller_and_its_buttons_answer_with_their_keys() {
         let mut c = Center::default();
         c.add(notification(1, "a"), false);
@@ -984,7 +1048,7 @@ mod tests {
         settle(&mut c);
         let card = first_card(&c);
         assert!(card.h > plain.h + 30.0);
-        let buttons = button_rects(card, 2);
+        let buttons = button_rects(card, 1, 2);
         assert!(buttons[1].x > buttons[0].x + buttons[0].w);
         assert!(buttons[1].y + buttons[1].h < card.y + card.h);
         assert_eq!(tap(&mut c, buttons[1]), Some((1, Some("read".to_string()))));

@@ -120,6 +120,53 @@ fn text(
     width
 }
 
+/// `body` broken into the lines of a card, on spaces where there are any.
+pub fn wrap(font: &mut Font, body: &str) -> Vec<String> {
+    // The card less its icon and its edges, in points like the size.
+    let max = center::CARD_WIDTH - 81.0;
+    font.set_size(15.0);
+    let width = |s: &str| -> f32 {
+        runs(font, s)
+            .iter()
+            .map(|(t, f)| f.measure_str(t, None).0)
+            .sum()
+    };
+    let mut lines = Vec::new();
+    for paragraph in body.lines().filter(|l| !l.trim().is_empty()) {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            let longer = if line.is_empty() {
+                word.to_string()
+            } else {
+                format!("{line} {word}")
+            };
+            if line.is_empty() || width(&longer) <= max {
+                line = longer;
+            } else {
+                lines.push(std::mem::replace(&mut line, word.to_string()));
+            }
+            // A word wider than the card: cut anywhere.
+            while width(&line) > max {
+                let mut head = String::new();
+                for c in line.chars() {
+                    head.push(c);
+                    if width(&head) > max {
+                        head.pop();
+                        break;
+                    }
+                }
+                if head.is_empty() {
+                    break;
+                }
+                line = line[head.len()..].to_string();
+                lines.push(head);
+            }
+        }
+        lines.push(line);
+    }
+    lines
+}
+
 /// `s` split where `font` runs out of glyphs: Inter has no emoji and no CJK,
 /// and notifications are other people's text. Each run comes with a font
 /// that can draw it, at `font`'s size.
@@ -535,10 +582,11 @@ fn card(
     font: &mut Font,
     fill_color: Color,
     alpha: f32,
+    lines: usize,
     buttons: usize,
 ) {
     // Its own scale: a card growing in is smaller than its place.
-    let k = r.h / center::card_height(buttons);
+    let k = r.h / center::card_height(lines, buttons);
     let ink = |a: f32| rgba(0xffffff, a * alpha);
     canvas.draw_rrect(
         RRect::new_rect_xy(skia(r), center::RADIUS * k, center::RADIUS * k),
@@ -592,18 +640,32 @@ fn card(
         right - time_w - 10.0 * k - x,
     );
     font.set_embolden(false);
-    let body = n.body.lines().next().unwrap_or_default();
-    text(
-        canvas,
-        font,
-        body,
-        (x, r.y + 43.0 * k),
-        15.0 * k,
-        ink(0.85),
-        false,
-        right - x,
-    );
-    let rects = center::button_rects(r, buttons);
+    let first = [n.body.lines().next().unwrap_or_default().to_string()];
+    let body = if n.lines.is_empty() {
+        &first[..]
+    } else {
+        &n.lines[..]
+    };
+    for (i, line) in body.iter().take(lines).enumerate() {
+        // The last one shown says so when there is more.
+        let more = i + 1 == lines && body.len() > lines;
+        let line = if more {
+            format!("{line}…")
+        } else {
+            line.clone()
+        };
+        text(
+            canvas,
+            font,
+            &line,
+            (x, r.y + (43.0 + center::LINE * i as f32) * k),
+            15.0 * k,
+            ink(0.85),
+            false,
+            right - x,
+        );
+    }
+    let rects = center::button_rects(r, lines, buttons);
     for (b, (_, label)) in rects.iter().zip(n.buttons()) {
         canvas.draw_rrect(
             RRect::new_rect_xy(skia(*b), b.h / 2.0, b.h / 2.0),
@@ -746,6 +808,7 @@ fn list(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, notes: &Notes) {
                 ids,
                 stacked,
                 buttons,
+                lines,
                 rect,
             } => {
                 let Some(entry) = notes.center.entry(ids[0]) else {
@@ -783,6 +846,7 @@ fn list(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, notes: &Notes) {
                     look.font,
                     glass(alpha),
                     alpha,
+                    *lines,
                     *buttons,
                 );
             }
@@ -921,6 +985,7 @@ pub fn banner(
             look.font,
             rgba(0x2c2c2e, 0.96),
             1.0,
+            1,
             0,
         );
     });
@@ -929,6 +994,21 @@ pub fn banner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrap_breaks_on_spaces_and_cuts_a_word_wider_than_the_card() {
+        let mut font = font();
+        let body = "IBus should be called from the desktop session in Wayland.\n\nSecond.";
+        let lines = wrap(&mut font, body);
+        assert!(lines.len() >= 3, "{lines:?}");
+        assert_eq!(lines.join(" "), body.replace("\n\n", " "));
+        assert_eq!(lines.last().unwrap(), "Second.");
+
+        let long = "x".repeat(200);
+        let cut = wrap(&mut font, &long);
+        assert!(cut.len() > 1);
+        assert_eq!(cut.concat(), long);
+    }
 
     #[test]
     fn reveal_copies_down_to_the_edge_and_shifts_under_the_bar() {

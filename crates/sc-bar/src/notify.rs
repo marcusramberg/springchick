@@ -121,6 +121,8 @@ fn notification(msg: &Message, id: u32) -> Option<Notification> {
         summary: capped(&summary, 256),
         // The markup the specification allows is not drawn.
         body: capped(&strip_markup(&capped(&body, 4096)), 1024),
+        // `main` wraps it: the font is there.
+        lines: Vec::new(),
         actions: actions
             .as_chunks::<2>()
             .0

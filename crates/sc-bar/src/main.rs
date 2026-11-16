@@ -674,7 +674,8 @@ impl App {
     /// An app sent a notification, or took one back.
     fn notified(&mut self, event: notify::Event) {
         match event {
-            notify::Event::Notify(n) => {
+            notify::Event::Notify(mut n) => {
+                n.lines = draw::wrap(&mut self.font, &n.body);
                 self.cache_icon(&n);
                 // Silent mode still collects them.
                 let silent = panel::Toggle::Silent.get(&self.system.controls) == Some(true);
