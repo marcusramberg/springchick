@@ -299,8 +299,9 @@ in
       (lib.mkIf config.services.greetd.enable {
         greetd.enableGnomeKeyring = lib.mkDefault true;
       })
-      # sc-bar's lock screen checks the PIN against the login password.
-      (lib.mkIf cfg.bar.enable { springchick = { }; })
+      # sc-bar's lock screen checks the PIN against the login password. It
+      # reads fingers itself: pam_fprintd would hold the PIN for one.
+      (lib.mkIf cfg.bar.enable { springchick.fprintAuth = false; })
     ];
 
     qt = lib.mkIf cfg.whitesur.enable {
