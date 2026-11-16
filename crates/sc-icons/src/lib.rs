@@ -138,6 +138,10 @@ fn load_png(path: &Path) -> Option<IconPixels> {
     let file = std::fs::File::open(path).ok()?;
     let decoder = png::Decoder::new(file);
     let mut reader = decoder.read_info().ok()?;
+    let (w, h) = reader.info().size();
+    if w.max(h) > 4096 {
+        return None;
+    }
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).ok()?;
     buf.truncate(info.buffer_size());
