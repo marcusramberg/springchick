@@ -65,6 +65,14 @@ in
 
     waybar.enable = lib.mkEnableOption "waybar with springchick's example config (extras/waybar)";
 
+    bar.enable =
+      lib.mkEnableOption ''
+        sc-bar, springchick's status bar and the sheet of controls pulled
+        down from it. Turn it off to run another bar''
+      // {
+        default = true;
+      };
+
     osk.enable =
       lib.mkEnableOption ''
         sc-osk, springchick's uinput on-screen keyboard. It takes the seat's
@@ -78,7 +86,8 @@ in
   config = lib.mkIf cfg.enable {
     environment = {
 
-      systemPackages = [ cfg.package ];
+      # bluetui: the bar's default long press on Bluetooth (`foot bluetui`).
+      systemPackages = [ cfg.package ] ++ lib.optional cfg.bar.enable pkgs.bluetui;
 
       sessionVariables.XDG_DATA_DIRS = [
         # mobi.phosh.FileSelector
@@ -177,6 +186,24 @@ in
       after = [ "springchick.service" ];
       serviceConfig = {
         ExecStart = "${cfg.package}/bin/sc-osk";
+        Restart = "on-failure";
+      };
+    };
+
+    systemd.user.services.sc-bar = lib.mkIf cfg.bar.enable {
+      description = "springchick status bar";
+      # Long-press commands (foot, nmtui) need the login PATH.
+      enableDefaultPath = false;
+      wantedBy = [ "springchick.service" ];
+      # The compositor too: restarted alone, it would find the bar still
+      # running, start nothing, and the bar then exits with its connection.
+      partOf = [
+        "graphical-session.target"
+        "springchick.service"
+      ];
+      after = [ "springchick.service" ];
+      serviceConfig = {
+        ExecStart = "${cfg.package}/bin/sc-bar";
         Restart = "on-failure";
       };
     };

@@ -21,6 +21,8 @@
   expat,
   zlib,
   xwayland,
+  wireplumber,
+  glib,
   src ? ../.,
   version ? "0.1.0",
 }:
@@ -163,6 +165,8 @@ rustPlatform.buildRustPackage {
     "sc-search"
     "-p"
     "sc-osk"
+    "-p"
+    "sc-bar"
   ];
 
   cargoTestFlags = [ "--workspace" ];
@@ -179,6 +183,11 @@ rustPlatform.buildRustPackage {
     wrapProgram $out/bin/sc-osk \
       --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}" \
       --prefix XDG_DATA_DIRS : "$out/share"
+
+    # wpctl for the volume, gsettings for dark mode.
+    wrapProgram $out/bin/sc-bar \
+      --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}" \
+      --prefix PATH : "${lib.makeBinPath [ wireplumber glib ]}"
 
     mkdir -p $out/share/springchick/predict
     ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: b64: ''

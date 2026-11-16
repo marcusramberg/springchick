@@ -120,3 +120,6 @@ site-build:
 # Warm up the devshell (builds nothing, just enters the environment)
 shell:
 	nix develop --command true
+
+vm-bar:
+	nix build .#checks.{{NIX_SYSTEM}}.vm-bar -L

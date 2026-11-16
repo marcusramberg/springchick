@@ -87,6 +87,8 @@ let
           ];
 
           programs.springchick.enable = true;
+          # The checks' coordinates predate the bar's strip.
+          programs.springchick.bar.enable = false;
           programs.springchick.settings.main.dpi = resolution.dpi;
 
           # virtio-gpu with an EDID advertising the phone mode, which find_output()

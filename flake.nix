@@ -76,6 +76,7 @@
           vm-pointer = import ./nix/vm-pointer-test.nix { inherit self pkgs; };
           vm-card-mask = import ./nix/vm-card-mask-test.nix { inherit self pkgs; };
           vm-osk-card = import ./nix/vm-osk-card-test.nix { inherit self pkgs; };
+          vm-bar = import ./nix/vm-bar-test.nix { inherit self pkgs; };
           vm-screenshots = import ./nix/vm-screenshots-test.nix { inherit self pkgs; };
         };
 
