@@ -4,6 +4,10 @@ Binary packages for postmarketOS/Alpine (`.apk`), Mobian/Debian (`.deb`) and
 Arch (`.pkg.tar.zst`), hosted in the Forgejo package registries on
 code.bas.es. NixOS is not packaged here — it has the flake.
 
+Every package ships `sc-bar`, the status bar and control sheet, with a user
+unit that starts with the compositor; `systemctl --user mask sc-bar.service`
+turns it off for another bar.
+
 Alpine gets a second package, `postmarketos-ui-springchick`: the apk equivalent
 of `nix/module.nix` (session dependencies + the wvkbd user unit), built from
 `packaging/nfpm-ui.yaml` by `package.sh`. Other distros do not have it — the

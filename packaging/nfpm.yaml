@@ -43,6 +43,12 @@ overrides:
     recommends:
       - xwayland
       - xdg-desktop-portal-gnome
+      # sc-bar: wpctl for the volume, gsettings for dark mode, and its
+      # long-press defaults (foot sh -c nmtui). Debian has no bluetui.
+      - wireplumber
+      - libglib2.0-bin
+      - foot
+      - network-manager
   apk:
     depends:
       - wayland-libs-client
@@ -62,6 +68,12 @@ overrides:
     recommends:
       - xorg-xwayland
       - xdg-desktop-portal-gnome
+      # sc-bar: see the deb list.
+      - wireplumber
+      - glib2
+      - foot
+      - networkmanager
+      - bluetui
 
 contents:
   - src: ${PKG_BIN}/springchick
@@ -70,6 +82,8 @@ contents:
     dst: /usr/bin/sc-search
   - src: ${PKG_BIN}/sc-osk
     dst: /usr/bin/sc-osk
+  - src: ${PKG_BIN}/sc-bar
+    dst: /usr/bin/sc-bar
   - src: ${PKG_BIN}/springchick-session
     dst: /usr/bin/springchick-session
   - src: nix/springchick.desktop
@@ -79,6 +93,9 @@ contents:
   # Inter is built into the binaries; the OFL travels with it.
   - src: crates/sc-fonts/Inter-LICENSE.txt
     dst: /usr/share/licenses/springchick/Inter-LICENSE.txt
+  # sc-bar's symbols are Lucide's.
+  - src: crates/sc-bar/LICENSE-lucide
+    dst: /usr/share/licenses/springchick/LICENSE-lucide
   - src: packaging/files/springchick-portals.conf
     dst: /usr/share/xdg-desktop-portal/springchick-portals.conf
 
@@ -89,6 +106,14 @@ contents:
     dst: /usr/lib/systemd/user/springchick.service
   - src: packaging/files/springchick-shutdown.target
     dst: /usr/lib/systemd/user/springchick-shutdown.target
+  # The status bar, on with the session on every distro. A .wants symlink: no
+  # user manager runs at install time to enable it. `systemctl --user mask
+  # sc-bar.service` makes room for another bar.
+  - src: packaging/files/sc-bar.service
+    dst: /usr/lib/systemd/user/sc-bar.service
+  - dst: /usr/lib/systemd/user/springchick.service.wants/sc-bar.service
+    type: symlink
+    src: ../sc-bar.service
   # cpuset delegation for [resources].bg_allowed_cpus; systemd's own
   # Delegate= list is replaced, not extended, so its four defaults repeat.
   - src: packaging/files/50-springchick-cpuset.conf

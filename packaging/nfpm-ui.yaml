@@ -38,8 +38,14 @@ depends:
   - gnome-keyring
   # Suspend/power-off from the shell's own keybinds.
   - polkit
-  # wpctl, which the volume keybinds shell out to.
+  # wpctl, which the volume keybinds and sc-bar's slider shell out to.
   - wireplumber
+  # sc-bar (in the main package): gsettings for dark mode, and the long-press
+  # defaults, `foot sh -c nmtui` on Wi-Fi. `foot bluetui` on Bluetooth is not
+  # pulled in: bluetui is in Alpine's testing repository only.
+  - glib
+  - foot
+  - networkmanager-tui
 
 contents:
   - src: packaging/files/wvkbd.service

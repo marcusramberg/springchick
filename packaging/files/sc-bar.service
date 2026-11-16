@@ -1,0 +1,16 @@
+[Unit]
+Description=springchick status bar
+Documentation=https://code.bas.es/marcus/springchick
+After=springchick.service
+# The compositor too: restarted alone, it would find the bar still running,
+# start nothing, and the bar then exits with its connection.
+PartOf=graphical-session.target springchick.service
+
+[Service]
+ExecStart=/usr/bin/sc-bar
+Restart=on-failure
+RestartSec=2
+
+[Install]
+# Not graphical-session.target: see wvkbd.service.
+WantedBy=springchick.service
