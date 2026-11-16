@@ -7,15 +7,18 @@
 //! smithay reports every `lock` request and treats whichever `SessionLocker`
 //! we confirm as the owner, so a second `lock` is refused and lock surfaces
 //! are only adopted from the owner. Otherwise any client could take over a
-//! locked session.
+//! locked session. A lock whose owner died goes only to another run of the
+//! same executable, so a restarted locker can let the user back in.
 //!
 //! `locked` may only be sent after a frame drawn under the lock is presented,
 //! so [`SessionLock::tick`] holds the confirmation one frame.
 
+use std::path::{Path, PathBuf};
+
 use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::DisplayHandle;
+use smithay::reexports::wayland_server::{DisplayHandle, Resource};
 use smithay::wayland::session_lock::{
     LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker,
 };
@@ -30,6 +33,17 @@ pub enum LockView {
     Surface,
     /// No surface yet, or the lock client died. Draw black.
     Blank,
+}
+
+/// Whether a client may take the lock: when nothing holds it, or when its
+/// owner died and the asker is the program the owner was.
+pub fn may_lock(
+    locked: bool,
+    owner_alive: bool,
+    owner: Option<&Path>,
+    asker: Option<&Path>,
+) -> bool {
+    !locked || (!owner_alive && owner.is_some() && owner == asker)
 }
 
 /// Split out so the locked-without-surface rule is testable.
@@ -51,6 +65,8 @@ pub struct SessionLock {
     surface: Option<LockSurface>,
     /// The `ext_session_lock_v1` that owns the lock; see [`SessionLock::owns`].
     owner: Option<ExtSessionLockV1>,
+    /// What the owner runs, read while it lives.
+    owner_exe: Option<PathBuf>,
 }
 
 impl SessionLock {
@@ -62,6 +78,7 @@ impl SessionLock {
             frames: 0,
             surface: None,
             owner: None,
+            owner_exe: None,
         }
     }
 
@@ -72,6 +89,10 @@ impl SessionLock {
 
     pub fn is_locked(&self) -> bool {
         self.locked
+    }
+
+    fn owner_alive(&self) -> bool {
+        self.owner.as_ref().is_some_and(Resource::is_alive)
     }
 
     /// A destroyed surface reads as absent.
@@ -91,9 +112,10 @@ impl SessionLock {
         self.pending.is_some()
     }
 
-    fn engage(&mut self, confirmation: SessionLocker) {
+    fn engage(&mut self, confirmation: SessionLocker, exe: Option<PathBuf>) {
         self.locked = true;
         self.owner = Some(confirmation.ext_session_lock().clone());
+        self.owner_exe = exe;
         self.pending = Some(confirmation);
         self.frames = 0;
     }
@@ -104,6 +126,7 @@ impl SessionLock {
         self.frames = 0;
         self.surface = None;
         self.owner = None;
+        self.owner_exe = None;
     }
 
     fn set_surface(&mut self, surface: LockSurface) {
@@ -149,13 +172,24 @@ impl SessionLockHandler for State {
     fn lock(&mut self, confirmation: SessionLocker) {
         // Confirming a second locker would hand the session to whoever asked last.
         // Dropping it sends `finished`.
-        if self.session_lock.is_locked() {
+        let exe = confirmation
+            .ext_session_lock()
+            .client()
+            .and_then(|c| c.get_credentials(&self.dh).ok())
+            .and_then(|c| std::fs::read_link(format!("/proc/{}/exe", c.pid)).ok());
+        let lock = &self.session_lock;
+        if !may_lock(
+            lock.locked,
+            lock.owner_alive(),
+            lock.owner_exe.as_deref(),
+            exe.as_deref(),
+        ) {
             warn!("refusing session lock: already locked by another client");
             drop(confirmation);
             return;
         }
         info!("session lock requested");
-        self.session_lock.engage(confirmation);
+        self.session_lock.engage(confirmation, exe);
         // A half-finished gesture must not resume after unlock.
         self.cancel_gestures();
         self.needs_render = true;
@@ -213,6 +247,16 @@ mod tests {
     #[test]
     fn locked_with_surface_draws_it() {
         assert_eq!(lock_view(true, true), LockView::Surface);
+    }
+
+    #[test]
+    fn only_the_dead_owners_program_takes_a_lock_over() {
+        let (bar, other) = (Path::new("/bin/sc-bar"), Path::new("/bin/other"));
+        assert!(may_lock(false, false, None, Some(other)));
+        assert!(!may_lock(true, true, Some(bar), Some(bar)));
+        assert!(may_lock(true, false, Some(bar), Some(bar)));
+        assert!(!may_lock(true, false, Some(bar), Some(other)));
+        assert!(!may_lock(true, false, None, None));
     }
 
     #[test]

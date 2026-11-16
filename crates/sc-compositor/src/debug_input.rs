@@ -3,7 +3,8 @@
 //! through `input_common`.
 //!
 //! Gesture verbs answer `ok locked` and do nothing under a session lock.
-//! `key` still works: that's how a scripted password reaches the lock client.
+//! `key`, `tap` and `tswipe` still work: that's how a scripted password
+//! reaches the lock client.
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DebugCmd {
@@ -461,7 +462,7 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
             DebugCmd::Down(..)
                 | DebugCmd::Move(..)
                 | DebugCmd::Up
-                | DebugCmd::Swipe { .. }
+                | DebugCmd::Swipe { touch: false, .. }
                 | DebugCmd::Launch { .. }
                 | DebugCmd::Drag { .. }
         )
@@ -687,8 +688,8 @@ fn dispatch(state: &mut State, cmd: DebugCmd, reply: SyncSender<Reply>) {
 
 fn advance_gesture(state: &mut State) {
     let mut g = state.active_gesture.take().expect("advance with gesture");
-    // Locked mid-swipe: abandon it.
-    if state.session_lock.is_locked() {
+    // Locked mid-swipe: abandon it. A finger's goes on, to the lock surface.
+    if !g.touch && state.session_lock.is_locked() {
         let _ = g.reply.send("ok locked\n".into());
         return;
     }
