@@ -136,6 +136,8 @@ in
     systemd.user.services.springchick = {
       description = "springchick Wayland compositor";
       documentation = [ "https://github.com/marcusramberg/springchick" ];
+      # A switch that changed the unit would stop it, and the session with it.
+      restartIfChanged = false;
       # Started by springchick-session only.
       bindsTo = [ "graphical-session.target" ];
       before = [
