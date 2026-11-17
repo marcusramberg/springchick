@@ -732,10 +732,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         ) {
             uclamp.observe(dt, interval, Duration::from_nanos(1_000_000_000_000 / mhz));
         }
-        uclamp.update(drawing, now);
+        // Dark, `render` never settles the animations, so `drawing` alone
+        // would hold the floors until the panel is back.
+        let boosting = active_tick(blanked, app.drm.mirroring(), drawing);
+        uclamp.update(boosting, now);
         let (level, levels) = uclamp.boost();
         cpu_boost.set(level, levels);
-        gpu_boost.update(drawing, now);
+        gpu_boost.update(boosting, now);
         if drawing {
             app.render();
         }
