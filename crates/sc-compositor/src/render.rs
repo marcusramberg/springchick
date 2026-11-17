@@ -198,6 +198,7 @@ pub struct DrawCtx<'a> {
     pub scene: &'a Scene,
     pub app_surface: Option<&'a WlSurface>,
     pub skia: &'a mut SkiaGl,
+    pub wallpaper: &'a mut crate::wallpaper::Wallpaper,
     pub model: &'a ShellModel,
     pub icon_cache: &'a HashMap<String, IconPixels>,
     pub app_catalog: &'a HashMap<String, AppEntry>,
@@ -797,6 +798,7 @@ fn pass_background(
     // Everything here is in the view: layers are arranged there and the app
     // is drawn there.
     let damage = Rectangle::from_size(ctx.view(size));
+    let app_covers = plan.app_fills_screen && !plan.app_blurred;
     let mut frame = renderer
         .render(framebuffer, size, ctx.base())
         .map_err(SwapBuffersError::from)?;
@@ -809,6 +811,22 @@ fn pass_background(
     frame
         .clear(Color32F::new(r, g, b, 1.0), &[damage])
         .map_err(SwapBuffersError::from)?;
+    if let Some(tex) = ctx.wallpaper.texture().filter(|_| !app_covers) {
+        let src = crate::wallpaper::cover_src(tex.size(), damage.size);
+        frame
+            .render_texture_from_to(
+                tex,
+                src,
+                damage,
+                &[damage],
+                &[],
+                Transform::Normal,
+                1.0,
+                None,
+                &[],
+            )
+            .map_err(SwapBuffersError::from)?;
+    }
 
     for elements in &plan.below_elements {
         if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, elements, &[damage]) {
@@ -816,7 +834,7 @@ fn pass_background(
         }
     }
 
-    if plan.app_fills_screen && !plan.app_blurred {
+    if app_covers {
         if let Err(e) =
             draw_render_elements(&mut frame, ctx.app_scale, &plan.app_elements, &[damage])
         {
@@ -1516,6 +1534,7 @@ pub fn draw_scene(
 
     ctx.skia.sync_catalog_gen(ctx.catalog_gen);
     ctx.skia.set_view(ctx.rotation);
+    ctx.wallpaper.load(renderer, size);
 
     let mut plan = plan_scene(renderer, ctx);
     // Before drawing: reads the pre-draw commit counter.

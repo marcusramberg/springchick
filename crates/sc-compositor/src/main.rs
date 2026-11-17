@@ -54,6 +54,7 @@ mod touch;
 mod touch_viz;
 mod uclamp;
 pub mod ui_state;
+mod wallpaper;
 mod winit_backend;
 mod wlr_screencopy;
 

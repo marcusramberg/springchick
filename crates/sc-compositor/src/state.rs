@@ -407,6 +407,7 @@ pub(crate) struct State {
     pub landscape_hint: bool,
 
     pub skia: SkiaGl,
+    pub wallpaper: crate::wallpaper::Wallpaper,
     pub wayland_socket: String,
 
     pub last_pointer_pos: Option<(f32, f32)>,
@@ -493,6 +494,7 @@ impl State {
         });
         let card_radius = resolve_card_radius(config.card_radius, panel.as_ref());
         let show_touches = config.show_touches;
+        let wallpaper = crate::wallpaper::Wallpaper::new(config.wallpaper.clone());
         let save_screenshots = config.save_screenshots;
         let prefer_no_csd = config.prefer_no_csd;
         let natural_scroll = config.natural_scroll;
@@ -751,6 +753,7 @@ impl State {
                 .ok(),
             landscape_hint: false,
             skia: SkiaGl::new(theme),
+            wallpaper,
             wayland_socket,
             last_pointer_pos: None,
             last_touch_pos: None,
@@ -846,6 +849,7 @@ impl State {
         self.show_touches = config.show_touches;
         self.save_screenshots = config.save_screenshots;
         self.skia.theme = config.theme;
+        self.wallpaper = crate::wallpaper::Wallpaper::new(config.wallpaper.clone());
         self.skia.drop_backdrop(true);
         self.skia.drop_backdrop(false);
         self.needs_render = true;

@@ -48,6 +48,10 @@ rotation_fade_ms = 130
 # until the next reload.
 rotate_ui = false
 
+# A PNG or JPEG behind Home, scaled to cover the screen (absolute path or
+# ~/...). Unset: the [theme] background colour.
+# wallpaper = "~/Pictures/wallpaper.jpg"
+
 # Draw a marker under each touch/pointer contact, for demo recordings.
 show_touches = false
 

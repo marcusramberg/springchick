@@ -96,6 +96,8 @@ pub struct Config {
     /// from it. `None` (`"auto"`): the panel's corner radius, else
     /// [`DEFAULT_CARD_RADIUS`].
     pub card_radius: Option<f32>,
+    /// An image behind Home, over `[theme] background`.
+    pub wallpaper: Option<PathBuf>,
     /// For demo recordings.
     pub show_touches: bool,
     /// Also write each screenshot to `$XDG_PICTURES_DIR/Screenshots/`.
@@ -737,6 +739,7 @@ struct RawMain {
     dpi: Option<f64>,
     idle_blank_secs: Option<u64>,
     card_radius: Option<toml::Value>,
+    wallpaper: Option<PathBuf>,
     show_touches: Option<bool>,
     save_screenshots: Option<bool>,
     natural_scroll: Option<bool>,
@@ -885,6 +888,7 @@ impl Config {
             dpi,
             idle_blank_secs,
             card_radius,
+            wallpaper: main.wallpaper,
             show_touches,
             save_screenshots,
             natural_scroll,
@@ -1665,6 +1669,16 @@ mod tests {
         assert_eq!(x.layout, "us,de");
         assert_eq!(x.options, "grp:win_space_toggle");
         assert_eq!(x.variant, "");
+    }
+
+    #[test]
+    fn wallpaper_is_read_from_main_section() {
+        let p = |s: &str| Config::parse(s).wallpaper;
+        assert_eq!(p(""), None);
+        assert_eq!(
+            p("[main]\nwallpaper = \"~/w.jpg\"\n"),
+            Some(PathBuf::from("~/w.jpg"))
+        );
     }
 
     #[test]

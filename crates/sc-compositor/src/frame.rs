@@ -805,6 +805,7 @@ impl State {
             scene: &prep.scene,
             app_surface: prep.app_surface.as_ref(),
             skia: &mut self.skia,
+            wallpaper: &mut self.wallpaper,
             model: &self.model,
             icon_cache: &self.icon_cache,
             app_catalog: &self.app_catalog,
