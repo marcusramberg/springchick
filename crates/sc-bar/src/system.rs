@@ -2,7 +2,7 @@
 //! UPower for the battery, NetworkManager and ModemManager for the radios,
 //! BlueZ, logind and sysfs for the backlight and the torch, feedbackd for
 //! silent mode, power-profiles-daemon, MPRIS, `wpctl` for the volume,
-//! `gsettings` for dark mode, and springchick's IPC for rotation and the
+//! `gsettings` for dark mode, `nmcli` to start the hotspot, and springchick's IPC for rotation and the
 //! app shortcuts. A setting
 //! whose service isn't there is left out.
 //!
@@ -35,6 +35,8 @@ const NM: &str = "org.freedesktop.NetworkManager";
 const NM_PATH: &str = "/org/freedesktop/NetworkManager";
 const NM_DEVICE_TYPE_WIFI: u32 = 2;
 const NM_DEVICE_TYPE_MODEM: u32 = 8;
+const NM_WIRELESS: &str = "org.freedesktop.NetworkManager.Device.Wireless";
+const NM_802_11_MODE_AP: u32 = 3;
 const MM: &str = "org.freedesktop.ModemManager1";
 const MM_PATH: &str = "/org/freedesktop/ModemManager1";
 const UPOWER_PATH: &str = "/org/freedesktop/UPower";
@@ -336,6 +338,10 @@ fn read(buses: &Buses, tools: &Tools) -> System {
                 .map(|p| p == "power-saver"),
         ),
         (Toggle::Torch, Light::torch().map(|l| l.level() > 0)),
+        (
+            Toggle::Hotspot,
+            hotspot(buses).ok().flatten().map(|(_, on)| on),
+        ),
     ] {
         controls.toggles[toggle as usize] = on;
     }
@@ -399,10 +405,12 @@ fn wifi(buses: &Buses) -> Result<Option<u8>, dbus::Error> {
         if kind != NM_DEVICE_TYPE_WIFI {
             continue;
         }
-        let ap: Path = buses.sys(NM, &path).get(
-            "org.freedesktop.NetworkManager.Device.Wireless",
-            "ActiveAccessPoint",
-        )?;
+        let device = buses.sys(NM, &path);
+        // A hotspot's own access point is not a signal.
+        if device.get::<u32>(NM_WIRELESS, "Mode")? == NM_802_11_MODE_AP {
+            continue;
+        }
+        let ap: Path = device.get(NM_WIRELESS, "ActiveAccessPoint")?;
         if &*ap != "/" {
             return buses
                 .sys(NM, &ap)
@@ -411,6 +419,18 @@ fn wifi(buses: &Buses) -> Result<Option<u8>, dbus::Error> {
         }
     }
     Ok(None)
+}
+
+/// The first Wi-Fi device, and whether it is an access point.
+fn hotspot(buses: &Buses) -> Result<Option<(Path<'static>, bool)>, dbus::Error> {
+    let Some((path, _)) = nm_devices(buses)?
+        .into_iter()
+        .find(|(_, kind)| *kind == NM_DEVICE_TYPE_WIFI)
+    else {
+        return Ok(None);
+    };
+    let mode: u32 = buses.sys(NM, &path).get(NM_WIRELESS, "Mode")?;
+    Ok(Some((path, mode == NM_802_11_MODE_AP)))
 }
 
 fn cellular(buses: &Buses) -> Result<Option<u8>, dbus::Error> {
@@ -669,6 +689,19 @@ fn change_one(buses: &Buses, change: Change) -> Result<(), dbus::Error> {
         Change::Toggle(Toggle::Torch, on) => {
             if let Some(torch) = Light::torch() {
                 torch.set(buses, "leds", if on { torch.max } else { 0 })?;
+            }
+        }
+        // nmcli keeps one "Hotspot" connection, making it with a password of
+        // its own the first time. It returns once the access point is up.
+        Change::Toggle(Toggle::Hotspot, true) => {
+            run("nmcli", &["--wait", "15", "device", "wifi", "hotspot"])
+        }
+        Change::Toggle(Toggle::Hotspot, false) => {
+            if let Some((device, true)) = hotspot(buses)? {
+                let active: Path = buses
+                    .sys(NM, &device)
+                    .get("org.freedesktop.NetworkManager.Device", "ActiveConnection")?;
+                nm.method_call::<(), _, _, _>(NM, "DeactivateConnection", (active,))?;
             }
         }
         Change::Slider(Slider::Brightness, value) => {

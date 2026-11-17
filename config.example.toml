@@ -123,11 +123,14 @@ lock = true
 
 # A long press ([keybinds] long_press_ms) on a toggle runs its command with
 # `sh -c` and puts the sheet away. Toggles: airplane, cellular, wifi,
-# bluetooth, rotation_lock, silent, dark_mode, low_power, torch. "" clears one.
+# bluetooth, rotation_lock, silent, dark_mode, low_power, torch, hotspot.
+# "" clears one.
 [bar.long_press]
 # Through sh: started by foot itself, NixOS's nmtui only prints its usage.
 wifi = "foot sh -c nmtui"
 bluetooth = "foot bluetui"
+# The shared network's name, password and a QR code of both.
+hotspot = "foot sh -c 'nmcli device wifi show-password; read _'"
 
 # Shell colours, "#rrggbb". Shadows, dims, the pointer and the camera-flash pop
 # and stars stay fixed. The search app rereads these each time it opens; the

@@ -330,6 +330,7 @@ fn toggle_look(toggle: Toggle) -> (Symbol, u32) {
         Toggle::DarkMode => (Symbol::Moon, 0x5e5ce6),
         Toggle::LowPower => (Symbol::BatteryLow, YELLOW),
         Toggle::Torch => (Symbol::Flashlight, BLUE),
+        Toggle::Hotspot => (Symbol::Link, GREEN),
     }
 }
 

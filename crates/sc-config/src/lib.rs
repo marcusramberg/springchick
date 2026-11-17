@@ -160,7 +160,15 @@ pub struct Bar {
 
 impl Default for Bar {
     fn default() -> Self {
-        let long_press = [("wifi", "foot sh -c nmtui"), ("bluetooth", "foot bluetui")];
+        let long_press = [
+            ("wifi", "foot sh -c nmtui"),
+            ("bluetooth", "foot bluetui"),
+            // The network's name, password and a QR code of both.
+            (
+                "hotspot",
+                "foot sh -c 'nmcli device wifi show-password; read _'",
+            ),
+        ];
         Bar {
             long_press: long_press.map(|(k, v)| (k.into(), v.into())).into(),
             lock: true,
@@ -1612,7 +1620,7 @@ mod tests {
     fn bar_long_press_goes_over_the_defaults() {
         let bar = Config::parse("[bar.long_press]\nbluetooth = \"\"\ntorch = \"true\"\n").bar;
         let keys: Vec<&str> = bar.long_press.keys().map(String::as_str).collect();
-        assert_eq!(keys, ["torch", "wifi"]);
+        assert_eq!(keys, ["hotspot", "torch", "wifi"]);
         assert_eq!(Config::parse("").bar.long_press["wifi"], "foot sh -c nmtui");
     }
 

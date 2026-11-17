@@ -23,7 +23,7 @@ const ROWS: usize = 5;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Controls {
     /// By `Toggle as usize`.
-    pub toggles: [Option<bool>; 9],
+    pub toggles: [Option<bool>; 10],
     /// 0..1.
     pub brightness: Option<f32>,
     /// 0..1.
@@ -52,6 +52,8 @@ pub enum Toggle {
     DarkMode,
     LowPower,
     Torch,
+    /// Wi-Fi sharing the connection as an access point.
+    Hotspot,
 }
 
 impl Toggle {
@@ -67,6 +69,7 @@ impl Toggle {
             "dark_mode" => Toggle::DarkMode,
             "low_power" => Toggle::LowPower,
             "torch" => Toggle::Torch,
+            "hotspot" => Toggle::Hotspot,
             _ => return None,
         })
     }
@@ -216,16 +219,15 @@ impl Grid {
     }
 }
 
-/// The tiles under the toggles and sliders: the torch, dark mode, then the
-/// shortcuts.
+/// The tiles under the toggles and sliders: the torch, dark mode, the hotspot,
+/// then the shortcuts.
 fn last_rows(c: &Controls) -> Vec<Control> {
     let torch = Toggle::Torch.get(c).map(|_| Control::Toggle(Toggle::Torch));
-    let dark = Toggle::DarkMode
-        .get(c)
-        .map(|_| Control::Toggle(Toggle::DarkMode));
+    let tile = |t: Toggle| t.get(c).map(|_| Control::Toggle(t));
     torch
         .into_iter()
-        .chain(dark)
+        .chain(tile(Toggle::DarkMode))
+        .chain(tile(Toggle::Hotspot))
         .chain((0..c.shortcuts).map(Control::Shortcut))
         .collect()
 }
@@ -585,7 +587,7 @@ mod tests {
 
     fn all() -> Controls {
         Controls {
-            toggles: [Some(false); 9],
+            toggles: [Some(false); 10],
             brightness: Some(0.5),
             volume: Some(0.4),
             media: None,
