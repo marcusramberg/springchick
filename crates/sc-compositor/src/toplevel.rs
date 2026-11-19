@@ -472,10 +472,7 @@ impl State {
         };
         let target = (tid, tl.app_id.clone());
         self.history.push_foreground(tid);
-        let mut offset = sc_anim::Spring::new(0.0);
-        offset.stiffness = 280.0;
-        offset.damping = 32.0;
-        offset.retarget(-1.0);
+        let offset = sc_anim::Spring::zoom(0.0, -1.0);
         self.ui = ui_state::UiState::QuickSwitch {
             current,
             current_app,

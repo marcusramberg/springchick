@@ -7,6 +7,8 @@ use sc_layout::Rect;
 
 /// Logical px.
 pub const BAR_H: f32 = 28.0;
+/// Kept clear above the modules, for the power glyph and the status row.
+const TOP: f32 = 70.0;
 const TOUCH_SLOP: f32 = 8.0;
 /// Underdamped, so the sheet lands with some weight: it runs about 3% of
 /// the way it fell past the bottom, and comes back.
@@ -15,7 +17,7 @@ const DAMPING: f32 = 32.0;
 /// Seconds of release velocity that count towards open or closed.
 const PROJECT: f32 = 0.2;
 /// Gap between modules, in cells.
-const GAP: f32 = 0.19;
+const GAP: f32 = 0.24;
 const COLUMNS: f32 = 4.0;
 /// Before the last row wraps.
 const ROWS: usize = 5;
@@ -113,21 +115,21 @@ impl PowerAction {
     pub fn label(self) -> &'static str {
         match self {
             PowerAction::Sleep => "Sleep",
-            PowerAction::LogOut => "Log Out",
+            PowerAction::LogOut => "Log out",
             PowerAction::Restart => "Restart",
-            PowerAction::PowerOff => "Power Off",
+            PowerAction::PowerOff => "Power off",
         }
     }
 }
 
 /// What the sheet shows: its controls, the power menu over them, or
-/// Notification Center.
+/// Notification Centre.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
     #[default]
     Main,
     Power,
-    /// Notification Center, which `center` lays out and `main` hands touches.
+    /// Notification Centre, which `center` lays out and `main` hands touches.
     Notifications,
 }
 
@@ -164,6 +166,8 @@ pub enum Look {
     Media,
     /// A labelled circle on the power page.
     Power,
+    /// A bare glyph in the screen's corner.
+    Corner,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -176,7 +180,7 @@ pub struct Item {
 /// The module grid: 4 columns by 5 rows or more, sized to fit the screen either way up.
 #[derive(Clone, Copy)]
 pub struct Grid {
-    x: f32,
+    pub x: f32,
     y: f32,
     pub cell: f32,
 }
@@ -186,11 +190,11 @@ impl Grid {
         let span = |n: f32| n + (n - 1.0) * GAP;
         let rows = (ROWS - 1 + last_rows(c).len().div_ceil(COLUMNS as usize)) as f32;
         let cell = (w * 0.84 / span(COLUMNS))
-            .min((h - BAR_H - 32.0) / span(rows))
+            .min((h - TOP - 16.0) / span(rows))
             .min(92.0);
         Grid {
             x: (w - cell * span(COLUMNS)) / 2.0,
-            y: ((h - cell * span(rows)) * 0.35).max(BAR_H + 16.0),
+            y: ((h - cell * span(rows)) * 0.35 - 20.0).max(TOP),
             cell,
         }
     }
@@ -202,6 +206,23 @@ impl Grid {
             y: self.y + row * pitch,
             w: self.cell + (columns - 1.0) * pitch,
             h: self.cell + (rows - 1.0) * pitch,
+        }
+    }
+
+    /// Where the open sheet's status row sits, down from the bar: its centre,
+    /// just above the modules.
+    pub fn status_y(&self) -> f32 {
+        self.y - 20.0
+    }
+
+    /// The power glyph, where the bar has the battery: its ink ends at the
+    /// modules' right edge.
+    pub fn corner(&self, w: f32) -> Rect {
+        Rect {
+            x: w - self.x - 26.0,
+            y: 4.0,
+            w: 36.0,
+            h: BAR_H,
         }
     }
 
@@ -219,14 +240,12 @@ impl Grid {
     }
 }
 
-/// The tiles under the toggles and sliders: the torch, dark mode, the hotspot,
-/// then the shortcuts.
+/// The tiles under the toggles and sliders: the torch, the hotspot, then the
+/// shortcuts.
 fn last_rows(c: &Controls) -> Vec<Control> {
-    let torch = Toggle::Torch.get(c).map(|_| Control::Toggle(Toggle::Torch));
     let tile = |t: Toggle| t.get(c).map(|_| Control::Toggle(t));
-    torch
+    tile(Toggle::Torch)
         .into_iter()
-        .chain(tile(Toggle::DarkMode))
         .chain(tile(Toggle::Hotspot))
         .chain((0..c.shortcuts).map(Control::Shortcut))
         .collect()
@@ -263,6 +282,11 @@ pub fn items(w: f32, h: f32, c: &Controls, page: Page) -> Vec<Item> {
         }
         return items;
     }
+    items.push(Item {
+        control: Control::PowerMenu,
+        rect: grid.corner(w),
+        look: Look::Corner,
+    });
     let round = [
         Toggle::Airplane,
         Toggle::Cellular,
@@ -304,13 +328,12 @@ pub fn items(w: f32, h: f32, c: &Controls, page: Page) -> Vec<Item> {
             look: Look::Media,
         });
     }
-    // Power sits beside low power, when the rows above it are full.
     let tile = |t: Toggle| t.get(c).map(|_| Control::Toggle(t));
     let tiles = [
         tile(Toggle::RotationLock),
         tile(Toggle::Silent),
-        Some(Control::PowerMenu),
         tile(Toggle::LowPower),
+        tile(Toggle::DarkMode),
     ];
     for (i, control) in tiles.into_iter().flatten().enumerate() {
         items.push(Item {
@@ -392,6 +415,12 @@ impl Panel {
 
     pub fn is_animating(&self) -> bool {
         !self.shown.is_settled()
+    }
+
+    /// How far the status row has come down from the bar, 0..1: it is there
+    /// well before the sheet is.
+    pub fn lowered(&self) -> f32 {
+        (self.shown() / 0.6).min(1.0)
     }
 
     /// How far past the bottom the sheet has swung, as a share of the screen.
@@ -717,8 +746,8 @@ mod tests {
         assert_eq!(
             shown,
             [
-                Control::Toggle(Toggle::Wifi),
                 Control::PowerMenu,
+                Control::Toggle(Toggle::Wifi),
                 Control::Slider(Slider::Volume)
             ]
         );
@@ -740,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn the_power_tile_opens_a_page_that_a_tap_outside_leaves() {
+    fn the_power_glyph_opens_a_page_that_a_tap_outside_leaves() {
         let mut p = open();
         let c = all();
         assert_eq!(tap(&mut p, &c, Control::PowerMenu), None);
@@ -759,6 +788,16 @@ mod tests {
         p.touch_up(0.0, H, &c);
         assert_eq!(p.page, Page::Main);
         assert!(!p.is_animating(), "back to the controls, not closed");
+    }
+
+    #[test]
+    fn the_status_row_is_down_before_the_sheet_is() {
+        let mut p = Panel::pulled(5.0, Page::Main);
+        assert_eq!(p.lowered(), 0.0);
+        p.touch_move((350.0, H * 0.3), W, H, &all());
+        assert_eq!(p.lowered(), 0.5);
+        p.touch_move((350.0, H * 0.7), W, H, &all());
+        assert_eq!(p.lowered(), 1.0);
     }
 
     #[test]
@@ -809,10 +848,11 @@ mod tests {
             for i in [Page::Main, Page::Power]
                 .into_iter()
                 .flat_map(|page| items(w, h, &all, page))
+                .filter(|i| i.look != Look::Corner)
             {
                 let r = i.rect;
                 assert!(
-                    r.x >= 0.0 && r.x + r.w <= w && r.y >= BAR_H && r.y + r.h <= h,
+                    r.x >= 0.0 && r.x + r.w <= w && r.y >= TOP && r.y + r.h <= h,
                     "{:?} at {w}x{h}",
                     i.control
                 );

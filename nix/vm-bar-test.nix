@@ -72,13 +72,14 @@ mkTest {
     # The first tile, the rotation lock: springchick's own, so always there,
     # and on until tapped.
     assert "disabled" in dbg("rotation")
-    dbg("tap 124 618")
+    dbg("tap 122 579")
     machine.wait_until_succeeds(
         f"SPRINGCHICK_IPC_SOCK={IPC_SOCK} springchick ipc rotation | grep -q enabled", timeout=30
     )
 
-    # The power tile turns the sheet to its power page; a tap outside turns it back.
-    dbg("tap 281 618")
+    # The power glyph in the corner turns the sheet to its power page; a tap
+    # outside turns it back.
+    dbg("tap 646 36")
     machine.sleep(2)
     machine.screenshot("power")
     dbg("tap 360 1380")
@@ -92,7 +93,7 @@ mkTest {
     dbg("tap 600 20")
     machine.wait_until_succeeds(layers("ns=bar-sheet layer=overlay"), timeout=30)
     machine.sleep(2)
-    dbg("tswipe 269 315 269 315 2000")
+    dbg("tswipe 267 274 267 274 2000")
     machine.wait_until_succeeds("ls /tmp/long-press", timeout=30)
     machine.wait_until_succeeds(f"! {layers('ns=bar-sheet')}", timeout=30)
     machine.sleep(3)
@@ -111,7 +112,7 @@ mkTest {
     machine.screenshot("banner")
     machine.wait_until_succeeds(f"! {layers('ns=bar-banner')}", timeout=30)
 
-    # Pulled down on the left, the sheet is Notification Center: one app's
+    # Pulled down on the left, the sheet is Notification Centre: one app's
     # notifications stacked, another's below. A tap on a card opens it.
     notify("footclient", "Charles Babbage", "The cards are punched.", "--wait")
     notify("foot", "Ada Lovelace", "Bring the notes.")
@@ -137,8 +138,8 @@ mkTest {
     machine.screenshot("shortcuts")
     launches = "journalctl -b _SYSTEMD_USER_UNIT=springchick.service | grep -cF 'app_id=foot'"
     before = int(machine.execute(launches)[1])
-    # After the dark mode tile.
-    dbg("tap 281 933")
+    # After the hotspot tile.
+    dbg("tap 281 896")
     machine.wait_until_succeeds(f"test $({launches}) -gt {before}", timeout=30)
     machine.succeed(f"! {layers('ns=bar-sheet')}")
 

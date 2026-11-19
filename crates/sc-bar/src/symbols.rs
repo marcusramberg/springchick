@@ -1,5 +1,6 @@
 //! Lucide's symbols (ISC, `LICENSE-lucide`) as SVG path data on its 24 unit
-//! grid, with circles, rects and lines written out as paths.
+//! grid, with circles, rects and lines written out as paths. The flashlight
+//! is our own.
 
 use skia_safe::{paint, Canvas, Color, Paint, Path};
 
@@ -50,7 +51,7 @@ impl Symbol {
             Symbol::LogOut => "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4 M16 17l5-5-5-5 M21 12H9",
             Symbol::Restart => "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5",
             Symbol::BatteryLow => "M4 7h12a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z M22 11v2 M6 11v2",
-            Symbol::Flashlight => "M18 6c0 2-2 2-2 4v10a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2V10c0-2-2-2-2-4V2h12z M6 6h12 M12 12h.01",
+            Symbol::Flashlight => "M6.5 2.5h11V4h-11z M6.5 7.5h11c0 2.5-3 3-3 5.5v8h-5v-8c0-2.5-3-3-3-5.5z M10.25 13.5v4h3.5v-4z",
             Symbol::Link => "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71 M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71",
             Symbol::Sun => "M8 12a4 4 0 1 0 8 0a4 4 0 1 0-8 0 M12 2v2 M12 20v2 M4.93 4.93l1.41 1.41 M17.66 17.66l1.41 1.41 M2 12h2 M20 12h2 M6.34 17.66l-1.41 1.41 M19.07 4.93l-1.41 1.41",
             Symbol::Volume => "M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z M16 9a5 5 0 0 1 0 6 M19.364 18.364a9 9 0 0 0 0-12.728",
@@ -64,8 +65,25 @@ impl Symbol {
     fn filled(self) -> bool {
         matches!(
             self,
-            Symbol::Zap | Symbol::Play | Symbol::Pause | Symbol::SkipBack | Symbol::SkipForward
+            Symbol::Zap
+                | Symbol::Flashlight
+                | Symbol::Play
+                | Symbol::Pause
+                | Symbol::SkipBack
+                | Symbol::SkipForward
         )
+    }
+
+    /// Scale that makes the symbols look one size: they fill the grid unevenly.
+    /// Their lines stay one weight.
+    fn optical(self) -> f32 {
+        match self {
+            Symbol::Bluetooth => 0.86,
+            Symbol::RotationLock => 1.15,
+            Symbol::BatteryLow => 1.2,
+            Symbol::Sun => 1.1,
+            _ => 1.0,
+        }
     }
 
     /// `size` across, centred on `center`.
@@ -73,6 +91,7 @@ impl Symbol {
         let Some(path) = Path::from_svg(self.path()) else {
             return;
         };
+        let size = size * self.optical();
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         paint.set_color(color);
@@ -81,7 +100,7 @@ impl Symbol {
         } else {
             paint::Style::Stroke
         });
-        paint.set_stroke_width(2.0);
+        paint.set_stroke_width(2.0 / self.optical());
         paint.set_stroke_cap(paint::Cap::Round);
         paint.set_stroke_join(paint::Join::Round);
         canvas.save();

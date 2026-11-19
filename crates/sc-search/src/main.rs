@@ -14,6 +14,7 @@ use eframe::egui;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use provider::{Hit, Provider};
 use sc_catalog::AppEntry;
+use sc_config::style::{radius, wash};
 use sc_shell_model::{unix_now, FrecencyStore};
 
 /// Must match `SEARCH_APP_ID` in the compositor.
@@ -51,8 +52,8 @@ impl Palette {
         Palette {
             text: translucent(theme.foreground, 240),
             dim: translucent(theme.muted, 255),
-            field: translucent(theme.foreground, 22),
-            press: translucent(theme.foreground, 32),
+            field: translucent(theme.foreground, (wash::FILL * 255.0).round() as u8),
+            press: translucent(theme.foreground, (wash::PRESSED * 255.0).round() as u8),
             backdrop: translucent(theme.background, 170),
         }
     }
@@ -362,13 +363,13 @@ impl SearchApp {
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), 56.0), Sense::click());
                 let p = ui.painter();
                 if resp.is_pointer_button_down_on() {
-                    p.rect_filled(rect, 12.0, self.palette.press);
+                    p.rect_filled(rect, radius::PANEL, self.palette.press);
                 }
                 let glyph = Rect::from_center_size(
                     Pos2::new(rect.left() + 28.0, rect.center().y),
                     Vec2::splat(36.0),
                 );
-                p.rect_filled(glyph, 9.0, self.palette.field);
+                p.rect_filled(glyph, radius::PANEL, self.palette.field);
                 let ext = hit
                     .path
                     .extension()
@@ -385,7 +386,7 @@ impl SearchApp {
                     glyph.center(),
                     Align2::CENTER_CENTER,
                     tag,
-                    FontId::proportional(10.0),
+                    FontId::proportional(12.0),
                     self.palette.dim,
                 );
                 let x = glyph.right() + 14.0;
@@ -393,7 +394,7 @@ impl SearchApp {
                     Pos2::new(x, rect.center().y - 2.0),
                     Align2::LEFT_BOTTOM,
                     &hit.title,
-                    FontId::proportional(16.0),
+                    FontId::proportional(15.0),
                     self.palette.text,
                 );
                 p.text(
@@ -481,7 +482,7 @@ fn search_field(ui: &mut egui::Ui, query: &mut String, palette: Palette) -> egui
             .hint_text(egui::RichText::new("Search").color(palette.dim))
             .text_color(palette.text)
             .desired_width(f32::INFINITY)
-            .font(FontId::proportional(18.0)),
+            .font(FontId::proportional(17.0)),
     )
 }
 
@@ -561,15 +562,15 @@ mod tests {
     }
 
     #[test]
-    fn default_field_and_press_match_the_old_white_washes() {
+    fn default_field_and_press_are_the_shared_washes() {
         let palette = Palette::new(&sc_config::Theme::default());
         assert_eq!(
             palette.field,
-            Color32::from_rgba_premultiplied(22, 22, 22, 22)
+            Color32::from_rgba_premultiplied(46, 46, 46, 46)
         );
         assert_eq!(
             palette.press,
-            Color32::from_rgba_premultiplied(32, 32, 32, 32)
+            Color32::from_rgba_premultiplied(64, 64, 64, 64)
         );
     }
 

@@ -1,5 +1,5 @@
 //! springchick's status bar and the sheet pulled down from it: the controls
-//! on the right half, Notification Center on the left. Layer surfaces: the
+//! on the right half, Notification Centre on the left. Layer surfaces: the
 //! bar holds its strip at the top, the sheet covers the screen only while it
 //! is pulled or open, and a banner's strip is there while one shows. It is
 //! the notification daemon too, when no other is, and the lock screen, when
@@ -65,7 +65,7 @@ use wayland_protocols::wp::viewporter::client::{
 };
 
 use center::Center;
-use panel::{Change, Page, Panel, BAR_H};
+use panel::{Change, Grid, Page, Panel, BAR_H};
 use system::{Msg, System};
 
 /// A surface's fractional scale and the viewport that maps its buffer back.
@@ -97,6 +97,8 @@ struct Sheet {
     bounced: bool,
     /// Down over the whole screen, and the compositor told so.
     full: bool,
+    /// On screen with the status row, so the bar under it is drawn bare.
+    has_row: bool,
 }
 
 /// A banner's own strip under the bar, there while one shows.
@@ -221,7 +223,7 @@ struct App {
     system: System,
     worker: mpsc::Sender<Msg>,
     clock: String,
-    /// `Monday 16 November`, over Notification Center's clock.
+    /// `Monday 16 November`, over Notification Centre's clock.
     date: String,
     finger: Option<Finger>,
     epoch: Instant,
@@ -279,7 +281,7 @@ fn main() {
     let notify = notify::serve(move |event| {
         let _ = notes_tx.send(Update::Notify(event));
     })
-    .map_err(|e| eprintln!("sc-bar: no Notification Center: {e}"))
+    .map_err(|e| eprintln!("sc-bar: no Notification Centre: {e}"))
     .ok();
 
     let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor");
@@ -896,14 +898,18 @@ impl App {
         let Some((buffer, pixels)) = buffer(&mut self.pool, &self.shm, w, h) else {
             return;
         };
-        let mut scene = draw::Scene {
-            font: &mut self.font,
-            theme: &self.theme,
-            system: &self.system,
-            clock: &self.clock,
-            icons: &self.icons,
-        };
-        draw::bar(pixels, w, h, scale, &mut scene);
+        if self.sheet.as_ref().is_some_and(|s| s.has_row) {
+            pixels.fill(0);
+        } else {
+            let mut scene = draw::Scene {
+                font: &mut self.font,
+                theme: &self.theme,
+                system: &self.system,
+                clock: &self.clock,
+                icons: &self.icons,
+            };
+            draw::bar(pixels, w, h, scale, &mut scene);
+        }
         let surface = self.bar.wl_surface();
         surface.damage_buffer(0, 0, w, h);
         let _ = buffer.attach_to(surface);
@@ -942,6 +948,7 @@ impl App {
             drawn_edge: 0,
             bounced: false,
             full: false,
+            has_row: false,
         });
         self.panel = Some(Panel::pulled(y, page));
         let _ = self.worker.send(Msg::Opened);
@@ -959,9 +966,10 @@ impl App {
         self.panel = None;
         self.finger = None;
         self.center.rest();
+        self.draw_bar();
     }
 
-    /// Draws the sheet for a change to Notification Center's list, which is
+    /// Draws the sheet for a change to Notification Centre's list, which is
     /// drawn over the rest every frame: nothing else needs drawing again.
     fn redraw_list(&mut self) {
         if let Some(sheet) = &mut self.sheet {
@@ -1030,14 +1038,14 @@ impl App {
             bar,
             shift,
         );
+        let mut scene = draw::Scene {
+            font: &mut self.font,
+            theme: &self.theme,
+            system: &self.system,
+            clock: &self.clock,
+            icons: &self.icons,
+        };
         if panel.page == Page::Notifications {
-            let mut scene = draw::Scene {
-                font: &mut self.font,
-                theme: &self.theme,
-                system: &self.system,
-                clock: &self.clock,
-                icons: &self.icons,
-            };
             let notes = draw::Notes {
                 center: &self.center,
                 date: &self.date,
@@ -1047,6 +1055,8 @@ impl App {
             };
             let (edge, shift) = (edge as f32 / scale, shift as f32 / scale);
             draw::notification_list(pixels, w, h, scale, &mut scene, &notes, edge, shift);
+        } else {
+            draw::sheet_top(pixels, w, h, scale, panel, &mut scene);
         }
 
         let surface = sheet.layer.wl_surface();
@@ -1074,6 +1084,9 @@ impl App {
         } else {
             let top = edge.min(sheet.drawn_edge) - 1;
             surface.damage_buffer(0, top, w, edge.max(sheet.drawn_edge) + 1 - top);
+            // The status row moves on its own.
+            let grid = Grid::new(sheet.w as f32, sheet.h as f32, &self.system.controls);
+            surface.damage_buffer(0, 0, w, ((grid.status_y() + BAR_H) * scale) as i32);
         }
         sheet.drawn_edge = edge;
         sheet.dirty = false;
@@ -1355,7 +1368,7 @@ impl App {
         });
         let (w, h) = self.screen();
         match target {
-            // Notification Center comes down the left half, the controls the right.
+            // Notification Centre comes down the left half, the controls the right.
             Target::Bar if self.sheet.is_none() => {
                 let page = if at.0 < self.bar_w as f32 / 2.0 {
                     Page::Notifications
@@ -1566,6 +1579,9 @@ impl CompositorHandler for App {
             return;
         };
         sheet.frame_pending = false;
+        // Its first frame is up: the bar's row would show double under it.
+        let covered = !sheet.has_row && panel.page != Page::Notifications;
+        sheet.has_row |= covered;
         panel.step(dt);
         let mut list_moving = false;
         if panel.page == Page::Notifications {
@@ -1577,6 +1593,9 @@ impl CompositorHandler for App {
         } else if sheet.dirty || panel.is_animating() || list_moving {
             sheet.repaint |= list_moving;
             self.draw_sheet();
+        }
+        if covered {
+            self.draw_bar();
         }
         self.flush_outcomes();
     }

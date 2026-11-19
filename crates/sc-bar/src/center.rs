@@ -1,4 +1,4 @@
-//! Notification Center, like iOS 18's: what apps sent, newest first, an app's
+//! Notification Centre, like iOS 18's: what apps sent, newest first, an app's
 //! notifications stacked until its stack is tapped. A tap on a card opens it,
 //! a swipe aside clears it, and the header's button clears them all. A new
 //! one drops in as a banner while the sheet is up. Pure: `notify` receives
@@ -15,7 +15,7 @@ const REFERENCE_WIDTH: f32 = 402.0;
 const MAX_WIDTH: f32 = 430.0;
 const MARGIN: f32 = 14.5;
 pub const HEIGHT: f32 = 64.0;
-pub const RADIUS: f32 = 22.0;
+pub const RADIUS: f32 = sc_config::style::radius::CARD;
 const SPACING: f32 = 10.0;
 /// A card's width in points, on any screen.
 pub const CARD_WIDTH: f32 = REFERENCE_WIDTH - 2.0 * MARGIN;

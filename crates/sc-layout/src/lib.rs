@@ -98,14 +98,16 @@ pub enum Hit {
 /// Status bar area.
 const TOP_PAD: f32 = 0.04;
 const BAR_HEIGHT: f32 = 0.03;
-/// Logical px.
-pub const PILL_HEIGHT: f32 = 8.0;
+/// Of the short edge, so the compositor (physical px) and the lock screen
+/// (logical) draw one pill.
+const PILL_HEIGHT: f32 = 0.01;
+const PILL_WIDTH: f32 = 0.35;
 const DOCK_HEIGHT: f32 = 0.10;
 const DOTS_HEIGHT: f32 = 0.02;
 /// Each side.
 const H_MARGIN: f32 = 0.04;
-/// Physical px: 4 logical at the default dpi.
-const BUTTON_INSET: f32 = 12.0;
+/// Of the short edge.
+const BUTTON_INSET: f32 = 0.01;
 /// Of cell width.
 const ICON_SIZE_FRAC: f32 = 0.62;
 /// Of cell height.
@@ -135,27 +137,24 @@ pub fn bar_rect(width: f32, height: f32) -> Rect {
     }
 }
 
-pub fn pill_in_bar(bar: Rect) -> Rect {
-    let pill_w = bar.w * 0.35;
-    Rect {
-        x: bar.x + (bar.w - pill_w) / 2.0,
-        y: bar.y + (bar.h - PILL_HEIGHT) / 2.0,
-        w: pill_w,
-        h: PILL_HEIGHT,
-    }
-}
-
 pub fn pill_rect(width: f32, height: f32) -> Rect {
-    pill_in_bar(bar_rect(width, height))
+    let bar = bar_rect(width, height);
+    let (w, h) = (width * PILL_WIDTH, width.min(height) * PILL_HEIGHT);
+    Rect {
+        x: (width - w) / 2.0,
+        y: bar.y + (bar.h - h) / 2.0,
+        w,
+        h,
+    }
 }
 
 /// The pill inside a card's bottom bar band, scaled with the card so it
 /// doesn't jump as the card returns to fullscreen.
 pub fn pill_under(card: Rect, width: f32, height: f32) -> Rect {
     let scale = if width > 0.0 { card.w / width } else { 1.0 };
-    let pill_w = card.w * 0.35;
+    let pill_w = card.w * PILL_WIDTH;
     let band = height * BAR_HEIGHT * scale;
-    let pill_h = PILL_HEIGHT * scale;
+    let pill_h = width.min(height) * PILL_HEIGHT * scale;
     Rect {
         x: card.x + (card.w - pill_w) / 2.0,
         y: card.y + card.h - band + (band - pill_h) / 2.0,
@@ -323,12 +322,14 @@ impl Layout {
     /// Slides the arrange buttons sideways off camera cutouts (a corner
     /// punch-hole sits right where "Add" goes).
     pub fn avoid_cutouts(&mut self, cutouts: &[Rect]) {
+        // As far off the cutout as off the top.
+        let inset = self.add_button.y;
         for c in cutouts {
             if self.add_button.intersects(c) {
-                self.add_button.x = c.x + c.w + BUTTON_INSET;
+                self.add_button.x = c.x + c.w + inset;
             }
             if self.done_button.intersects(c) {
-                self.done_button.x = c.x - BUTTON_INSET - self.done_button.w;
+                self.done_button.x = c.x - inset - self.done_button.w;
             }
         }
     }
@@ -409,14 +410,15 @@ pub fn compute(width: f32, height: f32, page: usize, model: &ShellModel) -> Layo
     // Inside the top padding, so they never overlap grid icons; inset off
     // the panel's rounded corners.
     let button_w = width * 0.2;
+    let inset = width.min(height) * BUTTON_INSET;
     let add_button = Rect {
-        x: grid_left + BUTTON_INSET,
-        y: BUTTON_INSET,
+        x: grid_left + inset,
+        y: inset,
         w: button_w,
         h: gm.grid_top,
     };
     let done_button = Rect {
-        x: width - grid_left - BUTTON_INSET - button_w,
+        x: width - grid_left - inset - button_w,
         ..add_button
     };
 

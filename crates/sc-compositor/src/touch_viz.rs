@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Physical pixels, sized for the FP5 at dpi 3.
-const CONTACT_RADIUS: f32 = 55.0;
+/// Logical px; the draw scales it by `dpi`.
+const CONTACT_RADIUS: f32 = 18.0;
 
 const RIPPLE_DUR: Duration = Duration::from_millis(350);
 
@@ -24,6 +24,7 @@ const TRAIL_RADIUS_FRAC: f32 = 0.5;
 pub struct TouchMark {
     pub x: f32,
     pub y: f32,
+    /// Logical px, unlike the position.
     pub radius: f32,
     pub alpha: f32,
     /// Solid disc (held) vs. stroked ring (released).

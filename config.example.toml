@@ -145,9 +145,14 @@ surface = "#1c1e24"      # icon menu, folders, volume indicator
 foreground = "#ffffff"   # labels, dots, pill, and faint highlights and tiles
 muted = "#969ca8"        # secondary search text, muted volume, missing icons
 danger = "#ff786e"       # destructive menu rows, the mute slash
-badge = "#dc3232"        # the remove badge in arrange mode
+badge = "#dc3232"        # the remove badge, Power Off, a low battery, rotation lock and silent
 warning = "#ffaa3c"      # volume above 100%
 highlight = "#ffcd46"    # touch markers, screenshot glow
+# What a control is filled with when on, under a foreground symbol: keep
+# them dark enough for one (3:1).
+accent = "#0a84ff"       # Wi-Fi, Bluetooth, torch, dark mode; the keyboard popup's choice
+positive = "#1c943f"     # cellular, hotspot, a charging battery
+caution = "#c76a00"      # airplane mode, low power
 
 # On-screen keyboard colours, "#rrggbb". A bad value keeps its default.
 [osk]
@@ -158,7 +163,7 @@ pressed = "#9a9aa0"
 latched = "#e5e5ea"        # shift / modifier held
 ink = "#ffffff"            # labels and icons
 ink_on_latched = "#000000"
-selected = "#0a84ff"       # the chosen accent in a long-press popup
+# selected = "#0a84ff"     # the chosen accent in a long-press popup; unset: [theme] accent
 haptics = false            # vibrate on key down, via feedbackd
 
 # Per-app resource limits, set on each app's systemd scope on focus change.

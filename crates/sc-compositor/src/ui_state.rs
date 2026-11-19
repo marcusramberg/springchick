@@ -535,17 +535,11 @@ pub fn transition(state: &mut UiState, event: UiEvent) -> Effect {
                     minimize_spring(current_progress, current_progress)
                 } else if matches!(target, NavTarget::BackToApp) {
                     // 1 = the release pose (the caller puts it in `origin`), 0 = fullscreen.
-                    let mut s = Spring::new(1.0);
-                    s.stiffness = 280.0;
-                    s.damping = 32.0;
+                    let mut s = Spring::zoom(1.0, 0.0);
                     s.velocity = -tracker.velocity.y / current_progress.max(0.05);
-                    s.retarget(0.0);
                     s
                 } else {
-                    let mut s = Spring::new(current_progress);
-                    s.stiffness = 280.0;
-                    s.damping = 32.0;
-                    s
+                    Spring::new(current_progress).zoomed()
                 };
                 if !matches!(target, NavTarget::BackToApp) {
                     progress.velocity = -tracker.velocity.y; // upward velocity → positive progress

@@ -13,7 +13,7 @@
 - **Home grid.** Pages, drag-to-reorder, hide apps, dock. Long press for menu.
   Pull down to search.
 - **Status bar.** Pull down on the right for the controls (radios, sliders,
-  media, power, your own app shortcuts), on the left for Notification Center.
+  media, power, your own app shortcuts), on the left for Notification Centre.
   New notifications drop in as banners.
 - **Lock screen.** With `lock_on_blank`, a dark screen locks: clock and
   notifications, swipe up for the PIN pad.
@@ -42,7 +42,7 @@
 ![App library](./assets/library.png)
 ![Volume OSD over an app](./assets/volume.png)
 ![Control centre](./assets/control-centre.png)
-![Notification Center](./assets/notifications.png)
+![Notification Centre](./assets/notifications.png)
 ![A notification banner](./assets/banner.png)
 
 ## Install

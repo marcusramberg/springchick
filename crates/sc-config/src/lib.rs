@@ -3,6 +3,8 @@
 //! typo on a phone means a recovery session.
 #![forbid(unsafe_code)]
 
+pub mod style;
+
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use tracing::warn;
@@ -190,6 +192,10 @@ pub struct Theme {
     pub badge: u32,
     pub warning: u32,
     pub highlight: u32,
+    /// Fills that carry a `foreground` symbol: a control that is on.
+    pub accent: u32,
+    pub positive: u32,
+    pub caution: u32,
 }
 
 impl Default for Theme {
@@ -203,6 +209,9 @@ impl Default for Theme {
             badge: 0xdc3232,
             warning: 0xffaa3c,
             highlight: 0xffcd46,
+            accent: 0x0a84ff,
+            positive: 0x1c943f,
+            caution: 0xc76a00,
         }
     }
 }
@@ -260,6 +269,9 @@ fn parse_theme(raw: Option<RawTheme>) -> Theme {
         badge: parse_color("badge", t.badge.as_ref(), d.badge),
         warning: parse_color("warning", t.warning.as_ref(), d.warning),
         highlight: parse_color("highlight", t.highlight.as_ref(), d.highlight),
+        accent: parse_color("accent", t.accent.as_ref(), d.accent),
+        positive: parse_color("positive", t.positive.as_ref(), d.positive),
+        caution: parse_color("caution", t.caution.as_ref(), d.caution),
     }
 }
 
@@ -672,6 +684,9 @@ struct RawTheme {
     badge: Option<toml::Value>,
     warning: Option<toml::Value>,
     highlight: Option<toml::Value>,
+    accent: Option<toml::Value>,
+    positive: Option<toml::Value>,
+    caution: Option<toml::Value>,
     #[serde(flatten)]
     unknown: toml::Table,
 }
@@ -863,8 +878,13 @@ impl Config {
         }
         let theme = parse_theme(file.theme);
         let osk_haptics = file.osk.as_ref().and_then(|o| o.haptics).unwrap_or(false);
-        let osk = file.osk.map_or_else(OskColors::default, |o| {
-            let d = OskColors::default();
+        // The popup's chosen accent follows the theme unless `[osk]` says.
+        let osk = {
+            let o = file.osk.unwrap_or_default();
+            let d = OskColors {
+                selected: theme.accent,
+                ..OskColors::default()
+            };
             OskColors {
                 bg: parse_color("bg", o.bg.as_ref(), d.bg),
                 key: parse_color("key", o.key.as_ref(), d.key),
@@ -879,7 +899,7 @@ impl Config {
                 ),
                 selected: parse_color("selected", o.selected.as_ref(), d.selected),
             }
-        });
+        };
         let raw = file.keybinds.unwrap_or_default();
 
         let bindings = raw.binding.into_iter().filter_map(convert).collect();
@@ -1645,6 +1665,10 @@ mod tests {
         assert_eq!(c.bg, 0x102030);
         assert_eq!(c.ink, OskColors::default().ink);
         assert_eq!(c.key, OskColors::default().key);
+        let accent = "[theme]\naccent = \"#000001\"\n";
+        assert_eq!(Config::parse(accent).osk.selected, 0x000001);
+        let own = format!("{accent}[osk]\nselected = \"#000002\"\n");
+        assert_eq!(Config::parse(&own).osk.selected, 0x000002);
         assert!(!Config::parse("").osk_haptics);
         assert!(Config::parse("[osk]\nhaptics = true\n").osk_haptics);
     }

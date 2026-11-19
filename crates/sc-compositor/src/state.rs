@@ -752,7 +752,7 @@ impl State {
                 .map_err(|e| info!("no session bus ({e}); no haptics"))
                 .ok(),
             landscape_hint: false,
-            skia: SkiaGl::new(theme),
+            skia: SkiaGl::new(theme, dpi as f32),
             wallpaper,
             wayland_socket,
             last_pointer_pos: None,

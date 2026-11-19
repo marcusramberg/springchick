@@ -7,6 +7,7 @@ use skia_safe::{
 use crate::emoji::Picker;
 use crate::grid::{Clip, Key, Page, Placed};
 use crate::osk::{Latch, Osk, POPUP_CELL};
+use sc_config::style::radius;
 
 pub use sc_config::OskColors;
 
@@ -165,7 +166,7 @@ pub fn draw(
         };
         if shown {
             paint.set_color(fill);
-            canvas.draw_rrect(RRect::new_rect_xy(r, 6.0, 6.0), &paint);
+            canvas.draw_rrect(RRect::new_rect_xy(r, radius::KEY, radius::KEY), &paint);
         }
 
         if icon(canvas, p.key, r, fill, ink) {
@@ -253,11 +254,14 @@ pub fn draw(
     // Key-coloured like the keys under it; a shadow lifts it off them.
     paint.set_color(Color::from_argb(140, 0, 0, 0));
     canvas.draw_rrect(
-        RRect::new_rect_xy(panel.with_offset((0.0, 2.0)), 8.0, 8.0),
+        RRect::new_rect_xy(panel.with_offset((0.0, 2.0)), radius::PANEL, radius::PANEL),
         &paint,
     );
     paint.set_color(char_key);
-    canvas.draw_rrect(RRect::new_rect_xy(panel, 8.0, 8.0), &paint);
+    canvas.draw_rrect(
+        RRect::new_rect_xy(panel, radius::PANEL, radius::PANEL),
+        &paint,
+    );
     let font = &mut fonts.text;
     font.set_size(h * 0.5);
     let cap = font.metrics().1.cap_height;
@@ -266,7 +270,7 @@ pub fn draw(
         if i == popup.selected {
             paint.set_color(selected);
             canvas.draw_rrect(
-                RRect::new_rect_xy(cell.with_inset((2.0, 2.0)), 6.0, 6.0),
+                RRect::new_rect_xy(cell.with_inset((2.0, 2.0)), radius::KEY, radius::KEY),
                 &paint,
             );
         }

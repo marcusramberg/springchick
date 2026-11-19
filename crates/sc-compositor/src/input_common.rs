@@ -337,8 +337,7 @@ fn settle_quick_switch(state: &mut State) {
     {
         *c = commit;
         *releasing = true;
-        offset.stiffness = 280.0;
-        offset.damping = 32.0;
+        *offset = offset.zoomed();
         offset.retarget(target);
     }
 }

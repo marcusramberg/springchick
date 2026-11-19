@@ -20,13 +20,18 @@ impl Spring {
         }
     }
 
-    /// Shared tuning for icon-zoom and card open/close.
+    /// Shared tuning for icon-zoom, card open/close and settling a release.
     pub fn zoom(from: f32, to: f32) -> Self {
-        let mut s = Spring::new(from);
-        s.stiffness = 300.0;
-        s.damping = 35.0;
+        let mut s = Spring::new(from).zoomed();
         s.retarget(to);
         s
+    }
+
+    /// [`Self::zoom`]'s tuning on a spring already in flight.
+    pub fn zoomed(mut self) -> Self {
+        self.stiffness = 300.0;
+        self.damping = 35.0;
+        self
     }
 
     pub fn retarget(&mut self, target: f32) {

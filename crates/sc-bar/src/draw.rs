@@ -12,12 +12,10 @@ use crate::panel::{
 };
 use crate::symbols::Symbol;
 use crate::system::System;
+use sc_config::style::{radius, wash};
 
-const BLUE: u32 = 0x0a84ff;
-const GREEN: u32 = 0x30d158;
-const ORANGE: u32 = 0xff9f0a;
-const RED: u32 = 0xff453a;
-const YELLOW: u32 = 0xffd60a;
+/// An ON tile, and the filled part of a slider.
+const TILE_ON: f32 = 0.92;
 /// From the screen's edge to the clock and the battery.
 const PAD: f32 = 20.0;
 
@@ -227,19 +225,19 @@ fn runs(font: &Font, s: &str) -> Vec<(String, Font)> {
 }
 
 /// The clock on the left; signal, Wi-Fi and the battery on the right.
-fn status_row(canvas: &Canvas, w: f32, look: &mut Scene) {
+/// Centred on `y`, `pad` in from the screen's edges.
+fn status_row(canvas: &Canvas, w: f32, y: f32, pad: f32, look: &mut Scene) {
     let ink = rgba(look.theme.foreground, 1.0);
     let faint = rgba(look.theme.foreground, 0.35);
-    let y = BAR_H / 2.0;
-    text(canvas, look.font, look.clock, (PAD, y), 14.0, ink, false, w);
-    let mut right = w - PAD;
+    text(canvas, look.font, look.clock, (pad, y), 15.0, ink, false, w);
+    let mut right = w - pad;
     if let Some((percent, plugged_in)) = look.system.battery {
         let body = Rect::from_xywh(right - 2.5 - 23.0, y - 5.5, 23.0, 11.0);
         // Low stays red on the charger: the bolt says it is charging.
         let level = if percent <= 20.0 {
-            rgba(RED, 1.0)
+            rgba(look.theme.badge, 1.0)
         } else if plugged_in {
-            rgba(GREEN, 1.0)
+            rgba(look.theme.positive, 1.0)
         } else {
             ink
         };
@@ -315,22 +313,24 @@ fn canvas_over(pixels: &mut [u8], w: i32, h: i32, scale: f32, draw: impl FnOnce(
 /// `pixels`: ARGB8888 (little-endian BGRA), `w`×`h` buffer px at `scale`.
 pub fn bar(pixels: &mut [u8], w: i32, h: i32, scale: f32, look: &mut Scene) {
     canvas_for(pixels, w, h, scale, |canvas| {
-        status_row(canvas, w as f32 / scale, look)
+        status_row(canvas, w as f32 / scale, BAR_H / 2.0, PAD, look)
     });
 }
 
-fn toggle_look(toggle: Toggle) -> (Symbol, u32) {
+/// Its symbol, and its colour when on: the disc's fill, or the symbol's ink
+/// on a tile.
+fn toggle_look(toggle: Toggle, theme: &sc_config::Theme) -> (Symbol, u32) {
     match toggle {
-        Toggle::Airplane => (Symbol::Plane, ORANGE),
-        Toggle::Cellular => (Symbol::Signal, GREEN),
-        Toggle::Wifi => (Symbol::Wifi, BLUE),
-        Toggle::Bluetooth => (Symbol::Bluetooth, BLUE),
-        Toggle::RotationLock => (Symbol::RotationLock, RED),
-        Toggle::Silent => (Symbol::BellOff, RED),
-        Toggle::DarkMode => (Symbol::Moon, 0x5e5ce6),
-        Toggle::LowPower => (Symbol::BatteryLow, YELLOW),
-        Toggle::Torch => (Symbol::Flashlight, BLUE),
-        Toggle::Hotspot => (Symbol::Link, GREEN),
+        Toggle::Airplane => (Symbol::Plane, theme.caution),
+        Toggle::Cellular => (Symbol::Signal, theme.positive),
+        Toggle::Wifi => (Symbol::Wifi, theme.accent),
+        Toggle::Bluetooth => (Symbol::Bluetooth, theme.accent),
+        Toggle::RotationLock => (Symbol::RotationLock, theme.badge),
+        Toggle::Silent => (Symbol::BellOff, theme.badge),
+        Toggle::DarkMode => (Symbol::Moon, theme.accent),
+        Toggle::LowPower => (Symbol::BatteryLow, theme.caution),
+        Toggle::Torch => (Symbol::Flashlight, theme.accent),
+        Toggle::Hotspot => (Symbol::Link, theme.positive),
     }
 }
 
@@ -358,7 +358,30 @@ pub fn reveal(dst: &mut [u8], open: &[u8], stride: usize, edge: usize, bar: usiz
     dst[edge * stride..].fill(0);
 }
 
-/// The sheet all the way down; [`reveal`] makes each frame from it.
+/// The status row and the power glyph, over a frame [`reveal`] made: the row
+/// comes down from the bar as the sheet does, and the glyph takes its corner.
+pub fn sheet_top(pixels: &mut [u8], w: i32, h: i32, scale: f32, panel: &Panel, look: &mut Scene) {
+    canvas_over(pixels, w, h, scale, |canvas| {
+        let (w, h) = (w as f32 / scale, h as f32 / scale);
+        let down = panel.lowered();
+        // Not until the row is clear of it.
+        let mut alpha = ((down - 0.6) / 0.4).max(0.0);
+        if panel.pressed == Some(Control::PowerMenu) {
+            alpha *= 0.4;
+        }
+        let grid = Grid::new(w, h, &look.system.controls);
+        let corner = grid.corner(w);
+        let at = (corner.center_x(), corner.center_y());
+        Symbol::Power.draw(canvas, at, 20.0, rgba(look.theme.foreground, alpha));
+        // With the modules, past the bottom too, and in line with their edges.
+        let rest = grid.status_y() + panel.overshoot() * h;
+        let y = BAR_H / 2.0 + down * (rest - BAR_H / 2.0);
+        status_row(canvas, w, y, PAD + down * (grid.x - PAD), look);
+    });
+}
+
+/// The sheet all the way down, but for [`sheet_top`]; [`reveal`] makes each
+/// frame from it.
 pub fn sheet(pixels: &mut [u8], w: i32, h: i32, scale: f32, panel: &Panel, look: &mut Scene) {
     canvas_for(pixels, w, h, scale, |canvas| {
         let (w, h) = (w as f32 / scale, h as f32 / scale);
@@ -367,10 +390,11 @@ pub fn sheet(pixels: &mut [u8], w: i32, h: i32, scale: f32, panel: &Panel, look:
         // Dark glass, as the reference: black, whatever the theme.
         let module = fill(rgba(0x000000, 0.4));
         canvas.draw_color(rgba(look.theme.background, 0.5), None);
-        status_row(canvas, w, look);
 
         let grid = Grid::new(w, h, controls);
-        let radius = grid.cell * 0.28;
+        let radius = grid.cell * radius::CONTAINER;
+        // One size everywhere, so the symbols' lines are one weight.
+        let glyph = grid.cell * 0.42;
         let rounded = |r: sc_layout::Rect| RRect::new_rect_xy(skia(r), radius, radius);
         if panel.page == Page::Power {
             canvas.draw_rrect(rounded(grid.power()), &module);
@@ -412,25 +436,25 @@ pub fn sheet(pixels: &mut [u8], w: i32, h: i32, scale: f32, panel: &Panel, look:
             let pressed = panel.pressed == Some(item.control);
             match (item.look, item.control) {
                 (Look::Round, Control::Toggle(t)) => {
-                    let (symbol, color) = toggle_look(t);
+                    let (symbol, color) = toggle_look(t, look.theme);
                     let on = t.get(controls) == Some(true);
-                    let alpha = if pressed { 0.4 } else { 0.18 };
+                    let alpha = if pressed { wash::HELD } else { wash::FILL };
                     let color = if on { rgba(color, 1.0) } else { white(alpha) };
                     canvas.draw_circle(center, r.w / 2.0, &fill(color));
-                    symbol.draw(canvas, center, r.w * 0.5, white(1.0));
+                    symbol.draw(canvas, center, glyph, white(1.0));
                 }
                 (Look::Power, Control::Power(action)) => {
                     let (symbol, color) = match action {
                         PowerAction::Sleep => (Symbol::Moon, None),
                         PowerAction::LogOut => (Symbol::LogOut, None),
                         PowerAction::Restart => (Symbol::Restart, None),
-                        PowerAction::PowerOff => (Symbol::Power, Some(RED)),
+                        PowerAction::PowerOff => (Symbol::Power, Some(look.theme.badge)),
                     };
-                    let alpha = if pressed { 0.4 } else { 0.18 };
+                    let alpha = if pressed { wash::HELD } else { wash::FILL };
                     let color =
                         color.map_or(white(alpha), |c| rgba(c, if pressed { 0.7 } else { 1.0 }));
                     canvas.draw_circle(center, r.w / 2.0, &fill(color));
-                    symbol.draw(canvas, center, r.w * 0.45, white(1.0));
+                    symbol.draw(canvas, center, glyph, white(1.0));
                     let size = grid.cell * 0.19;
                     look.font.set_size(size);
                     let width = look.font.measure_str(action.label(), None).0;
@@ -446,17 +470,10 @@ pub fn sheet(pixels: &mut [u8], w: i32, h: i32, scale: f32, panel: &Panel, look:
                         w,
                     );
                 }
-                (Look::Tile, Control::PowerMenu) => {
-                    canvas.draw_rrect(rounded(r), &module);
-                    if pressed {
-                        canvas.draw_rrect(rounded(r), &fill(white(0.25)));
-                    }
-                    Symbol::Power.draw(canvas, center, r.w * 0.42, white(1.0));
-                }
                 (Look::Tile, Control::Shortcut(i)) => {
                     canvas.draw_rrect(rounded(r), &module);
                     if pressed {
-                        canvas.draw_rrect(rounded(r), &fill(white(0.25)));
+                        canvas.draw_rrect(rounded(r), &fill(white(wash::PRESSED)));
                     }
                     if let Some(image) = look.icons.get(i) {
                         let d = r.w * 0.62;
@@ -472,18 +489,18 @@ pub fn sheet(pixels: &mut [u8], w: i32, h: i32, scale: f32, panel: &Panel, look:
                     }
                 }
                 (Look::Tile, Control::Toggle(t)) => {
-                    let (symbol, color) = toggle_look(t);
+                    let (symbol, color) = toggle_look(t, look.theme);
                     let on = t.get(controls) == Some(true);
                     if on {
-                        canvas.draw_rrect(rounded(r), &fill(white(0.92)));
+                        canvas.draw_rrect(rounded(r), &fill(white(TILE_ON)));
                     } else {
                         canvas.draw_rrect(rounded(r), &module);
                         if pressed {
-                            canvas.draw_rrect(rounded(r), &fill(white(0.25)));
+                            canvas.draw_rrect(rounded(r), &fill(white(wash::PRESSED)));
                         }
                     }
                     let ink = if on { rgba(color, 1.0) } else { white(1.0) };
-                    symbol.draw(canvas, center, r.w * 0.42, ink);
+                    symbol.draw(canvas, center, glyph, ink);
                 }
                 (Look::Slider, Control::Slider(slider)) => {
                     let value = slider.get(controls).unwrap_or(0.0);
@@ -491,7 +508,7 @@ pub fn sheet(pixels: &mut [u8], w: i32, h: i32, scale: f32, panel: &Panel, look:
                     canvas.clip_rrect(rounded(r), ClipOp::Intersect, true);
                     canvas.draw_rect(skia(r), &module);
                     let level = Rect::from_xywh(r.x, r.y + r.h * (1.0 - value), r.w, r.h * value);
-                    canvas.draw_rect(level, &fill(white(0.92)));
+                    canvas.draw_rect(level, &fill(white(TILE_ON)));
                     canvas.restore();
                     let symbol = match slider {
                         Slider::Brightness => Symbol::Sun,
@@ -499,11 +516,11 @@ pub fn sheet(pixels: &mut [u8], w: i32, h: i32, scale: f32, panel: &Panel, look:
                     };
                     // Dark once the level reaches it.
                     let ink = if r.h * value > r.w * 0.5 {
-                        rgba(0x6e6e73, 1.0)
+                        rgba(look.theme.background, 1.0)
                     } else {
                         white(1.0)
                     };
-                    symbol.draw(canvas, (center.0, r.y + r.h - r.w * 0.5), r.w * 0.4, ink);
+                    symbol.draw(canvas, (center.0, r.y + r.h - r.w * 0.5), glyph, ink);
                 }
                 (Look::Media, Control::Media(action)) => {
                     let playing = controls.media.as_ref().is_some_and(|m| m.playing);
@@ -526,7 +543,7 @@ pub fn sheet(pixels: &mut [u8], w: i32, h: i32, scale: f32, panel: &Panel, look:
     });
 }
 
-/// What Notification Center draws from besides the [`Scene`].
+/// What Notification Centre draws from besides the [`Scene`].
 pub struct Notes<'a> {
     pub center: &'a Center,
     /// `Monday 16 November`.
@@ -549,7 +566,7 @@ pub fn icon_key(n: &Notification) -> &str {
     }
 }
 
-/// Where Notification Center's list starts on a sheet `w` wide: below the
+/// Where Notification Centre's list starts on a sheet `w` wide: below the
 /// date and the clock.
 pub fn list_view(w: f32, h: f32) -> View {
     let mut view = View { top: 0.0, w, h };
@@ -595,7 +612,7 @@ fn card(
     );
     let d = 38.0 * k;
     let icon = Rect::from_xywh(r.x + 13.5 * k, r.y + (center::HEIGHT * k - d) / 2.0, d, d);
-    let shape = RRect::new_rect_xy(icon, 9.0 * k, 9.0 * k);
+    let shape = RRect::new_rect_xy(icon, radius::PANEL * k, radius::PANEL * k);
     match notes.icons.get(icon_key(n)).and_then(Option::as_ref) {
         Some(image) => {
             canvas.save();
@@ -628,8 +645,7 @@ fn card(
     } else {
         &n.summary
     };
-    // Inter ships in one weight; the title is emboldened in place.
-    font.set_embolden(true);
+    font_weighted(font, true);
     text(
         canvas,
         font,
@@ -640,7 +656,7 @@ fn card(
         false,
         right - time_w - 10.0 * k - x,
     );
-    font.set_embolden(false);
+    font_weighted(font, false);
     let first = [n.body.lines().next().unwrap_or_default().to_string()];
     let body = if n.lines.is_empty() {
         &first[..]
@@ -670,16 +686,16 @@ fn card(
     for (b, (_, label)) in rects.iter().zip(n.buttons()) {
         canvas.draw_rrect(
             RRect::new_rect_xy(skia(*b), b.h / 2.0, b.h / 2.0),
-            &fill(ink(0.14)),
+            &fill(ink(wash::FILL)),
         );
-        font.set_size(14.0 * k);
+        font.set_size(15.0 * k);
         let width = font.measure_str(label, None).0.min(b.w - 16.0 * k);
         text(
             canvas,
             font,
             label,
             (b.center_x() - width / 2.0, b.center_y()),
-            14.0 * k,
+            15.0 * k,
             ink(0.95),
             false,
             width,
@@ -687,7 +703,7 @@ fn card(
     }
 }
 
-/// Notification Center all the way down, without its list: the date and the
+/// Notification Centre all the way down, without its list: the date and the
 /// clock. [`reveal`] makes each frame of the sheet's own movement from it,
 /// and [`notification_list`] goes over that.
 pub fn notifications(
@@ -701,7 +717,7 @@ pub fn notifications(
     canvas_for(pixels, w, h, scale, |canvas| {
         let (w, h) = (w as f32 / scale, h as f32 / scale);
         canvas.draw_color(rgba(look.theme.background, 0.5), None);
-        status_row(canvas, w, look);
+        status_row(canvas, w, BAR_H / 2.0, PAD, look);
         heading(canvas, w, h, look, notes.date);
     });
 }
@@ -715,7 +731,7 @@ fn heading(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, date: &str) {
         look.font,
         date,
         (w / 2.0, BAR_H + 34.0 * k),
-        19.0 * k,
+        20.0 * k,
         ink(0.85),
     );
     font_weighted(look.font, true);
@@ -774,7 +790,7 @@ fn list(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, notes: &Notes) {
     // The list scrolls under the clock, not over it.
     canvas.save();
     canvas.clip_rect(Rect::from_xywh(0.0, view.top - 6.0 * k, w, h), None, false);
-    let glass = |a: f32| rgba(0xffffff, 0.17 * a);
+    let glass = |a: f32| rgba(0xffffff, wash::FILL * a);
     for row in rows.iter().filter(|r| {
         let r = r.rect();
         r.y + r.h > 0.0 && r.y < h
@@ -786,9 +802,9 @@ fn list(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, notes: &Notes) {
                 text(
                     canvas,
                     look.font,
-                    "Notification Center",
+                    "Notification Centre",
                     (rect.x + 8.0 * k, y),
-                    21.0 * k,
+                    20.0 * k,
                     ink(1.0),
                     false,
                     rect.w,
@@ -893,11 +909,12 @@ pub fn lock(
                 15.0 * k,
                 ink(0.6),
             );
-            let pill = Rect::from_xywh(w / 2.0 - 67.0 * k, h - 13.0 * k, 134.0 * k, 5.0 * k);
-            canvas.draw_rrect(RRect::new_rect_xy(pill, 2.5 * k, 2.5 * k), &fill(ink(0.9)));
+            let pill = skia(sc_layout::pill_rect(w, h));
+            let r = pill.height() / 2.0;
+            canvas.draw_rrect(RRect::new_rect_xy(pill, r, r), &fill(ink(wash::PILL)));
             canvas.restore();
         }
-        status_row(canvas, w, look);
+        status_row(canvas, w, BAR_H / 2.0, PAD, look);
     });
 }
 
@@ -925,7 +942,7 @@ fn pad(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, lock: &Lock) {
         let pressed = lock.pressed() == Some(key);
         match key {
             Key::Digit(d) => {
-                let glass = rgba(0xffffff, if pressed { 0.45 } else { 0.17 });
+                let glass = rgba(0xffffff, if pressed { wash::HELD } else { wash::FILL });
                 canvas.draw_circle(c, lock::KEY_DIAMETER / 2.0 * k, &fill(glass));
                 centred(canvas, look.font, &d.to_string(), c, 34.0 * k, ink(1.0));
             }
@@ -946,8 +963,15 @@ fn pad(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, lock: &Lock) {
     }
 }
 
+/// Regular, or SemiBold for the few titles.
 fn font_weighted(font: &mut Font, bold: bool) {
-    font.set_embolden(bold);
+    thread_local! {
+        static FACES: [Option<skia_safe::Typeface>; 2] = [sc_fonts::INTER, sc_fonts::INTER_SEMIBOLD]
+            .map(|data| FontMgr::default().new_from_data(data, None));
+    }
+    if let Some(face) = FACES.with(|faces| faces[bold as usize].clone()) {
+        font.set_typeface(face);
+    }
 }
 
 /// The banner's surface: clear but for the card at `rect`.
@@ -986,7 +1010,7 @@ pub fn banner(
             n,
             notes,
             look.font,
-            rgba(0x2c2c2e, 0.96),
+            rgba(look.theme.surface, 0.96),
             1.0,
             1,
             0,

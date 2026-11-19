@@ -8,6 +8,7 @@ use sc_icons::IconPixels;
 use sc_layout::{self, IconSlot, Layout};
 use sc_shell_model::ShellModel;
 
+use sc_config::style::{radius, wash};
 use sc_config::Theme;
 use skia_safe::gpu::gl::{Format, FramebufferInfo, Interface};
 use skia_safe::gpu::{
@@ -86,8 +87,13 @@ fn blur_clip(
     })
 }
 
+/// Label and menu text, logical px.
+const TEXT_SIZE: f32 = 12.0;
+
 pub struct SkiaGl {
     pub theme: Theme,
+    /// `dpi`: sizes here are logical px times this.
+    scale: f32,
     context: Option<DirectContext>,
     gl_get_integerv: Option<GlGetIntegerv>,
     gl_finish: Option<GlFinish>,
@@ -97,6 +103,8 @@ pub struct SkiaGl {
     icon_images: HashMap<String, Image>,
     icon_gen: u64,
     font: Option<Font>,
+    /// SemiBold, for "Done".
+    bold: Option<Font>,
     draws: u64,
     /// Frosted Home at quarter size, `[app, deck]`; see `blur_backdrop_cached`.
     backdrop: [Option<(BackdropKey, Image)>; 2],
@@ -180,6 +188,11 @@ fn argb(alpha: u8, rgb: u32) -> Color {
     Color::from_argb(alpha, (rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
+/// `rgb` at one of the [`wash`] steps.
+fn washed(rgb: u32, alpha: f32) -> Color {
+    argb((alpha * 255.0).round() as u8, rgb)
+}
+
 /// `t` of the way to white, for the paler rim and glow around `highlight`.
 fn lighten(rgb: u32, t: f32) -> u32 {
     let [_, r, g, b] = rgb.to_be_bytes();
@@ -215,6 +228,7 @@ struct IconAssets<'a> {
     font: &'a Option<Font>,
     app_catalog: &'a HashMap<String, AppEntry>,
     theme: Theme,
+    scale: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -376,9 +390,10 @@ struct CachedSurface {
 }
 
 impl SkiaGl {
-    pub fn new(theme: Theme) -> Self {
+    pub fn new(theme: Theme, scale: f32) -> Self {
         Self {
             theme,
+            scale,
             context: None,
             gl_get_integerv: None,
             gl_finish: None,
@@ -388,6 +403,7 @@ impl SkiaGl {
             icon_images: HashMap::new(),
             icon_gen: 0,
             font: None,
+            bold: None,
             draws: 0,
             backdrop: [None, None],
             view: Rotation::None,
@@ -491,8 +507,15 @@ impl SkiaGl {
                 .new_from_data(sc_fonts::INTER, None)
                 .or_else(|| mgr.match_family_style("sans-serif", FontStyle::normal()))
                 .unwrap_or_else(|| mgr.legacy_make_typeface(None, FontStyle::normal()).unwrap());
-            let mut font = Font::from_typeface(typeface, 28.0);
+            let mut font = Font::from_typeface(typeface, TEXT_SIZE * self.scale);
             font.set_subpixel(true);
+            self.bold = mgr
+                .new_from_data(sc_fonts::INTER_SEMIBOLD, None)
+                .map(|face| {
+                    let mut bold = font.clone();
+                    bold.set_typeface(face);
+                    bold
+                });
             self.font = Some(font);
         }
     }
@@ -521,7 +544,7 @@ impl SkiaGl {
         canvas.translate((menu.anchor.0, menu.anchor.1));
         canvas.scale((scale, scale));
         canvas.translate((-menu.anchor.0, -menu.anchor.1));
-        draw_menu_panel(canvas, menu, &self.font, p, self.theme);
+        draw_menu_panel(canvas, menu, &self.font, p, self.theme, self.scale);
         canvas.restore();
 
         if let Some(ctx) = self.context.as_mut() {
@@ -598,6 +621,7 @@ impl SkiaGl {
             font: &self.font,
             app_catalog,
             theme: self.theme,
+            scale: self.scale,
         };
         for (i, slot) in folder.layout.apps.iter().enumerate() {
             draw_icon_slot(
@@ -709,6 +733,7 @@ impl SkiaGl {
             font: &self.font,
             app_catalog,
             theme: self.theme,
+            scale: self.scale,
         };
         let cues = |slot: &IconSlot| IconCues {
             pressed: pressed_app == Some(slot.app_id.as_str()),
@@ -736,7 +761,13 @@ impl SkiaGl {
             draw_icon_slot(canvas, slot, assets, cues(slot));
         }
 
-        draw_dots(canvas, &current_layout, page, self.theme.foreground);
+        draw_dots(
+            canvas,
+            &current_layout,
+            page,
+            self.theme.foreground,
+            self.scale,
+        );
 
         // No bar here: the chrome overlay draws the pill.
 
@@ -745,7 +776,8 @@ impl SkiaGl {
                 draw_remove_badge(canvas, slot, self.theme);
             }
             current_layout.avoid_cutouts(&view.cutouts);
-            draw_arrange_buttons(canvas, &current_layout, &self.font, self.theme.foreground);
+            let done = self.bold.as_ref().or(self.font.as_ref());
+            draw_arrange_buttons(canvas, &current_layout, done, self.theme.foreground);
 
             if view.over_dock {
                 draw_dock_highlight(canvas, &current_layout, self.theme.foreground);
@@ -1164,9 +1196,9 @@ impl SkiaGl {
         if marks.is_empty() {
             return;
         }
-        let highlight = self.theme.highlight;
+        let (highlight, scale) = (self.theme.highlight, self.scale);
         self.with_overlay_canvas(width, height, flip_y, |canvas| {
-            draw_touch_marks(canvas, marks, highlight);
+            draw_touch_marks(canvas, marks, highlight, scale);
         });
     }
 
@@ -1283,8 +1315,13 @@ fn draw_touch_marks(
     canvas: &skia_safe::Canvas,
     marks: &[crate::touch_viz::TouchMark],
     highlight: u32,
+    scale: f32,
 ) {
     for m in marks {
+        let m = &crate::touch_viz::TouchMark {
+            radius: m.radius * scale,
+            ..*m
+        };
         let a = |x: f32| (x * m.alpha).round().clamp(0.0, 255.0) as u8;
         if m.filled {
             let mut fill = Paint::default();
@@ -1398,6 +1435,7 @@ fn draw_icon_slot(
         font,
         app_catalog,
         theme,
+        scale,
     } = assets;
     let IconCues {
         pressed,
@@ -1413,7 +1451,7 @@ fn draw_icon_slot(
     if pressed && launching.is_none() {
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
-        paint.set_color(argb(60, theme.foreground));
+        paint.set_color(washed(theme.foreground, wash::PRESSED));
         let pad = slot.icon_rect.w * 0.12;
         let rect = Rect::new(
             slot.icon_rect.x - pad,
@@ -1421,7 +1459,8 @@ fn draw_icon_slot(
             slot.icon_rect.x + slot.icon_rect.w + pad,
             slot.icon_rect.y + slot.icon_rect.h + pad,
         );
-        let rrect = RRect::new_rect_xy(rect, 24.0, 24.0);
+        let r = radius::PANEL * scale;
+        let rrect = RRect::new_rect_xy(rect, r, r);
         canvas.draw_rrect(rrect, &paint);
     }
 
@@ -1444,7 +1483,8 @@ fn draw_icon_slot(
     } else {
         let mut paint = Paint::default();
         paint.set_color(argb(115, theme.muted));
-        let rrect = RRect::new_rect_xy(icon_dst, 20.0, 20.0);
+        let r = radius::PANEL * scale;
+        let rrect = RRect::new_rect_xy(icon_dst, r, r);
         canvas.draw_rrect(rrect, &paint);
     }
 
@@ -1460,13 +1500,13 @@ fn draw_icon_slot(
         if let Some(f) = font {
             let mut paint = Paint::default();
             paint.set_color(argb(255, theme.foreground));
-            // Long names would run under their neighbours' labels.
-            let name = ellipsize(f, &entry.name, slot.label_rect.w);
+            // Long names would run under their neighbours' labels, or into them.
+            let name = ellipsize(f, &entry.name, slot.label_rect.w - 6.0 * scale);
             if let Some(blob) = TextBlob::new(&name, f) {
                 let text_width = f.measure_str(&name, None).0;
                 let x = slot.label_rect.x + (slot.label_rect.w - text_width) / 2.0;
                 let y = slot.label_rect.y + slot.label_rect.h * 0.75;
-                canvas.draw_text_blob(&blob, (x, y), &paint);
+                draw_label(canvas, &blob, (x, y), &paint, scale);
             }
         }
     }
@@ -1488,8 +1528,9 @@ fn draw_folder_tile(
     let rect = Rect::new(t.x, t.y, t.x + t.w, t.y + t.h);
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    paint.set_color(argb(56, theme.foreground));
-    canvas.draw_rrect(RRect::new_rect_xy(rect, t.w * 0.22, t.w * 0.22), &paint);
+    paint.set_color(washed(theme.foreground, wash::FILL));
+    let r = t.w * radius::CONTAINER;
+    canvas.draw_rrect(RRect::new_rect_xy(rect, r, r), &paint);
 
     for (r, app_id) in slot.preview.iter().zip(preview.iter()) {
         let dst = Rect::new(r.x, r.y, r.x + r.w, r.y + r.h);
@@ -1505,12 +1546,26 @@ fn draw_folder_tile(
             let text_width = f.measure_str(&slot.name, None).0;
             let x = slot.label_rect.x + (slot.label_rect.w - text_width) / 2.0;
             let y = slot.label_rect.y + slot.label_rect.h * 0.75;
-            canvas.draw_text_blob(&blob, (x, y), &paint);
+            draw_label(canvas, &blob, (x, y), &paint, assets.scale);
         }
     }
 }
 
-const MENU_FONT_SCALE: f32 = 1.15;
+/// A label over the wallpaper, on a hard shadow so a light one doesn't
+/// swallow it. Not blurred: there are dozens a frame.
+fn draw_label(
+    canvas: &skia_safe::Canvas,
+    blob: &TextBlob,
+    (x, y): (f32, f32),
+    paint: &Paint,
+    scale: f32,
+) {
+    let mut shadow = Paint::default();
+    shadow.set_color(Color::from_argb(110, 0, 0, 0));
+    canvas.draw_text_blob(blob, (x, y + scale), &shadow);
+    canvas.draw_text_blob(blob, (x, y), paint);
+}
+
 /// Fraction of the panel width.
 const MENU_TEXT_INSET_FRAC: f32 = 0.08;
 
@@ -1537,18 +1592,19 @@ fn draw_menu_panel(
     font: &Option<Font>,
     progress: f32,
     theme: Theme,
+    scale: f32,
 ) {
     let a = |alpha: f32| (alpha * progress).clamp(0.0, 255.0) as u8;
     let panel = &menu.layout.panel;
     let panel_rect = Rect::new(panel.x, panel.y, panel.x + panel.w, panel.y + panel.h);
-    let radius = (panel.w * 0.06).min(28.0);
+    let radius = radius::PANEL * scale;
 
     let mut shadow = Paint::default();
     shadow.set_anti_alias(true);
     shadow.set_color(Color::from_argb(a(90.0), 0, 0, 0));
     shadow.set_mask_filter(skia_safe::MaskFilter::blur(
         skia_safe::BlurStyle::Normal,
-        18.0,
+        6.0 * scale,
         false,
     ));
     canvas.draw_rrect(RRect::new_rect_xy(panel_rect, radius, radius), &shadow);
@@ -1564,12 +1620,12 @@ fn draw_menu_panel(
         if menu.pressed == Some(i) {
             let mut hl = Paint::default();
             hl.set_anti_alias(true);
-            hl.set_color(argb(a(50.0), theme.foreground));
+            hl.set_color(argb(a(255.0 * wash::PRESSED), theme.foreground));
             canvas.draw_rect(rect, &hl);
         }
         if i > 0 {
             let mut sep = Paint::default();
-            sep.set_color(argb(a(40.0), theme.foreground));
+            sep.set_color(argb(a(255.0 * wash::HAIRLINE), theme.foreground));
             let inset = row.w * 0.05;
             canvas.draw_rect(
                 Rect::new(row.x + inset, row.y, row.x + row.w - inset, row.y + 1.0),
@@ -1580,10 +1636,9 @@ fn draw_menu_panel(
             continue;
         };
         let Some(f) = font else { continue };
-        let f = f.with_size(f.size() * MENU_FONT_SCALE).unwrap_or(f.clone());
         let x = row.x + row.w * MENU_TEXT_INSET_FRAC;
-        let label = ellipsize(&f, label, row.w * (1.0 - 2.0 * MENU_TEXT_INSET_FRAC));
-        let Some(blob) = TextBlob::new(&label, &f) else {
+        let label = ellipsize(f, label, row.w * (1.0 - 2.0 * MENU_TEXT_INSET_FRAC));
+        let Some(blob) = TextBlob::new(&label, f) else {
             continue;
         };
         let mut paint = Paint::default();
@@ -1602,9 +1657,15 @@ fn draw_menu_panel(
     }
 }
 
-fn draw_dots(canvas: &skia_safe::Canvas, layout: &Layout, current_page: usize, foreground: u32) {
-    let dot_radius = 6.0_f32;
-    let dot_spacing = 20.0_f32;
+fn draw_dots(
+    canvas: &skia_safe::Canvas,
+    layout: &Layout,
+    current_page: usize,
+    foreground: u32,
+    scale: f32,
+) {
+    let dot_radius = 2.0 * scale;
+    let dot_spacing = 7.0 * scale;
     let total_width = layout.page_count as f32 * dot_spacing;
     let start_x = layout.dots_rect.x + (layout.dots_rect.w - total_width) / 2.0;
     let cy = layout.dots_rect.y + layout.dots_rect.h / 2.0;
@@ -1621,8 +1682,7 @@ fn draw_dots(canvas: &skia_safe::Canvas, layout: &Layout, current_page: usize, f
 fn draw_pill(canvas: &skia_safe::Canvas, pill: sc_layout::Rect, alpha: f32, foreground: u32) {
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    let a = (180.0 * alpha.clamp(0.0, 1.0)).round() as u8;
-    paint.set_color(argb(a, foreground));
+    paint.set_color(washed(foreground, wash::PILL * alpha.clamp(0.0, 1.0)));
 
     let rect = Rect::new(pill.x, pill.y, pill.x + pill.w, pill.y + pill.h);
     let radius = pill.h / 2.0;
@@ -1653,12 +1713,12 @@ fn draw_remove_badge(canvas: &skia_safe::Canvas, slot: &IconSlot, theme: Theme) 
 fn draw_arrange_buttons(
     canvas: &skia_safe::Canvas,
     layout: &Layout,
-    font: &Option<Font>,
+    font: Option<&Font>,
     foreground: u32,
 ) {
     let mut fill = Paint::default();
     fill.set_anti_alias(true);
-    fill.set_color(argb(60, foreground));
+    fill.set_color(washed(foreground, wash::PRESSED));
     let add = &layout.add_button;
     let radius = add.h * 0.3;
     let (cx, cy) = (add.x + radius, add.center_y());
@@ -1676,9 +1736,6 @@ fn draw_arrange_buttons(
     let Some(f) = font else {
         return;
     };
-    let mut f = f.clone();
-    f.set_size(f.size() * 1.15);
-    f.set_embolden(true);
     let done = &layout.done_button;
     let width = f.measure_str("Done", None).0;
     let (_, metrics) = f.metrics();
@@ -1687,7 +1744,7 @@ fn draw_arrange_buttons(
     let mut text = Paint::default();
     text.set_anti_alias(true);
     text.set_color(argb(255, foreground));
-    canvas.draw_str("Done", (done.x + done.w - width, y), &f, &text);
+    canvas.draw_str("Done", (done.x + done.w - width, y), f, &text);
 }
 
 fn draw_dock_highlight(canvas: &skia_safe::Canvas, layout: &Layout, foreground: u32) {
@@ -1696,7 +1753,7 @@ fn draw_dock_highlight(canvas: &skia_safe::Canvas, layout: &Layout, foreground: 
 
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    paint.set_color(argb(70, foreground));
+    paint.set_color(washed(foreground, wash::PRESSED));
     canvas.draw_rect(rect, &paint);
 }
 
@@ -1710,8 +1767,9 @@ fn draw_dock_frame(canvas: &skia_safe::Canvas, layout: &Layout, foreground: u32)
     paint.set_anti_alias(true);
     paint.set_style(skia_safe::paint::Style::Stroke);
     paint.set_stroke_width((z.h * 0.012).max(1.0));
-    paint.set_color(argb(48, foreground));
-    canvas.draw_round_rect(rect, z.h * 0.22, z.h * 0.22, &paint);
+    paint.set_color(washed(foreground, wash::HAIRLINE));
+    let r = z.h * radius::CONTAINER;
+    canvas.draw_round_rect(rect, r, r, &paint);
 }
 
 /// Skipped if the icon isn't uploaded yet.
