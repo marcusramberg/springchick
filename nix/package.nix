@@ -175,10 +175,11 @@ rustPlatform.buildRustPackage {
   cargoTestFlags = [ "--workspace" ];
 
   postInstall = ''
-    # `$out/bin` on PATH so the compositor can spawn `sc-search`.
+    # `$out/bin` on PATH so the compositor can spawn `sc-search`; gsettings
+    # for `wallpaper_light`.
     wrapProgram $out/bin/springchick \
       --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}" \
-      --prefix PATH : "${lib.makeBinPath [ xwayland ]}:$out/bin"
+      --prefix PATH : "${lib.makeBinPath [ xwayland glib ]}:$out/bin"
 
     wrapProgram $out/bin/sc-search \
       --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}"

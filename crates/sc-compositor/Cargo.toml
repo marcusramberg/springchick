@@ -65,6 +65,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 skia-safe = { version = "0.99", features = ["gl"] }
+# WebP wallpapers: the only prebuilt Skia with the codec is the all-features
+# one. Pure Rust, already in the tree.
+image-webp = "0.1"
 # Matches smithay's calloop (0.14); the `signals` feature enables SIGTERM
 # handling on the event loop we get via smithay::reexports::calloop (feature
 # unification). Not imported directly — see drm_backend's signal source.

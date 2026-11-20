@@ -2764,6 +2764,7 @@ version = "0.1.0"
 dependencies = [
  "calloop 0.14.5",
  "dbus",
+ "image-webp",
  "libc",
  "png 0.17.16",
  "rustix 1.1.4",

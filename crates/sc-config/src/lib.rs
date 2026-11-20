@@ -100,6 +100,8 @@ pub struct Config {
     pub card_radius: Option<f32>,
     /// An image behind Home, over `[theme] background`.
     pub wallpaper: Option<PathBuf>,
+    /// Replaces `wallpaper` while the colour scheme is light.
+    pub wallpaper_light: Option<PathBuf>,
     /// For demo recordings.
     pub show_touches: bool,
     /// Also write each screenshot to `$XDG_PICTURES_DIR/Screenshots/`.
@@ -755,6 +757,7 @@ struct RawMain {
     idle_blank_secs: Option<u64>,
     card_radius: Option<toml::Value>,
     wallpaper: Option<PathBuf>,
+    wallpaper_light: Option<PathBuf>,
     show_touches: Option<bool>,
     save_screenshots: Option<bool>,
     natural_scroll: Option<bool>,
@@ -909,6 +912,7 @@ impl Config {
             idle_blank_secs,
             card_radius,
             wallpaper: main.wallpaper,
+            wallpaper_light: main.wallpaper_light,
             show_touches,
             save_screenshots,
             natural_scroll,
@@ -1702,6 +1706,10 @@ mod tests {
         assert_eq!(
             p("[main]\nwallpaper = \"~/w.jpg\"\n"),
             Some(PathBuf::from("~/w.jpg"))
+        );
+        assert_eq!(
+            Config::parse("[main]\nwallpaper_light = \"/l.webp\"\n").wallpaper_light,
+            Some(PathBuf::from("/l.webp"))
         );
     }
 

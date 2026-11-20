@@ -1534,7 +1534,10 @@ pub fn draw_scene(
 
     ctx.skia.sync_catalog_gen(ctx.catalog_gen);
     ctx.skia.set_view(ctx.rotation);
-    ctx.wallpaper.load(renderer, size);
+    if ctx.wallpaper.load(renderer, size) {
+        ctx.skia.drop_backdrop(true);
+        ctx.skia.drop_backdrop(false);
+    }
 
     let mut plan = plan_scene(renderer, ctx);
     // Before drawing: reads the pre-draw commit counter.

@@ -494,7 +494,8 @@ impl State {
         });
         let card_radius = resolve_card_radius(config.card_radius, panel.as_ref());
         let show_touches = config.show_touches;
-        let wallpaper = crate::wallpaper::Wallpaper::new(config.wallpaper.clone());
+        let mut wallpaper = crate::wallpaper::Wallpaper::default();
+        wallpaper.set(config.wallpaper.clone(), config.wallpaper_light.clone());
         let save_screenshots = config.save_screenshots;
         let prefer_no_csd = config.prefer_no_csd;
         let natural_scroll = config.natural_scroll;
@@ -849,9 +850,8 @@ impl State {
         self.show_touches = config.show_touches;
         self.save_screenshots = config.save_screenshots;
         self.skia.theme = config.theme;
-        self.wallpaper = crate::wallpaper::Wallpaper::new(config.wallpaper.clone());
-        self.skia.drop_backdrop(true);
-        self.skia.drop_backdrop(false);
+        self.wallpaper
+            .set(config.wallpaper.clone(), config.wallpaper_light.clone());
         self.needs_render = true;
         self.idle = blank::Idle::new(config.idle_blank_secs, std::time::Instant::now());
         self.orientation_settle.set_hold(config.rotation_settle_ms);
