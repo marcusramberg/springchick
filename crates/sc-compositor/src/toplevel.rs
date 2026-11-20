@@ -603,8 +603,12 @@ impl State {
             let Some(slot) = slot else { continue };
             // A fullscreen app owns the whole view; the usable area is not its
             // size, turned or not. `configure_fullscreen` sizes it instead.
-            // Committed state: one mid-negotiation is still sized here.
-            if surface_is_fullscreen(&slot.surface) {
+            // Requested counts too: resizing one mid-negotiation would have it
+            // commit fullscreen at the usable size, short of the screen.
+            let entering = slot
+                .surface
+                .with_pending_state(|s| s.states.contains(xdg_toplevel::State::Fullscreen));
+            if entering || surface_is_fullscreen(&slot.surface) {
                 continue;
             }
             if !follow.contains(&Some(tid)) || self.frozen_toplevels.contains(&tid) {
