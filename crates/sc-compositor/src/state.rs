@@ -116,6 +116,8 @@ pub(crate) struct FramePrep {
     pub osd_view: Option<(f32, bool, f32)>,
     /// Post-screenshot sparkle progress, 0..1.
     pub screenshot_flash: Option<f32>,
+    /// Home's scale and alpha while it comes in after an unlock.
+    pub home_arrival: Option<(f32, f32)>,
     pub bar_alpha: f32,
     pub layers_below: layer_shell::RenderList,
     pub layers_above: layer_shell::RenderList,

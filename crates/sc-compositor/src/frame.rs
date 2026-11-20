@@ -420,6 +420,10 @@ impl State {
             (self.layers.regrow_pending(), "layer-regrow"),
             // The lock confirmation waits for a presented frame.
             (self.session_lock.needs_frame(), "session-lock"),
+            (
+                crate::session_lock::arrival(self.session_lock.unlocked_at, now).is_some(),
+                "unlock",
+            ),
             // A still finger sends no events, so the long-press timer needs frames.
             // Gated on `pointer_down`: a stale `icon_press` from a lost touch-up
             // would otherwise pin the loop on (battery).
@@ -732,6 +736,7 @@ impl State {
             frame_time,
             osd_view,
             screenshot_flash,
+            home_arrival: crate::session_lock::arrival(self.session_lock.unlocked_at, osd_now),
             bar_alpha,
             layers_below,
             layers_above,
@@ -819,6 +824,7 @@ impl State {
             frame_time: prep.frame_time,
             osd: prep.osd_view,
             screenshot_flash: prep.screenshot_flash,
+            home_arrival: prep.home_arrival,
             touches: &prep.touch_marks,
             cursor: prep.cursor,
             lock_view: prep.lock_view,

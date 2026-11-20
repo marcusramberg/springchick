@@ -698,6 +698,7 @@ impl SkiaGl {
             lift,
             shift,
             recede,
+            arrival,
         } = view;
         self.ensure_font();
         self.upload_missing_icons(icon_cache);
@@ -712,8 +713,15 @@ impl SkiaGl {
         let canvas = surface.canvas();
 
         // Save/restore so the cached surface's matrix doesn't accumulate.
-        canvas.save();
+        let saved = canvas.save();
         orient(canvas, view, width, height, flip_y);
+        if let Some((z, alpha)) = arrival {
+            let centre = (width as f32 / 2.0, height as f32 / 2.0);
+            canvas.translate(centre);
+            canvas.scale((z, z));
+            canvas.translate((-centre.0, -centre.1));
+            canvas.save_layer_alpha_f(None, alpha);
+        }
         // The lift's sign follows the flip.
         if lift != 0.0 || shift != 0.0 {
             canvas.translate((shift, if flip_y { lift } else { -lift }));
@@ -805,7 +813,7 @@ impl SkiaGl {
             );
         }
 
-        canvas.restore();
+        canvas.restore_to_count(saved);
 
         if let Some(ctx) = self.context.as_mut() {
             ctx.flush(None);

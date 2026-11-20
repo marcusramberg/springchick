@@ -146,6 +146,8 @@ pub struct HomeView<'a> {
     pub lift: f32,
     pub shift: f32,
     pub recede: Option<crate::scene::HomeRecede>,
+    /// Scale and alpha while Home comes in after an unlock.
+    pub arrival: Option<(f32, f32)>,
 }
 
 /// Tiles are page-local; `x_offset` slides them with the pages.
@@ -221,6 +223,7 @@ pub struct DrawCtx<'a> {
     /// `(level, muted, alpha)`.
     pub osd: Option<(f32, bool, f32)>,
     pub screenshot_flash: Option<f32>,
+    pub home_arrival: Option<(f32, f32)>,
     /// Physical coords.
     pub touches: &'a [crate::touch_viz::TouchMark],
     /// Physical px.
@@ -872,6 +875,7 @@ fn pass_home(size: Size<i32, Physical>, ctx: &mut DrawCtx<'_>, plan: &ScenePlan)
         lift: scene.home_lift,
         shift: scene.home_shift,
         recede: scene.home_recede,
+        arrival: ctx.home_arrival,
     };
     let v = ctx.view(size);
     ctx.skia.draw_home(v.w, v.h, ctx.skia_flip_y, &view);
@@ -1527,6 +1531,10 @@ pub fn draw_scene(
     size: Size<i32, Physical>,
     ctx: &mut DrawCtx<'_>,
 ) -> Result<Vec<Rectangle<i32, Physical>>, SwapBuffersError> {
+    if ctx.wallpaper.load(renderer, size) {
+        ctx.skia.drop_backdrop(true);
+        ctx.skia.drop_backdrop(false);
+    }
     // Before planning, so no client content can reach the framebuffer.
     if ctx.lock_view != crate::session_lock::LockView::Unlocked {
         return draw_locked(renderer, framebuffer, size, ctx);
@@ -1534,10 +1542,6 @@ pub fn draw_scene(
 
     ctx.skia.sync_catalog_gen(ctx.catalog_gen);
     ctx.skia.set_view(ctx.rotation);
-    if ctx.wallpaper.load(renderer, size) {
-        ctx.skia.drop_backdrop(true);
-        ctx.skia.drop_backdrop(false);
-    }
 
     let mut plan = plan_scene(renderer, ctx);
     // Before drawing: reads the pre-draw commit counter.
@@ -1569,8 +1573,8 @@ pub fn draw_scene(
     Ok(damage_hint)
 }
 
-/// Black plus the lock surface. Only the OSD, touch marks and cursor are
-/// kept; none shows session content. Always full damage.
+/// The lock surface over the wallpaper, or black without one. Only the OSD,
+/// touch marks and cursor are kept; none shows session content. Always full damage.
 fn draw_locked(
     renderer: &mut GlesRenderer,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
@@ -1598,11 +1602,37 @@ fn draw_locked(
     let mut frame = renderer
         .render(framebuffer, size, ctx.transform)
         .map_err(SwapBuffersError::from)?;
-    // Black, not the theme background: an idle-looking backdrop would hide a dead
-    // lock client.
+    // Black without a surface: an idle-looking backdrop would hide a dead
+    // lock client. Under one, what Home has, for a locker that leaves it
+    // showing (`sc-bar`).
+    let [_, r, g, b] = match ctx.lock_surface {
+        Some(_) => ctx.skia.theme.background.to_be_bytes(),
+        None => [0; 4],
+    }
+    .map(|c| c as f32 / 255.0);
     frame
-        .clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage])
+        .clear(Color32F::new(r, g, b, 1.0), &[damage])
         .map_err(SwapBuffersError::from)?;
+    if let Some(tex) = ctx
+        .wallpaper
+        .texture()
+        .filter(|_| ctx.lock_surface.is_some())
+    {
+        let src = crate::wallpaper::cover_src(tex.size(), size);
+        frame
+            .render_texture_from_to(
+                tex,
+                src,
+                damage,
+                &[damage],
+                &[],
+                Transform::Normal,
+                1.0,
+                None,
+                &[],
+            )
+            .map_err(SwapBuffersError::from)?;
+    }
     if let Err(e) = draw_render_elements(&mut frame, ctx.app_scale, &elements, &[damage]) {
         warn!(?e, "failed to draw lock surface");
     }

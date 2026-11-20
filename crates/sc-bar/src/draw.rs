@@ -718,14 +718,21 @@ pub fn notifications(
         let (w, h) = (w as f32 / scale, h as f32 / scale);
         canvas.draw_color(rgba(look.theme.background, 0.5), None);
         status_row(canvas, w, BAR_H / 2.0, PAD, look);
-        heading(canvas, w, h, look, notes.date);
+        heading(
+            canvas,
+            w,
+            h,
+            look,
+            notes.date,
+            rgba(look.theme.foreground, 1.0),
+        );
     });
 }
 
 /// The date over the clock.
-fn heading(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, date: &str) {
+fn heading(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, date: &str, ink: Color) {
     let k = list_view(w, h).k();
-    let ink = |a: f32| rgba(look.theme.foreground, a);
+    let ink = |a: f32| ink.with_a((ink.a() as f32 * a) as u8);
     centred(
         canvas,
         look.font,
@@ -872,8 +879,28 @@ fn list(canvas: &Canvas, w: f32, h: f32, look: &mut Scene, notes: &Notes) {
     canvas.restore();
 }
 
-/// The lock screen: the passcode pad, and over it the cover (the date, the
-/// clock and the notifications) as far up as it has been pushed.
+fn smoothstep(from: f32, to: f32, x: f32) -> f32 {
+    let t = ((x - from) / (to - from)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// `draw` at `alpha`, in a layer only while it is part-way.
+fn faded(canvas: &Canvas, alpha: f32, draw: impl FnOnce(&Canvas)) {
+    if alpha <= 0.0 {
+        return;
+    }
+    match alpha < 1.0 {
+        true => canvas.save_layer_alpha_f(None, alpha),
+        false => canvas.save(),
+    };
+    draw(canvas);
+    canvas.restore();
+}
+
+/// The lock screen over the compositor's wallpaper: the passcode pad fading
+/// in as the cover (the date, the clock and the notifications) is pushed up
+/// and fades out. `shown` fades all but the status row, which Home has
+/// too, once unlocked.
 #[allow(clippy::too_many_arguments)]
 pub fn lock(
     pixels: &mut [u8],
@@ -884,36 +911,47 @@ pub fn lock(
     notes: &Notes,
     lock: &Lock,
     hint: &str,
+    shown: f32,
 ) {
     canvas_for(pixels, w, h, scale, |canvas| {
         let (w, h) = (w as f32 / scale, h as f32 / scale);
         let k = list_view(w, h).k();
-        let ink = |a: f32| rgba(look.theme.foreground, a);
-        canvas.draw_color(rgba(look.theme.background, 1.0), None);
         let up = lock.reveal();
-        if up > 0.0 {
-            pad(canvas, w, h, look, lock);
-        }
-        if up < h {
-            canvas.save();
-            canvas.translate((0.0, -up));
-            canvas.clip_rect(Rect::from_xywh(0.0, 0.0, w, h), None, false);
-            canvas.draw_color(rgba(look.theme.background, 1.0), None);
-            heading(canvas, w, h, look, notes.date);
-            list(canvas, w, h, look, notes);
-            centred(
-                canvas,
-                look.font,
-                hint,
-                (w / 2.0 + lock.shake() * k, h - 40.0 * k),
-                15.0 * k,
-                ink(0.6),
-            );
-            let pill = skia(sc_layout::pill_rect(w, h));
-            let r = pill.height() / 2.0;
-            canvas.draw_rrect(RRect::new_rect_xy(pill, r, r), &fill(ink(wash::PILL)));
-            canvas.restore();
-        }
+        let gone = (up / h).clamp(0.0, 1.0);
+        faded(canvas, shown, |canvas| {
+            // No fill: the compositor's wallpaper shows through.
+            canvas.draw_color(rgba(look.theme.background, wash::SCRIM), None);
+            faded(canvas, smoothstep(0.2, 1.0, gone), |canvas| {
+                pad(canvas, w, h, look, lock)
+            });
+            faded(canvas, 1.0 - smoothstep(0.0, 0.6, gone), |canvas| {
+                canvas.translate((0.0, -up));
+                canvas.clip_rect(Rect::from_xywh(0.0, 0.0, w, h), None, false);
+                let pill = skia(sc_layout::pill_rect(w, h));
+                // Once as a shadow a pixel down, then in ink.
+                for (ink, dy) in [
+                    (rgba(look.theme.background, wash::SHADOW), k),
+                    (rgba(look.theme.foreground, 1.0), 0.0),
+                ] {
+                    let ink_a = |a: f32| ink.with_a((ink.a() as f32 * a) as u8);
+                    canvas.save();
+                    canvas.translate((0.0, dy));
+                    heading(canvas, w, h, look, notes.date, ink);
+                    centred(
+                        canvas,
+                        look.font,
+                        hint,
+                        (w / 2.0 + lock.shake() * k, h - 40.0 * k),
+                        15.0 * k,
+                        ink_a(0.6),
+                    );
+                    let r = pill.height() / 2.0;
+                    canvas.draw_rrect(RRect::new_rect_xy(pill, r, r), &fill(ink_a(wash::PILL)));
+                    canvas.restore();
+                }
+                list(canvas, w, h, look, notes);
+            });
+        });
         status_row(canvas, w, BAR_H / 2.0, PAD, look);
     });
 }

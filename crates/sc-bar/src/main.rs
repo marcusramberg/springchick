@@ -112,6 +112,9 @@ struct BannerSurface {
     dirty: bool,
 }
 
+/// How long the lock screen takes to fade off the wallpaper, seconds.
+const LEAVE: f64 = 0.2;
+
 /// The lock screen, there from the request until the PIN is right.
 struct Locked {
     hidpi: Option<Hidpi>,
@@ -123,8 +126,9 @@ struct Locked {
     frame_pending: bool,
     dirty: bool,
     pad: lock::Lock,
-    /// Unlocked before the compositor said `locked`: it goes then.
-    leaving: bool,
+    /// Unlocked, and fading out until then. It goes after that, once the
+    /// compositor has said `locked`.
+    leaving: Option<f64>,
     sensor: Sensor,
 }
 
@@ -429,6 +433,7 @@ fn main() {
             app.banner_tick = app.now();
             app.draw_banner();
         }
+        app.leave();
         if app.hold.is_some_and(|at| app.now() >= at) {
             app.hold = None;
             app.long_press();
@@ -440,11 +445,17 @@ fn main() {
         let Some(guard) = queue.prepare_read() else {
             continue;
         };
-        let wait = [app.hold, app.banner_hide_at]
-            .into_iter()
-            .flatten()
-            .map(|at| (at - app.now()).max(0.0))
-            .fold(next_minute as f64, f64::min);
+        let leaving = app.locked.as_ref().and_then(|l| l.leaving);
+        // Past it, the compositor's `locked` is what is waited for.
+        let wait = [
+            app.hold,
+            app.banner_hide_at,
+            leaving.filter(|&at| at > app.now()),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|at| (at - app.now()).max(0.0))
+        .fold(next_minute as f64, f64::min);
         let timeout = rustix::event::Timespec {
             tv_sec: wait as i64,
             tv_nsec: (wait.fract() * 1e9) as i64,
@@ -1112,7 +1123,7 @@ impl App {
         self.sensor_off();
         if let Some(locked) = &mut self.locked {
             locked.pad = lock::Lock::default();
-            locked.leaving = false;
+            locked.leaving = None;
             locked.sensor = Sensor::Idle;
             return self.redraw_lock(true);
         }
@@ -1139,7 +1150,7 @@ impl App {
             frame_pending: false,
             dirty: true,
             pad: lock::Lock::default(),
-            leaving: false,
+            leaving: None,
             sensor: Sensor::Idle,
         });
         if let Some(marker) = lock_marker() {
@@ -1147,13 +1158,23 @@ impl App {
         }
     }
 
+    /// Fades the lock screen off the wallpaper; [`Self::leave`] then unlocks.
     fn unlock(&mut self) {
+        let now = self.now();
+        if let Some(locked) = self.locked.as_mut().filter(|l| l.leaving.is_none()) {
+            locked.leaving = Some(now + LEAVE);
+            self.redraw_lock(true);
+        }
+    }
+
+    /// By the clock, not by frames: a dark panel shows none.
+    fn leave(&mut self) {
+        let now = self.now();
         // Dropped before `locked`, the compositor would stay locked alone.
-        if let Some(locked) = self.locked.take_if(|l| l.session.is_locked()) {
+        let gone = |l: &mut Locked| l.session.is_locked() && l.leaving.is_some_and(|at| now >= at);
+        if let Some(locked) = self.locked.take_if(gone) {
             locked.session.unlock();
             self.unlocked();
-        } else if let Some(locked) = &mut self.locked {
-            locked.leaving = true;
         }
     }
 
@@ -1246,7 +1267,7 @@ impl App {
         if locked.w == 0 {
             return;
         }
-        let scale = self.scale;
+        let (scale, now) = (self.scale, self.now());
         let surface = locked.surface.wl_surface();
         let (w, h) = self.sized(surface, &locked.hidpi, locked.w, locked.h);
         let Some((buffer, pixels)) = buffer(&mut self.pool, &self.shm, w, h) else {
@@ -1272,7 +1293,20 @@ impl App {
             Sensor::Missed => "Not recognised, try again",
             _ => "Swipe up to unlock",
         };
-        draw::lock(pixels, w, h, scale, &mut scene, &notes, &locked.pad, hint);
+        let shown = locked
+            .leaving
+            .map_or(1.0, |at| ((at - now) / LEAVE).clamp(0.0, 1.0) as f32);
+        draw::lock(
+            pixels,
+            w,
+            h,
+            scale,
+            &mut scene,
+            &notes,
+            &locked.pad,
+            hint,
+            shown,
+        );
         let surface = locked.surface.wl_surface();
         surface.damage_buffer(0, 0, w, h);
         locked.dirty = false;
@@ -1294,7 +1328,8 @@ impl App {
         locked.frame_pending = false;
         locked.pad.step(dt);
         self.center.step(dt, Some(view));
-        if locked.dirty || locked.pad.is_animating() || self.center.is_animating() {
+        let moving = locked.pad.is_animating() || locked.leaving.is_some();
+        if locked.dirty || moving || self.center.is_animating() {
             self.draw_lock();
         }
         self.flush_outcomes();
@@ -1384,7 +1419,7 @@ impl App {
                 }
             }
             Target::Lock => {
-                let Some(locked) = &mut self.locked else {
+                let Some(locked) = self.locked.as_mut().filter(|l| l.leaving.is_none()) else {
                     return;
                 };
                 // The bottom of the screen moves the cover, whatever is there.
@@ -1669,9 +1704,7 @@ impl LayerShellHandler for App {
 
 impl SessionLockHandler for App {
     fn locked(&mut self, _: &Connection, _: &QueueHandle<Self>, _: SessionLock) {
-        if self.locked.as_ref().is_some_and(|l| l.leaving) {
-            self.unlock();
-        }
+        self.leave();
     }
 
     /// Refused: another locker has the session.

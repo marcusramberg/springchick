@@ -12,6 +12,10 @@ pub mod wash {
     pub const HELD: f32 = 0.45;
     /// The home pill, on Home and on the lock screen.
     pub const PILL: f32 = 0.7;
+    /// `background` over the wallpaper, under the lock screen.
+    pub const SCRIM: f32 = 0.3;
+    /// `background` as the hard shadow of text straight on the wallpaper.
+    pub const SHADOW: f32 = 0.43;
 }
 
 /// Corner radii, logical px.

@@ -14,6 +14,7 @@
 //! so [`SessionLock::tick`] holds the confirmation one frame.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
@@ -26,6 +27,19 @@ use smithay::wayland::session_lock::{
 use tracing::{info, warn};
 
 use crate::state::State;
+
+const ARRIVE: Duration = Duration::from_millis(450);
+const ARRIVE_ZOOM: f32 = 0.12;
+
+/// Home coming in over the wallpaper after an unlock: its scale and alpha,
+/// `None` once it is there.
+pub fn arrival(unlocked: Option<Instant>, now: Instant) -> Option<(f32, f32)> {
+    let t = now.saturating_duration_since(unlocked?).as_secs_f32() / ARRIVE.as_secs_f32();
+    (t < 1.0).then(|| {
+        let p = sc_anim::ease_out_cubic(t);
+        (1.0 + ARRIVE_ZOOM * (1.0 - p), (p / 0.6).min(1.0))
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LockView {
@@ -67,6 +81,8 @@ pub struct SessionLock {
     owner: Option<ExtSessionLockV1>,
     /// What the owner runs, read while it lives.
     owner_exe: Option<PathBuf>,
+    /// Starts [`arrival`].
+    pub unlocked_at: Option<Instant>,
 }
 
 impl SessionLock {
@@ -79,6 +95,7 @@ impl SessionLock {
             surface: None,
             owner: None,
             owner_exe: None,
+            unlocked_at: None,
         }
     }
 
@@ -118,6 +135,7 @@ impl SessionLock {
         self.owner_exe = exe;
         self.pending = Some(confirmation);
         self.frames = 0;
+        self.unlocked_at = None;
     }
 
     fn release(&mut self) {
@@ -127,6 +145,7 @@ impl SessionLock {
         self.surface = None;
         self.owner = None;
         self.owner_exe = None;
+        self.unlocked_at = Some(Instant::now());
     }
 
     fn set_surface(&mut self, surface: LockSurface) {
@@ -242,6 +261,17 @@ mod tests {
     fn unlocked_draws_the_shell() {
         assert_eq!(lock_view(false, false), LockView::Unlocked);
         assert_eq!(lock_view(false, true), LockView::Unlocked);
+    }
+
+    #[test]
+    fn home_arrives_zoomed_and_clear_and_ends_at_rest() {
+        let t0 = Instant::now();
+        assert_eq!(arrival(None, t0), None);
+        assert_eq!(arrival(Some(t0), t0), Some((1.0 + ARRIVE_ZOOM, 0.0)));
+        let (scale, alpha) = arrival(Some(t0), t0 + ARRIVE / 2).unwrap();
+        assert!(scale > 1.0 && scale < 1.0 + ARRIVE_ZOOM / 2.0);
+        assert_eq!(alpha, 1.0);
+        assert_eq!(arrival(Some(t0), t0 + ARRIVE), None);
     }
 
     #[test]

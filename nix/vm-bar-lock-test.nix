@@ -7,6 +7,11 @@
 
 let
   inherit (import ./test-support.nix { inherit self pkgs; }) mkTest;
+
+  # Shows behind the lock screen, and is light enough to swallow bare text.
+  wallpaper = pkgs.runCommand "lock-wallpaper.png" { nativeBuildInputs = [ pkgs.imagemagick ]; } ''
+    magick -size 720x1440 gradient:'#ffffff'-'#8aadf4' $out
+  '';
 in
 mkTest {
   name = "springchick-bar-lock";
@@ -16,6 +21,7 @@ mkTest {
     {
       programs.springchick.bar.enable = lib.mkForce true;
       programs.springchick.settings.main.lock_on_blank = true;
+      programs.springchick.settings.main.wallpaper = "${wallpaper}";
       users.users.tester.password = "2580";
     };
 
@@ -61,8 +67,11 @@ mkTest {
     machine.sleep(2)
     machine.screenshot("lock")
 
-    dbg("tswipe 360 1400 360 500 200")
+    # Slowly, for a look at the cover fading into the pad.
+    machine.execute(f"SPRINGCHICK_IPC_SOCK={IPC_SOCK} springchick ipc tswipe 360 1400 360 500 4000 >&2 &")
     machine.sleep(2)
+    machine.screenshot("fade")
+    machine.sleep(4)
     machine.screenshot("pad")
     dbg("tap %d %d" % KEYS["2"])
     dbg("tap %d %d" % KEYS["ok"])
@@ -75,6 +84,8 @@ mkTest {
 
     enter("2580")
     wait_count("session unlocked", 1)
+    machine.sleep(2)
+    machine.screenshot("home")
 
     # Killed under its own lock, the bar comes back and takes it up again.
     machine.succeed("loginctl lock-sessions")
