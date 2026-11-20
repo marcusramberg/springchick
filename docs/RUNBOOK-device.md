@@ -180,7 +180,7 @@ trap cleanup EXIT
 echo "[stopping greetd]"; sudo systemctl stop greetd; sleep 3
 echo "[starting seatd]"; sudo "$SEATD" -g video >/tmp/seatd.log 2>&1 & sleep 1
 echo "[launching springchick — Ctrl-C to stop]"
-LIBSEAT_BACKEND=seatd SPRINGCHICK_BACKEND=drm SPRINGCHICK_PERF=1 \
+LIBSEAT_BACKEND=seatd SPRINGCHICK_BACKEND=drm RUST_LOG=info,springchick=debug \
   nix develop -c cargo run -p sc-compositor 2>&1 | tee /tmp/springchick-perf.log
 EOF
 chmod +x /tmp/sc-run.sh && /tmp/sc-run.sh
