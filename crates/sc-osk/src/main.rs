@@ -371,16 +371,31 @@ impl App {
         self.height = h;
     }
 
-    /// Key-row height and the blank band under it, from the output as it is
-    /// now. The compositor draws its home pill over that band.
-    fn size_for_output(&self) -> (u32, u32) {
-        let (out_w, out_h) = self
-            .output_state
+    fn output_size(&self) -> (i32, i32) {
+        self.output_state
             .outputs()
             .next()
             .and_then(|o| self.output_state.info(&o)?.logical_size)
-            .unwrap_or((400, 800));
-        let h = (out_w as f32 * 0.66).clamp(200.0, 320.0) as u32;
+            .unwrap_or((400, 800))
+    }
+
+    /// The keys keep their portrait width in landscape, centred, so they
+    /// keep their portrait height too.
+    fn keys_w(&self) -> u32 {
+        let (out_w, out_h) = self.output_size();
+        self.width.min(out_w.min(out_h) as u32)
+    }
+
+    fn keys_x(&self) -> f32 {
+        ((self.width - self.keys_w()) / 2) as f32
+    }
+
+    /// Key-row height and the blank band under it, from the output as it is
+    /// now. The compositor draws its home pill over that band.
+    fn size_for_output(&self) -> (u32, u32) {
+        let (out_w, out_h) = self.output_size();
+        let squash = if out_w > out_h { 0.8 } else { 1.0 };
+        let h = (out_w.min(out_h) as f32 * 0.66 * squash).clamp(200.0, 320.0) as u32;
         let inset = sc_layout::bar_rect(out_w as f32, out_h as f32).h as u32;
         (h, inset)
     }
@@ -428,12 +443,12 @@ impl App {
             layouts: self.layouts.len(),
         };
         self.picker
-            .set_area(grid::emoji_area(self.width as f32, self.height as f32));
+            .set_area(grid::emoji_area(self.keys_w() as f32, self.height as f32));
         self.grid = grid::layout(
             self.osk.page,
             self.osk.bar,
             self.osk.shift.on(),
-            self.width as f32,
+            self.keys_w() as f32,
             self.height as f32,
             &labels,
         );
@@ -449,6 +464,7 @@ impl App {
             self.width as i32 * self.scale,
             (self.height + self.inset) as i32 * self.scale,
         );
+        let keys_x = self.keys_x();
         let pool = self.pool.get_or_insert_with(|| {
             SlotPool::new((w * h * 4) as usize, &self.shm).expect("shm pool")
         });
@@ -460,6 +476,7 @@ impl App {
             w,
             h,
             self.scale as f32,
+            keys_x,
             &self.grid,
             &self.osk,
             (self.osk.page == Page::Emoji).then_some(&self.picker),
@@ -493,7 +510,7 @@ impl App {
             _ => Vec::new(),
         };
         let had_popup = self.osk.popup.is_some();
-        if self.osk.tick(self.now(), self.width as f32, variants) {
+        if self.osk.tick(self.now(), self.keys_w() as f32, variants) {
             if !had_popup && self.osk.popup.is_some() {
                 self.buzz();
             }
@@ -556,7 +573,7 @@ impl App {
         if words.is_empty() {
             return;
         }
-        let area = grid::bar_area(self.width as f32, self.height as f32);
+        let area = grid::bar_area(self.keys_w() as f32, self.height as f32);
         self.strip = suggest::strip(words, area);
     }
 
@@ -569,7 +586,7 @@ impl App {
     }
 
     fn touch_down(&mut self, id: i32, (x, y): (f64, f64)) {
-        let at = (x as f32, y as f32);
+        let at = (x as f32 - self.keys_x(), y as f32);
         if self.osk.page == Page::Emoji && self.picker.area().contains(at.0, at.1) {
             self.picker.down(id, at, self.now());
             return;
@@ -602,6 +619,7 @@ impl App {
     }
 
     fn touch_motion(&mut self, id: i32, (x, y): (f64, f64)) {
+        let x = x - self.keys_x() as f64;
         if self.picker.owns(id) {
             self.picker.motion(id, (x as f32, y as f32), self.now());
             self.draw();

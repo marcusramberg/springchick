@@ -98,12 +98,14 @@ fn draw_shaped(
 }
 
 /// `pixels`: ARGB8888 (little-endian BGRA), `w`×`h` buffer px at `scale`.
+/// The keys start `x` logical px in.
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
     pixels: &mut [u8],
     w: i32,
     h: i32,
     scale: f32,
+    x: f32,
     grid: &[Placed],
     osk: &Osk,
     picker: Option<&Picker>,
@@ -128,6 +130,7 @@ pub fn draw(
     let canvas = surface.canvas();
     canvas.clear(bg);
     canvas.scale((scale, scale));
+    canvas.translate((x, 0.0));
 
     let pressed: Vec<Key> = osk.pressed().collect();
     let mut paint = Paint::default();
