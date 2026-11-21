@@ -1,164 +1,67 @@
 # AGENTS.md
 
-## What this is
-
 springchick is an iOS-Springboard-style Wayland compositor for mainline Linux
-phones. It is a fused compositor: the shell UI (home grid, dock, gestures,
-animations, switcher) is drawn by Skia into the same EGL/GLES context Smithay
-uses to composite clients. There is no separate shell process.
+phones. It is a fused compositor: the shell UI is drawn by Skia into the same
+EGL/GLES context Smithay uses to composite clients. The bar, OSK and search
+are separate clients (`sc-bar`, `sc-osk`, `sc-search`).
 
 ## Build / test
 
-Everything must run inside the nix devshell. `rust-toolchain.toml` pins stable
-via rust-overlay, so a bare `cargo` tries to rustup-download a toolchain and
-fails. `sc-compositor` also needs native libs (libudev, libseat, pkg-config,
-libclang for skia bindgen).
+Everything runs inside the nix devshell; a bare `cargo` fails.
 
 ```bash
 nix develop --command bash -c 'cargo build -p sc-compositor'
 nix develop --command bash -c 'cargo test --workspace'
-nix develop --command bash -c 'cargo test -p sc-layout'          # single crate
 nix develop --command bash -c 'cargo test -p sc-compositor ui_state::'  # single module/test
 nix develop --command bash -c 'cargo check --tests'              # fast compile check
 ```
 
-`nix develop --command true` warms the devshell. A cold skia build is long, so build in the background or with a large timeout.
+A cold skia build is long, so build in the background or with a large timeout.
 
-Binary: `target/debug/springchick`. Backend chosen by `SPRINGCHICK_BACKEND` (`drm`, else winit).
-
-### VM tests (headless, real DRM path)
+VM checks exercise the real DRM path headless. They are listed in `flake.nix`:
 
 ```bash
 nix build .#checks.aarch64-linux.vm-boot -L
 ```
 
-The other checks are `vm-screenshots` (README images; `just screenshots` copies them to `assets/`), `vm-switcher`, `vm-dialog`, `vm-rotation`, `vm-arrange`, `vm-icon-menu`, `vm-library`, `vm-lock`, `vm-capture`, `vm-portal`, `vm-pointer`, `vm-card-mask`, `vm-osk-card`, `vm-bar` and `vm-bar-lock` (listed in `flake.nix`).
+Build the check matching `builtins.currentSystem`: cross-building runs rustc under qemu-user, which SIGSEGVs. `nix/package.nix` filters `src`, so edits under `nix/`, `tests/`, `docs/` don't rebuild the compositor.
 
-Build the check matching `builtins.currentSystem`. Cross-building runs the release tree under qemu-user emulation, which SIGSEGVs rustc. `nix/package.nix` filters `src` to `Cargo.toml`/`Cargo.lock`/`config.example.toml`/`crates/`, so edits under `nix/`, `tests/`, `docs/` don't rebuild the compositor.
+## Running / driving it
 
-### Running / driving it
-
-Use the `run-springchick` skill (`.claude/skills/run-springchick/SKILL.md`). It covers the nested-winit driver (`driver.sh`: build/up/client/send/shot/down), the interactive VM driver, and a long list of gotchas. Never `pkill foot`: the user's own terminal is a foot window, so kill by recorded PID only.
-
-A running compositor always listens on `$XDG_RUNTIME_DIR/springchick-ipc.sock`; drive it with `springchick ipc <verb>` (`tap X Y` (a real contact: routed to the client under it, else the shell), `swipe X1 Y1 X2 Y2 [MS]` (shell gestures only), `tswipe X1 Y1 X2 Y2 [MS]` (a real finger drag: scrolls the client under it), `key NAME [MS]`, `down/move/up`, `settle [MS]`, `launch APP_ID [new]`, `action NAME`, `reload`, `haptic [EVENT]` (a feedbackd event through the shell's own haptics, default `button-pressed`), `layers`, `busy` (what keeps the frame loop running right now, or `idle`: run it before restarting a compositor that draws with nothing moving), `shortcuts [APP_ID]` (the control sheet's app tiles; an id adds or removes it), `pill` (blink the home pill once, even on Home or under a covering layer: `sc-bar` sends it when its sheet reaches the bottom), `layout [N]`, `rotation [enable|disable]`, `record start PATH [SCALE]` / `record stop` (DRM only: every rendered frame through the V4L2 hardware H.264 encoder, see `record.rs`), `quit`). Works nested, in the VM, and on-device.
-
-`springchick ipc layers` dumps every layer surface and layer-rooted popup being composited (namespace, layer, logical geometry, the physical rect, buffer size, pending-map/slide state, anchor and exclusive zone), plus the usable area and regrow-guard state. Run it first when the screen shows something no client admits to, e.g. two on-screen keyboards from one wvkbd process.
-
-`springchick ipc reload` re-reads `config.toml` live: keybinds, `card_radius`, `show_touches`, `save_screenshots`, `prefer_no_csd` (next window to negotiate decorations), `lock_on_blank`, `natural_scroll` (next touchpad added), `idle_blank_secs` (countdown restarts), `rotation_settle_ms`/`rotation_fade_ms` (next turn), `rotate_ui`, `wallpaper`/`wallpaper_light` (the files are read again), `[xkb]` (the seat keymap), `[theme]`, and any `include`d file. `dpi`, `uclamp_min`, `gpu_min_mhz` and `vrr` are ignored on reload and need a restart.
-
-`reload` also rescans the app catalog (`.desktop` files + icons): newly installed apps land on Home, uninstalled ones leave pages/dock/hidden and lose their frecency stats, and the renderer's uploaded icon textures are dropped so re-themed icons repaint. The catalog rescans itself too: `catalog_watch.rs` inotify-watches every XDG `applications/` dir, so a package-manager install/remove lands without an explicit reload. The watch has a 750 ms debounce, and the rescan runs on the compositor thread at the next event-loop wake, so a blanked screen costs nothing.
-
-`tests/integration.sh` is an older nested-winit smoke suite (sockets, multi-client, clean shutdown, keybinds); parts are being ported to the VM checks.
+- To start one (nested winit or VM), use the `run-springchick` skill.
+- To drive or inspect a running one, use `springchick ipc <verb>` (the `springchick-ipc` skill; verbs are in `ipc.rs`). `ipc layers` and `ipc busy` are the first things to run when the screen shows something unexplained or the frame loop won't idle.
+- Never kill by name (`pkill foot`, `pkill niri`): the user's terminal is a foot window and their desktop is niri. Kill by recorded PID only.
 
 ## Architecture
 
-Push logic into pure crates (no GPU, no Wayland deps) and unit-test it there. `sc-compositor` does integration and wiring only.
+Push logic into pure crates (no GPU, no Wayland deps) and unit-test it there. `sc-compositor` does integration and wiring only. The crates are `crates/sc-*`; the names say what they hold.
 
-```
-crates/
-  sc-anim/         Spring physics (critically damped, interruptible)
-  sc-bar/          Standalone status bar, pull-down control sheet (right half) and Notification Centre (left half, with banners) and the lock screen (`lock.rs`, PIN through PAM service `springchick`): layer-shell surfaces, `ext-session-lock-v1`, the `org.freedesktop.Notifications` server, D-Bus (UPower, NM, MM, BlueZ, logind, feedbackd, MPRIS)
-  sc-catalog/      .desktop scan/parse + field-code stripping + search ranking
-  sc-compositor/   The `springchick` binary
-  sc-config/       config.toml parsing: sections, `include`, [theme]. Lenient — bad entry dropped, rest applies
-  sc-haptics/      feedbackd haptics over the session bus (shell switcher line, OSK keys)
-  sc-icons/        Icon theme lookup + resvg → raw RGBA (no Skia dep)
-  sc-input/        Gesture recognizer (Tracker/Pt) + nav state machine (NavTarget)
-  sc-keys/         Short/long key-press timing rules (types live in sc-config)
-  sc-layout/       Pure geometry: (size, page, model) → icon rects, dock, dots, bar zone, icon-menu panel; + hit-testing
-  sc-panel/        Display shape (corner radius, camera cutouts) from bundled gmobile data, by device-tree compatible
-  sc-osk/          Standalone on-screen keyboard: layer-shell client typing through uinput, labels from the seat keymap, per-app bar
-  sc-predict/      OSK word completion + next-word: frequency word lists (AOSP LatinIME via scripts/aosp-wordlist.py) + learned words/pairs
-  sc-search/       Standalone pull-down search app (eframe/winit client): app grid + pluggable result providers (`provider.rs`, dsearch when installed)
-  sc-shell-model/  Grid/dock data model (4x6 pages, dock) + persist (state.toml)
-```
+In `sc-compositor`:
 
-Every crate except `sc-compositor`, `sc-search`, `sc-osk` (its `uinput.rs`) and `sc-bar` (`localtime_r`, `pam.rs`) is `#![forbid(unsafe_code)]`.
+- `state.rs` holds the central `State`; behaviour lives in sibling `impl State` modules.
+- `ui_state.rs` is a pure state machine: `transition(&mut state, event) -> Effect`. Side effects are returned, never performed there.
+- `scene.rs` is pure: `compute_scene(state, output_size) -> Scene`.
+- `render.rs` is the one render path both backends (`winit_backend.rs`, `drm_backend.rs`) share.
 
-### sc-compositor module map
+Every crate is `#![forbid(unsafe_code)]` unless it already has a reason not to be.
 
-`main.rs` is a thin entry point (arg dispatch to `ipc::run_client` or a backend). The real structure:
+## Invariants the code won't tell you
 
-- `state.rs`: the central `State`, holding every protocol state object, the shell model, input bookkeeping, and `FramePrep` (the backend-agnostic render snapshot). Behaviour lives in sibling `impl State` modules.
-- `handlers.rs`: smithay protocol handler impls and the `delegate_dispatch2!` call.
-- `toplevel.rs`: app window lifecycle, focus, decoration, rotation. A modal or parented dialog (`is_dialog`: `set_parent` or the modal xdg-dialog hint; GTK4 binds xdg_dialog_v1 to every window, so a plain hint means nothing) floats: its own height, width capped at the usable area (scaled down when GTK can't go narrower), centred over the app behind it, which is frosted; one too tall even then is maximized like an app. Any client-closed window hands the screen back to the MRU app; only the shell's own close goes Home.
-- `ui_state.rs`: the pure state machine, `transition(&mut state, event) -> Effect`. States are `Home`/`App`/`AppOpening`/`AppClosing`/`Grabbing`/`Settling`/`QuickSwitch`/`Switcher`. Side effects are returned, never performed here.
-- `scene.rs`: pure `compute_scene(state, output_size) -> Scene` (window transforms: scale, center, corner radius). No GPU deps.
-- `input_dispatch.rs` / `input_common.rs` / `touch.rs` / `keybinds.rs`: input normalization to `Pt` (0..1) and routing by `UiState`. `kbd_switch.rs` is held-modifier (Super+Tab) switching.
-- `arrange.rs`: home-grid reflow springs and arrange-mode drag. A long press on empty home background enters arrange. A long press on an icon opens `icon_menu.rs` instead: Open (or one row per window, by title, when the app has several), New window, Close, Add to/Remove from Control Centre, Remove.
-- `library.rs`: the app library, a derived last home page with one tile per category folder.
-- `launcher.rs` / `provenance.rs` / `resources.rs`: spawning apps (each in its own systemd scope), working out which launch a mapped window belongs to (xdg-activation token, then process ancestry), and per-app cgroup resource tiers. Window identity comes from the launch, not the client-reported `app_id`, so a `Terminal=true` entry isn't tagged `foot` and each PWA keeps its own id.
-- `frame.rs`: per-frame shell advance, popups, animation gating, producing `FramePrep`.
-- `render.rs`: the shared render path both backends use (clear, two-pass transformed app composite, Skia home/bar overlay, blur regions, rounded-rect texture shader).
-- `skia_gl.rs`: Skia-on-Smithay-GLES context sharing.
-- `winit_backend.rs` / `drm_backend.rs`: the two ways to present. `session.rs` is the Wayland display/socket plumbing they share, and `mirror.rs` is external-display mirroring on DRM.
-- `debug_input.rs` + `ipc.rs`: synthetic-input socket and its CLI client.
-- Protocol extras: `layer_shell.rs`, `popups.rs`, `idle_notify.rs`, `idle_inhibit.rs`, `gamma_control.rs`, `output_power.rs`, `background_effect.rs`, `content_type.rs`, `session_lock.rs`, `wlr_screencopy.rs`.
-- Shell and device bits: `switcher.rs`, `bar_hint.rs`, `osd.rs`, `touch_viz.rs`, `app_history.rs`, `rotation.rs` + `sensor.rs` (iio-sensor-proxy), `blank.rs`, `sleep.rs` (blank before suspend), `screenshot.rs`, `capture.rs`, `record.rs` (native recorder: GPU NV12 conversion into dmabufs a V4L2 M2M encoder imports, raw H.264 + `PATH.ts` frame times), `catalog_watch.rs`, `uclamp.rs`, `cpu_boost.rs`, `gpu_boost.rs`, `frame_stats.rs`.
-- Client pacing: `presentation.rs` (wp_presentation, with feedback answered from the DRM vblank, or after the swap on winit) and `pacing.rs` (wp_fifo + wp_commit_timing). Both are driven from `render.rs`'s frame-callback walk and hand the backend a `FrameSinks`. Its two halves are obligations: unanswered feedback hangs a client, and a signalled blocker still needs `pacing::clear_blockers` to apply the commit waiting on it.
-
-### Render pipeline (`render.rs`)
-
-1. Tick animations.
-2. Compute scene.
-3. Smithay pass 1: clear + fullscreen app (if not transitioning).
-4. Skia: home screen (if `scene.show_home`).
-5. Smithay pass 2: scaled app elements via `RescaleRenderElement` + `RelocateRenderElement` (if transitioning).
-6. Skia: bar overlay.
-7. Frame callbacks.
-8. Submit.
-
-### Skia/Smithay GLES sharing rules
-
-- `context.reset(None)` before any Skia draw (invalidates Skia's GL state cache).
-- `context.flush_and_submit()` after Skia draws (pixels must land before swap).
-- Cache the Skia `Surface` keyed on `(fboid, width, height)`; recreate only on change.
-- The DRM partial-damage fast path is off for any frame in which Skia drew (`SkiaGl::draw_count`), so overlays need no registration. Keep every Skia draw going through `ensure_surface`; a new non-Skia pass over a fullscreen app goes in `flip_damage`'s `only_app`.
-
-### Smithay dependency
-
-Pinned to upstream git (`github.com/Smithay/smithay.git`, rev `8a27023`) because crates.io lacks xkbcommon 0.9, which fixes wvkbd keymap loading. Protocol dispatch is one `smithay::delegate_dispatch2!(State)` in `handlers.rs`; upstream removed the per-protocol `delegate_*!` macros.
-
-Do not remove the `use_system_lib` feature. It selects libwayland-server over the pure-Rust `wayland-backend`. Several smithay role handlers post a protocol error from a surface pre-commit hook after the role object is gone (the "destroy role, attach nil, commit" teardown every Qt/quickshell client does). The Rust backend delivers that on the dead object and kills the client, which hit layer surfaces (Smithay#1979, dms panel close) and lock surfaces (`Committed before the first ack_configure.`, dms unlock). libwayland drops the error.
-
-libinput/DRM/GBM/session types are used via `smithay::reexports::*` to avoid version skew.
+- Skia shares Smithay's GL context: `context.reset(None)` before any Skia draw, `context.flush_and_submit()` after. Keep every Skia draw going through `ensure_surface`, which is what turns the DRM partial-damage fast path off for that frame. A new non-Skia pass over a fullscreen app goes in `flip_damage`'s `only_app`.
+- `FrameSinks` (`presentation.rs`, `pacing.rs`) are obligations: unanswered presentation feedback hangs a client, and a signalled blocker still needs `pacing::clear_blockers`.
+- Do not remove smithay's `use_system_lib` feature. With the pure-Rust wayland backend, the "destroy role, attach nil, commit" teardown every Qt client does gets the client killed.
+- Smithay is pinned to a git rev (see `Cargo.toml`). Use libinput/DRM/GBM/session types via `smithay::reexports::*` to avoid version skew.
+- Window identity comes from the launch (`provenance.rs`), not the client-reported `app_id`.
+- GTK4 binds `xdg_dialog_v1` to every window; only `set_parent` or the modal hint means dialog (`toplevel.rs`, `is_dialog`).
 
 ## Configuration
 
-`config.example.toml` documents every option at its compiled-in default. Lookup order: `$SPRINGCHICK_CONFIG`, then `$XDG_CONFIG_HOME/springchick/config.toml`, then `/etc/springchick/config.toml`. Persisted state (dock, pages, frecency) is separate: `sc_shell_model::persist` writes `state.toml`.
-
-A top-level `include = ["themes/nord.toml"]` merges other files underneath the one naming them. Paths resolve beside the file as named, not through its symlink target, so a store-linked config finds its neighbours. Tables merge by key, `[[tables]]` append, anything else is replaced. An include that fails to parse or holds a wrong-typed value is skipped with a warning. With no usable `keybinds.binding` the built-in bindings apply; `binding = []` clears them.
-
-`[theme]` colours are `"#rrggbb"` strings, `0xRRGGBB` in `sc_config::Theme`; each draw site keeps its own alpha. `SkiaGl::theme` feeds the shell, `sc-bar` reads it when it starts, and `sc-search` reloads it each time it is raised. `sc-osk` keeps its own `[osk]` colours, so a theme file sets both. What no config sets (the `foreground` wash steps, the radius scale) is `sc_config::style`: draw with its names, not a new literal.
-
-Notable options:
-
-- `dpi` (default 3): advertised via `wp_fractional_scale`. The FP5 panel is illegible at 1:1.
-- `card_radius` (default `"auto"`): the panel's corner radius from `sc-panel`, else 120. Grabbed apps also leave fullscreen at the panel's own corners. `GMOBILE_DT_COMPATIBLES=fairphone,fp5` fakes a device.
-- `idle_blank_secs`, `show_touches`, `save_screenshots`, `prefer_no_csd`, `natural_scroll`.
-- `wallpaper` (default unset): a PNG, JPEG or WebP behind Home, over `[theme] background`, scaled to cover (`wallpaper.rs`). Not drawn under a fullscreen app. Also drawn under a lock surface, which `sc-bar`'s lock screen leaves clear. On unlock the lock screen fades off it (`LEAVE` in `sc-bar`) and Home zooms in over it (`session_lock::arrival`). `wallpaper_light` (default unset) replaces it while the GNOME colour scheme is not `prefer-dark`: a thread hears dconf's `Notify` on the session bus and asks `gsettings`, started only when the option is set.
-- `lock_on_blank` (default `false`): every blank (power key, idle, suspend) asks logind to lock the session, as `loginctl lock-session` does (DRM backend only). `sc-bar` hears the `Lock` signal and takes `ext-session-lock-v1` with its lock screen: Notification Centre's cover, slid up to a digit pad checked through PAM. Digits only, hence off by default; `loginctl unlock-session` unlocks it too. `[bar] lock = false` leaves the signal to another locker. With an fprintd (or tee-fprintd) sensor and an enrolled finger, the lock screen also unlocks by fingerprint (`fprint.rs`): the sensor is claimed from the lock screen's first frame on a lit panel until the next blank or unlock. A lock whose client died goes only to another run of the same executable, and a restarted `sc-bar` asks (`$XDG_RUNTIME_DIR/sc-bar.locked`).
-- `[bar.long_press]` maps one of `sc-bar`'s toggles (`wifi`, `bluetooth`, ...) to a `sh -c` command run on a long press (defaults: `foot sh -c nmtui`, `foot bluetui`, and for `hotspot` nmcli's `show-password` QR). Read when the bar starts. The sheet's app shortcuts are not config: the icon menu's "Add to Control Centre" row keeps them in `state.toml`, and the bar asks for them with `ipc shortcuts`.
-- `[predict] dictionaries` (default `[]`): word lists for OSK completion, `springchick/predict/NAME.txt` in the XDG data dirs (`word\tfreq`). The nix package ships all 26 AOSP lists (`nb`, `en_US`, `de`, `fr`, `sv`, ...); `scripts/predict-lists.sh DIR` builds the same set for any other distro. `scripts/aosp-wordlist.py --extra` merges a `word count` corpus list for words AOSP lacks (measured: no gain for nb, so not shipped). `cargo run -p sc-predict --example bench -- LIST.txt CORPUS.txt` measures a change to the ranking.
-- `rotate_ui` (default `false`): turn Home and ordinary windows with the device, not just fullscreen apps. `springchick ipc rotation enable|disable` overrides it live until the next `reload` (no arg queries). It holds an accelerometer claim whenever the screen is lit. A turn sets the smithay output's transform, so the layer map arranges panels and the OSK in the turned space and they are drawn, hit-tested and captured there; only the panel cutouts stay upright-only.
-- `rotation_settle_ms` (default 400): accelerometer debounce.
-- `rotation_fade_ms` (default 130): half the dip-to-black that covers a turn.
-- `vrr` (default `true`): asks the panel for variable refresh. DRM backend only, no-op unless the connector reports `vrr_capable`, startup-only.
-- `uclamp_min` (default `"auto"`): scheduler `util_min` floor held on the render thread while drawing, derived from CPU topology and raised while frames miss the refresh interval, taking the big clusters' cpufreq `scaling_min_freq` up with it (`cpu_boost.rs`, needs the module's tmpfiles rule). See `uclamp.rs`.
-- `gpu_min_mhz` (default `"auto"`): GPU devfreq `min_freq` held while drawing, the lowest OPP at or above half the top clock (FP5: 450 MHz). Needs the module's udev rule. See `gpu_boost.rs`.
-
-Env vars: `SPRINGCHICK_BACKEND`, `SPRINGCHICK_CONFIG`, `SPRINGCHICK_IPC_SOCK`, `SPRINGCHICK_DEBUG_SOCK` (legacy), `SPRINGCHICK_WINIT_SIZE` (`WxH`). `SPRINGCHICK_PANEL_TRANSFORM` (`90`/`180`/`270`/`normal`, module option `panelTransform`) overrides the DRM connector's `panel orientation`, which otherwise turns a sideways-mounted panel (Steam Deck) upright. `SPRINGCHICK_OUTPUT` is read only by `scripts/screenshot.sh` and `scripts/record.sh`.
-
-## Deployment
-
-`nix/module.nix` exposes `programs.springchick.enable` and adds the package to `sessionPackages`, so the greeter lists springchick as a wayland session (real logind seat, no seatd hack). `bin/springchick-session` (source: `nix/springchick-session`) is a shell wrapper that starts the compositor as the `springchick.service` user unit so `graphical-session.target` comes up; without systemd it falls back to exec'ing the binary with `SPRINGCHICK_BACKEND=drm`. The module also runs a polkit agent (soteria) and, with `whitesur.enable` (default on), makes WhiteSur dark the default GTK 3 theme and Kvantum Qt style. Device runbook: `docs/RUNBOOK-device.md` (build on-device over `ssh dmsmobile`).
-
-Screen capture: `ext-image-copy-capture-v1` (dmabuf fast path on DRM, shm readback otherwise) plus `zwlr_screencopy_v1` (`wlr_screencopy.rs`, shm only) for wlr-era clients. Shared buffer plumbing is in `capture.rs`; each backend has its own draw-and-read-back glue. `scripts/screenshot.sh` uses grim. `scripts/record.sh` uses wf-recorder over wlr-screencopy, because it is the only recorder that reaches the FP5's `h264_v4l2m2m` hardware encoder. wl-screenrec is VAAPI-only and falls back to software x264 there. `NATIVE=1 scripts/record.sh` uses `ipc record` instead: no client round trip, every frame, and it muxes the raw stream with its `.ts` times via mkvmerge.
+`config.example.toml` documents every option at its default; keep it in step when adding one. Parsing is `sc-config` and is lenient: a bad entry is dropped and the rest applies. Draw with `sc_config::Theme` colours and `sc_config::style` names, not new literals. Persisted shell state (`state.toml`) is separate, in `sc_shell_model::persist`.
 
 ## Testing expectations
 
-Pure logic gets a unit test: every state transition, layout computation, and gesture classification. Integration is smoke-level (compositor starts, accepts clients, doesn't crash) via the VM checks. Visual correctness and gesture feel are human-reviewed; there is no pixel-diff infra.
+Pure logic gets a unit test: every state transition, layout computation, and gesture classification. Integration is smoke-level via the VM checks. Visual correctness and gesture feel are human-reviewed; there is no pixel-diff infra.
 
 ## Further reading
 
-`CONTRIBUTING.md` covers the same ground at more length, plus Smithay/NixOS specifics, key patterns, common client warnings, and milestone status. `docs/RUNBOOK-device.md` covers on-device deployment.
+`CONTRIBUTING.md` goes into more depth (key patterns, Smithay/NixOS specifics, common client warnings). `docs/RUNBOOK-device.md` covers on-device deployment.

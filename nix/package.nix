@@ -212,6 +212,11 @@ rustPlatform.buildRustPackage {
     install -Dm444 ${../config.example.toml} \
       $out/share/springchick/config.example.toml
 
+    install -Dm444 ${../completions/springchick.fish} \
+      $out/share/fish/vendor_completions.d/springchick.fish
+    install -Dm444 ${../completions/springchick.bash} \
+      $out/share/bash-completion/completions/springchick
+
     # Inter is built into the binaries; the OFL travels with it.
     install -Dm444 ${../crates/sc-fonts/Inter-LICENSE.txt} \
       $out/share/licenses/springchick/Inter-LICENSE.txt

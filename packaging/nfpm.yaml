@@ -93,6 +93,10 @@ contents:
     dst: /usr/share/wayland-sessions/springchick.desktop
   - src: config.example.toml
     dst: /usr/share/springchick/config.example.toml
+  - src: completions/springchick.fish
+    dst: /usr/share/fish/vendor_completions.d/springchick.fish
+  - src: completions/springchick.bash
+    dst: /usr/share/bash-completion/completions/springchick
   # Inter is built into the binaries; the OFL travels with it.
   - src: crates/sc-fonts/Inter-LICENSE.txt
     dst: /usr/share/licenses/springchick/Inter-LICENSE.txt

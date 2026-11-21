@@ -8,6 +8,7 @@ mod bar_hint;
 mod blank;
 mod capture;
 mod catalog_watch;
+mod complete;
 mod content_type;
 mod cpu_boost;
 mod debug_input;
@@ -73,6 +74,10 @@ fn main() -> std::process::ExitCode {
     }
     if args.get(1).map(String::as_str) == Some("ipc") {
         return ipc::run_client(&args[2..]);
+    }
+    if args.get(1).map(String::as_str) == Some("complete") {
+        complete::run(&args[2..]);
+        return std::process::ExitCode::SUCCESS;
     }
 
     init_tracing();

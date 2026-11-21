@@ -20,6 +20,19 @@ pub fn socket_path() -> PathBuf {
     PathBuf::from(dir).join("springchick-ipc.sock")
 }
 
+/// The reply to `line` minus its `ok`. For completions: `None` rather than an
+/// error or a hung shell.
+pub fn query(line: &str) -> Option<String> {
+    let stream = UnixStream::connect(socket_path()).ok()?;
+    let timeout = Some(std::time::Duration::from_millis(300));
+    stream.set_read_timeout(timeout).ok()?;
+    stream.set_write_timeout(timeout).ok()?;
+    writeln!(&stream, "{line}").ok()?;
+    let mut reply = String::new();
+    BufReader::new(&stream).read_line(&mut reply).ok()?;
+    Some(reply.trim().strip_prefix("ok")?.trim().to_string())
+}
+
 /// Exit 0 on `ok`, 1 on `err` or I/O failure, 2 on misuse.
 pub fn run_client(args: &[String]) -> ExitCode {
     if args.is_empty() {
